@@ -4,14 +4,22 @@ import MewMobileCore
 /// A mock implementation of `MobileCoreProtocol` for unit testing.
 /// Records all method calls and returns configurable snapshot data.
 /// Events are delivered via `fireEvent` — the test controls timing.
-final class MockMobileCore: MobileCoreProtocol {
+// UniFFI exposes synchronous requirements; tests call this spy from the main actor.
+@MainActor
+final class MockMobileCore: @preconcurrency MobileCoreProtocol {
     // Recorded calls
+    var goalResponseCalls: [(nodeId: String, requestId: String, accepted: Bool)] = []
+    var permissionResponseCalls: [(nodeId: String, requestId: String, decision: Decision)] = []
+    var askUserResponseCalls: [(nodeId: String, requestId: String, answers: [String])] = []
+    var promptAccepted = true
     var promptCalls: [(nodeId: String, text: String)] = []
     var slashCommandCalls: [(nodeId: String, command: String)] = []
     var setPermissionModeCalls: [(nodeId: String, mode: String)] = []
     var setThinkingVariantCalls: [(nodeId: String, variant: String)] = []
+    var switchPersonaCalls: [(nodeId: String, name: String)] = []
     var switchModelCalls: [(nodeId: String, provider: String, model: String)] = []
     var connectCalls: [String] = []
+    var askUserCancelCalls: [(nodeId: String, requestId: String)] = []
     var cancelCalls: [String] = []
     var attachCalls: [(nodeId: String, sessionId: String)] = []
     var listSessionsCalls: [String] = []
@@ -56,16 +64,25 @@ final class MockMobileCore: MobileCoreProtocol {
 
     func snapshot(id: DaemonId) -> DaemonSnapshot? { snapshotResult }
 
-    func prompt(id: DaemonId, text: String) {
+    func prompt(id: DaemonId, text: String) -> Bool {
         promptCalls.append((id.nodeId, text))
+        return promptAccepted
     }
 
     func cancel(id: DaemonId) { cancelCalls.append(id.nodeId) }
 
-    func respondPermission(id: DaemonId, requestId: String, decision: Decision) {}
-    func respondAskUser(id: DaemonId, requestId: String, answers: [String]) {}
-    func respondPlanApproval(id: DaemonId, requestId: String, approved: Bool, feedback: String?) {}
-    func respondToGoal(id: DaemonId, requestId: String, accepted: Bool) {}
+    func respondPermission(id: DaemonId, requestId: String, decision: Decision) {
+        permissionResponseCalls.append((id.nodeId, requestId, decision))
+    }
+    func cancelAskUser(id: DaemonId, requestId: String) {
+        askUserCancelCalls.append((id.nodeId, requestId))
+    }
+    func respondAskUser(id: DaemonId, requestId: String, answers: [String]) {
+        askUserResponseCalls.append((id.nodeId, requestId, answers))
+    }
+    func respondToGoal(id: DaemonId, requestId: String, accepted: Bool) {
+        goalResponseCalls.append((id.nodeId, requestId, accepted))
+    }
 
     func listSessions(id: DaemonId) { listSessionsCalls.append(id.nodeId) }
     func newSession(id: DaemonId, cwd: String?) { newSessionCalls.append(cwd) }
@@ -78,7 +95,9 @@ final class MockMobileCore: MobileCoreProtocol {
     }
 
     func listPersonas(id: DaemonId) {}
-    func switchPersona(id: DaemonId, name: String) {}
+    func switchPersona(id: DaemonId, name: String) {
+        switchPersonaCalls.append((id.nodeId, name))
+    }
 
     func setAutoTitle(id: DaemonId, enabled: Bool) {}
     func setAutoSummary(id: DaemonId, enabled: Bool) {}
@@ -87,8 +106,9 @@ final class MockMobileCore: MobileCoreProtocol {
         setPermissionModeCalls.append((id.nodeId, mode))
     }
 
-    func slashCommand(id: DaemonId, command: String) {
+    func slashCommand(id: DaemonId, command: String) -> Bool {
         slashCommandCalls.append((id.nodeId, command))
+        return promptAccepted
     }
 
     func setThinkingVariant(id: DaemonId, variant: String) {

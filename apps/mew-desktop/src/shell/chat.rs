@@ -632,24 +632,6 @@ impl DesktopShell {
     }
 
     pub(super) fn submit_prompt(&mut self, cx: &mut Context<Self>) {
-        if let Some(request_id) = self.plan_feedback_request.take() {
-            let feedback = self.model.ui.take_prompt();
-            self.composer_selection = 0..0;
-            self.composer_selection_reversed = false;
-            self.composer_marked_range = None;
-            self.composer_is_selecting = false;
-            self.restart_composer_cursor_blink(cx);
-            if let Some(feedback) = feedback {
-                self.prompt_history.record(&feedback);
-                self.send_command(ClientMessage::PlanApprovalResponse {
-                    request_id,
-                    approved: false,
-                    feedback: Some(feedback),
-                });
-            }
-            cx.notify();
-            return;
-        }
         let awaiting_question = self
             .model
             .ui
@@ -659,18 +641,43 @@ impl DesktopShell {
         if self.model.ui.running && !awaiting_question {
             return;
         }
-        let attachments = std::mem::take(&mut self.attachments);
-        let Some(text) = self.model.ui.take_prompt() else {
-            self.attachments = attachments;
+        if self.model.ui.composer.trim().is_empty() {
             return;
-        };
-        self.composer_selection = 0..0;
-        self.composer_selection_reversed = false;
-        self.composer_marked_range = None;
-        self.composer_is_selecting = false;
-        self.restart_composer_cursor_blink(cx);
-        self.input_animation_id = self.input_animation_id.wrapping_add(1);
-        if let Some(action) = self
+        }
+        if !self.model.session_is_ready() || self.session_requests.is_pending() {
+            if self.task_drafts.owner().session_id.is_none() {
+                if !self.session_requests.is_pending() {
+                    self.initial_auto_attach = false;
+                    if !self.create_session(None, None) {
+                        self.finish_prompt_submission(false, cx);
+                        return;
+                    }
+                }
+                let snapshot = PromptDraft {
+                    text: self.model.ui.composer.clone(),
+                    attachments: self.attachments.clone(),
+                };
+                if !self
+                    .session_requests
+                    .set_initial_prompt(self.task_drafts.owner(), snapshot)
+                {
+                    self.report_pending_attachment();
+                }
+            } else {
+                self.report_pending_attachment();
+            }
+            cx.notify();
+            return;
+        }
+        if self.awaiting_model_switch.is_some() {
+            self.model.last_error = Some(
+                "The model is still switching. Your draft is saved; submit again when it is ready."
+                    .into(),
+            );
+            cx.notify();
+            return;
+        }
+        let accepted = if let Some(action) = self
             .model
             .ui
             .pending_actions
@@ -680,50 +687,43 @@ impl DesktopShell {
             let ActionKind::AskUser { questions, .. } = &action.kind else {
                 return;
             };
-            let request_id = action.request_id.clone();
-            let question_count = questions.len();
-            let mut answers = text
+            let mut answers = self
+                .model
+                .ui
+                .composer
                 .lines()
                 .map(str::trim)
                 .map(str::to_owned)
                 .collect::<Vec<_>>();
-            answers.resize(question_count, String::new());
+            answers.resize(questions.len(), String::new());
             self.send_command(ClientMessage::AskUserResponse {
-                request_id,
+                cancelled: false,
+                request_id: action.request_id.clone(),
                 answers,
-            });
-            cx.notify();
-            return;
-        }
-        self.prompt_history.record(&text);
-        if self.model.session_is_ready() {
-            if let Some(command) = daemon_slash_command(&text) {
-                self.send_command(ClientMessage::SlashCommand { command });
-            } else {
-                self.send_command(ClientMessage::Prompt { text, attachments });
-            }
+            })
+        } else if let Some(command) = daemon_slash_command(&self.model.ui.composer) {
+            self.send_command(ClientMessage::SlashCommand { command })
         } else {
-            self.pending_prompt = Some(text);
-            self.pending_attachments = attachments;
-            if self.model.ui.selected_session.is_none() && !self.pending_session_request {
-                self.pending_session_request = true;
-                self.pending_session_target = None;
-                let command = self.model.ui.new_conversation(None);
-                self.send_command(command);
-            }
-        }
-        cx.notify();
+            session_requests::queue_prompt(
+                self.command_tx.as_ref(),
+                &mut self.model.ui.composer,
+                &mut self.attachments,
+                &mut self.prompt_history,
+            )
+        };
+        self.finish_prompt_submission(accepted, cx);
     }
 
-    pub(super) fn begin_plan_feedback(
-        &mut self,
-        request_id: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.plan_feedback_request = Some(request_id);
-        self.release_browser_focus();
-        window.focus(&self.composer_focus_handle, cx);
+    pub(super) fn finish_prompt_submission(&mut self, accepted: bool, cx: &mut Context<Self>) {
+        self.model.finish_prompt_submission(accepted);
+        if accepted {
+            self.composer_selection = 0..0;
+            self.composer_selection_reversed = false;
+            self.composer_marked_range = None;
+            self.composer_is_selecting = false;
+            self.restart_composer_cursor_blink(cx);
+            self.input_animation_id = self.input_animation_id.wrapping_add(1);
+        }
         cx.notify();
     }
 
@@ -784,12 +784,6 @@ impl DesktopShell {
     ) {
         let key = event.keystroke.key.as_str();
         let shift = event.keystroke.modifiers.shift;
-        if key == "escape" && self.plan_feedback_request.is_some() {
-            self.plan_feedback_request = None;
-            cx.notify();
-            cx.stop_propagation();
-            return;
-        }
         if self.mention_menu_is_open() {
             match key {
                 "down" => {

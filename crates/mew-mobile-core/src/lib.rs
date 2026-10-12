@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -157,8 +158,14 @@ pub struct MobileCore {
 /// Shared connection state, accessible from both the background task
 /// (for updates) and the foreground API (for snapshots).
 struct ConnState {
-    /// The currently attached session ID, if any.
-    attached_session: Mutex<Option<String>>,
+    /// Session requested by the user, retained across reconnects.
+    requested_session: Mutex<Option<String>>,
+    /// Reject commands queued before a reconnect or attachment change.
+    attachment_generation: AtomicU64,
+    /// SessionReady confirms this generation, even when reattaching the same ID.
+    confirmed_generation: AtomicU64,
+    /// Accepted prompts awaiting daemon running activity or rejection.
+    pending_submissions: Mutex<HashMap<String, u64>>,
     /// Framework-independent daemon/session state used by desktop and mobile
     /// adapters. The UniFFI projection remains alongside it during migration.
     client_state: Mutex<mew_client_core::ClientState>,
@@ -184,17 +191,17 @@ struct ConnState {
     current_persona: Mutex<Option<String>>,
     /// Available personas from last PersonaList.
     available_personas: Mutex<Vec<crate::events::PersonaInfo>>,
-    /// Typed events produced by the framework-independent reducer.
-    ///
-    /// The CoreEvent listener remains as a UniFFI compatibility projection
-    /// while platform consumers move to the shared client event vocabulary.
+    #[cfg(test)]
     shared_events: Mutex<Vec<mew_client_core::ClientEvent>>,
 }
 
 impl ConnState {
     fn new() -> Self {
         Self {
-            attached_session: Mutex::new(None),
+            requested_session: Mutex::new(None),
+            attachment_generation: AtomicU64::new(0),
+            confirmed_generation: AtomicU64::new(u64::MAX),
+            pending_submissions: Mutex::new(HashMap::new()),
             client_state: Mutex::new(mew_client_core::ClientState::default()),
             session_state: Mutex::new(None),
             daemon_version: Mutex::new(None),
@@ -207,16 +214,35 @@ impl ConnState {
             thinking_variant: Mutex::new(None),
             current_persona: Mutex::new(None),
             available_personas: Mutex::new(Vec::new()),
+            #[cfg(test)]
             shared_events: Mutex::new(Vec::new()),
         }
     }
 
+    fn invalidate_session_commands(&self) {
+        self.attachment_generation.fetch_add(1, Ordering::Relaxed);
+        self.pending_submissions.lock().unwrap().clear();
+    }
+
+    fn release_submission(&self, session_id: &str, generation: u64) {
+        let mut pending = self.pending_submissions.lock().unwrap();
+        if pending.get(session_id) == Some(&generation) {
+            pending.remove(session_id);
+        }
+    }
+
     fn push_shared_events(&self, events: impl IntoIterator<Item = mew_client_core::ClientEvent>) {
+        #[cfg(test)]
         self.shared_events.lock().unwrap().extend(events);
+        #[cfg(not(test))]
+        drop(events);
     }
 
     fn push_shared_event(&self, event: mew_client_core::ClientEvent) {
+        #[cfg(test)]
         self.shared_events.lock().unwrap().push(event);
+        #[cfg(not(test))]
+        drop(event);
     }
 
     #[cfg(test)]
@@ -230,9 +256,86 @@ impl ConnState {
 struct DaemonConnection {
     /// Channel for sending ClientMessages to the background task, which
     /// forwards them over the WebSocket.
-    tx: mpsc::UnboundedSender<ClientMessage>,
+    tx: mpsc::UnboundedSender<QueuedCommand>,
     /// Shared state between the background task and the foreground API.
     state: Arc<ConnState>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+struct QueuedCommand {
+    message: ClientMessage,
+    session_id: Option<String>,
+    generation: Option<u64>,
+}
+
+impl QueuedCommand {
+    fn ready(&self, state: &ConnState) -> bool {
+        if let Some(session_id) = &self.session_id {
+            let client = state.client_state.lock().unwrap();
+            let generation = state.attachment_generation.load(Ordering::Relaxed);
+            if self.generation != Some(generation)
+                || state.confirmed_generation.load(Ordering::Relaxed) != generation
+            {
+                return false;
+            }
+            return client.connection == Some(mew_client_core::ConnectionStatus::Connected)
+                && client.attached_session.as_ref() == Some(session_id)
+                && state.requested_session.lock().unwrap().as_ref() == Some(session_id);
+        }
+        if let ClientMessage::AttachSession { session_id, .. } = &self.message {
+            return state.requested_session.lock().unwrap().as_ref() == Some(session_id);
+        }
+        true
+    }
+}
+
+impl DaemonConnection {
+    fn send(&self, message: ClientMessage) -> bool {
+        let session_scoped = matches!(
+            &message,
+            ClientMessage::Cancel
+                | ClientMessage::PermissionResponse { .. }
+                | ClientMessage::AskUserResponse { .. }
+                | ClientMessage::GoalResponse { .. }
+                | ClientMessage::SwitchModel { .. }
+                | ClientMessage::SetPermissionMode { .. }
+                | ClientMessage::SlashCommand { .. }
+                | ClientMessage::SetThinkingVariant { .. }
+                | ClientMessage::ListPersonas
+                | ClientMessage::SwitchPersona { .. }
+                | ClientMessage::SetAutoTitle { .. }
+                | ClientMessage::SetAutoSummary { .. }
+        );
+        let (session_id, generation) = if session_scoped {
+            let client = self.state.client_state.lock().unwrap();
+            let session_id = client.attached_session.clone();
+            let generation = self.state.attachment_generation.load(Ordering::Relaxed);
+            if self.state.confirmed_generation.load(Ordering::Relaxed) != generation
+                || client.connection != Some(mew_client_core::ConnectionStatus::Connected)
+                || session_id.is_none()
+                || session_id != *self.state.requested_session.lock().unwrap()
+            {
+                return false;
+            }
+            (session_id, Some(generation))
+        } else {
+            (None, None)
+        };
+        self.tx
+            .send(QueuedCommand {
+                message,
+                session_id,
+                generation,
+            })
+            .is_ok()
+    }
+}
+
+impl Drop for DaemonConnection {
+    fn drop(&mut self) {
+        *self.state.listener.lock().unwrap() = None;
+        self.task.abort();
+    }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -295,8 +398,7 @@ impl MobileCore {
     /// Remove a daemon from the registry and disconnect.
     pub fn remove_daemon(&self, id: DaemonId) {
         self.registry.lock().unwrap().remove(&id);
-        let mut conns = self.connections.lock().unwrap();
-        conns.remove(&id.node_id);
+        self.disconnect(id);
     }
 
     /// List all known daemons.
@@ -311,16 +413,12 @@ impl MobileCore {
             None => return,
         };
 
-        let (tx, rx) = mpsc::unbounded_channel::<ClientMessage>();
+        let mut conns = self.connections.lock().unwrap();
+        if conns.contains_key(&id.node_id) {
+            return;
+        }
+        let (tx, rx) = mpsc::unbounded_channel::<QueuedCommand>();
         let conn_state = Arc::new(ConnState::new());
-        let conn = DaemonConnection {
-            tx: tx.clone(),
-            state: conn_state.clone(),
-        };
-        self.connections
-            .lock()
-            .unwrap()
-            .insert(id.node_id.clone(), conn);
 
         let endpoint = self.endpoint.clone();
         let daemon_id = id.node_id.clone();
@@ -336,7 +434,7 @@ impl MobileCore {
 
         // Spawn the background connection task.
         let conn_state_for_task = conn_state.clone();
-        self.runtime.spawn(async move {
+        let task = self.runtime.spawn(async move {
             // Reconnect loop with exponential backoff (spec: 1s, 2s, 4s… cap 30s).
             let mut attempt: u32 = 0;
             let mut rx = rx;
@@ -368,16 +466,7 @@ impl MobileCore {
                 let jitter = rand_jitter() % 500; // 0-499ms jitter
                 let delay = Duration::from_millis(capped * 1000 + jitter);
 
-                conn_state_for_task.push_shared_event(
-                    conn_state_for_task
-                        .client_state
-                        .lock()
-                        .unwrap()
-                        .set_connection_status(mew_client_core::ConnectionStatus::Backoff {
-                            attempt,
-                            error: error.clone(),
-                        }),
-                );
+                set_shared_connection_status(&conn_state_for_task, mew_client_core::ConnectionStatus::Backoff { attempt, error: error.clone() });
 
                 if let Some(ref l) = *conn_state_for_task.listener.lock().unwrap() {
                     l.on_event(CoreEvent::DaemonStatusChanged {
@@ -408,84 +497,105 @@ impl MobileCore {
                 });
             }
         });
+        conns.insert(
+            id.node_id,
+            DaemonConnection {
+                tx,
+                state: conn_state,
+                task,
+            },
+        );
     }
 
     /// Disconnect from a daemon.
     pub fn disconnect(&self, id: DaemonId) {
-        let mut conns = self.connections.lock().unwrap();
-        conns.remove(&id.node_id);
+        let removed = self.connections.lock().unwrap().remove(&id.node_id);
+        if let Some(conn) = removed {
+            set_shared_connection_status(
+                &conn.state,
+                mew_client_core::ConnectionStatus::Disconnected,
+            );
+            drop(conn);
+            if let Some(listener) = self.listener.lock().unwrap().clone() {
+                listener.on_event(CoreEvent::DaemonStatusChanged {
+                    daemon: id.node_id,
+                    status: DaemonStatus::Disconnected,
+                });
+            }
+        }
     }
 
     /// Attach to a session on a daemon.
     pub fn attach(&self, id: DaemonId, session_id: String) {
         let conns = self.connections.lock().unwrap();
         if let Some(conn) = conns.get(&id.node_id) {
-            *conn.state.attached_session.lock().unwrap() = Some(session_id.clone());
-            let _ = conn.tx.send(ClientMessage::AttachSession {
+            conn.state.invalidate_session_commands();
+            *conn.state.requested_session.lock().unwrap() = Some(session_id.clone());
+            let _ = conn.send(ClientMessage::AttachSession {
                 session_id: session_id.clone(),
                 client_kind: mew_protocol::ClientKind::Mobile,
             });
         }
     }
 
-    /// Send a prompt to the attached session on a daemon.
-    pub fn prompt(&self, id: DaemonId, text: String) {
+    /// Queue a prompt only after the requested session is confirmed.
+    /// False leaves the caller's composer and transcript unchanged.
+    pub fn prompt(&self, id: DaemonId, text: String) -> bool {
         let conns = self.connections.lock().unwrap();
-        if let Some(conn) = conns.get(&id.node_id) {
-            // Optimistically add the user message so it renders immediately, and
-            // mark it so the daemon's echoed UserMessage is deduped (spec note
-            // #9) rather than double-added.
-            let session_id = {
-                let mut ss_lock = conn.state.session_state.lock().unwrap();
-                if let Some(ss) = ss_lock.as_mut() {
-                    ss.last_sent_prompt = Some(text.clone());
-                    ss.shared.record_prompt(text.clone());
-                    ss.messages.push(state::ChatMessage {
-                        id: ulid::Ulid::new().to_string(),
-                        role: "user".into(),
-                        parts: vec![state::MessagePart {
-                            id: ulid::Ulid::new().to_string(),
-                            kind: state::PartKind::Text,
-                            text: Some(text.clone()),
-                            tool_name: None,
-                            tool_state: None,
-                            tool_input: None,
-                            tool_output: None,
-                            tool_error: None,
-                            tool_call_id: None,
-                            tool_time_start: None,
-                            tool_time_end: None,
-                            tool_sensitivity: None,
-                        }],
-                        assistant_meta: None,
-                    });
-                    Some(ss.session_id.clone())
-                } else {
-                    None
-                }
-            };
-            // Refresh the UI so the optimistic message shows without waiting for
-            // a turn to start.
-            if let Some(sid) = session_id {
-                if let Some(ref l) = *conn.state.listener.lock().unwrap() {
-                    l.on_event(CoreEvent::SessionReloaded {
-                        daemon: id.node_id.clone(),
-                        session_id: sid,
-                    });
-                }
-            }
-            let _ = conn.tx.send(ClientMessage::Prompt {
-                text,
-                attachments: vec![],
+        let Some(conn) = conns.get(&id.node_id) else {
+            return false;
+        };
+        let mut client = conn.state.client_state.lock().unwrap();
+        let Some(session_id) = client.attached_session.clone() else {
+            return false;
+        };
+        let generation = conn.state.attachment_generation.load(Ordering::Relaxed);
+        if conn.state.confirmed_generation.load(Ordering::Relaxed) != generation
+            || client.connection != Some(mew_client_core::ConnectionStatus::Connected)
+            || client
+                .session(&session_id)
+                .is_some_and(|session| session.running)
+            || conn.state.requested_session.lock().unwrap().as_deref() != Some(&session_id)
+        {
+            return false;
+        }
+        let mut pending = conn.state.pending_submissions.lock().unwrap();
+        if pending.contains_key(&session_id) {
+            return false;
+        }
+        if conn
+            .tx
+            .send(QueuedCommand {
+                message: ClientMessage::Prompt {
+                    text: text.clone(),
+                    attachments: vec![],
+                },
+                session_id: Some(session_id.clone()),
+                generation: Some(generation),
+            })
+            .is_err()
+        {
+            return false;
+        }
+        pending.insert(session_id.clone(), generation);
+        drop(pending);
+        client.record_prompt(&session_id, text);
+        drop(client);
+        sync_mobile_session_from_client_state(&conn.state);
+        if let Some(listener) = conn.state.listener.lock().unwrap().clone() {
+            listener.on_event(CoreEvent::SessionReloaded {
+                daemon: id.node_id,
+                session_id,
             });
         }
+        true
     }
 
     /// Cancel the current turn on a daemon.
     pub fn cancel(&self, id: DaemonId) {
         let conns = self.connections.lock().unwrap();
         if let Some(conn) = conns.get(&id.node_id) {
-            let _ = conn.tx.send(ClientMessage::Cancel);
+            let _ = conn.send(ClientMessage::Cancel);
         }
     }
 
@@ -498,7 +608,7 @@ impl MobileCore {
                 Decision::AllowSession => mew_protocol::PermissionDecision::AllowSession,
                 Decision::Deny => mew_protocol::PermissionDecision::Deny,
             };
-            let _ = conn.tx.send(ClientMessage::PermissionResponse {
+            let _ = conn.send(ClientMessage::PermissionResponse {
                 request_id,
                 decision: wire_decision,
             });
@@ -509,28 +619,22 @@ impl MobileCore {
     pub fn respond_ask_user(&self, id: DaemonId, request_id: String, answers: Vec<String>) {
         let conns = self.connections.lock().unwrap();
         if let Some(conn) = conns.get(&id.node_id) {
-            let _ = conn.tx.send(ClientMessage::AskUserResponse {
+            let _ = conn.send(ClientMessage::AskUserResponse {
                 request_id,
                 answers,
+                cancelled: false,
             });
         }
     }
 
-    /// Respond to a plan-approval request. `approved = false` with optional
-    /// `feedback` requests changes.
-    pub fn respond_plan_approval(
-        &self,
-        id: DaemonId,
-        request_id: String,
-        approved: bool,
-        feedback: Option<String>,
-    ) {
+    /// Close a question without cancelling the parent turn.
+    pub fn cancel_ask_user(&self, id: DaemonId, request_id: String) {
         let conns = self.connections.lock().unwrap();
         if let Some(conn) = conns.get(&id.node_id) {
-            let _ = conn.tx.send(ClientMessage::PlanApprovalResponse {
+            let _ = conn.send(ClientMessage::AskUserResponse {
                 request_id,
-                approved,
-                feedback,
+                answers: vec![],
+                cancelled: true,
             });
         }
     }
@@ -539,7 +643,7 @@ impl MobileCore {
     pub fn respond_to_goal(&self, id: DaemonId, request_id: String, accepted: bool) {
         let conns = self.connections.lock().unwrap();
         if let Some(conn) = conns.get(&id.node_id) {
-            let _ = conn.tx.send(ClientMessage::GoalResponse {
+            let _ = conn.send(ClientMessage::GoalResponse {
                 request_id,
                 accepted,
             });
@@ -550,7 +654,7 @@ impl MobileCore {
     pub fn list_sessions(&self, id: DaemonId) {
         let conns = self.connections.lock().unwrap();
         if let Some(conn) = conns.get(&id.node_id) {
-            let _ = conn.tx.send(ClientMessage::ListSessions);
+            let _ = conn.send(ClientMessage::ListSessions);
         }
     }
 
@@ -558,7 +662,9 @@ impl MobileCore {
     pub fn new_session(&self, id: DaemonId, cwd: Option<String>) {
         let conns = self.connections.lock().unwrap();
         if let Some(conn) = conns.get(&id.node_id) {
-            let _ = conn.tx.send(ClientMessage::NewSession {
+            conn.state.invalidate_session_commands();
+            *conn.state.requested_session.lock().unwrap() = None;
+            let _ = conn.send(ClientMessage::NewSession {
                 cwd,
                 client_kind: mew_protocol::ClientKind::Mobile,
             });
@@ -570,7 +676,7 @@ impl MobileCore {
     pub fn list_projects(&self, id: DaemonId) {
         let conns = self.connections.lock().unwrap();
         if let Some(conn) = conns.get(&id.node_id) {
-            let _ = conn.tx.send(ClientMessage::ListProjects);
+            let _ = conn.send(ClientMessage::ListProjects);
         }
     }
 
@@ -579,7 +685,7 @@ impl MobileCore {
     pub fn list_dir(&self, id: DaemonId, session_id: String, path: Option<String>) {
         let conns = self.connections.lock().unwrap();
         if let Some(conn) = conns.get(&id.node_id) {
-            let _ = conn.tx.send(ClientMessage::ListDir { session_id, path });
+            let _ = conn.send(ClientMessage::ListDir { session_id, path });
         }
     }
 
@@ -587,7 +693,7 @@ impl MobileCore {
     pub fn list_models(&self, id: DaemonId) {
         let conns = self.connections.lock().unwrap();
         if let Some(conn) = conns.get(&id.node_id) {
-            let _ = conn.tx.send(ClientMessage::ListModels);
+            let _ = conn.send(ClientMessage::ListModels);
         }
     }
 
@@ -595,7 +701,7 @@ impl MobileCore {
     pub fn switch_model(&self, id: DaemonId, provider: String, model: String) {
         let conns = self.connections.lock().unwrap();
         if let Some(conn) = conns.get(&id.node_id) {
-            let _ = conn.tx.send(ClientMessage::SwitchModel { provider, model });
+            let _ = conn.send(ClientMessage::SwitchModel { provider, model });
         }
     }
 
@@ -603,23 +709,24 @@ impl MobileCore {
     pub fn set_permission_mode(&self, id: DaemonId, mode: String) {
         let conns = self.connections.lock().unwrap();
         if let Some(conn) = conns.get(&id.node_id) {
-            let _ = conn.tx.send(ClientMessage::SetPermissionMode { mode });
+            let _ = conn.send(ClientMessage::SetPermissionMode { mode });
         }
     }
 
     /// Send a slash command to the daemon. Response comes as SlashResult event.
-    pub fn slash_command(&self, id: DaemonId, command: String) {
+    pub fn slash_command(&self, id: DaemonId, command: String) -> bool {
         let conns = self.connections.lock().unwrap();
-        if let Some(conn) = conns.get(&id.node_id) {
-            let _ = conn.tx.send(ClientMessage::SlashCommand { command });
-        }
+        let Some(conn) = conns.get(&id.node_id) else {
+            return false;
+        };
+        conn.send(ClientMessage::SlashCommand { command })
     }
 
     /// Set the thinking variant for the active session.
     pub fn set_thinking_variant(&self, id: DaemonId, variant: String) {
         let conns = self.connections.lock().unwrap();
         if let Some(conn) = conns.get(&id.node_id) {
-            let _ = conn.tx.send(ClientMessage::SetThinkingVariant { variant });
+            let _ = conn.send(ClientMessage::SetThinkingVariant { variant });
         }
     }
 
@@ -628,7 +735,7 @@ impl MobileCore {
     pub fn list_personas(&self, id: DaemonId) {
         let conns = self.connections.lock().unwrap();
         if let Some(conn) = conns.get(&id.node_id) {
-            let _ = conn.tx.send(ClientMessage::ListPersonas);
+            let _ = conn.send(ClientMessage::ListPersonas);
         }
     }
 
@@ -637,7 +744,7 @@ impl MobileCore {
     pub fn switch_persona(&self, id: DaemonId, name: String) {
         let conns = self.connections.lock().unwrap();
         if let Some(conn) = conns.get(&id.node_id) {
-            let _ = conn.tx.send(ClientMessage::SwitchPersona { name });
+            let _ = conn.send(ClientMessage::SwitchPersona { name });
         }
     }
 
@@ -645,7 +752,7 @@ impl MobileCore {
     pub fn set_auto_title(&self, id: DaemonId, enabled: bool) {
         let conns = self.connections.lock().unwrap();
         if let Some(conn) = conns.get(&id.node_id) {
-            let _ = conn.tx.send(ClientMessage::SetAutoTitle { enabled });
+            let _ = conn.send(ClientMessage::SetAutoTitle { enabled });
         }
     }
 
@@ -653,7 +760,7 @@ impl MobileCore {
     pub fn set_auto_summary(&self, id: DaemonId, enabled: bool) {
         let conns = self.connections.lock().unwrap();
         if let Some(conn) = conns.get(&id.node_id) {
-            let _ = conn.tx.send(ClientMessage::SetAutoSummary { enabled });
+            let _ = conn.send(ClientMessage::SetAutoSummary { enabled });
         }
     }
 
@@ -661,9 +768,7 @@ impl MobileCore {
     pub fn rename_session(&self, id: DaemonId, session_id: String, title: String) {
         let conns = self.connections.lock().unwrap();
         if let Some(conn) = conns.get(&id.node_id) {
-            let _ = conn
-                .tx
-                .send(ClientMessage::RenameSession { session_id, title });
+            let _ = conn.send(ClientMessage::RenameSession { session_id, title });
         }
     }
 
@@ -671,7 +776,7 @@ impl MobileCore {
     pub fn archive_session(&self, id: DaemonId, session_id: String, archived: bool) {
         let conns = self.connections.lock().unwrap();
         if let Some(conn) = conns.get(&id.node_id) {
-            let _ = conn.tx.send(ClientMessage::ArchiveSession {
+            let _ = conn.send(ClientMessage::ArchiveSession {
                 session_id,
                 archived,
             });
@@ -682,9 +787,7 @@ impl MobileCore {
     pub fn pin_session(&self, id: DaemonId, session_id: String, pinned: bool) {
         let conns = self.connections.lock().unwrap();
         if let Some(conn) = conns.get(&id.node_id) {
-            let _ = conn
-                .tx
-                .send(ClientMessage::PinSession { session_id, pinned });
+            let _ = conn.send(ClientMessage::PinSession { session_id, pinned });
         }
     }
 
@@ -692,7 +795,7 @@ impl MobileCore {
     pub fn delete_session(&self, id: DaemonId, session_id: String) {
         let conns = self.connections.lock().unwrap();
         if let Some(conn) = conns.get(&id.node_id) {
-            let _ = conn.tx.send(ClientMessage::DeleteSession { session_id });
+            let _ = conn.send(ClientMessage::DeleteSession { session_id });
         }
     }
 
@@ -712,7 +815,13 @@ impl MobileCore {
     pub fn snapshot(&self, id: DaemonId) -> Option<DaemonSnapshot> {
         let conns = self.connections.lock().unwrap();
         let conn = conns.get(&id.node_id)?;
-        let attached = conn.state.attached_session.lock().unwrap().clone();
+        let attached = conn
+            .state
+            .client_state
+            .lock()
+            .unwrap()
+            .attached_session
+            .clone();
         let session_state = conn.state.session_state.lock().unwrap();
         let models = conn.state.models.lock().unwrap().clone();
         let daemon_version = conn.state.daemon_version.lock().unwrap().clone();
@@ -750,8 +859,97 @@ impl MobileCore {
                 turns: ss.turns,
                 todos: ss.todos.clone(),
             });
+            let client = conn.state.client_state.lock().unwrap();
+            if let Some(session) = client.session(&ss.session_id) {
+                for action in &session.pending_actions {
+                    use mew_client_core::ActionKind;
+                    let permission = match &action.kind {
+                        ActionKind::Permission { tool_name, input } => Some((
+                            tool_name.clone(),
+                            serde_json::to_string_pretty(input).unwrap_or_default(),
+                        )),
+                        ActionKind::WorkspacePermission { path } => {
+                            Some(("workspace_escape".into(), path.clone()))
+                        }
+                        ActionKind::SubagentPermission {
+                            tool_name, input, ..
+                        } => Some((
+                            format!("subagent:{tool_name}"),
+                            serde_json::to_string_pretty(input).unwrap_or_default(),
+                        )),
+                        ActionKind::AskUser {
+                            call_id,
+                            questions,
+                            subagent,
+                        } => {
+                            snap.pending_ask_user.push(state::PendingAskUser {
+                                subagent: subagent.as_ref().map(Into::into),
+                                daemon: id.node_id.clone(),
+                                request_id: action.request_id.clone(),
+                                session_id: ss.session_id.clone(),
+                                call_id: call_id.clone(),
+                                questions: questions
+                                    .iter()
+                                    .map(|question| question.prompt.clone())
+                                    .collect(),
+                            });
+                            None
+                        }
+                        ActionKind::GoalApproval { .. } => None,
+                    };
+                    if let Some((tool_name, input)) = permission {
+                        snap.pending_permissions.push(state::PendingPermission {
+                            daemon: id.node_id.clone(),
+                            request_id: action.request_id.clone(),
+                            session_id: ss.session_id.clone(),
+                            tool_name,
+                            input,
+                        });
+                    }
+                }
+            }
         }
         Some(snap)
+    }
+}
+
+#[derive(Default)]
+struct TextDeltaBuffer {
+    origin: Option<(String, String)>,
+    text: String,
+}
+
+impl TextDeltaBuffer {
+    fn push(
+        &mut self,
+        daemon: &str,
+        session_id: String,
+        part_id: String,
+        delta: String,
+    ) -> Option<CoreEvent> {
+        let same_origin = self
+            .origin
+            .as_ref()
+            .is_some_and(|(session, part)| session == &session_id && part == &part_id);
+        let previous = if same_origin { None } else { self.take(daemon) };
+        if self.origin.is_none() {
+            self.origin = Some((session_id, part_id));
+        }
+        self.text.push_str(&delta);
+        previous
+    }
+
+    fn take(&mut self, daemon: &str) -> Option<CoreEvent> {
+        let (session_id, part_id) = self.origin.take()?;
+        if self.text.is_empty() {
+            return None;
+        }
+        Some(CoreEvent::TextDelta {
+            daemon: daemon.to_owned(),
+            session_id,
+            part_id,
+            delta: std::mem::take(&mut self.text),
+        })
     }
 }
 
@@ -772,12 +970,50 @@ fn set_shared_connection_status(
     conn_state: &Arc<ConnState>,
     status: mew_client_core::ConnectionStatus,
 ) {
-    let event = conn_state
-        .client_state
-        .lock()
-        .unwrap()
-        .set_connection_status(status);
+    let mut client = conn_state.client_state.lock().unwrap();
+    if status != mew_client_core::ConnectionStatus::Connected {
+        conn_state.invalidate_session_commands();
+        client.attached_session = None;
+    }
+    let event = client.set_connection_status(status);
+    drop(client);
     conn_state.push_shared_event(event);
+}
+
+/// Verify compatibility before announcing a connection or attaching a session.
+async fn verify_daemon_protocol<S>(
+    ws: &mut tokio_tungstenite::WebSocketStream<S>,
+) -> anyhow::Result<ServerMessage>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    tokio::time::timeout(Duration::from_secs(10), async {
+        ws.send(Message::Text(mew_protocol::encode_json(&ClientMessage::Ping)?)).await?;
+        loop {
+            let frame = ws.next().await.context("daemon closed during protocol handshake")??;
+            match frame {
+                Message::Text(text) => {
+                    let message = mew_protocol::decode_json::<ServerMessage>(&text)
+                        .context("invalid daemon protocol handshake")?;
+                    match &message {
+                        ServerMessage::Pong { protocol_version, .. } => {
+                            anyhow::ensure!(
+                                *protocol_version == mew_protocol::PROTOCOL_VERSION,
+                                "incompatible daemon protocol version {protocol_version} (expected {}); update or restart the daemon and app",
+                                mew_protocol::PROTOCOL_VERSION,
+                            );
+                            return Ok(message);
+                        }
+                        ServerMessage::RemoteReady { .. } => {}
+                        ServerMessage::Error { message } => anyhow::bail!("daemon protocol handshake failed: {message}"),
+                        _ => anyhow::bail!("unexpected daemon protocol handshake response"),
+                    }
+                }
+                Message::Close(_) => anyhow::bail!("daemon closed during protocol handshake"),
+                _ => {}
+            }
+        }
+    }).await.context("daemon protocol handshake timed out")?
 }
 
 /// Connect to a daemon over iroh and run the message loop.
@@ -790,7 +1026,7 @@ async fn connect_and_run(
     daemon_id: &str,
     node_id: &str,
     pairing_token: Option<&str>,
-    rx: &mut mpsc::UnboundedReceiver<ClientMessage>,
+    rx: &mut mpsc::UnboundedReceiver<QueuedCommand>,
     conn_state: &Arc<ConnState>,
 ) -> Result<ConnOutcome> {
     let emit_event = |event: CoreEvent| {
@@ -835,12 +1071,6 @@ async fn connect_and_run(
         .await
         .context("websocket handshake over iroh")?;
 
-    set_shared_connection_status(conn_state, mew_client_core::ConnectionStatus::Connected);
-    emit_event(CoreEvent::DaemonStatusChanged {
-        daemon: daemon_id.to_string(),
-        status: DaemonStatus::Connected,
-    });
-
     // Iroh connections must complete the daemon's transport-level handshake
     // before sending normal protocol messages. Existing paired mobile nodes
     // authenticate through the daemon's trusted-node record, so they do not
@@ -851,13 +1081,19 @@ async fn connect_and_run(
     })?;
     ws.send(Message::Text(hello)).await?;
 
-    // Send Ping to get daemon version.
-    let ping = mew_protocol::encode_json(&ClientMessage::Ping)?;
-    ws.send(Message::Text(ping)).await?;
+    let pong = verify_daemon_protocol(&mut ws).await?;
+    set_shared_connection_status(conn_state, mew_client_core::ConnectionStatus::Connected);
+    emit_event(CoreEvent::DaemonStatusChanged {
+        daemon: daemon_id.to_string(),
+        status: DaemonStatus::Connected,
+    });
+    for event in translate_message(&pong, conn_state, &mut None, daemon_id) {
+        emit_event(event);
+    }
 
     // If we have a previously-attached session, re-send AttachSession so the
     // daemon replays the newest history page (spec: reconnect re-attach).
-    let reattach = conn_state.attached_session.lock().unwrap().clone();
+    let reattach = conn_state.requested_session.lock().unwrap().clone();
     if let Some(session_id) = reattach {
         let attach_msg = mew_protocol::encode_json(&ClientMessage::AttachSession {
             session_id,
@@ -873,8 +1109,7 @@ async fn connect_and_run(
     let mut drop_reason: Option<String> = None;
 
     // TextDelta coalescing buffer (spec note #8).
-    let mut delta_buffer = String::new();
-    let mut delta_part_id: Option<String> = None;
+    let mut delta_buffer = TextDeltaBuffer::default();
     let mut last_flush = tokio::time::Instant::now();
     const FLUSH_INTERVAL: Duration = Duration::from_millis(16);
 
@@ -883,13 +1118,29 @@ async fn connect_and_run(
             // Forward client messages to the daemon.
             msg = rx.recv() => {
                 match msg {
-                    Some(client_msg) => {
+                    Some(queued) => {
+                        if !queued.ready(conn_state) {
+                            if let (Some(session_id), Some(generation)) = (&queued.session_id, queued.generation) {
+                                if matches!(queued.message, ClientMessage::Prompt { .. }) { conn_state.release_submission(session_id, generation); }
+                            }
+                            if let Some(session_id) = queued.session_id {
+                                emit_event(CoreEvent::Alert { daemon: daemon_id.to_string(), session_id, kind: "error".into(), title: "Message was not sent".into(), detail: Some("The session connection changed. Reattach and retry.".into()) });
+                            }
+                            continue;
+                        }
+                        let client_msg = queued.message;
                         // Track last sent prompt for UserMessage dedup.
                         if let ClientMessage::Prompt { text, .. } = &client_msg {
                             last_sent_prompt = Some(text.clone());
                         }
                         let json = mew_protocol::encode_json(&client_msg)?;
                         if ws.send(Message::Text(json)).await.is_err() {
+                            if let (Some(session_id), Some(generation)) = (&queued.session_id, queued.generation) {
+                                if matches!(client_msg, ClientMessage::Prompt { .. }) { conn_state.release_submission(session_id, generation); }
+                            }
+                            if let Some(session_id) = queued.session_id {
+                                emit_event(CoreEvent::Alert { daemon: daemon_id.to_string(), session_id, kind: "error".into(), title: "Message delivery interrupted".into(), detail: Some("Check the session history after reconnecting before retrying.".into()) });
+                            }
                             drop_reason = Some("failed to send message to daemon".to_string());
                             break;
                         }
@@ -942,82 +1193,32 @@ async fn connect_and_run(
                     daemon_id,
                 );
 
-                // Flush any pending TextDelta before emitting non-delta events.
-                if !delta_buffer.is_empty() && !events.iter().any(|e| matches!(e, CoreEvent::TextDelta { .. })) {
-                    if let Some(ref pid) = delta_part_id {
-                        let session_id = conn_state.session_state.lock().unwrap()
-                            .as_ref().map(|s| s.session_id.clone()).unwrap_or_default();
-                        emit_event(CoreEvent::TextDelta {
-                            daemon: daemon_id.to_string(),
-                            session_id,
-                            part_id: pid.clone(),
-                            delta: std::mem::take(&mut delta_buffer),
-                        });
+                if !events.iter().any(|e| matches!(e, CoreEvent::TextDelta { .. })) {
+                    if let Some(event) = delta_buffer.take(daemon_id) {
+                        emit_event(event);
                     }
-                    delta_part_id = None;
                 }
-
                 for event in events {
-                    // Coalesce TextDelta events (spec note #8).
-                    if let CoreEvent::TextDelta { part_id, delta, .. } = &event {
-                        if delta_part_id.as_deref() == Some(part_id) {
-                            delta_buffer.push_str(delta);
-                            if last_flush.elapsed() >= FLUSH_INTERVAL {
-                                let session_id = conn_state.session_state.lock().unwrap()
-                                    .as_ref().map(|s| s.session_id.clone()).unwrap_or_default();
-                                emit_event(CoreEvent::TextDelta {
-                                    daemon: daemon_id.to_string(),
-                                    session_id,
-                                    part_id: part_id.clone(),
-                                    delta: std::mem::take(&mut delta_buffer),
-                                });
-                                last_flush = tokio::time::Instant::now();
-                            }
-                            continue;
-                        } else {
-                            // Part changed — flush old, start new.
-                            if !delta_buffer.is_empty() {
-                                if let Some(pid) = &delta_part_id {
-                                    let session_id = conn_state.session_state.lock().unwrap()
-                                        .as_ref().map(|s| s.session_id.clone()).unwrap_or_default();
-                                    emit_event(CoreEvent::TextDelta {
-                                        daemon: daemon_id.to_string(),
-                                        session_id,
-                                        part_id: pid.clone(),
-                                        delta: std::mem::take(&mut delta_buffer),
-                                    });
-                                }
-                            }
-                            delta_part_id = Some(part_id.clone());
-                            delta_buffer.push_str(delta);
-                            last_flush = tokio::time::Instant::now();
-                            continue;
+                    if let CoreEvent::TextDelta { session_id, part_id, delta, .. } = event {
+                        if let Some(previous) = delta_buffer.push(daemon_id, session_id, part_id, delta) {
+                            emit_event(previous);
                         }
+                        if last_flush.elapsed() >= FLUSH_INTERVAL {
+                            if let Some(event) = delta_buffer.take(daemon_id) {
+                                emit_event(event);
+                            }
+                            last_flush = tokio::time::Instant::now();
+                        }
+                    } else {
+                        emit_event(event);
                     }
-
-                    emit_event(event);
                 }
             }
         }
     }
 
-    // Flush remaining delta buffer.
-    if !delta_buffer.is_empty() {
-        if let Some(pid) = &delta_part_id {
-            let session_id = conn_state
-                .session_state
-                .lock()
-                .unwrap()
-                .as_ref()
-                .map(|s| s.session_id.clone())
-                .unwrap_or_default();
-            emit_event(CoreEvent::TextDelta {
-                daemon: daemon_id.to_string(),
-                session_id,
-                part_id: pid.clone(),
-                delta: std::mem::take(&mut delta_buffer),
-            });
-        }
+    if let Some(event) = delta_buffer.take(daemon_id) {
+        emit_event(event);
     }
 
     Ok(if user_disconnected {
@@ -1031,90 +1232,6 @@ async fn connect_and_run(
 
 /// Translate a `ServerMessage` into zero or more `CoreEvent`s, updating
 /// the shared `ConnState` as needed.
-fn project_history_messages(messages: &[mew_message::Message]) -> Vec<state::ChatMessage> {
-    messages
-        .iter()
-        .map(|msg| {
-            let parts: Vec<_> = msg
-                .parts
-                .iter()
-                .map(|p| match p {
-                    Part::Text(tp) => state::MessagePart {
-                        id: tp.base.id.to_string(),
-                        kind: state::PartKind::Text,
-                        text: Some(tp.text.clone()),
-                        tool_name: None,
-                        tool_state: None,
-                        tool_input: None,
-                        tool_output: None,
-                        tool_error: None,
-                        tool_call_id: None,
-                        tool_time_start: None,
-                        tool_time_end: None,
-                        tool_sensitivity: None,
-                    },
-                    Part::Reasoning(rp) => state::MessagePart {
-                        id: rp.base.id.to_string(),
-                        kind: state::PartKind::Reasoning,
-                        text: Some(rp.text.clone()),
-                        tool_name: None,
-                        tool_state: None,
-                        tool_input: None,
-                        tool_output: None,
-                        tool_error: None,
-                        tool_call_id: None,
-                        tool_time_start: None,
-                        tool_time_end: None,
-                        tool_sensitivity: None,
-                    },
-                    Part::ToolCall(tcp) => {
-                        let (input_str, output, error, time_start, time_end) =
-                            state::tool_state_fields(&tcp.state);
-                        state::MessagePart {
-                            id: tcp.base.id.to_string(),
-                            kind: state::PartKind::ToolCall,
-                            text: None,
-                            tool_name: Some(tcp.tool_name.clone()),
-                            tool_state: Some(format!("{:?}", tcp.state).to_lowercase()),
-                            tool_input: input_str,
-                            tool_output: output,
-                            tool_error: error,
-                            tool_call_id: Some(tcp.call_id.clone()),
-                            tool_time_start: time_start,
-                            tool_time_end: time_end,
-                            tool_sensitivity: None,
-                        }
-                    }
-                    _ => state::MessagePart {
-                        id: ulid::Ulid::new().to_string(),
-                        kind: state::PartKind::Error,
-                        text: None,
-                        tool_name: None,
-                        tool_state: None,
-                        tool_input: None,
-                        tool_output: None,
-                        tool_error: None,
-                        tool_call_id: None,
-                        tool_time_start: None,
-                        tool_time_end: None,
-                        tool_sensitivity: None,
-                    },
-                })
-                .collect();
-            state::ChatMessage {
-                id: ulid::Ulid::new().to_string(),
-                role: format!("{:?}", msg.role).to_lowercase(),
-                parts,
-                assistant_meta: msg.assistant.as_ref().map(|a| state::MobileAssistantMeta {
-                    model_id: a.model_id.clone(),
-                    cost: a.cost,
-                    manifest: a.manifest.as_ref().map(state::to_mobile_manifest),
-                }),
-            }
-        })
-        .collect()
-}
-
 fn translate_message(
     msg: &ServerMessage,
     conn_state: &Arc<ConnState>,
@@ -1124,6 +1241,11 @@ fn translate_message(
     use mew_protocol::ServerMessage;
     let d = daemon_id.to_string();
     let mut events = Vec::new();
+    if matches!(msg, ServerMessage::SessionReady { .. }) {
+        conn_state
+            .confirmed_generation
+            .store(u64::MAX, Ordering::Relaxed);
+    }
 
     let shared_events = conn_state
         .client_state
@@ -1131,16 +1253,47 @@ fn translate_message(
         .unwrap()
         .apply_server_message(msg.clone());
     conn_state.push_shared_events(shared_events);
+    match msg {
+        ServerMessage::SessionActivityChanged {
+            session_id,
+            activity: mew_protocol::SessionState::Running,
+        }
+        | ServerMessage::SessionAlert {
+            session_id,
+            kind: mew_protocol::AlertKind::TurnComplete | mew_protocol::AlertKind::TurnFailed,
+            ..
+        } => {
+            conn_state
+                .pending_submissions
+                .lock()
+                .unwrap()
+                .remove(session_id);
+        }
+        ServerMessage::Error { .. } | ServerMessage::ErrorEvent { .. } => {
+            if let Some(session_id) = conn_state
+                .client_state
+                .lock()
+                .unwrap()
+                .attached_session
+                .as_deref()
+            {
+                conn_state
+                    .pending_submissions
+                    .lock()
+                    .unwrap()
+                    .remove(session_id);
+            }
+        }
+        _ => {}
+    }
 
-    // Provider events use the shared session as the source of truth. Sync the
-    // mobile projection before the compatibility match so its legacy helper
-    // observes an already-reduced event instead of applying it twice.
+    // Project the canonical reduction before reading per-message metadata.
     if matches!(msg, ServerMessage::Provider { .. }) {
         sync_mobile_session_from_client_state(conn_state);
     }
 
     match msg {
-        ServerMessage::Pong { version } => {
+        ServerMessage::Pong { version, .. } => {
             *conn_state.daemon_version.lock().unwrap() = Some(version.clone());
             events.push(CoreEvent::DaemonVersion {
                 daemon: d,
@@ -1155,7 +1308,16 @@ fn translate_message(
             permission_mode,
             ..
         } => {
-            *conn_state.attached_session.lock().unwrap() = Some(session_id.clone());
+            let mut requested = conn_state.requested_session.lock().unwrap();
+            if requested.is_none() {
+                *requested = Some(session_id.clone());
+            }
+            drop(requested);
+            conn_state
+                .pending_submissions
+                .lock()
+                .unwrap()
+                .remove(session_id);
             *conn_state.session_state.lock().unwrap() = Some(SessionState::new(session_id.clone()));
             // Capture current model/provider/permission_mode from SessionReady.
             *conn_state.current_model.lock().unwrap() = model.clone();
@@ -1166,6 +1328,10 @@ fn translate_message(
                     ss.permission_mode = Some(pm.clone());
                 }
             }
+            events.push(CoreEvent::SessionReady {
+                daemon: d.clone(),
+                session_id: session_id.clone(),
+            });
             events.push(CoreEvent::SessionReloaded {
                 daemon: d.clone(),
                 session_id: session_id.clone(),
@@ -1254,65 +1420,62 @@ fn translate_message(
             });
         }
 
-        ServerMessage::SessionHistory { messages } => {
-            // Rebuild session state from history replay.
-            let mut ss_lock = conn_state.session_state.lock().unwrap();
-            if let Some(ss) = ss_lock.as_mut() {
-                ss.messages = project_history_messages(messages);
-            }
-            let session_id = ss_lock.as_ref().map(|s| s.session_id.clone());
-            drop(ss_lock);
-            if let Some(sid) = session_id {
+        ServerMessage::SessionHistory { .. } => {
+            let session_id = conn_state
+                .session_state
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|s| s.session_id.clone());
+            if let Some(session_id) = session_id {
                 events.push(CoreEvent::SessionReloaded {
                     daemon: d,
-                    session_id: sid,
+                    session_id,
                 });
             }
         }
 
-        ServerMessage::SessionHistoryPage {
-            messages, replace, ..
-        } => {
-            // The mobile projection currently has no history paginator, but
-            // it still accepts pages so desktop-sized daemon histories do not
-            // break the shared protocol.
-            let mut ss_lock = conn_state.session_state.lock().unwrap();
-            if let Some(ss) = ss_lock.as_mut() {
-                let mut page_messages = project_history_messages(messages);
-                if *replace {
-                    ss.messages = page_messages;
-                } else {
-                    page_messages.append(&mut ss.messages);
-                    ss.messages = page_messages;
-                }
-            }
-            let session_id = ss_lock.as_ref().map(|s| s.session_id.clone());
-            drop(ss_lock);
-            if let Some(sid) = session_id {
+        ServerMessage::SessionHistoryPage { session_id, .. } => {
+            let attached = conn_state
+                .client_state
+                .lock()
+                .unwrap()
+                .attached_session
+                .clone();
+            if attached.as_deref() == Some(session_id) {
                 events.push(CoreEvent::SessionReloaded {
                     daemon: d,
-                    session_id: sid,
+                    session_id: session_id.clone(),
                 });
             }
+        }
+
+        ServerMessage::SessionActivityChanged {
+            session_id,
+            activity,
+        } => {
+            events.push(CoreEvent::SessionActivityChanged {
+                daemon: d,
+                session_id: session_id.clone(),
+                running: *activity == mew_protocol::SessionState::Running,
+            });
         }
 
         ServerMessage::Provider { event } => {
             let mut ss_lock = conn_state.session_state.lock().unwrap();
             if let Some(ss) = ss_lock.as_mut() {
                 match event {
-                    ProviderEventWire::PartStart { part } => {
-                        ss.apply_provider_event(event);
-                        if let Part::Text(tp) = part {
-                            events.push(CoreEvent::TextDelta {
-                                daemon: d,
-                                session_id: ss.session_id.clone(),
-                                part_id: tp.base.id.to_string(),
-                                delta: tp.text.clone(),
-                            });
-                        }
+                    ProviderEventWire::PartStart {
+                        part: Part::Text(tp),
+                    } => {
+                        events.push(CoreEvent::TextDelta {
+                            daemon: d,
+                            session_id: ss.session_id.clone(),
+                            part_id: tp.base.id.to_string(),
+                            delta: tp.text.clone(),
+                        });
                     }
                     ProviderEventWire::PartDelta { part_id, delta, .. } => {
-                        ss.apply_provider_event(event);
                         events.push(CoreEvent::TextDelta {
                             daemon: d,
                             session_id: ss.session_id.clone(),
@@ -1321,7 +1484,6 @@ fn translate_message(
                         });
                     }
                     ProviderEventWire::PartEnd { part_id } => {
-                        ss.apply_provider_event(event);
                         events.push(CoreEvent::PartUpdated {
                             daemon: d,
                             session_id: ss.session_id.clone(),
@@ -1336,10 +1498,9 @@ fn translate_message(
                         finish,
                         ..
                     } => {
-                        ss.apply_provider_event(event);
                         let failed = *finish == mew_message::Finish::Error;
                         let manifest = ss.last_manifest.take();
-                        events.push(CoreEvent::TurnEnded {
+                        events.push(CoreEvent::ProviderMessageEnded {
                             daemon: d,
                             session_id: ss.session_id.clone(),
                             input_tokens: usage.input as u64,
@@ -1349,9 +1510,7 @@ fn translate_message(
                             manifest,
                         });
                     }
-                    _ => {
-                        ss.apply_provider_event(event);
-                    }
+                    _ => {}
                 }
             }
         }
@@ -1406,7 +1565,7 @@ fn translate_message(
             }
         }
 
-        ServerMessage::UserMessage { text } => {
+        ServerMessage::UserMessage { text, .. } => {
             // Dedup: daemon echoes our prompt back (spec note #9).
             if let Some(ref last) = last_sent_prompt {
                 if last == text {
@@ -1444,14 +1603,11 @@ fn translate_message(
             input,
         } => {
             let input_str = serde_json::to_string_pretty(input).unwrap_or_default();
-            let mut ss_lock = conn_state.session_state.lock().unwrap();
+            let ss_lock = conn_state.session_state.lock().unwrap();
             let session_id = ss_lock
                 .as_ref()
                 .map(|s| s.session_id.clone())
                 .unwrap_or_default();
-            if let Some(ss) = ss_lock.as_mut() {
-                ss.pending_permissions += 1;
-            }
             events.push(CoreEvent::PermissionRequested {
                 daemon: d,
                 session_id,
@@ -1465,16 +1621,15 @@ fn translate_message(
             request_id,
             call_id,
             questions,
+            subagent,
         } => {
-            let mut ss_lock = conn_state.session_state.lock().unwrap();
+            let ss_lock = conn_state.session_state.lock().unwrap();
             let session_id = ss_lock
                 .as_ref()
                 .map(|s| s.session_id.clone())
                 .unwrap_or_default();
-            if let Some(ss) = ss_lock.as_mut() {
-                ss.pending_questions += 1;
-            }
             events.push(CoreEvent::AskUserRequested {
+                subagent: subagent.as_ref().map(Into::into),
                 daemon: d,
                 session_id,
                 request_id: request_id.clone(),
@@ -1483,45 +1638,16 @@ fn translate_message(
             });
         }
 
-        ServerMessage::PlanApprovalRequest {
-            request_id,
-            call_id,
-            plan_path,
-            plan_markdown,
-            persona,
-        } => {
-            let mut ss_lock = conn_state.session_state.lock().unwrap();
-            let session_id = ss_lock
-                .as_ref()
-                .map(|s| s.session_id.clone())
-                .unwrap_or_default();
-            if let Some(ss) = ss_lock.as_mut() {
-                ss.pending_questions += 1;
-            }
-            events.push(CoreEvent::PlanApprovalRequested {
-                daemon: d,
-                session_id,
-                request_id: request_id.clone(),
-                call_id: call_id.clone(),
-                plan_path: plan_path.clone(),
-                plan_markdown: plan_markdown.clone(),
-                persona: persona.clone(),
-            });
-        }
-
         ServerMessage::GoalProposed {
             request_id,
             call_id,
             objective,
         } => {
-            let mut ss_lock = conn_state.session_state.lock().unwrap();
+            let ss_lock = conn_state.session_state.lock().unwrap();
             let session_id = ss_lock
                 .as_ref()
                 .map(|s| s.session_id.clone())
                 .unwrap_or_default();
-            if let Some(ss) = ss_lock.as_mut() {
-                ss.pending_questions += 1;
-            }
             events.push(CoreEvent::GoalProposed {
                 daemon: d,
                 session_id,
@@ -1532,10 +1658,6 @@ fn translate_message(
         }
 
         ServerMessage::RequestResolved { request_id } => {
-            let mut ss_lock = conn_state.session_state.lock().unwrap();
-            if let Some(ss) = ss_lock.as_mut() {
-                ss.pending_permissions = ss.pending_permissions.saturating_sub(1);
-            }
             events.push(CoreEvent::RequestResolved {
                 daemon: d,
                 request_id: request_id.clone(),
@@ -1563,7 +1685,7 @@ fn translate_message(
             pending_questions,
         } => {
             let mut ss_lock = conn_state.session_state.lock().unwrap();
-            if let Some(ss) = ss_lock.as_mut() {
+            if let Some(ss) = ss_lock.as_mut().filter(|ss| ss.session_id == *session_id) {
                 ss.pending_permissions = *pending_permissions;
                 ss.pending_questions = *pending_questions;
             }
@@ -1667,14 +1789,11 @@ fn translate_message(
 
         // Pass through events that need permission handling but no state assembly.
         ServerMessage::WorkspacePermissionRequest { request_id, path } => {
-            let mut ss_lock = conn_state.session_state.lock().unwrap();
+            let ss_lock = conn_state.session_state.lock().unwrap();
             let session_id = ss_lock
                 .as_ref()
                 .map(|s| s.session_id.clone())
                 .unwrap_or_default();
-            if let Some(ss) = ss_lock.as_mut() {
-                ss.pending_permissions += 1;
-            }
             events.push(CoreEvent::PermissionRequested {
                 daemon: d,
                 session_id,
@@ -1690,14 +1809,11 @@ fn translate_message(
             input,
             ..
         } => {
-            let mut ss_lock = conn_state.session_state.lock().unwrap();
+            let ss_lock = conn_state.session_state.lock().unwrap();
             let session_id = ss_lock
                 .as_ref()
                 .map(|s| s.session_id.clone())
                 .unwrap_or_default();
-            if let Some(ss) = ss_lock.as_mut() {
-                ss.pending_permissions += 1;
-            }
             let input_str = serde_json::to_string_pretty(input).unwrap_or_default();
             events.push(CoreEvent::PermissionRequested {
                 daemon: d,
@@ -1747,9 +1863,10 @@ fn translate_message(
             events.push(CoreEvent::Alert {
                 daemon: d.clone(),
                 session_id: conn_state
-                    .attached_session
+                    .client_state
                     .lock()
                     .unwrap()
+                    .attached_session
                     .clone()
                     .unwrap_or_default(),
                 kind: "error".into(),
@@ -1761,9 +1878,10 @@ fn translate_message(
             events.push(CoreEvent::Alert {
                 daemon: d.clone(),
                 session_id: conn_state
-                    .attached_session
+                    .client_state
                     .lock()
                     .unwrap()
+                    .attached_session
                     .clone()
                     .unwrap_or_default(),
                 kind: "error".into(),
@@ -1798,8 +1916,7 @@ fn translate_message(
             });
         }
 
-        ServerMessage::PersonaSwitched { name }
-        | ServerMessage::PersonaSwitchRequested { name } => {
+        ServerMessage::PersonaSwitched { name } => {
             *conn_state.current_persona.lock().unwrap() = Some(name.clone());
             if let Some(ss) = conn_state.session_state.lock().unwrap().as_mut() {
                 ss.current_persona = Some(name.clone());
@@ -1842,11 +1959,11 @@ fn translate_message(
         | ServerMessage::SubagentStart { .. }
         | ServerMessage::SubagentStatus { .. }
         | ServerMessage::JobUpdate { .. }
+        | ServerMessage::SessionActivitySnapshot { .. }
         | ServerMessage::ClientAttached { .. }
         | ServerMessage::ClientDetached { .. }
         | ServerMessage::ControlYielded { .. }
         | ServerMessage::SessionSummaryChanged { .. }
-        | ServerMessage::SessionActivityChanged { .. }
         | ServerMessage::SessionStatsChanged { .. }
         | ServerMessage::SessionUsageChanged { .. }
         | ServerMessage::GroupList { .. }
@@ -1854,6 +1971,14 @@ fn translate_message(
         | ServerMessage::FilePreview { .. }
         | ServerMessage::FilesystemDirListing { .. }
         | ServerMessage::GitStatusResult { .. }
+        | ServerMessage::SessionDiff { .. }
+        | ServerMessage::SessionDiffError { .. }
+        | ServerMessage::SubagentHistory { .. }
+        | ServerMessage::JobOutput { .. }
+        | ServerMessage::JobOutputError { .. }
+        | ServerMessage::TodoUpdated { .. }
+        | ServerMessage::TodoUpdateError { .. }
+        | ServerMessage::BrowserPageRegistration { .. }
         | ServerMessage::FsChanged { .. }
         | ServerMessage::SessionMetaChanged { .. }
         | ServerMessage::FlaggedFilesChanged { .. }
@@ -1865,11 +1990,18 @@ fn translate_message(
         | ServerMessage::TerminalOpened { .. }
         | ServerMessage::TerminalOutput { .. }
         | ServerMessage::TerminalExited { .. }
-        | ServerMessage::TerminalError { .. } => {}
+        | ServerMessage::TerminalError { .. }
+        | ServerMessage::PromptReceipt { .. } => {}
     }
 
     if !matches!(msg, ServerMessage::Provider { .. }) {
         sync_mobile_session_from_client_state(conn_state);
+    }
+    if matches!(msg, ServerMessage::SessionReady { .. }) {
+        conn_state.confirmed_generation.store(
+            conn_state.attachment_generation.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
     }
     events
 }
@@ -1962,6 +2094,741 @@ fn rand_jitter() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_action_frames_leave_attention_counts_authoritative() {
+        let conn = Arc::new(ConnState::new());
+        let daemon = "node-abc".to_owned();
+        let mut prompt = None;
+        let id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        translate_message(
+            &ServerMessage::SessionReady {
+                session_id: id.into(),
+                cwd: None,
+                model: None,
+                provider: None,
+                permission_mode: None,
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        let permission = ServerMessage::PermissionRequest {
+            request_id: "permission".into(),
+            tool_name: "shell".into(),
+            input: serde_json::json!({}),
+        };
+        translate_message(&permission, &conn, &mut prompt, &daemon);
+        translate_message(&permission, &conn, &mut prompt, &daemon);
+        for request in [
+            ServerMessage::WorkspacePermissionRequest {
+                request_id: "workspace".into(),
+                path: "/project".into(),
+            },
+            ServerMessage::SubagentPermissionRequest {
+                request_id: "subagent".into(),
+                parent_call_id: "parent".into(),
+                tool_name: "shell".into(),
+                input: serde_json::json!({}),
+            },
+            ServerMessage::AskUserRequest {
+                subagent: None,
+                request_id: "ask".into(),
+                call_id: "ask-call".into(),
+                questions: vec![],
+            },
+            ServerMessage::GoalProposed {
+                request_id: "goal".into(),
+                call_id: "goal-call".into(),
+                objective: "finish".into(),
+            },
+        ] {
+            translate_message(&request, &conn, &mut prompt, &daemon);
+            translate_message(&request, &conn, &mut prompt, &daemon);
+        }
+        assert_eq!(
+            conn.session_state
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .pending_permissions,
+            0
+        );
+        assert_eq!(
+            conn.session_state
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .pending_questions,
+            0
+        );
+        translate_message(
+            &ServerMessage::SessionAttentionChanged {
+                session_id: id.into(),
+                pending_permissions: 1,
+                pending_questions: 2,
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        translate_message(
+            &ServerMessage::SessionAttentionChanged {
+                session_id: "other".into(),
+                pending_permissions: 7,
+                pending_questions: 8,
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        translate_message(
+            &ServerMessage::RequestResolved {
+                request_id: "permission".into(),
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        let guard = conn.session_state.lock().unwrap();
+        let session = guard.as_ref().unwrap();
+        assert_eq!(session.pending_permissions, 1);
+        assert_eq!(session.pending_questions, 2);
+    }
+
+    async fn connected_core() -> (
+        MobileCore,
+        DaemonId,
+        Arc<ConnState>,
+        mpsc::UnboundedReceiver<QueuedCommand>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let core = MobileCore::new(vec![7; 32], dir.path().to_str().unwrap().into())
+            .await
+            .unwrap();
+        let id = DaemonId {
+            node_id: core.node_id(),
+        };
+        let state = Arc::new(ConnState::new());
+        state
+            .client_state
+            .lock()
+            .unwrap()
+            .set_connection_status(mew_client_core::ConnectionStatus::Connected);
+        let (tx, rx) = mpsc::unbounded_channel();
+        core.connections.lock().unwrap().insert(
+            id.node_id.clone(),
+            DaemonConnection {
+                tx,
+                state: state.clone(),
+                task: tokio::spawn(std::future::pending()),
+            },
+        );
+        translate_message(
+            &ServerMessage::SessionReady {
+                session_id: "confirmed".into(),
+                cwd: None,
+                model: None,
+                provider: None,
+                permission_mode: None,
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        (core, id, state, rx)
+    }
+
+    #[tokio::test]
+    async fn repeated_connect_preserves_the_live_connection_and_disconnect_releases_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = MobileCore::new(vec![7; 32], dir.path().to_str().unwrap().into())
+            .await
+            .unwrap();
+        let id = core.add_daemon(core.node_id(), "self".into());
+        core.connect(id.clone());
+        let state = core
+            .connections
+            .lock()
+            .unwrap()
+            .get(&id.node_id)
+            .unwrap()
+            .state
+            .clone();
+        core.connect(id.clone());
+        assert!(Arc::ptr_eq(
+            &state,
+            &core
+                .connections
+                .lock()
+                .unwrap()
+                .get(&id.node_id)
+                .unwrap()
+                .state
+        ));
+        let weak = Arc::downgrade(&state);
+        drop(state);
+        core.disconnect(id);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while weak.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("disconnect must cancel connecting and backoff tasks");
+    }
+
+    #[tokio::test]
+    async fn pending_attachment_cannot_redirect_a_prompt_or_snapshot() {
+        let (core, id, _state, mut rx) = connected_core().await;
+        core.attach(id.clone(), "requested".into());
+        assert!(matches!(
+            rx.recv().await,
+            Some(QueuedCommand {
+                message: ClientMessage::AttachSession { .. },
+                ..
+            })
+        ));
+        assert_eq!(
+            core.snapshot(id.clone())
+                .unwrap()
+                .attached_session
+                .as_deref(),
+            Some("confirmed")
+        );
+        core.prompt(id.clone(), "must stay in composer".into());
+        assert!(
+            rx.try_recv().is_err(),
+            "no prompt may reach the previous session"
+        );
+        assert!(core.snapshot(id).unwrap().sessions[0].messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_prompt_send_does_not_create_a_phantom_user_message() {
+        let (core, id, state, rx) = connected_core().await;
+        drop(rx);
+        core.prompt(id.clone(), "unsent".into());
+        assert!(core.snapshot(id).unwrap().sessions[0].messages.is_empty());
+        assert!(state
+            .client_state
+            .lock()
+            .unwrap()
+            .session("confirmed")
+            .unwrap()
+            .last_sent_prompt
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn accepted_prompt_survives_the_next_canonical_projection() {
+        let (core, id, state, mut rx) = connected_core().await;
+        core.prompt(id.clone(), "accepted".into());
+        assert!(
+            matches!(rx.recv().await, Some(QueuedCommand { message: ClientMessage::Prompt { text, .. }, .. }) if text == "accepted")
+        );
+        translate_message(
+            &ServerMessage::SessionActivityChanged {
+                session_id: "confirmed".into(),
+                activity: mew_protocol::SessionState::Running,
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert_eq!(core.snapshot(id).unwrap().sessions[0].messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn history_for_another_session_cannot_replace_the_attached_transcript() {
+        let (core, id, state, _rx) = connected_core().await;
+        core.prompt(id.clone(), "current".into());
+        translate_message(
+            &ServerMessage::SessionHistoryPage {
+                session_id: "other".into(),
+                messages: vec![],
+                next_cursor: None,
+                replace: true,
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert_eq!(core.snapshot(id).unwrap().sessions[0].messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn queued_prompt_keeps_its_origin_when_requested_attachment_changes() {
+        let (core, id, state, mut rx) = connected_core().await;
+        assert!(core.prompt(id.clone(), "old session".into()));
+        let queued = rx.recv().await.unwrap();
+        core.attach(id.clone(), "new session".into());
+        assert_eq!(queued.session_id.as_deref(), Some("confirmed"));
+        assert!(!queued.ready(&state));
+    }
+
+    #[tokio::test]
+    async fn reconnect_requires_a_new_session_ack_before_sending() {
+        let (core, id, state, _rx) = connected_core().await;
+        set_shared_connection_status(&state, mew_client_core::ConnectionStatus::Connecting);
+        set_shared_connection_status(&state, mew_client_core::ConnectionStatus::Connected);
+        assert!(!core.prompt(id.clone(), "wait for replay".into()));
+        assert!(core.snapshot(id).unwrap().attached_session.is_none());
+    }
+
+    #[tokio::test]
+    async fn repeated_submission_before_running_queues_only_one_prompt() {
+        let (core, id, state, mut rx) = connected_core().await;
+        assert!(core.prompt(id.clone(), "first".into()));
+        assert!(!core.prompt(id.clone(), "second".into()));
+        let first = rx.try_recv().unwrap();
+        assert!(matches!(first.message, ClientMessage::Prompt { text, .. } if text == "first"));
+        assert!(rx.try_recv().is_err());
+        let mut echoed = Some("first".into());
+        translate_message(
+            &ServerMessage::UserMessage {
+                text: "first".into(),
+                request_id: None,
+            },
+            &state,
+            &mut echoed,
+            &id.node_id,
+        );
+        assert!(!core.prompt(id.clone(), "after echo".into()));
+        translate_message(
+            &ServerMessage::SessionActivityChanged {
+                session_id: "other".into(),
+                activity: mew_protocol::SessionState::Running,
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(!core.prompt(id.clone(), "after foreign activity".into()));
+        translate_message(
+            &ServerMessage::SessionActivityChanged {
+                session_id: "confirmed".into(),
+                activity: mew_protocol::SessionState::Running,
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(!core.prompt(id.clone(), "while running".into()));
+        translate_message(
+            &ServerMessage::SessionActivityChanged {
+                session_id: "confirmed".into(),
+                activity: mew_protocol::SessionState::Idle,
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(core.prompt(id.clone(), "next turn".into()));
+    }
+
+    #[tokio::test]
+    async fn submission_error_and_reconnect_release_only_current_reservations() {
+        let (core, id, state, mut rx) = connected_core().await;
+        assert!(core.prompt(id.clone(), "first".into()));
+        rx.try_recv().unwrap();
+        translate_message(
+            &ServerMessage::Error {
+                message: "not accepted".into(),
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(core.prompt(id.clone(), "retry".into()));
+        let old = rx.try_recv().unwrap();
+        set_shared_connection_status(
+            &state,
+            mew_client_core::ConnectionStatus::Backoff {
+                attempt: 0,
+                error: "closed".into(),
+            },
+        );
+        set_shared_connection_status(&state, mew_client_core::ConnectionStatus::Connected);
+        translate_message(
+            &ServerMessage::SessionReady {
+                session_id: "confirmed".into(),
+                cwd: None,
+                model: None,
+                provider: None,
+                permission_mode: None,
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(
+            !old.ready(&state),
+            "reconnect must not resubmit an old queued prompt"
+        );
+        assert!(core.prompt(id.clone(), "fresh".into()));
+    }
+
+    #[test]
+    fn coalesced_text_keeps_its_session_when_attachment_changes() {
+        let mut buffer = TextDeltaBuffer::default();
+        assert!(buffer
+            .push("daemon", "first".into(), "part".into(), "old".into())
+            .is_none());
+        let flushed = buffer
+            .push("daemon", "second".into(), "part".into(), "new".into())
+            .unwrap();
+        assert!(
+            matches!(flushed, CoreEvent::TextDelta { session_id, delta, .. } if session_id == "first" && delta == "old")
+        );
+        assert!(
+            matches!(buffer.take("daemon"), Some(CoreEvent::TextDelta { session_id, delta, .. }) if session_id == "second" && delta == "new")
+        );
+        assert!(buffer.take("daemon").is_none());
+    }
+
+    #[tokio::test]
+    async fn snapshot_contains_replayed_permissions_and_questions() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = MobileCore::new(vec![7; 32], dir.path().to_str().unwrap().into())
+            .await
+            .unwrap();
+        let conn = Arc::new(ConnState::new());
+        let daemon = "node-abc".to_owned();
+        let id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        *conn.requested_session.lock().unwrap() = Some(id.into());
+        conn.client_state.lock().unwrap().connection =
+            Some(mew_client_core::ConnectionStatus::Connected);
+        let (tx, mut outbound) = mpsc::unbounded_channel();
+        core.connections.lock().unwrap().insert(
+            daemon.clone(),
+            DaemonConnection {
+                tx,
+                state: conn.clone(),
+                task: tokio::spawn(std::future::pending()),
+            },
+        );
+        let mut prompt = None;
+        translate_message(
+            &ServerMessage::SessionReady {
+                session_id: id.into(),
+                cwd: None,
+                model: None,
+                provider: None,
+                permission_mode: None,
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        translate_message(
+            &ServerMessage::PermissionRequest {
+                request_id: "permission".into(),
+                tool_name: "shell".into(),
+                input: serde_json::json!({"command":"pwd"}),
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        translate_message(
+            &ServerMessage::AskUserRequest {
+                subagent: Some(mew_protocol::SubagentQuestionSource {
+                    parent_call_id: "task".into(),
+                    child_session_id: "child".into(),
+                    name: "worker".into(),
+                    display_name: Some("Curie".into()),
+                }),
+                request_id: "ask".into(),
+                call_id: "ask-call".into(),
+                questions: vec![mew_protocol::Question {
+                    prompt: "which file?".into(),
+                    options: vec![],
+                }],
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        let snapshot = core
+            .snapshot(DaemonId {
+                node_id: daemon.clone(),
+            })
+            .unwrap();
+        assert_eq!(snapshot.pending_permissions.len(), 1);
+        assert_eq!(snapshot.pending_permissions[0].session_id, id);
+        assert_eq!(snapshot.pending_permissions[0].request_id, "permission");
+        assert_eq!(snapshot.pending_permissions[0].daemon, daemon);
+        assert_eq!(snapshot.pending_ask_user.len(), 1);
+        assert_eq!(snapshot.pending_ask_user[0].session_id, id);
+        assert_eq!(snapshot.pending_ask_user[0].questions, ["which file?"]);
+        assert_eq!(snapshot.pending_ask_user[0].daemon, daemon);
+        let source = snapshot.pending_ask_user[0].subagent.as_ref().unwrap();
+        assert_eq!(source.parent_call_id, "task");
+        assert_eq!(source.child_session_id, "child");
+        assert_eq!(source.name, "worker");
+        assert_eq!(source.display_name.as_deref(), Some("Curie"));
+        core.cancel_ask_user(
+            DaemonId {
+                node_id: daemon.clone(),
+            },
+            "ask".into(),
+        );
+        let command = outbound
+            .try_recv()
+            .expect("confirmed attachment should allow closing its child question");
+        assert_eq!(command.session_id.as_deref(), Some(id));
+        assert!(
+            matches!(command.message, ClientMessage::AskUserResponse { request_id, cancelled: true, .. } if request_id == "ask")
+        );
+        translate_message(
+            &ServerMessage::SessionHistoryPage {
+                session_id: id.into(),
+                messages: vec![],
+                next_cursor: None,
+                replace: false,
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        assert_eq!(
+            core.snapshot(DaemonId {
+                node_id: daemon.clone()
+            })
+            .unwrap()
+            .pending_permissions
+            .len(),
+            1
+        );
+        let ready = translate_message(
+            &ServerMessage::SessionReady {
+                session_id: id.into(),
+                cwd: None,
+                model: None,
+                provider: None,
+                permission_mode: None,
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        assert!(
+            matches!(ready.as_slice(), [CoreEvent::SessionReady { daemon: ready_daemon, session_id }, CoreEvent::SessionReloaded { .. }]
+            if ready_daemon == &daemon && session_id == id)
+        );
+        let snapshot = core.snapshot(DaemonId { node_id: daemon }).unwrap();
+        assert!(snapshot.pending_permissions.is_empty());
+        assert!(snapshot.pending_ask_user.is_empty());
+        core.endpoint.close().await;
+    }
+
+    #[test]
+    fn mobile_provider_projection_reduces_each_frame_once() {
+        let conn = Arc::new(ConnState::new());
+        let daemon = "node-abc".to_owned();
+        let mut prompt = None;
+        let id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        translate_message(
+            &ServerMessage::SessionReady {
+                session_id: id.into(),
+                cwd: None,
+                model: None,
+                provider: None,
+                permission_mode: None,
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        let message_id = ulid::Ulid::new();
+        let part_id = ulid::Ulid::new();
+        translate_message(
+            &ServerMessage::Provider {
+                event: ProviderEventWire::PartStart {
+                    part: Part::Text(mew_message::TextPart {
+                        base: mew_message::PartBase {
+                            id: part_id,
+                            message_id,
+                            session_id: ulid::Ulid::from_string(id).unwrap(),
+                        },
+                        text: String::new(),
+                        synthetic: false,
+                    }),
+                },
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        translate_message(
+            &ServerMessage::Provider {
+                event: ProviderEventWire::PartDelta {
+                    part_id,
+                    field: "text".into(),
+                    delta: "hello".into(),
+                },
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        {
+            let guard = conn.session_state.lock().unwrap();
+            let session = guard.as_ref().unwrap();
+            assert_eq!(session.messages[0].parts.len(), 1);
+            assert_eq!(session.messages[0].parts[0].text.as_deref(), Some("hello"));
+        }
+        translate_message(
+            &ServerMessage::Provider {
+                event: ProviderEventWire::MessageEnd {
+                    finish: mew_message::Finish::ToolUse,
+                    usage: mew_message::Tokens {
+                        input: 7,
+                        output: 2,
+                        ..Default::default()
+                    },
+                    cost: 0.01,
+                    manifest: None,
+                },
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        let guard = conn.session_state.lock().unwrap();
+        let session = guard.as_ref().unwrap();
+        assert_eq!(session.messages[0].parts.len(), 1);
+        assert_eq!(session.messages[0].parts[0].text.as_deref(), Some("hello"));
+        assert_eq!(session.input_tokens, 7);
+        assert_eq!(session.turns, 1);
+    }
+
+    #[test]
+    fn mobile_activity_controls_busy_state_across_provider_completion() {
+        let conn = Arc::new(ConnState::new());
+        let daemon = "node-abc".to_owned();
+        let mut prompt = None;
+        let id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        translate_message(
+            &ServerMessage::SessionReady {
+                session_id: id.into(),
+                cwd: None,
+                model: None,
+                provider: None,
+                permission_mode: None,
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        translate_message(
+            &ServerMessage::SessionActivityChanged {
+                session_id: id.into(),
+                activity: mew_protocol::SessionState::Running,
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        assert!(conn.session_state.lock().unwrap().as_ref().unwrap().running);
+        translate_message(
+            &ServerMessage::Provider {
+                event: ProviderEventWire::MessageEnd {
+                    finish: mew_message::Finish::ToolUse,
+                    usage: Default::default(),
+                    cost: 0.0,
+                    manifest: None,
+                },
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        assert!(conn.session_state.lock().unwrap().as_ref().unwrap().running);
+        translate_message(
+            &ServerMessage::SessionActivityChanged {
+                session_id: "background".into(),
+                activity: mew_protocol::SessionState::Active,
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        assert!(conn.session_state.lock().unwrap().as_ref().unwrap().running);
+        translate_message(
+            &ServerMessage::SessionActivityChanged {
+                session_id: id.into(),
+                activity: mew_protocol::SessionState::Active,
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        assert!(!conn.session_state.lock().unwrap().as_ref().unwrap().running);
+    }
+
+    async fn protocol_handshake_result(pong: &str) -> anyhow::Result<ServerMessage> {
+        let (client, server) = tokio::io::duplex(4096);
+        let mut client = tokio_tungstenite::WebSocketStream::from_raw_socket(
+            client,
+            tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+        let mut server = tokio_tungstenite::WebSocketStream::from_raw_socket(
+            server,
+            tungstenite::protocol::Role::Server,
+            None,
+        )
+        .await;
+        let pong = pong.to_owned();
+        let peer = tokio::spawn(async move {
+            let ping = server.next().await.unwrap().unwrap();
+            assert!(
+                matches!(ping, Message::Text(ref text) if mew_protocol::decode_json::<ClientMessage>(text).is_ok_and(|msg| matches!(msg, ClientMessage::Ping)))
+            );
+            let ready = mew_protocol::encode_json(&ServerMessage::RemoteReady {
+                scope: mew_protocol::RemoteScope::Control,
+            })
+            .unwrap();
+            server.send(Message::Text(ready)).await.unwrap();
+            server.send(Message::Text(pong)).await.unwrap();
+        });
+        let result = verify_daemon_protocol(&mut client).await;
+        peer.await.unwrap();
+        result
+    }
+
+    #[tokio::test]
+    async fn protocol_handshake_accepts_current_daemon_after_remote_ready() {
+        let current = mew_protocol::encode_json(&ServerMessage::Pong {
+            version: "test".into(),
+            protocol_version: mew_protocol::PROTOCOL_VERSION,
+        })
+        .unwrap();
+        let pong = protocol_handshake_result(&current).await.unwrap();
+        assert!(matches!(pong, ServerMessage::Pong { .. }));
+    }
+
+    #[tokio::test]
+    async fn protocol_handshake_rejects_incompatible_daemons() {
+        for pong in [
+            r#"{"type":"pong","version":"legacy"}"#.to_owned(),
+            r#"{"type":"pong","version":"previous-native","protocol_version":1}"#.to_owned(),
+            mew_protocol::encode_json(&ServerMessage::Pong {
+                version: "future".into(),
+                protocol_version: mew_protocol::PROTOCOL_VERSION + 1,
+            })
+            .unwrap(),
+        ] {
+            let error = protocol_handshake_result(&pong).await.unwrap_err();
+            assert!(error.to_string().contains("protocol"));
+            assert!(error.to_string().contains("daemon"));
+        }
+    }
 
     #[test]
     fn test_parse_dial_info_raw_node_id() {
@@ -2208,25 +3075,6 @@ mod tests {
         assert_eq!(
             conn.current_persona.lock().unwrap().as_deref(),
             Some("explainer")
-        );
-    }
-
-    #[test]
-    fn test_translate_persona_switch_requested() {
-        let conn = Arc::new(ConnState::new());
-        let daemon_id = "node-abc".to_string();
-        let mut last_prompt: Option<String> = None;
-
-        let msg = ServerMessage::PersonaSwitchRequested {
-            name: "code-reviewer".into(),
-        };
-
-        let events = translate_message(&msg, &conn, &mut last_prompt, &daemon_id);
-        assert_eq!(events.len(), 1);
-        assert!(matches!(events[0], CoreEvent::PersonaSwitched { .. }));
-        assert_eq!(
-            conn.current_persona.lock().unwrap().as_deref(),
-            Some("code-reviewer")
         );
     }
 }

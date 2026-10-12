@@ -35,8 +35,32 @@ pub(crate) async fn build_daemon_server(
     mode: mew_hooks::PermissionMode,
 ) -> Result<mew_daemon::DaemonServer> {
     let cfg = mew_config::load().context("load config")?;
-    let cat = crate::setup::providers::load_catalog(&cfg).await;
+    let cat = if fake_provider {
+        None
+    } else {
+        crate::setup::providers::load_catalog(&cfg).await
+    };
 
+    build_daemon_server_with_config(
+        cfg,
+        cat,
+        fake_provider,
+        provider_flag,
+        model_flag,
+        raw,
+        mode,
+    )
+}
+
+fn build_daemon_server_with_config(
+    cfg: mew_config::Config,
+    cat: Option<mew_catalog::Catalog>,
+    fake_provider: bool,
+    provider_flag: &str,
+    model_flag: Option<String>,
+    raw: bool,
+    mode: mew_hooks::PermissionMode,
+) -> Result<mew_daemon::DaemonServer> {
     let cfg = Arc::new(cfg);
     let cat = Arc::new(cat);
 
@@ -45,103 +69,151 @@ pub(crate) async fn build_daemon_server(
     let cfg_for_models = Arc::clone(&cfg);
     let cat_for_models = Arc::clone(&cat);
 
-    // The agent-builder closure. `fake_provider=true` skips all real-
-    // provider setup and wires in `FakeProvider` so the daemon runs
-    // without network access.
-    let builder: mew_daemon::AgentBuilder = if fake_provider {
-        Arc::new(|params: mew_daemon::AgentBuildParams| {
-            use mew_provider_fake::FakeProvider;
-            let provider = Arc::new(FakeProvider::new(FakeProvider::text_response(
-                "hello from fake provider",
-            )));
-            let dispatcher = Arc::new(mew_hooks::NopDispatcher);
-            let session_id: Option<SessionId> = params
-                .session_id
-                .strip_prefix("sess_")
-                .and_then(|s| ulid::Ulid::from_string(s).ok());
+    let (default_provider, default_model) = if fake_provider {
+        ("fake".to_string(), "fake".to_string())
+    } else {
+        let model = model_flag
+            .filter(|model| !model.is_empty())
+            .unwrap_or_else(|| {
+                if cfg.default_model.is_empty() {
+                    "deepseek-v4-flash".into()
+                } else {
+                    cfg.default_model.clone()
+                }
+            });
+        crate::setup::providers::resolve_model(
+            &cfg,
+            cat.as_ref().as_ref(),
+            provider_flag,
+            Some(model),
+        )
+    };
+    info!(model = %default_model, "mew daemon starting");
+    let builder: mew_daemon::AgentBuilder = Arc::new(move |params| {
+        let cwd = params
+            .cwd
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let mut session_cfg = (*cfg).clone();
+        let mut provider_id = default_provider.clone();
+        let mut model_id = default_model.clone();
+        let mut permission_mode = mode;
+        if let Some(policy) = &params.policy {
+            if let Some(provider) = &policy.provider {
+                provider_id.clone_from(provider);
+            }
+            if let Some(model) = &policy.model {
+                model_id.clone_from(model);
+            }
+            session_cfg.default_persona = policy.persona.clone().unwrap_or_else(|| "none".into());
+            permission_mode = mew_hooks::PermissionMode::from_id(&policy.permission_mode)
+                .with_context(|| {
+                    format!("invalid saved permission mode '{}'", policy.permission_mode)
+                })?;
+        }
+        let personas = if fake_provider {
+            mew_personas::builtin_defaults()
+        } else {
+            mew_personas::Loader::new(cwd.clone())
+                .load()
+                .context("load session personas")?
+        };
+        let persona = if matches!(session_cfg.default_persona.as_str(), "none" | "default") {
+            None
+        } else {
+            Some(
+                personas
+                    .iter()
+                    .find(|persona| persona.name == session_cfg.default_persona)
+                    .with_context(|| {
+                        format!(
+                            "session persona '{}' is unavailable",
+                            session_cfg.default_persona
+                        )
+                    })?,
+            )
+        };
+        if params.policy.is_none() {
+            if let Some(pin) = persona.and_then(|persona| persona.config.model.as_deref()) {
+                (provider_id, model_id) =
+                    crate::setup::providers::split_provider_model(pin, &provider_id);
+            }
+        }
+        if provider_id.trim().is_empty() || model_id.trim().is_empty() {
+            anyhow::bail!("session provider and model must not be empty")
+        }
+        let session_id: Option<SessionId> = params
+            .session_id
+            .strip_prefix("sess_")
+            .and_then(|id| ulid::Ulid::from_string(id).ok());
+        let todos_path = params
+            .writer
+            .path()
+            .parent()
+            .map(|path| path.join("todos.json"));
+        let mut agent = if fake_provider {
+            if provider_id != "fake" || model_id != "fake" {
+                anyhow::bail!("fake daemon only supports fake/fake")
+            }
+            let provider = Arc::new(mew_provider_fake::FakeProvider::new(
+                mew_provider_fake::FakeProvider::text_response("hello from fake provider"),
+            ));
             let mut agent = Agent::new(
                 provider,
-                dispatcher,
+                Arc::new(mew_hooks::NopDispatcher),
                 Some(params.writer),
                 Vec::new(),
                 session_id,
             );
-            agent.set_model_info("fake", "fake");
-            let personas = mew_personas::builtin_defaults();
+            agent.cwd = cwd.clone();
+            agent.workspace_roots = if session_cfg.workspace.roots.is_empty() {
+                vec![cwd.clone()]
+            } else {
+                session_cfg.workspace.roots.clone()
+            };
+            agent.set_model_info(&model_id, &provider_id);
+            agent.todos_path = todos_path;
+            agent.set_permission_engine(crate::setup::agent::build_permission_engine(
+                &session_cfg,
+                permission_mode,
+                &cwd,
+            ));
             agent.set_personas(personas.clone());
-            if let Some(persona) = personas.iter().find(|p| p.name == "builder") {
+            if let Some(persona) = persona {
                 agent.apply_persona(persona);
             }
-            Ok((agent, Some("fake".to_string()), Some("fake".to_string())))
-        })
-    } else {
-        let (provider_id, model_id) = crate::setup::providers::resolve_model(
-            &cfg,
-            (*cat).as_ref(),
-            provider_flag,
-            model_flag,
-        );
-        let provider_id = Arc::new(provider_id);
-        let model_id = Arc::new(model_id);
-        let model_id_display = model_id.clone();
-        let provider_id_display = Arc::clone(&provider_id);
-        info!("mew daemon starting, model={}", model_id_display);
-        Arc::new(move |params: mew_daemon::AgentBuildParams| {
-            let cfg = (*cfg).clone();
-            let cat = (*cat).clone();
-            let provider_id = (*provider_id).clone();
-            let model_id = (*model_id).clone();
-            let session_id: Option<SessionId> = params
-                .session_id
-                .strip_prefix("sess_")
-                .and_then(|s| ulid::Ulid::from_string(s).ok());
+            agent
+        } else {
             let provider = crate::setup::providers::build_provider(
-                &cfg,
-                cat.as_ref(),
+                &session_cfg,
+                cat.as_ref().as_ref(),
                 &provider_id,
                 &model_id,
                 raw,
                 session_id,
             )?;
-            let mut agent = crate::setup::agent::build_session_agent(
-                &cfg,
-                cat.as_ref(),
+            crate::setup::agent::build_session_agent(
+                &session_cfg,
+                cat.as_ref().as_ref(),
                 provider,
                 &provider_id,
                 &model_id,
                 raw,
-                mode,
+                permission_mode,
                 Some(params.writer),
                 session_id,
-                params.cwd,
-                params.browser_enabled,
+                Some(cwd),
                 Arc::new(mew_hooks::NopDispatcher),
-                None,
+                todos_path,
                 &[],
-            )?;
-
-            // Apply the model's default thinking variant, matching the
-            // non-daemon `run` path. The daemon otherwise starts with
-            // `reasoning = None` even for models that think by default, making
-            // the CLI report thinking as off when it isn't.
-            match crate::setup::providers::resolve_reasoning(cat.as_ref(), &model_id, None) {
-                Some((config, name)) => {
-                    agent.set_reasoning(Some(config));
-                    agent.set_active_thinking_variant(Some(name));
-                }
-                None => {
-                    agent.set_reasoning(None);
-                    agent.set_active_thinking_variant(None);
-                }
-            }
-
-            Ok((
-                agent,
-                Some((*model_id_display).clone()),
-                Some((*provider_id_display).clone()),
-            ))
-        })
-    };
+            )?
+        };
+        let variant = params
+            .policy
+            .as_ref()
+            .map(|policy| policy.thinking_variant.as_deref().unwrap_or(""));
+        apply_session_thinking(&mut agent, cat.as_ref().as_ref(), &model_id, variant)?;
+        Ok((agent, Some(model_id), Some(provider_id)))
+    });
 
     // Two listeners can run concurrently via `tokio::try_join!`. The builder
     // closure is wrapped in an Arc (so the daemon API takes Arc<dyn Fn>),
@@ -155,7 +227,7 @@ pub(crate) async fn build_daemon_server(
                 if provider != "fake" || model != "fake" {
                     anyhow::bail!("fake daemon only supports fake/fake")
                 }
-                agent.set_model_info(provider, model);
+                agent.set_model_info(model, provider);
                 Ok((provider.to_owned(), model.to_owned()))
             });
         let lister: mew_daemon::ModelLister = Arc::new(|| {
@@ -258,27 +330,16 @@ pub(crate) async fn build_daemon_server(
                     Some(agent.session_id),
                 )
                 .context("build provider for model switch")?;
-                agent.provider = new_provider;
-                if let Some(c) = cat_ref {
-                    agent.supports_vision = c.supports_vision(model_id);
-                    agent.context_window = c.context_window(model_id).max(0) as u32;
-                    if let Some(raw_max) = c.max_output(model_id) {
-                        agent.set_default_max_output_tokens(raw_max.min(32768));
-                    }
-                }
-                // Reset thinking to the new model's default so the active
-                // variant tracks the switched-to model rather than the
-                // previous one.
-                match crate::setup::providers::resolve_reasoning(cat_ref, model_id, None) {
-                    Some((config, name)) => {
-                        agent.set_reasoning(Some(config));
-                        agent.set_active_thinking_variant(Some(name));
-                    }
-                    None => {
-                        agent.set_reasoning(None);
-                        agent.set_active_thinking_variant(None);
-                    }
-                }
+                crate::setup::agent::switch_session_model(
+                    agent,
+                    &cfg_switcher,
+                    cat_ref,
+                    new_provider,
+                    provider_id,
+                    model_id,
+                    raw2,
+                );
+                apply_session_thinking(agent, cat_ref, model_id, None)?;
                 Ok((provider_id.to_string(), model_id.to_string()))
             },
         );
@@ -292,31 +353,40 @@ pub(crate) async fn build_daemon_server(
         let cat_thinking = Arc::clone(&cat_for_models);
         let thinking_setter: mew_daemon::ThinkingSetter =
             Arc::new(move |agent: &mut Agent, model_id: &str, variant: &str| {
-                let cat_ref = (*cat_thinking).as_ref();
-                if variant.is_empty() {
-                    agent.set_reasoning(None);
-                    return Ok(None);
-                }
-                match crate::setup::providers::resolve_reasoning(cat_ref, model_id, Some(variant)) {
-                    Some((config, resolved_name)) => {
-                        agent.set_reasoning(Some(config));
-                        agent.set_active_thinking_variant(Some(resolved_name.clone()));
-                        Ok(Some(resolved_name))
-                    }
-                    // Unknown variant — or "off" on a model without an
-                    // explicit off variant — is a plain disable, matching
-                    // the previous wire behavior.
-                    None => {
-                        agent.set_reasoning(None);
-                        agent.set_active_thinking_variant(None);
-                        Ok(None)
-                    }
-                }
+                apply_session_thinking(agent, (*cat_thinking).as_ref(), model_id, Some(variant))
             });
         server = server.with_thinking_setter(thinking_setter);
     }
 
     Ok(server)
+}
+
+fn apply_session_thinking(
+    agent: &mut Agent,
+    catalog: Option<&mew_catalog::Catalog>,
+    model: &str,
+    variant: Option<&str>,
+) -> Result<Option<String>> {
+    let off = variant.is_some_and(|name| matches!(name, "" | "none" | "off"));
+    let resolved = crate::setup::providers::resolve_reasoning(
+        catalog,
+        model,
+        if off { Some("off") } else { variant },
+    );
+    if let Some(variant) = variant.filter(|_| !off && resolved.is_none()) {
+        anyhow::bail!(
+            "thinking variant '{}' is unavailable for model '{}'",
+            variant,
+            model
+        )
+    }
+    let (reasoning, name) = match resolved {
+        Some((reasoning, name)) => (Some(reasoning), (!off).then_some(name)),
+        None => (None, None),
+    };
+    agent.set_reasoning(reasoning);
+    agent.set_active_thinking_variant(name.clone());
+    Ok(name)
 }
 
 /// Run the daemon. Builds an agent per connection via `build_session_agent`.
@@ -897,3 +967,7 @@ mod status_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+#[cfg(test)]
+#[path = "daemon_policy_tests.rs"]
+mod policy_tests;

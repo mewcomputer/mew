@@ -11,7 +11,12 @@
 //! sends a `PermissionRequest` or `AskUserRequest` with an ID; the frontend
 //! responds with `PermissionResponse` or `AskUserResponse` using the same ID.
 
+pub use mew_message::SubagentQuestionSource;
+
 use serde::{Deserialize, Serialize};
+
+/// Wire revision required by native clients. Increment for incompatible changes.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 pub const DEFAULT_HISTORY_PAGE_LIMIT: usize = 24;
 
@@ -111,6 +116,19 @@ pub enum ClientMessage {
         #[serde(default)]
         attachments: Vec<Attachment>,
     },
+    /// Submit to an explicit attached session and await its receipt.
+    SubmitPrompt {
+        session_id: String,
+        request_id: String,
+        text: String,
+        #[serde(default)]
+        attachments: Vec<Attachment>,
+    },
+    /// Reconcile an uncertain submission without starting another turn.
+    ReadPromptReceipt {
+        session_id: String,
+        request_id: String,
+    },
 
     /// Cancel the current turn.
     Cancel,
@@ -132,17 +150,11 @@ pub enum ClientMessage {
     /// Respond to an `AskUserRequest` from the daemon.
     AskUserResponse {
         request_id: String,
+        /// Close this question without supplying answers.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        cancelled: bool,
         /// One answer per question, in order.
         answers: Vec<String>,
-    },
-
-    /// Respond to a `PlanApprovalRequest` from the daemon. `approved = false`
-    /// with optional `feedback` requests changes to the plan.
-    PlanApprovalResponse {
-        request_id: String,
-        approved: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        feedback: Option<String>,
     },
 
     /// Respond to a `GoalProposed` from the daemon. `accepted = true` activates
@@ -243,6 +255,29 @@ pub enum ClientMessage {
     GitStatus {
         session_id: String,
     },
+    ReadSessionDiff {
+        session_id: String,
+        request_id: String,
+    },
+    /// Read a bounded chunk from a job owned by the attached session.
+    ReadJobOutput {
+        session_id: String,
+        job_id: String,
+        request_id: String,
+        offset: u64,
+    },
+    ReadSubagentHistory {
+        session_id: String,
+        child_session_id: String,
+        request_id: String,
+    },
+    /// Compare and edit one todo without replacing its identity or dependencies.
+    UpdateTodo {
+        session_id: String,
+        request_id: String,
+        #[serde(flatten)]
+        edit: TodoEdit,
+    },
     WatchWorkspace {
         session_id: String,
         enabled: bool,
@@ -289,11 +324,23 @@ pub enum ClientMessage {
     },
 
     /// Ping the daemon for liveness check and version negotiation.
-    /// The daemon responds with `ServerMessage::Pong { version }`.
+    /// The daemon responds with `ServerMessage::Pong` including its wire revision.
     Ping,
 
     // -- Browser --
-    /// Navigate the browser session to an HTTP(S) URL.
+    /// Register a ready local native page for this conversation.
+    RegisterBrowserPage {
+        session_id: String,
+        page_instance: String,
+        cdp_endpoint: String,
+        target_id: String,
+    },
+    /// Revoke this connection's matching page generation.
+    UnregisterBrowserPage {
+        session_id: String,
+        page_instance: String,
+    },
+    /// Navigate the attached session's registered browser page.
     BrowserOpen {
         url: String,
         /// Frontend-owned tab identity, echoed by browser responses.
@@ -592,6 +639,14 @@ impl From<PermissionDecision> for mew_hooks::PermissionDecision {
 // Daemon → Frontend messages
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptStatus {
+    Accepted,
+    Rejected,
+    Unknown,
+}
+
 /// A message from the daemon to the frontend.
 ///
 /// This is the wire representation of `AgentEvent`. The variants that carry
@@ -600,6 +655,13 @@ impl From<PermissionDecision> for mew_hooks::PermissionDecision {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
+    PromptReceipt {
+        session_id: String,
+        request_id: String,
+        status: PromptStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
     /// Confirms the scope granted to an authenticated remote connection.
     RemoteReady {
         scope: RemoteScope,
@@ -634,9 +696,11 @@ pub enum ServerMessage {
 
     /// A user message was sent to this session. Broadcast to all
     /// attached clients so multi-device clients see the prompt.
-    /// The sending client can deduplicate by matching text content.
+    /// Acknowledged submissions carry their exact request identity.
     UserMessage {
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
 
     /// A tool execution has started.
@@ -685,18 +749,10 @@ pub enum ServerMessage {
     /// Ask the user one to four free-text questions.
     AskUserRequest {
         request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subagent: Option<SubagentQuestionSource>,
         call_id: String,
         questions: Vec<Question>,
-    },
-
-    /// Present a completed plan for user approval (from `handoff_plan`). The
-    /// frontend responds with `PlanApprovalResponse`.
-    PlanApprovalRequest {
-        request_id: String,
-        call_id: String,
-        plan_path: String,
-        plan_markdown: String,
-        persona: String,
     },
 
     /// Present a proposed goal for user approval (from `propose_goal`). The
@@ -742,10 +798,22 @@ pub enum ServerMessage {
     TodosUpdated {
         todos: Vec<Todo>,
     },
+    TodoUpdated {
+        session_id: String,
+        request_id: String,
+        todos: Vec<Todo>,
+    },
+    TodoUpdateError {
+        session_id: String,
+        request_id: String,
+        message: String,
+    },
 
-    /// A `switch_persona` tool call was queued and the turn ended.
-    PersonaSwitchRequested {
-        name: String,
+    /// Authoritative task activity when attaching to a session.
+    SessionActivitySnapshot {
+        session_id: String,
+        subagents: Vec<SubagentActivity>,
+        jobs: Vec<JobActivity>,
     },
 
     /// A background shell job state changed.
@@ -792,6 +860,29 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         next_cursor: Option<usize>,
         replace: bool,
+    },
+    JobOutput {
+        session_id: String,
+        job_id: String,
+        request_id: String,
+        offset: u64,
+        next_offset: u64,
+        output: String,
+        done: bool,
+        incomplete: bool,
+    },
+    JobOutputError {
+        session_id: String,
+        job_id: String,
+        request_id: String,
+        message: String,
+    },
+    SubagentHistory {
+        session_id: String,
+        child_session_id: String,
+        request_id: String,
+        messages: Vec<mew_message::Message>,
+        error: Option<String>,
     },
 
     // -- Model management --
@@ -891,7 +982,19 @@ pub enum ServerMessage {
     GitStatusResult {
         entries: Vec<GitEntry>,
     },
+    SessionDiff {
+        session_id: String,
+        request_id: String,
+        files: Vec<mew_diff::FileDiff>,
+    },
+    SessionDiffError {
+        session_id: String,
+        request_id: String,
+        message: String,
+    },
     FsChanged {
+        #[serde(default)]
+        session_id: String,
         paths: Vec<String>,
     },
 
@@ -951,9 +1054,7 @@ pub enum ServerMessage {
         personas: Vec<PersonaInfo>,
     },
 
-    /// Confirmation that a persona switch succeeded. Distinct from
-    /// `PersonaSwitchRequested` (which is emitted when a tool queues
-    /// a persona switch during a turn).
+    /// Confirmation that an explicit persona selection succeeded.
     PersonaSwitched {
         name: String,
     },
@@ -963,6 +1064,9 @@ pub enum ServerMessage {
     Pong {
         /// Daemon version string (e.g. "0.2.0").
         version: String,
+        /// Missing in legacy daemons, which are incompatible with this revision.
+        #[serde(default)]
+        protocol_version: u32,
     },
 
     /// Response to `ListProjects`. Contains deduped project directories
@@ -978,6 +1082,11 @@ pub enum ServerMessage {
         title: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tab_id: Option<String>,
+    },
+    BrowserPageRegistration {
+        session_id: String,
+        page_instance: String,
+        error: Option<String>,
     },
     BrowserScreenshot {
         data: String,
@@ -1096,6 +1205,24 @@ pub enum SubagentOutcome {
     Failed { reason: String },
 }
 
+/// An active subagent task, keyed by its parent tool call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentActivity {
+    pub task_id: String,
+    pub child_session_id: Option<String>,
+    pub name: String,
+    pub display_name: Option<String>,
+    pub status: String,
+    pub tool_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobActivity {
+    pub job_id: String,
+    pub command: String,
+    pub state: String,
+}
+
 /// A todo item, mirroring `mew_agent::Todo` but serializable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Todo {
@@ -1103,6 +1230,15 @@ pub struct Todo {
     pub content: String,
     pub status: String,
     pub depends_on: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TodoEdit {
+    pub todo_id: usize,
+    pub expected_content: String,
+    pub expected_status: String,
+    pub content: String,
+    pub status: String,
 }
 
 /// Metadata for a session group.
@@ -1404,6 +1540,102 @@ pub fn subagent_outcome_to_wire(o: &mew_subagents::SubagentOutcome) -> SubagentO
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn job_output_preserves_chunk_offsets_and_request_identity() {
+        let request = ClientMessage::ReadJobOutput {
+            session_id: "session".into(),
+            job_id: "job".into(),
+            request_id: "read".into(),
+            offset: 65_535,
+        };
+        assert!(
+            matches!(round_trip(&request), ClientMessage::ReadJobOutput { session_id, job_id, request_id, offset } if session_id == "session" && job_id == "job" && request_id == "read" && offset == 65_535)
+        );
+        let reply = ServerMessage::JobOutput {
+            session_id: "session".into(),
+            job_id: "job".into(),
+            request_id: "read".into(),
+            offset: 65_535,
+            next_offset: 65_538,
+            output: "猫".into(),
+            done: true,
+            incomplete: true,
+        };
+        assert!(
+            matches!(round_trip(&reply), ServerMessage::JobOutput { offset: 65_535, next_offset: 65_538, output, done: true, incomplete: true, .. } if output == "猫")
+        );
+        let error = ServerMessage::JobOutputError {
+            session_id: "session".into(),
+            job_id: "job".into(),
+            request_id: "read".into(),
+            message: "unknown job".into(),
+        };
+        assert!(
+            matches!(round_trip(&error), ServerMessage::JobOutputError { session_id, job_id, request_id, message } if session_id == "session" && job_id == "job" && request_id == "read" && message == "unknown job")
+        );
+    }
+
+    #[test]
+    fn subagent_history_preserves_request_identity_and_errors() {
+        let request = ClientMessage::ReadSubagentHistory {
+            session_id: "parent".into(),
+            child_session_id: "child".into(),
+            request_id: "request".into(),
+        };
+        assert!(
+            matches!(round_trip(&request), ClientMessage::ReadSubagentHistory { session_id, child_session_id, request_id } if session_id == "parent" && child_session_id == "child" && request_id == "request")
+        );
+        for error in [None, Some("missing child transcript".into())] {
+            let reply = ServerMessage::SubagentHistory {
+                session_id: "parent".into(),
+                child_session_id: "child".into(),
+                request_id: "request".into(),
+                messages: vec![],
+                error: error.clone(),
+            };
+            assert!(
+                matches!(round_trip(&reply), ServerMessage::SubagentHistory { session_id, child_session_id, request_id, messages, error: actual } if session_id == "parent" && child_session_id == "child" && request_id == "request" && messages.is_empty() && actual == error)
+            );
+        }
+    }
+    #[test]
+    fn todo_edit_and_scoped_replies_roundtrip() {
+        let request = ClientMessage::UpdateTodo {
+            session_id: "session".into(),
+            request_id: "edit".into(),
+            edit: TodoEdit {
+                todo_id: 3,
+                expected_content: "original".into(),
+                expected_status: "pending".into(),
+                content: "目標".into(),
+                status: "blocked".into(),
+            },
+        };
+        let json = encode_json(&request).unwrap();
+        assert!(json.contains("\"todo_id\":3"));
+        let decoded = decode_json::<ClientMessage>(&json).unwrap();
+        assert!(
+            matches!(decoded, ClientMessage::UpdateTodo { session_id, request_id, edit } if session_id == "session" && request_id == "edit" && edit.content == "目標")
+        );
+        for reply in [
+            ServerMessage::TodoUpdated {
+                session_id: "session".into(),
+                request_id: "edit".into(),
+                todos: vec![],
+            },
+            ServerMessage::TodoUpdateError {
+                session_id: "session".into(),
+                request_id: "edit".into(),
+                message: "changed while editing".into(),
+            },
+        ] {
+            assert_eq!(
+                encode_json(&decode_json::<ServerMessage>(&encode_json(&reply).unwrap()).unwrap())
+                    .unwrap(),
+                encode_json(&reply).unwrap()
+            );
+        }
+    }
     use super::*;
     use mew_message::{Part, PartBase, TextPart};
 
@@ -1583,14 +1815,50 @@ mod tests {
 
         let pong = ServerMessage::Pong {
             version: "0.2.0".into(),
+            protocol_version: PROTOCOL_VERSION,
         };
         let j = encode_json(&pong).unwrap();
         assert!(j.contains(r#""type":"pong""#));
         assert!(j.contains(r#""version":"0.2.0""#));
         let decoded: ServerMessage = decode_json(&j).unwrap();
         match decoded {
-            ServerMessage::Pong { version } => assert_eq!(version, "0.2.0"),
+            ServerMessage::Pong {
+                version,
+                protocol_version,
+            } => {
+                assert_eq!(version, "0.2.0");
+                assert_eq!(protocol_version, PROTOCOL_VERSION);
+            }
             _ => panic!("expected Pong"),
+        }
+    }
+
+    #[test]
+    fn legacy_pong_defaults_to_an_incompatible_revision() {
+        let pong: ServerMessage = decode_json(r#"{"type":"pong","version":"0.2.0"}"#).unwrap();
+        assert!(matches!(
+            pong,
+            ServerMessage::Pong {
+                protocol_version: 0,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn retired_plan_approval_responses_are_rejected() {
+        let response =
+            r#"{"type":"plan_approval_response","request_id":"old-request","approved":true}"#;
+        assert!(decode_json::<ClientMessage>(response).is_err());
+    }
+
+    #[test]
+    fn retired_handoff_events_are_rejected() {
+        for event in [
+            r#"{"type":"plan_approval_request","request_id":"old-request","call_id":"old-call","plan_path":"PLAN.md","plan_markdown":"plan","persona":"builder"}"#,
+            r#"{"type":"persona_switch_requested","name":"builder"}"#,
+        ] {
+            assert!(decode_json::<ServerMessage>(event).is_err());
         }
     }
 
@@ -1785,6 +2053,7 @@ mod tests {
     #[test]
     fn client_message_ask_user_response_multiple_answers_roundtrip() {
         let m = ClientMessage::AskUserResponse {
+            cancelled: false,
             request_id: "uuid-5".into(),
             answers: vec!["alpha".into(), "beta".into(), "gamma".into()],
         };
@@ -1792,54 +2061,10 @@ mod tests {
             ClientMessage::AskUserResponse {
                 request_id,
                 answers,
+                ..
             } => {
                 assert_eq!(request_id, "uuid-5");
                 assert_eq!(answers, vec!["alpha", "beta", "gamma"]);
-            }
-            _ => panic!(),
-        }
-    }
-
-    #[test]
-    fn client_message_plan_approval_response_approved_roundtrip() {
-        let m = ClientMessage::PlanApprovalResponse {
-            request_id: "uuid-6".into(),
-            approved: true,
-            feedback: None,
-        };
-        // Approved responses omit the feedback field on the wire.
-        let json = serde_json::to_string(&m).unwrap();
-        assert!(!json.contains("feedback"));
-        match round_trip(&m) {
-            ClientMessage::PlanApprovalResponse {
-                request_id,
-                approved,
-                feedback,
-            } => {
-                assert_eq!(request_id, "uuid-6");
-                assert!(approved);
-                assert_eq!(feedback, None);
-            }
-            _ => panic!(),
-        }
-    }
-
-    #[test]
-    fn client_message_plan_approval_response_changes_roundtrip() {
-        let m = ClientMessage::PlanApprovalResponse {
-            request_id: "uuid-7".into(),
-            approved: false,
-            feedback: Some("add tests".into()),
-        };
-        match round_trip(&m) {
-            ClientMessage::PlanApprovalResponse {
-                request_id,
-                approved,
-                feedback,
-            } => {
-                assert_eq!(request_id, "uuid-7");
-                assert!(!approved);
-                assert_eq!(feedback.as_deref(), Some("add tests"));
             }
             _ => panic!(),
         }
@@ -2244,6 +2469,7 @@ mod tests {
     #[test]
     fn server_message_ask_user_request_multiple_questions_roundtrip() {
         let m = ServerMessage::AskUserRequest {
+            subagent: None,
             request_id: "uuid-3".into(),
             call_id: "ask_1".into(),
             questions: vec![
@@ -2274,39 +2500,13 @@ mod tests {
                 request_id,
                 call_id,
                 questions,
+                ..
             } => {
                 assert_eq!(request_id, "uuid-3");
                 assert_eq!(call_id, "ask_1");
                 assert_eq!(questions.len(), 2);
                 assert_eq!(questions[0].options.len(), 2);
                 assert_eq!(questions[1].options[0].label, "yes");
-            }
-            _ => panic!(),
-        }
-    }
-
-    #[test]
-    fn server_message_plan_approval_request_roundtrip() {
-        let m = ServerMessage::PlanApprovalRequest {
-            request_id: "uuid-8".into(),
-            call_id: "handoff_1".into(),
-            plan_path: "/repo/PLAN.md".into(),
-            plan_markdown: "# Goal\n\n1. do the thing".into(),
-            persona: "builder".into(),
-        };
-        match round_trip(&m) {
-            ServerMessage::PlanApprovalRequest {
-                request_id,
-                call_id,
-                plan_path,
-                plan_markdown,
-                persona,
-            } => {
-                assert_eq!(request_id, "uuid-8");
-                assert_eq!(call_id, "handoff_1");
-                assert_eq!(plan_path, "/repo/PLAN.md");
-                assert!(plan_markdown.contains("do the thing"));
-                assert_eq!(persona, "builder");
             }
             _ => panic!(),
         }
@@ -2422,17 +2622,6 @@ mod tests {
                 assert_eq!(todos[1].depends_on, vec![1]);
                 assert_eq!(todos[2].depends_on, vec![1, 2]);
             }
-            _ => panic!(),
-        }
-    }
-
-    #[test]
-    fn server_message_persona_switch_roundtrip() {
-        let m = ServerMessage::PersonaSwitchRequested {
-            name: "explorer".into(),
-        };
-        match round_trip(&m) {
-            ServerMessage::PersonaSwitchRequested { name } => assert_eq!(name, "explorer"),
             _ => panic!(),
         }
     }
@@ -2599,6 +2788,7 @@ mod tests {
             (
                 "ask_user_response",
                 ClientMessage::AskUserResponse {
+                    cancelled: false,
                     request_id: "uuid-0".into(),
                     answers: vec![],
                 },
@@ -3075,6 +3265,37 @@ mod tests {
             }
             other => panic!("wrong variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn browser_page_registration_preserves_session_and_generation() {
+        let request = ClientMessage::RegisterBrowserPage {
+            session_id: "session-a".into(),
+            page_instance: "page-a".into(),
+            cdp_endpoint: "http://127.0.0.1:9223".into(),
+            target_id: "target-a".into(),
+        };
+        assert_eq!(
+            encode_json(&round_trip(&request)).unwrap(),
+            encode_json(&request).unwrap()
+        );
+        let remove = ClientMessage::UnregisterBrowserPage {
+            session_id: "session-a".into(),
+            page_instance: "page-a".into(),
+        };
+        assert_eq!(
+            encode_json(&round_trip(&remove)).unwrap(),
+            encode_json(&remove).unwrap()
+        );
+        let response = ServerMessage::BrowserPageRegistration {
+            session_id: "session-a".into(),
+            page_instance: "page-a".into(),
+            error: Some("unsupported CLI".into()),
+        };
+        assert_eq!(
+            encode_json(&round_trip(&response)).unwrap(),
+            encode_json(&response).unwrap()
+        );
     }
 
     #[test]
@@ -3772,6 +3993,55 @@ mod tests {
             variants.len(),
             "duplicate type tags in DaemonMessage: {:?}",
             tags
+        );
+    }
+}
+
+#[cfg(test)]
+mod review_wire_tests {
+    use super::*;
+
+    #[test]
+    fn review_requests_and_responses_roundtrip_session_request_and_file_content() {
+        let command = ClientMessage::ReadSessionDiff {
+            session_id: "remote".into(),
+            request_id: "fresh".into(),
+        };
+        let encoded = encode_json(&command).unwrap();
+        assert!(
+            matches!(decode_json::<ClientMessage>(&encoded).unwrap(), ClientMessage::ReadSessionDiff { session_id, request_id } if session_id == "remote" && request_id == "fresh")
+        );
+        for message in [
+            ServerMessage::SessionDiff {
+                session_id: "remote".into(),
+                request_id: "fresh".into(),
+                files: vec![mew_diff::FileDiff::binary("generated.bin", None)],
+            },
+            ServerMessage::SessionDiffError {
+                session_id: "remote".into(),
+                request_id: "failed".into(),
+                message: "repository missing".into(),
+            },
+            ServerMessage::FsChanged {
+                session_id: "remote".into(),
+                paths: vec!["external-edit.txt".into()],
+            },
+        ] {
+            let encoded = encode_json(&message).unwrap();
+            let decoded: ServerMessage = decode_json(&encoded).unwrap();
+            assert_eq!(
+                serde_json::to_value(decoded).unwrap(),
+                serde_json::to_value(message).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_workspace_changes_decode_without_claiming_a_session_origin() {
+        let message: ServerMessage =
+            decode_json(r#"{"type":"fs_changed","paths":["old.txt"]}"#).unwrap();
+        assert!(
+            matches!(message, ServerMessage::FsChanged { session_id, paths } if session_id.is_empty() && paths == ["old.txt"])
         );
     }
 }

@@ -16,6 +16,22 @@ export type ClientMessage = {
     session_id: string;
     client_kind: string;
 } | {
+    type: "load_session_history";
+    session_id: string;
+    before: number;
+    limit?: number;
+} | {
+    type: "read_job_output";
+    session_id: string;
+    job_id: string;
+    request_id: string;
+    offset: number;
+} | {
+    type: "read_subagent_history";
+    session_id: string;
+    child_session_id: string;
+    request_id: string;
+} | {
     type: "list_sessions";
 } | {
     type: "delete_session";
@@ -47,11 +63,11 @@ export type ClientMessage = {
     type: "ask_user_response";
     request_id: string;
     answers: string[];
+    cancelled?: boolean;
 } | {
-    type: "plan_approval_response";
+    type: "goal_response";
     request_id: string;
-    approved: boolean;
-    feedback?: string;
+    accepted: boolean;
 } | {
     type: "slash_command";
     command: string;
@@ -112,7 +128,11 @@ export type ClientMessage = {
     session_id: string;
     path: string;
     max_bytes?: number;
-} | {
+} | ({
+    type: "update_todo";
+    session_id: string;
+    request_id: string;
+} & TodoEdit) | {
     type: "git_status";
     session_id: string;
 } | {
@@ -272,6 +292,46 @@ export interface MessageError {
     kind: ErrorKind;
     message: string;
 }
+export interface SubagentQuestionSource {
+    parent_call_id: string;
+    child_session_id: string;
+    name: string;
+    display_name: string | null;
+}
+export interface SubagentActivity {
+    task_id: string;
+    child_session_id: string | null;
+    name: string;
+    display_name: string | null;
+    status: string;
+    tool_name: string | null;
+}
+export interface JobActivity {
+    job_id: string;
+    command: string;
+    state: string;
+}
+export interface JobOutput {
+    session_id: string;
+    job_id: string;
+    request_id: string;
+    offset: number;
+    next_offset: number;
+    output: string;
+    done: boolean;
+    incomplete: boolean;
+}
+export interface JobOutputError {
+    session_id: string;
+    job_id: string;
+    request_id: string;
+    message: string;
+}
+export interface SessionActivitySnapshot {
+    session_id: string;
+    subagents: SubagentActivity[];
+    jobs: JobActivity[];
+}
 export interface QuestionOption {
     label: string;
     description: string;
@@ -279,6 +339,13 @@ export interface QuestionOption {
 export interface Question {
     prompt: string;
     options: QuestionOption[];
+}
+export interface TodoEdit {
+    todo_id: number;
+    expected_content: string;
+    expected_status: string;
+    content: string;
+    status: string;
 }
 export interface Todo {
     id: number;
@@ -493,6 +560,7 @@ export type ServerMessage = {
 } | {
     type: "user_message";
     text: string;
+    request_id?: string;
 } | {
     type: "tool_start";
     call_id: string;
@@ -522,16 +590,15 @@ export type ServerMessage = {
     path: string;
 } | {
     type: "ask_user_request";
+    subagent?: SubagentQuestionSource;
     request_id: string;
     call_id: string;
     questions: Question[];
 } | {
-    type: "plan_approval_request";
+    type: "goal_proposed";
     request_id: string;
     call_id: string;
-    plan_path: string;
-    plan_markdown: string;
-    persona: string;
+    objective: string;
 } | {
     type: "subagent_start";
     parent_call_id: string;
@@ -559,14 +626,23 @@ export type ServerMessage = {
     type: "todos_updated";
     todos: Todo[];
 } | {
-    type: "persona_switch_requested";
-    name: string;
+    type: "todo_updated";
+    session_id: string;
+    request_id: string;
+    todos: Todo[];
+} | {
+    type: "todo_update_error";
+    session_id: string;
+    request_id: string;
+    message: string;
 } | {
     type: "job_update";
     job_id: string;
     command: string;
     state: string;
-} | {
+} | ({
+    type: "session_activity_snapshot";
+} & SessionActivitySnapshot) | {
     type: "slash_result";
     text: string;
 } | {
@@ -580,6 +656,23 @@ export type ServerMessage = {
 } | {
     type: "session_history";
     messages: Message[];
+} | ({
+    type: "job_output";
+} & JobOutput) | ({
+    type: "job_output_error";
+} & JobOutputError) | {
+    type: "subagent_history";
+    session_id: string;
+    child_session_id: string;
+    request_id: string;
+    messages: Message[];
+    error: string | null;
+} | {
+    type: "session_history_page";
+    session_id: string;
+    messages: Message[];
+    next_cursor?: number;
+    replace: boolean;
 } | {
     type: "model_list";
     models: ModelInfo[];
@@ -652,6 +745,7 @@ export type ServerMessage = {
     entries: GitEntry[];
 } | {
     type: "fs_changed";
+    session_id?: string;
     paths: string[];
 } | {
     type: "session_usage_changed";
@@ -682,6 +776,7 @@ export type ServerMessage = {
 } | {
     type: "pong";
     version: string;
+    protocol_version?: number;
 } | {
     type: "project_list";
     projects: ProjectInfo[];
@@ -762,16 +857,15 @@ export interface MewClientEvents {
         path: string;
     }, respond: (decision: PermissionDecision) => void) => void;
     "ask-user-request": (data: {
+        subagent?: SubagentQuestionSource;
         request_id: string;
         call_id: string;
         questions: Question[];
     }) => void;
-    "plan-approval-request": (data: {
+    "goal-proposed": (data: {
         request_id: string;
         call_id: string;
-        plan_path: string;
-        plan_markdown: string;
-        persona: string;
+        objective: string;
     }) => void;
     "subagent-start": (data: {
         parent_call_id: string;
@@ -790,17 +884,25 @@ export interface MewClientEvents {
         outcome: SubagentOutcome;
         manifests?: TurnManifest[];
     }) => void;
-    "todos-updated": (data: {
+    "todo-updated": (data: {
+        session_id: string;
+        request_id: string;
         todos: Todo[];
     }) => void;
-    "persona-switch-requested": (data: {
-        name: string;
+    "todo-update-error": (data: {
+        session_id: string;
+        request_id: string;
+        message: string;
+    }) => void;
+    "todos-updated": (data: {
+        todos: Todo[];
     }) => void;
     "job-update": (data: {
         job_id: string;
         command: string;
         state: string;
     }) => void;
+    "session-activity-snapshot": (data: SessionActivitySnapshot) => void;
     "slash-result": (data: {
         text: string;
     }) => void;
@@ -813,6 +915,15 @@ export interface MewClientEvents {
     }) => void;
     "session-history": (data: {
         messages: Message[];
+    }) => void;
+    "job-output": (data: JobOutput) => void;
+    "job-output-error": (data: JobOutputError) => void;
+    "subagent-history": (data: {
+        session_id: string;
+        child_session_id: string;
+        request_id: string;
+        messages: Message[];
+        error: string | null;
     }) => void;
     "model-list": (data: {
         models: ModelInfo[];
@@ -921,6 +1032,7 @@ export interface MewClientEvents {
     }) => void;
     pong: (data: {
         version: string;
+        protocol_version: number;
     }) => void;
     "project-list": (data: {
         projects: ProjectInfo[];
@@ -981,6 +1093,8 @@ export declare class MewClient {
     private openPromise;
     /** Session id returned by `newSession`. */
     private sessionId;
+    /** Messages currently projected from the most recent history pages. */
+    private sessionHistoryMessages;
     /** Session lifecycle requests share uncorrelated daemon errors. */
     private sessionCommandTail;
     constructor(url: string, opts?: MewClientOptions);
@@ -995,6 +1109,8 @@ export declare class MewClient {
     newSession(cwd?: string | null): Promise<string>;
     /** Send `prompt`. Streaming events are emitted via the registered handlers. */
     prompt(text: string, attachments?: Attachment[]): void;
+    /** Compare and save one todo; resolve only after the daemon confirms it. */
+    updateTodo(sessionId: string, edit: TodoEdit): Promise<Todo[]>;
     /** Send `cancel` to abort the current turn. */
     cancel(): void;
     /** Inject guidance into the running turn's next request (steer the LLM).
@@ -1010,13 +1126,21 @@ export declare class MewClient {
     /** Respond to an `ask_user_request`. The UI calls this after the user
      *  submits answers to the questions. */
     respondToAskUser(request_id: string, answers: string[]): void;
-    /** Respond to a `plan_approval_request`. `approved = false` with optional
-     *  `feedback` requests changes to the plan. */
-    respondToPlanApproval(request_id: string, approved: boolean, feedback?: string): void;
+    /** Close one question while leaving the parent turn and other questions active. */
+    cancelAskUser(request_id: string): void;
+    /** Accept or reject a proposed goal using its original request ID. */
+    respondToGoal(request_id: string, accepted: boolean): void;
     /** Attach to an existing session (active or idle). If the session is idle,
      *  the daemon loads its persisted history from disk and sends a
      *  `session-history` event. Resolves with the session id. */
     attachSession(session_id: string): Promise<string>;
+    /** Request older messages for the attached session using the cursor from a
+     *  previous history page. */
+    loadSessionHistory(session_id: string, before: number, limit?: number): void;
+    /** Read the next bounded UTF-8 chunk from a session-owned job. */
+    readJobOutput(session_id: string, job_id: string, request_id: string, offset: number): void;
+    /** Request a recorded child transcript without changing the attached session. */
+    readSubagentHistory(session_id: string, child_session_id: string, request_id: string): void;
     /** List all sessions known to the daemon (active + persisted idle).
      *  The daemon responds with a `session-list` event. */
     listSessions(): Promise<SessionInfo[]>;

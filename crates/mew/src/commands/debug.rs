@@ -10,9 +10,11 @@ pub(crate) async fn debug_cmd(command: DebugCommands) -> Result<()> {
             sensitivity,
         } => {
             let cfg = mew_config::load().context("load config")?;
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
             let engine = crate::setup::agent::build_permission_engine(
                 &cfg,
                 mew_hooks::PermissionMode::Standard,
+                &cwd,
             );
 
             let input_json: serde_json::Value = match input {
@@ -29,14 +31,7 @@ pub(crate) async fn debug_cmd(command: DebugCommands) -> Result<()> {
                 ),
             };
 
-            let decision = engine
-                .check(
-                    &tool,
-                    &input_json,
-                    sens,
-                    &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
-                )
-                .await;
+            let decision = engine.check(&tool, &input_json, sens, &cwd).await;
 
             println!("Tool:        {tool}");
             println!("Input:       {input_json}");

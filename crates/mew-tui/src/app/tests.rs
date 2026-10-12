@@ -1,5 +1,314 @@
 use super::*;
 
+#[test]
+fn format_cwd_preserves_home_component_boundaries_and_unicode() {
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+    assert_eq!(format_cwd(&home), "~");
+    assert_eq!(
+        format_cwd(&home.join("projects/日本語")),
+        "~/projects/日本語"
+    );
+    let sibling = std::path::PathBuf::from(format!("{}-other/work", home.display()));
+    assert_eq!(format_cwd(&sibling), sibling.display().to_string());
+    assert_eq!(
+        format_cwd(std::path::Path::new("/tmp/project")),
+        "/tmp/project"
+    );
+}
+
+#[test]
+fn project_picker_abbreviates_the_home_path_without_changing_its_identity() {
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+    let path = home.join("projects/日本語").display().to_string();
+    let mut app = App::new();
+    app.projects = vec![mew_protocol::ProjectInfo {
+        path: path.clone(),
+        display_name: "日本語".into(),
+        session_count: 1,
+        last_used_at: None,
+        pinned: false,
+    }];
+    app.open_project_picker();
+    let item = &app.picker.as_ref().unwrap().items[0];
+    assert_eq!(item.id, path);
+    assert_eq!(
+        item.description,
+        "~/projects/日本語  ·  1 sessions  ·  last: —"
+    );
+}
+
+#[test]
+fn session_context_keeps_missing_project_and_invalid_time_explicit() {
+    let session: mew_protocol::SessionInfo = serde_json::from_value(serde_json::json!({
+        "session_id": "work", "state": "idle", "created_at": 0,
+        "client_count": 0, "cwd": "", "last_message_at": i64::MAX,
+        "pending_permissions": 1, "pending_questions": 2
+    }))
+    .unwrap();
+    let context = App::new().session_context(&session);
+    assert_eq!(context.path, "Project unavailable");
+    assert_eq!(context.metadata, "1 approval · 2 questions");
+}
+
+#[test]
+fn daemon_session_error_is_visible_without_an_active_prompt() {
+    let mut app = App::new();
+    let message = "failed to load session history";
+
+    app.apply_daemon_notification(&mew_protocol::ServerMessage::Error {
+        message: message.into(),
+    });
+
+    assert_eq!(
+        app.alert.as_ref().map(|(text, _)| text.as_str()),
+        Some(message)
+    );
+}
+
+#[test]
+fn daemon_history_pages_preserve_order_and_follow_latest_messages() {
+    let mut app = App::new();
+    app.status.session_id = "active".into();
+    app.push_user("older".into(), Vec::new());
+    app.push_user("newer".into(), Vec::new());
+    let messages = app.messages().to_vec();
+    app.push_user("previous session".into(), Vec::new());
+    app.auto_scroll = false;
+
+    app.apply_daemon_notification(&mew_protocol::ServerMessage::SessionHistoryPage {
+        session_id: "active".into(),
+        messages: messages[1..].to_vec(),
+        next_cursor: Some(1),
+        replace: true,
+    });
+    assert_eq!(app.messages(), &messages[1..]);
+    assert!(app.auto_scroll);
+    app.apply_daemon_notification(&mew_protocol::ServerMessage::SessionHistoryPage {
+        session_id: "active".into(),
+        messages: messages[..1].to_vec(),
+        next_cursor: None,
+        replace: false,
+    });
+
+    assert_eq!(app.messages(), messages.as_slice());
+    assert!(app.auto_scroll);
+}
+
+#[test]
+fn daemon_older_history_page_preserves_manual_scroll() {
+    for append_before_prepend in [true, false] {
+        let mut app = App::new();
+        app.status.session_id = "active".into();
+        for index in 0..5 {
+            app.push_user(format!("message {index}"), Vec::new());
+        }
+        let messages = app.messages().to_vec();
+        app.apply_daemon_notification(&mew_protocol::ServerMessage::SessionHistoryPage {
+            session_id: "active".into(),
+            messages: messages[2..].to_vec(),
+            next_cursor: Some(2),
+            replace: true,
+        });
+        app.ensure_chat_rendered(42, 44, 4);
+        app.scroll_up(2);
+        let visible = app.chat_rows[app.scroll as usize..app.scroll as usize + 4].to_vec();
+
+        if append_before_prepend {
+            app.push_user("live tail".into(), Vec::new());
+        }
+        app.apply_daemon_notification(&mew_protocol::ServerMessage::SessionHistoryPage {
+            session_id: "active".into(),
+            messages: messages[..2].to_vec(),
+            next_cursor: None,
+            replace: false,
+        });
+        if !append_before_prepend {
+            app.push_user("live tail".into(), Vec::new());
+        }
+        app.ensure_chat_rendered(42, 44, 4);
+
+        assert!(!app.auto_scroll);
+        assert_eq!(
+            &app.chat_rows[app.scroll as usize..app.scroll as usize + 4],
+            visible.as_slice()
+        );
+    }
+}
+
+#[test]
+fn daemon_history_pages_from_another_session_do_not_change_transcript() {
+    let mut app = App::new();
+    app.status.session_id = "active".into();
+    app.push_user("current session".into(), Vec::new());
+    let messages = app.messages().to_vec();
+    app.auto_scroll = false;
+    for replace in [true, false] {
+        app.apply_daemon_notification(&mew_protocol::ServerMessage::SessionHistoryPage {
+            session_id: "previous".into(),
+            messages: Vec::new(),
+            next_cursor: Some(10),
+            replace,
+        });
+
+        assert_eq!(app.messages(), messages.as_slice());
+        assert!(!app.auto_scroll);
+    }
+}
+
+fn daemon_permission(
+    tool_name: &str,
+) -> (
+    AgentEvent,
+    tokio::sync::oneshot::Receiver<mew_hooks::PermissionDecision>,
+) {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    (
+        AgentEvent::PermissionRequest {
+            call: mew_hooks::ToolCall {
+                tool_name: tool_name.into(),
+                call_id: "call".into(),
+                input: serde_json::json!({}),
+            },
+            tx,
+        },
+        rx,
+    )
+}
+
+#[test]
+fn daemon_required_actions_deduplicate_and_resolve_only_matching_ids() {
+    let mut app = App::new();
+    app.daemon_mode = true;
+    let (permission, mut permission_rx) = daemon_permission("bash");
+    app.handle_daemon_required_action("p".into(), permission);
+    let (duplicate, _) = daemon_permission("duplicate");
+    app.handle_daemon_required_action("p".into(), duplicate);
+    let (tx, mut goal_rx) = tokio::sync::oneshot::channel();
+    app.handle_daemon_required_action(
+        "g".into(),
+        AgentEvent::GoalProposed {
+            call_id: "goal-call".into(),
+            objective: "finish the task".into(),
+            tx,
+        },
+    );
+
+    app.apply_daemon_notification(&mew_protocol::ServerMessage::RequestResolved {
+        request_id: "unknown".into(),
+    });
+    assert_eq!(app.permission.as_ref().unwrap().tool_name, "bash");
+    assert_eq!(app.mode, Mode::PermissionPrompt);
+    app.apply_daemon_notification(&mew_protocol::ServerMessage::RequestResolved {
+        request_id: "p".into(),
+    });
+
+    assert!(matches!(
+        permission_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+    ));
+    assert!(app.permission.is_none());
+    assert_eq!(app.mode, Mode::GoalProposal);
+    assert_eq!(
+        app.goal_proposal.as_ref().unwrap().objective,
+        "finish the task"
+    );
+    app.apply_daemon_notification(&mew_protocol::ServerMessage::RequestResolved {
+        request_id: "g".into(),
+    });
+    assert!(matches!(
+        goal_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+    ));
+    assert!(app.goal_proposal.is_none());
+    assert_eq!(app.mode, Mode::Normal);
+}
+
+#[test]
+fn daemon_required_actions_clear_on_attach_before_replay() {
+    let mut app = App::new();
+    let (permission, mut rx) = daemon_permission("bash");
+    app.handle_daemon_required_action("old".into(), permission);
+    app.apply_daemon_notification(&mew_protocol::ServerMessage::SessionReady {
+        session_id: "new-session".into(),
+        cwd: None,
+        model: None,
+        provider: None,
+        permission_mode: None,
+    });
+    assert!(matches!(
+        rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+    ));
+    assert!(app.permission.is_none());
+    assert_eq!(app.mode, Mode::Normal);
+    let (replayed, _) = daemon_permission("read");
+    app.handle_daemon_required_action("old".into(), replayed);
+    assert_eq!(app.permission.as_ref().unwrap().tool_name, "read");
+}
+
+#[test]
+fn daemon_required_action_response_advances_to_the_next_question() {
+    let mut app = App::new();
+    app.daemon_mode = true;
+    let (permission, mut rx) = daemon_permission("bash");
+    app.handle_daemon_required_action("p".into(), permission);
+    let (tx, _) = tokio::sync::oneshot::channel();
+    app.handle_daemon_required_action(
+        "q".into(),
+        AgentEvent::AskUser {
+            call_id: "question-call".into(),
+            questions: vec![AskUserQuestion {
+                prompt: "pick a route".into(),
+                options: vec![],
+            }],
+            tx,
+        },
+    );
+
+    app.send_permission_decision(mew_hooks::PermissionDecision::AllowOnce);
+
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        mew_hooks::PermissionDecision::AllowOnce
+    );
+    assert_eq!(app.mode, Mode::UserQuestion);
+    assert_eq!(
+        app.user_question.as_ref().unwrap().questions[0].prompt,
+        "pick a route"
+    );
+    app.apply_daemon_notification(&mew_protocol::ServerMessage::RequestResolved {
+        request_id: "p".into(),
+    });
+    assert_eq!(app.mode, Mode::UserQuestion);
+}
+
+#[test]
+fn daemon_idle_clears_cancellation_only_for_the_attached_session_without_finishing_stream() {
+    let mut app = App::new();
+    app.daemon_mode = true;
+    app.status.session_id = "active".into();
+    app.cancelling = true;
+    app.streaming = true;
+    app.apply_daemon_notification(&mew_protocol::ServerMessage::SessionActivityChanged {
+        session_id: "other".into(),
+        activity: mew_protocol::SessionState::Idle,
+    });
+    assert!(app.cancelling);
+    app.apply_daemon_notification(&mew_protocol::ServerMessage::SessionActivityChanged {
+        session_id: "active".into(),
+        activity: mew_protocol::SessionState::Running,
+    });
+    assert!(app.cancelling);
+
+    app.apply_daemon_notification(&mew_protocol::ServerMessage::SessionActivityChanged {
+        session_id: "active".into(),
+        activity: mew_protocol::SessionState::Idle,
+    });
+
+    assert!(!app.cancelling);
+    assert!(app.streaming);
+}
+
 /// Open a picker with an explicit item list, so rendering and scroll
 /// mechanics tests don't depend on the real filesystem or catalog contents.
 fn open_test_picker(app: &mut App, kind: &str, items: Vec<PickerItem>) {
@@ -12,6 +321,8 @@ fn open_test_picker(app: &mut App, kind: &str, items: Vec<PickerItem>) {
         cursor: 0,
         filter_undo: editor::UndoHistory::default(),
         scroll: 0,
+        details_scroll: 0,
+        visible_details: 0,
         visible_items: PICKER_VISIBLE_ITEMS,
         hint: None,
         budget: None,
@@ -567,7 +878,7 @@ fn test_prune_sidebar_state_removes_expired_finished_subagents() {
 }
 
 #[test]
-fn test_done_todo_visibility_follows_ttl() {
+fn test_done_todo_visibility_preserves_list_and_hides_done() {
     let mut app = App::new();
     app.todos = vec![
         mew_agent::Todo {
@@ -583,27 +894,33 @@ fn test_done_todo_visibility_follows_ttl() {
             depends_on: Vec::new(),
         },
     ];
-    // Simulate TodosUpdated: fresh done timestamp.
+    // Restore the complete task record, including completed work.
     app.handle_agent_event(AgentEvent::TodosUpdated {
         todos: app.todos.clone(),
     });
 
-    // Freshly done within a large TTL: visible.
+    // Completed work leaves the activity view immediately.
     app.sidebar_finished_ttl = 3600;
-    assert!(app.todo_visible(&app.todos[1]));
+    assert!(!app.todo_visible(&app.todos[1]));
 
     // TTL 0: done todos hidden immediately, in-progress still visible.
     app.sidebar_finished_ttl = 0;
     assert!(!app.todo_visible(&app.todos[1]));
     assert!(app.todo_visible(&app.todos[0]));
 
-    // The pruned timestamp must not resurrect the hidden todo: re-running
-    // the event (as the agent would on any change) keeps it hidden.
+    // Replaying the task record must not resurrect completed activity.
     app.prune_sidebar_state();
     app.handle_agent_event(AgentEvent::TodosUpdated {
         todos: app.todos.clone(),
     });
     assert!(!app.todo_visible(&app.todos[1]));
+    assert_eq!(app.todos.len(), 2);
+    let mut restarted = app.todos.clone();
+    restarted[1].status = mew_agent::TodoStatus::InProgress;
+    app.handle_agent_event(AgentEvent::TodosUpdated { todos: restarted });
+    assert!(app.todo_visible(&app.todos[1]));
+    app.handle_agent_event(AgentEvent::TodosUpdated { todos: vec![] });
+    assert!(app.todos.is_empty());
 }
 
 #[test]
@@ -717,78 +1034,6 @@ fn test_goal_proposal_accept_registers_active_goal() {
         app.active_goal.as_ref().map(|g| g.objective.as_str()),
         Some("ship 0.1.3")
     );
-}
-
-fn open_plan_approval(app: &mut App) -> tokio::sync::oneshot::Receiver<mew_agent::PlanDecision> {
-    use mew_agent::AgentEvent;
-    let (tx, rx) = tokio::sync::oneshot::channel::<mew_agent::PlanDecision>();
-    app.handle_agent_event(AgentEvent::PlanApprovalRequest {
-        call_id: "c1".into(),
-        plan_path: "/repo/PLAN.md".into(),
-        plan_markdown: "# Goal\n\n1. do it".into(),
-        persona: "builder".into(),
-        tx,
-    });
-    rx
-}
-
-#[test]
-fn test_plan_approval_event_sets_mode() {
-    let mut app = App::new();
-    let _rx = open_plan_approval(&mut app);
-    assert_eq!(app.mode, Mode::PlanApproval);
-    let pa = app.plan_approval.as_ref().expect("state stored");
-    assert_eq!(pa.persona, "builder");
-    assert!(pa.plan_markdown.contains("do it"));
-}
-
-#[test]
-fn test_plan_approval_approve_sends_decision() {
-    let mut app = App::new();
-    let mut rx = open_plan_approval(&mut app);
-    // selected defaults to 0 (approve).
-    app.plan_approval_confirm();
-    assert_eq!(app.mode, Mode::Normal);
-    assert!(app.plan_approval.is_none());
-    match rx.try_recv().expect("decision sent") {
-        mew_agent::PlanDecision::Approved => {}
-        other => panic!("expected Approved, got {other:?}"),
-    }
-}
-
-#[test]
-fn test_plan_approval_request_changes_flow() {
-    let mut app = App::new();
-    let mut rx = open_plan_approval(&mut app);
-    // Toggle to "request changes"; first confirm enters the feedback editor.
-    app.plan_approval_toggle();
-    app.plan_approval_confirm();
-    assert_eq!(app.mode, Mode::PlanApproval, "still open, now editing");
-    assert!(app.plan_approval.as_ref().unwrap().editing_feedback);
-    // Empty feedback doesn't submit.
-    app.plan_approval_confirm();
-    assert!(app.plan_approval.is_some());
-    // Type feedback, then confirm.
-    for c in "add tests".chars() {
-        app.plan_approval_type_char(c);
-    }
-    app.plan_approval_confirm();
-    assert_eq!(app.mode, Mode::Normal);
-    match rx.try_recv().expect("decision sent") {
-        mew_agent::PlanDecision::ChangesRequested(f) => assert_eq!(f, "add tests"),
-        other => panic!("expected ChangesRequested, got {other:?}"),
-    }
-}
-
-#[test]
-fn test_plan_approval_cancel_drops_tx() {
-    let mut app = App::new();
-    let mut rx = open_plan_approval(&mut app);
-    app.cancel_plan_approval();
-    assert_eq!(app.mode, Mode::Normal);
-    assert!(app.plan_approval.is_none());
-    // Dropping tx makes the agent's rx.await return Err.
-    assert!(rx.try_recv().is_err());
 }
 
 #[test]
@@ -1578,7 +1823,11 @@ fn test_rewind_to_truncates_messages() {
         app.messages.push(msg);
         app.rendered_md_cache.insert(
             part_id,
-            (80, format!("msg {}", i), std::rc::Rc::new(vec![])),
+            (
+                80,
+                format!("msg {}", i),
+                std::rc::Rc::new(ratatui_mdstream::RenderedLines::default()),
+            ),
         );
     }
     assert_eq!(app.messages.len(), 5);
@@ -1982,8 +2231,35 @@ fn test_picker_filtered_hides_headers() {
     let filtered = picker.filtered();
     // No headers in filtered results.
     assert!(!filtered.iter().any(|i| i.header));
-    // Both kimi/k3 entries should match the filter.
-    assert_eq!(filtered.len(), 2);
+    // The recent shortcut and full-list entry represent one model.
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].id, "kimi/k3");
+}
+
+#[test]
+fn test_model_picker_search_preserves_distinct_provider_models() {
+    let mut app = App::new();
+    app.models = vec![
+        ("codex/gpt-6.1-sol".into(), "sol model".into()),
+        ("openai/gpt-6.1-sol".into(), "sol model".into()),
+    ];
+    app.recent_models = vec!["codex/gpt-6.1-sol".into()];
+    app.open_model_picker();
+
+    let picker = app.picker.as_mut().unwrap();
+    for query in ["6.1", "SOL MODEL"] {
+        picker.filter = query.into();
+        let ids: Vec<&str> = picker
+            .filtered()
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["codex/gpt-6.1-sol", "openai/gpt-6.1-sol"]);
+    }
+
+    // Clearing search restores both the Recent and All Models sections.
+    picker.filter.clear();
+    assert_eq!(picker.filtered().len(), 5);
 }
 
 #[test]
@@ -2522,11 +2798,19 @@ fn test_multipart_cache_keyed_by_partid() {
     // its own cache entry keyed by PartId.
     app.rendered_md_cache.insert(
         part1_id,
-        (80, "first".to_string(), std::rc::Rc::new(vec![])),
+        (
+            80,
+            "first".to_string(),
+            std::rc::Rc::new(ratatui_mdstream::RenderedLines::default()),
+        ),
     );
     app.rendered_md_cache.insert(
         part2_id,
-        (80, "second".to_string(), std::rc::Rc::new(vec![])),
+        (
+            80,
+            "second".to_string(),
+            std::rc::Rc::new(ratatui_mdstream::RenderedLines::default()),
+        ),
     );
 
     // Both entries must survive — if the cache were keyed by MessageId,
@@ -2687,7 +2971,7 @@ fn ctrl_up_guides_oldest_queued_message() {
         crossterm::event::KeyModifiers::CONTROL,
     );
     let action = crate::events::handle_key_event(&mut app, ctrl_up);
-    assert!(matches!(action, Some(Action::GuideQueued(text)) if text == "first"));
+    assert!(matches!(action, Some(Action::GuideQueued {text,..}) if text == "first"));
     // The guided message is popped from the queue; the rest remain.
     assert_eq!(app.queued_messages, vec!["second".to_string()]);
 }
@@ -2845,11 +3129,11 @@ fn test_budget_mouse_click_drag_commit() {
         modifiers: crossterm::event::KeyModifiers::NONE,
     };
 
-    // Click on the track sets the draft (row/col are 1-based; the handler
-    // subtracts 1). Column 15 → frac (14-10)/19 ≈ 0.21 → snap → 55296.
+    // Crossterm uses zero-based coordinates. Column 14 maps to
+    // (14-10)/19 of the track, snapped to 55296 tokens.
     assert!(crate::events::handle_mouse_event(
         &mut app,
-        mouse(MouseEventKind::Down(MouseButton::Left), 15, 6)
+        mouse(MouseEventKind::Down(MouseButton::Left), 14, 5)
     )
     .is_none());
     assert_eq!(budget_draft(&app), "55296");
@@ -2862,14 +3146,14 @@ fn test_budget_mouse_click_drag_commit() {
     // Drag to the right end.
     crate::events::handle_mouse_event(
         &mut app,
-        mouse(MouseEventKind::Drag(MouseButton::Left), 30, 6),
+        mouse(MouseEventKind::Drag(MouseButton::Left), 29, 5),
     );
     assert_eq!(budget_draft(&app), "262144");
 
     // Release commits `budget:<n>` and keeps the picker open.
     let action = crate::events::handle_mouse_event(
         &mut app,
-        mouse(MouseEventKind::Up(MouseButton::Left), 30, 6),
+        mouse(MouseEventKind::Up(MouseButton::Left), 29, 5),
     );
     assert_eq!(thinking_action(action), Some("budget:262144".into()));
     assert!(app.picker.is_some());
@@ -2881,19 +3165,25 @@ fn test_budget_mouse_wheel_nudges_and_commits() {
 
     let mut app = App::new();
     open_qwen_thinking_picker(&mut app);
-    let rect = ratatui::layout::Rect::new(10, 5, 20, 1);
-    app.picker
-        .as_mut()
+    select_budget_row(&mut app);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| crate::ui::draw(frame, &mut app))
+        .unwrap();
+    let rect = app
+        .picker
+        .as_ref()
         .unwrap()
         .budget
-        .as_mut()
+        .as_ref()
         .unwrap()
-        .track_rect = Some(rect);
+        .track_rect
+        .unwrap();
 
     let mouse = |kind: MouseEventKind| MouseEvent {
         kind,
-        column: 15,
-        row: 6,
+        column: rect.x,
+        row: rect.y,
         modifiers: crossterm::event::KeyModifiers::NONE,
     };
 
@@ -2903,20 +3193,20 @@ fn test_budget_mouse_wheel_nudges_and_commits() {
     // Wheel up nudges up.
     let action = crate::events::handle_mouse_event(&mut app, mouse(MouseEventKind::ScrollUp));
     assert_eq!(thinking_action(action), Some("budget:131072".into()));
-    // Wheel outside the track scrolls the list (moves selection) and leaves
+    // Wheel over the choices scrolls the list (moves selection) and leaves
     // the budget draft untouched.
     let selected_before = app.picker.as_ref().unwrap().selected;
     let off = MouseEvent {
         kind: MouseEventKind::ScrollUp,
-        column: 2,
-        row: 2,
+        column: app.picker_mouse.list.x,
+        row: app.picker_mouse.list.y,
         modifiers: crossterm::event::KeyModifiers::NONE,
     };
     assert!(crate::events::handle_mouse_event(&mut app, off).is_none());
     assert_ne!(
         app.picker.as_ref().unwrap().selected,
         selected_before,
-        "wheel off the track should scroll the list"
+        "wheel over the choices should scroll the list"
     );
     assert_eq!(
         budget_draft(&app),
@@ -2931,10 +3221,15 @@ fn test_picker_mouse_wheel_scrolls_selection() {
 
     let mut app = App::new();
     app.open_command_palette();
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| crate::ui::draw(frame, &mut app))
+        .unwrap();
+    let choices = app.picker_mouse.list;
     let mouse = |kind: MouseEventKind| MouseEvent {
         kind,
-        column: 40,
-        row: 10,
+        column: choices.x,
+        row: choices.y,
         modifiers: crossterm::event::KeyModifiers::NONE,
     };
     assert_eq!(app.picker.as_ref().unwrap().selected, 0);
@@ -2942,23 +3237,40 @@ fn test_picker_mouse_wheel_scrolls_selection() {
     assert_eq!(app.picker.as_ref().unwrap().selected, 1);
     crate::events::handle_mouse_event(&mut app, mouse(MouseEventKind::ScrollUp));
     assert_eq!(app.picker.as_ref().unwrap().selected, 0);
-    // Non-wheel events stay inert on picker content.
+    let outside = MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 0,
+        row: 0,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    crate::events::handle_mouse_event(&mut app, outside);
+    assert_eq!(app.picker.as_ref().unwrap().selected, 0);
+    // Clicking a rendered row selects it; Enter keeps the existing activation.
+    let settings_row = app
+        .picker_mouse
+        .rows
+        .iter()
+        .find(|(_, index)| *index == 2)
+        .unwrap()
+        .0;
     let click = MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
-        column: 40,
-        row: 10,
+        column: choices.x,
+        row: settings_row,
         modifiers: crossterm::event::KeyModifiers::NONE,
     };
     assert!(crate::events::handle_mouse_event(&mut app, click).is_none());
+    assert_eq!(app.picker.as_ref().unwrap().selected, 2);
+    assert!(matches!(
+        crate::events::handle_key_event(&mut app, key(crossterm::event::KeyCode::Enter)),
+        Some(crate::events::Action::OpenSettings)
+    ));
 }
 
 #[test]
 fn test_picker_row_scroll_keeps_selection_visible() {
-    // Scroll offsets are measured in wrapped display rows: reaching the last
-    // item advances the scroll so the selected item's full row span is in
-    // view.
     let mut h = crate::harness::Harness::new(80, 24);
-    let items = (0..12)
+    let items = (0..30)
         .map(|n| PickerItem {
             id: format!("skill{n}"),
             label: format!("@skill:skill{n}"),
@@ -2969,13 +3281,12 @@ fn test_picker_row_scroll_keeps_selection_visible() {
         })
         .collect();
     open_test_picker(&mut h.app, "command", items);
-    // Move to the last item (11 steps from index 0).
-    for _ in 0..11 {
+    for _ in 0..29 {
         h.app.picker_down();
     }
     h.render();
     let picker = h.app.picker.as_ref().unwrap();
-    assert_eq!(picker.selected, 11);
+    assert_eq!(picker.selected, 29);
     assert!(
         picker.scroll > 0,
         "reaching the last item must scroll, scroll={}",
@@ -2983,7 +3294,7 @@ fn test_picker_row_scroll_keeps_selection_visible() {
     );
     let rendered = h.render();
     assert!(
-        rendered.contains("@skill:skill11"),
+        rendered.contains("@skill:skill29"),
         "selected item must be visible:\n{rendered}"
     );
 }
@@ -3024,7 +3335,7 @@ fn test_picker_scrollbar_travels_full_track() {
     // position == content_length - 1, so the old `content_length = total`
     // call left the thumb short of the bottom at max scroll.
     let mut h = crate::harness::Harness::new(80, 24);
-    let items = (0..12)
+    let items = (0..30)
         .map(|n| PickerItem {
             id: format!("skill{n}"),
             label: format!("@skill:skill{n}"),
@@ -3047,7 +3358,7 @@ fn test_picker_scrollbar_travels_full_track() {
     // Jump to the very bottom: select the last item (which advances scroll)
     // and force the offset to max; the draw pass keeps the selection in view
     // and clamps scroll to max_scroll.
-    for _ in 0..11 {
+    for _ in 0..29 {
         h.app.picker_down();
     }
     h.app.picker.as_mut().unwrap().scroll = usize::MAX;
@@ -3107,6 +3418,7 @@ fn test_slash_scrollbar_reaches_bottom() {
     h.type_str("/");
     assert_eq!(h.app.mode, crate::app::Mode::SlashCommand);
     // Force the popup to the bottom; the draw pass clamps slash_scroll.
+    h.app.slash_selected = h.app.filtered_slash_commands().len() - 1;
     h.app.slash_scroll = usize::MAX;
     let (thumb, _top, bottom) = scrollbar_span(&h.render()).expect("slash scrollbar must render");
     assert_eq!(
@@ -3127,6 +3439,7 @@ fn test_permission_max_scroll_accounts_for_wrapping() {
         tx: None,
         selected: 0,
         scroll: 0,
+        view: Default::default(),
     };
     // One raw line, but many wrapped rows at the default popup width: the
     // scroll range must be non-trivial.
@@ -3149,6 +3462,7 @@ fn test_permission_max_scroll_accounts_for_wrapping() {
         tx: None,
         selected: 0,
         scroll: 0,
+        view: Default::default(),
     };
     assert_eq!(short.max_scroll(80, 24), None);
 }
@@ -3166,8 +3480,12 @@ fn test_permission_mouse_wheel_scrolls() {
         tx: None,
         selected: 0,
         scroll: 0,
+        view: Default::default(),
     });
-    app.chat_area = ratatui::layout::Rect::new(0, 0, 80, 24);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| crate::ui::draw(frame, &mut app))
+        .unwrap();
     let mouse = |kind: MouseEventKind| MouseEvent {
         kind,
         column: 30,
@@ -3354,5 +3672,322 @@ fn test_reasoning_summary_with_encrypted_content_is_rendered() {
     assert!(
         rendered.contains("checking the date"),
         "the summary text must be visible:\n{rendered}"
+    );
+}
+
+#[test]
+fn daemon_message_end_keeps_turn_busy() {
+    let mut app = App::new();
+    app.daemon_mode = true;
+    app.streaming = true;
+    app.queued_messages = vec!["next".into()];
+
+    // Responses tool calls report Stop; the agent can still execute tools
+    // or continue after a text-only response.
+    for finish in [mew_message::Finish::Stop, mew_message::Finish::ToolUse] {
+        app.handle_agent_event(mew_agent::AgentEvent::Provider(
+            mew_provider::ProviderEvent::MessageEnd {
+                finish,
+                usage: mew_message::Tokens::default(),
+                cost: 0.0,
+            },
+        ));
+        assert!(app.streaming);
+        assert!(!app.pending_queued_send);
+    }
+}
+
+#[test]
+fn daemon_error_waits_for_turn_shutdown() {
+    let mut app = App::new();
+    app.daemon_mode = true;
+    app.streaming = true;
+    app.cancelling = true;
+    app.handle_agent_event(mew_agent::AgentEvent::Error("aborted".into()));
+    assert!(app.streaming);
+    assert!(app.cancelling);
+}
+
+#[test]
+fn finishing_turn_releases_queue_and_clears_busy_state() {
+    let mut app = App::new();
+    app.daemon_mode = true;
+    app.streaming = true;
+    app.cancelling = true;
+    app.retry_status = Some("retrying".into());
+    app.esc_cancel_pending = Some(std::time::Instant::now());
+    app.ctrl_c_quit_pending = Some(std::time::Instant::now());
+    app.queued_messages = vec!["first".into(), "second".into()];
+
+    // No visible provider parts are required to keep the turn busy or end it.
+    app.finish_turn();
+    assert!(!app.streaming);
+    assert!(!app.cancelling);
+    assert!(app.retry_status.is_none());
+    assert!(app.esc_cancel_pending.is_none());
+    assert!(app.ctrl_c_quit_pending.is_none());
+    assert!(app.pending_queued_send);
+    assert_eq!(app.pop_queued_message().as_deref(), Some("first"));
+    assert_eq!(app.pop_queued_message().as_deref(), Some("second"));
+    app.finish_turn();
+    assert!(!app.pending_queued_send);
+}
+
+#[test]
+fn daemon_provider_error_keeps_turn_busy() {
+    let mut app = App::new();
+    app.daemon_mode = true;
+    app.streaming = true;
+    app.queued_messages = vec!["next".into()];
+    app.handle_agent_event(mew_agent::AgentEvent::Provider(
+        mew_provider::ProviderEvent::Error(mew_message::MessageError {
+            kind: mew_message::ErrorKind::ProviderApi,
+            message: "failed".into(),
+        }),
+    ));
+    assert!(app.streaming);
+    assert!(!app.pending_queued_send);
+    app.finish_turn();
+    assert!(!app.streaming);
+    assert!(app.pending_queued_send);
+}
+
+#[test]
+fn sidebar_job_failures_expire_and_restart_has_fresh_timing() {
+    let mut app = App::new();
+    app.handle_agent_event(AgentEvent::JobUpdate {
+        job_id: "job".into(),
+        command: "first command".into(),
+        state: "failed".into(),
+    });
+    assert!(app.background_job_visible(&app.background_jobs[0]));
+    app.background_jobs[0].finished_at = Some(Instant::now() - Duration::from_secs(181));
+    assert!(!app.background_job_visible(&app.background_jobs[0]));
+    app.background_jobs[0].started_at = Instant::now() - Duration::from_secs(500);
+    app.handle_agent_event(AgentEvent::JobUpdate {
+        job_id: "job".into(),
+        command: "retry command".into(),
+        state: "running".into(),
+    });
+    let job = &app.background_jobs[0];
+    assert!(job.started_at.elapsed() < Duration::from_secs(1));
+    assert!(job.finished_at.is_none());
+    assert_eq!(job.command, "retry command");
+    assert!(app.background_job_visible(job));
+    app.handle_agent_event(AgentEvent::JobUpdate {
+        job_id: "job".into(),
+        command: "retry command".into(),
+        state: "completed".into(),
+    });
+    assert!(!app.background_job_visible(&app.background_jobs[0]));
+}
+
+#[test]
+fn sidebar_subagent_restart_replaces_terminal_run() {
+    let mut app = App::new();
+    for child in ["first", "second"] {
+        app.handle_agent_event(AgentEvent::SubagentStart {
+            parent_call_id: "task".into(),
+            name: "researcher".into(),
+            child_session_id: child.into(),
+            display_name: None,
+        });
+        if child == "first" {
+            app.handle_agent_event(AgentEvent::SubagentStatus {
+                parent_call_id: "task".into(),
+                tool_name: "researcher".into(),
+                message: "old progress".into(),
+            });
+            app.handle_agent_event(AgentEvent::SubagentEnd {
+                parent_call_id: "task".into(),
+                child_session_id: child.into(),
+                outcome: mew_agent::SubagentOutcome::Failed {
+                    reason: "failed".into(),
+                },
+                manifests: vec![],
+            });
+        }
+    }
+    assert_eq!(app.subagents.len(), 1);
+    assert!(matches!(app.subagents[0].status, SubagentStatus::Running));
+    assert!(app.subagents[0].finished_at.is_none());
+    assert!(app.subagents[0].last_progress.is_none());
+}
+
+#[test]
+fn child_question_shows_its_owner_and_escape_preserves_other_pending_questions() {
+    let mut app = App::new();
+    app.daemon_mode = true;
+    app.status.session_id = "parent-session".into();
+    app.push_synthetic_message("conversation".into());
+    let (child_tx, mut child_rx) = tokio::sync::oneshot::channel();
+    app.handle_daemon_required_action(
+        "child-q".into(),
+        AgentEvent::SubagentAskUser {
+            source: mew_message::SubagentQuestionSource {
+                parent_call_id: "task".into(),
+                child_session_id: "child".into(),
+                name: "worker".into(),
+                display_name: Some("Curie".into()),
+            },
+            call_id: "ask".into(),
+            questions: vec![AskUserQuestion {
+                prompt: "which file?".into(),
+                options: vec![],
+            }],
+            tx: child_tx,
+        },
+    );
+    let (parent_tx, mut parent_rx) = tokio::sync::oneshot::channel();
+    app.handle_daemon_required_action(
+        "parent-q".into(),
+        AgentEvent::AskUser {
+            call_id: "parent-ask".into(),
+            questions: vec![AskUserQuestion {
+                prompt: "parent question".into(),
+                options: vec![],
+            }],
+            tx: parent_tx,
+        },
+    );
+    let backend = ratatui::backend::TestBackend::new(80, 24);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| crate::ui::draw(frame, &mut app))
+        .unwrap();
+    let rendered: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(
+        rendered.contains("Curie (worker): which file?"),
+        "{rendered}"
+    );
+    let action = crate::events::handle_key_event(
+        &mut app,
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+    );
+    assert!(
+        matches!(action, Some(crate::events::Action::CloseQuestion { session_id, request_id })
+        if session_id == "parent-session" && request_id == "child-q"),
+        "closing a child question must carry its explicit session and request"
+    );
+    assert!(matches!(
+        child_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+    ));
+    assert!(matches!(
+        parent_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    assert_eq!(app.daemon_request_id.as_deref(), Some("parent-q"));
+    assert_eq!(app.user_question.as_ref().unwrap().call_id, "parent-ask");
+    app.user_question.as_mut().unwrap().freeform_text = "answer".into();
+    app.user_question_confirm();
+    assert_eq!(parent_rx.try_recv().unwrap(), vec!["answer"]);
+
+    let (parent_tx, mut parent_rx) = tokio::sync::oneshot::channel();
+    app.handle_daemon_required_action(
+        "next-parent-q".into(),
+        AgentEvent::AskUser {
+            call_id: "next-parent-ask".into(),
+            questions: vec![AskUserQuestion {
+                prompt: "continue?".into(),
+                options: vec![],
+            }],
+            tx: parent_tx,
+        },
+    );
+    let action = crate::events::handle_key_event(
+        &mut app,
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+    );
+    assert!(matches!(action, Some(crate::events::Action::Cancel)));
+    assert!(matches!(
+        parent_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+    ));
+}
+#[test]
+fn empty_job_polls_keep_rendered_content_and_refresh_terminal_metadata() {
+    let mut h = crate::harness::Harness::new(128, 40);
+    h.app.status.session_id = "owner".into();
+    h.app.handle_agent_event(AgentEvent::JobUpdate {
+        job_id: "job".into(),
+        command: "cargo test".into(),
+        state: "running".into(),
+    });
+    h.app.open_job("job".into());
+    let now = std::time::Instant::now();
+    let request = |app: &mut App, at| {
+        let Some(crate::events::Action::ReadJobOutput { request_id, .. }) =
+            app.take_activity_request(at)
+        else {
+            panic!("expected job output request");
+        };
+        request_id
+    };
+    let id = request(&mut h.app, now);
+    let output = "cached row\n".repeat(1_000);
+    let offset = output.len() as u64;
+    h.app
+        .apply_job_output("owner", "job", &id, 0, offset, &output, false, false);
+    assert!(h.render().contains("cached row"));
+    let cached_rows = h
+        .app
+        .activity_view
+        .as_ref()
+        .unwrap()
+        .rendered
+        .as_ref()
+        .unwrap()
+        .rows
+        .as_ptr();
+
+    for (tick, done) in [(1, false), (2, true)] {
+        let id = request(&mut h.app, now + std::time::Duration::from_secs(tick));
+        h.app
+            .apply_job_output("owner", "job", &id, offset, offset, "", done, done);
+        let cache = h
+            .app
+            .activity_view
+            .as_ref()
+            .unwrap()
+            .rendered
+            .as_ref()
+            .expect("an empty poll must retain the rendered output");
+        assert_eq!(cache.rows.as_ptr(), cached_rows);
+        h.render();
+    }
+    h.app.handle_agent_event(AgentEvent::JobUpdate {
+        job_id: "job".into(),
+        command: "cargo test".into(),
+        state: "completed".into(),
+    });
+    h.render();
+    h.app.scroll_activity(crossterm::event::KeyCode::End);
+    let frame = h.render();
+    assert!(frame.contains("Job · Completed"), "{frame}");
+    assert!(frame.contains("Output incomplete"), "{frame}");
+    assert_eq!(
+        h.app
+            .activity_view
+            .as_ref()
+            .unwrap()
+            .rendered
+            .as_ref()
+            .unwrap()
+            .rows
+            .as_ptr(),
+        cached_rows
     );
 }

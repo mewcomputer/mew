@@ -47,10 +47,7 @@ struct RootView: View {
     @ViewBuilder
     private func alertBanner(_ item: AlertItem) -> some View {
         Button {
-            // Navigate to the alert's session.
-            if let daemonId = store.selectedDaemonId {
-                store.path.append(.chat(daemonNodeId: daemonId.nodeId, sessionId: item.sessionId))
-            }
+            store.openAlertSession(item)
             withAnimation(Theme.Motion.value(Theme.Motion.surface, reduced: reduceMotion)) {
                 store.activeBanner = nil
             }

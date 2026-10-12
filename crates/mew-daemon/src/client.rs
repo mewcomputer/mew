@@ -10,9 +10,11 @@
 //! `AgentEvent` variants like `PermissionRequest` carry a `oneshot::Sender`
 //! so the TUI can respond. On the client side, we reconstruct these by
 //! creating a fresh `oneshot::channel` for each incoming wire request.
-//! The `Receiver` goes into the `AgentEvent` (handed to the TUI); the
-//! `Sender` is awaited by a background task that forwards the decision
+//! The `Sender` goes into the `AgentEvent` (handed to the TUI); the
+//! `Receiver` is awaited by a background task that forwards the decision
 //! back to the daemon as a `ClientMessage::PermissionResponse`.
+//! Required actions use the persistent notification channel, including when
+//! the TUI attaches to a turn initiated by another client.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -20,8 +22,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
 use mew_agent::{
-    AgentEvent, AskUserQuestion, GoalDecision, PlanDecision, QuestionOption as AgentQuestionOption,
-    Todo, TodoStatus,
+    AgentEvent, AskUserQuestion, GoalDecision, QuestionOption as AgentQuestionOption, Todo,
+    TodoStatus,
 };
 use mew_hooks::{PermissionDecision, ToolCall as HookToolCall};
 use mew_message::Part;
@@ -34,23 +36,25 @@ use tungstenite::{protocol::WebSocketConfig, Message};
 
 /// Shared state for pending request/response pairs.
 struct ClientState {
+    pending_todo_edits: Mutex<HashMap<String, PendingTodoEdit>>,
+    /// Buffered required actions, with consumed entries retained until the
+    /// daemon resolves them so replay never creates a second response sender.
+    required_actions: std::sync::Mutex<HashMap<String, Option<AgentEvent>>>,
     /// `request_id → receiver` for permission decisions.
     /// The receiver is awaited by a spawned task that forwards the
     /// decision back to the daemon.
     pending_permissions: Mutex<HashMap<String, oneshot::Receiver<PermissionDecision>>>,
     /// `request_id → receiver` for ask-user answers.
     pending_ask_user: Mutex<HashMap<String, oneshot::Receiver<Vec<String>>>>,
-    /// `request_id → receiver` for plan-approval decisions.
-    pending_plan_approvals: Mutex<HashMap<String, oneshot::Receiver<PlanDecision>>>,
     /// `request_id → receiver` for goal-proposal decisions.
     pending_goal_proposals: Mutex<HashMap<String, oneshot::Receiver<GoalDecision>>>,
-    /// The current event sender (set by `prompt()`, cleared when the
-    /// receiver is dropped). The background reader uses this to forward
-    /// translated AgentEvents.
+    /// The current event sender, set by `prompt()` and closed when the
+    /// attached session reports Idle or the connection closes. The reader
+    /// forwards all turn events before closing it.
     event_tx: Mutex<Option<mpsc::Sender<AgentEvent>>>,
     /// Persistent notification channel — always alive, unlike `event_tx`
     /// which is prompt-scoped. Session-management `ServerMessage`s
-    /// (SessionList, SessionTitleChanged, etc.) are forwarded here as raw
+    /// (SessionList, SessionTitleChanged, etc.) and required actions arrive as raw
     /// wire types so the TUI can maintain a live session rail, alerts,
     /// and metadata without being in the middle of a turn.
     notify_tx: mpsc::Sender<ServerMessage>,
@@ -69,30 +73,115 @@ pub struct DaemonClient {
     state: Arc<ClientState>,
 }
 
+struct PendingTodoEdit {
+    session_id: String,
+    reply: oneshot::Sender<Result<Vec<Todo>>>,
+}
+
 impl DaemonClient {
+    pub async fn read_subagent_history(
+        &self,
+        session_id: &str,
+        child_session_id: &str,
+        request_id: &str,
+    ) -> Result<()> {
+        let json = mew_protocol::encode_json(&ClientMessage::ReadSubagentHistory {
+            session_id: session_id.into(),
+            child_session_id: child_session_id.into(),
+            request_id: request_id.into(),
+        })?;
+        self.state
+            .ws_out
+            .send(json)
+            .await
+            .context("daemon connection closed during child history request")
+    }
+
+    pub async fn update_todo(
+        &self,
+        session_id: &str,
+        edit: mew_protocol::TodoEdit,
+    ) -> Result<Vec<Todo>> {
+        let request_id = ulid::Ulid::new().to_string();
+        let (reply, receiver) = oneshot::channel();
+        self.state.pending_todo_edits.lock().await.insert(
+            request_id.clone(),
+            PendingTodoEdit {
+                session_id: session_id.into(),
+                reply,
+            },
+        );
+        let result = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let json = mew_protocol::encode_json(&ClientMessage::UpdateTodo {
+                session_id: session_id.into(),
+                request_id: request_id.clone(),
+                edit,
+            })?;
+            self.state
+                .ws_out
+                .send(json)
+                .await
+                .context("daemon connection closed during todo save")?;
+            receiver
+                .await
+                .context("daemon disconnected before confirming todo save")?
+        })
+        .await
+        .context("todo save was not confirmed; update or reconnect the daemon before retrying");
+        self.state
+            .pending_todo_edits
+            .lock()
+            .await
+            .remove(&request_id);
+        result?
+    }
     /// Connect to a daemon at the given WebSocket URL.
     ///
     /// Returns the `DaemonClient` and a `Receiver<ServerMessage>` for
     /// session-management notifications. The notification channel is
     /// always alive (unlike the prompt-scoped event channel) and receives
-    /// raw `ServerMessage`s that don't map to `AgentEvent`s — SessionList,
-    /// SessionTitleChanged, SessionAlert, etc. The caller should drain
-    /// it in the main event loop via `tokio::select!`.
+    /// raw `ServerMessage`s for session state and required actions. After
+    /// applying a notification, callers consume its reconstructed action with
+    /// `take_required_action`. Drain this channel in the main event loop.
     pub async fn connect(url: &str) -> Result<(Self, mpsc::Receiver<ServerMessage>)> {
         let config = WebSocketConfig {
             max_frame_size: None,
             ..WebSocketConfig::default()
         };
-        let (ws_stream, _response) = connect_async_with_config(url, Some(config), false)
+        let (mut ws_stream, _response) = connect_async_with_config(url, Some(config), false)
             .await
             .context("connect to daemon")?;
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            ws_stream
+                .send(Message::Text(mew_protocol::encode_json(&ClientMessage::Ping)?))
+                .await?;
+            loop {
+                let frame = ws_stream.next().await.context("daemon closed during handshake")??;
+                match frame {
+                    Message::Text(text) => {
+                        let message: ServerMessage = mew_protocol::decode_json(&text)
+                            .context("invalid daemon protocol handshake")?;
+                        match message {
+                            ServerMessage::Pong { protocol_version, .. }
+                                if protocol_version == mew_protocol::PROTOCOL_VERSION => return Ok(()),
+                            _ => anyhow::bail!("incompatible daemon protocol; restart or update the daemon and client"),
+                        }
+                    }
+                    Message::Close(_) => anyhow::bail!("daemon closed during protocol handshake"),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .context("daemon protocol handshake timed out; restart or update the daemon")??;
 
         let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
         let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<String>(64);
 
         // Forward outgoing JSON to the WebSocket.
-        tokio::spawn(async move {
+        let outgoing_task = tokio::spawn(async move {
             while let Some(json) = outgoing_rx.recv().await {
                 if ws_tx.send(Message::Text(json)).await.is_err() {
                     break;
@@ -103,9 +192,10 @@ impl DaemonClient {
         let (notify_tx, notify_rx) = mpsc::channel::<ServerMessage>(128);
 
         let state = Arc::new(ClientState {
+            pending_todo_edits: Mutex::new(HashMap::new()),
+            required_actions: std::sync::Mutex::new(HashMap::new()),
             pending_permissions: Mutex::new(HashMap::new()),
             pending_ask_user: Mutex::new(HashMap::new()),
-            pending_plan_approvals: Mutex::new(HashMap::new()),
             pending_goal_proposals: Mutex::new(HashMap::new()),
             event_tx: Mutex::new(None),
             notify_tx,
@@ -136,14 +226,89 @@ impl DaemonClient {
                     }
                 };
 
+                let todo_reply = match &server_msg {
+                    ServerMessage::TodoUpdated {
+                        session_id,
+                        request_id,
+                        todos,
+                    } => Some((
+                        session_id,
+                        request_id,
+                        todos
+                            .iter()
+                            .map(|todo| {
+                                Ok(Todo {
+                                    id: todo.id,
+                                    content: todo.content.clone(),
+                                    status: TodoStatus::parse(&todo.status)
+                                        .context("invalid todo status in reply")?,
+                                    depends_on: todo.depends_on.clone(),
+                                })
+                            })
+                            .collect::<Result<Vec<_>>>(),
+                    )),
+                    ServerMessage::TodoUpdateError {
+                        session_id,
+                        request_id,
+                        message,
+                    } => Some((session_id, request_id, Err(anyhow::anyhow!("{message}")))),
+                    _ => None,
+                };
+                if let Some((session_id, request_id, result)) = todo_reply {
+                    let mut pending = state_clone.pending_todo_edits.lock().await;
+                    if pending
+                        .get(request_id)
+                        .is_some_and(|request| &request.session_id == session_id)
+                    {
+                        if let Some(request) = pending.remove(request_id) {
+                            let _ = request.reply.send(result);
+                        }
+                    }
+                    continue;
+                }
+
                 // SessionReady is not an AgentEvent — the caller handles it
                 // via new_session(). Skip forwarding for those. But we do
                 // capture the session ID for later use, and still push the
                 // message to notify_tx so callers can read model/provider.
                 if let ServerMessage::SessionReady { ref session_id, .. } = server_msg {
-                    *state_clone.session_id.lock().await = Some(session_id.clone());
+                    let mut current_session = state_clone.session_id.lock().await;
+                    if current_session.as_ref() != Some(session_id) {
+                        *state_clone.event_tx.lock().await = None;
+                    }
+                    *current_session = Some(session_id.clone());
+                    drop(current_session);
+                    state_clone.required_actions.lock().unwrap().clear();
                     let _ = state_clone.notify_tx.send(server_msg.clone()).await;
                     continue;
+                }
+
+                if let Some(request_id) = required_action_id(&server_msg) {
+                    if !state_clone
+                        .required_actions
+                        .lock()
+                        .unwrap()
+                        .contains_key(request_id)
+                    {
+                        let action = translate_server_message(&server_msg, &state_clone)
+                            .await
+                            .into_iter()
+                            .next();
+                        state_clone
+                            .required_actions
+                            .lock()
+                            .unwrap()
+                            .insert(request_id.to_owned(), action);
+                        let _ = state_clone.notify_tx.send(server_msg).await;
+                    }
+                    continue;
+                }
+                if let ServerMessage::RequestResolved { ref request_id } = server_msg {
+                    state_clone
+                        .required_actions
+                        .lock()
+                        .unwrap()
+                        .remove(request_id);
                 }
 
                 let events = translate_server_message(&server_msg, &state_clone).await;
@@ -160,9 +325,22 @@ impl DaemonClient {
                             break;
                         }
                     }
-                } else {
+                } else if matches!(
+                    server_msg,
+                    ServerMessage::Error { .. } | ServerMessage::TodosUpdated { .. }
+                ) {
+                    let _ = state_clone.notify_tx.send(server_msg).await;
+                } else if !events.is_empty() {
                     warn!("daemon client: event without active prompt");
                 }
+            }
+            outgoing_task.abort();
+            state_clone.pending_todo_edits.lock().await.clear();
+            let _ = outgoing_task.await;
+            if let Some(tx) = state_clone.event_tx.lock().await.take() {
+                let _ = tx
+                    .send(AgentEvent::Error("daemon connection closed".into()))
+                    .await;
             }
         });
 
@@ -207,6 +385,12 @@ impl DaemonClient {
         attachments: Vec<mew_protocol::Attachment>,
     ) -> mpsc::Receiver<AgentEvent> {
         let (event_tx, event_rx) = mpsc::channel(256);
+        if self.state.session_id.lock().await.is_none() {
+            let _ = event_tx
+                .send(AgentEvent::Error("no daemon session attached".into()))
+                .await;
+            return event_rx;
+        }
 
         // Set the event sender so the background reader forwards events.
         *self.state.event_tx.lock().await = Some(event_tx);
@@ -214,7 +398,13 @@ impl DaemonClient {
         // Send the prompt message.
         let msg = ClientMessage::Prompt { text, attachments };
         let json = mew_protocol::encode_json(&msg).unwrap_or_default();
-        let _ = self.state.ws_out.send(json).await;
+        if self.state.ws_out.send(json).await.is_err() {
+            if let Some(tx) = self.state.event_tx.lock().await.take() {
+                let _ = tx
+                    .send(AgentEvent::Error("daemon connection closed".into()))
+                    .await;
+            }
+        }
 
         event_rx
     }
@@ -391,21 +581,47 @@ impl DaemonClient {
         self.state.session_id.lock().await.clone()
     }
 
+    /// Take a required action from its ordered notification. Requests remain
+    /// available when observing a session without initiating its active turn.
+    pub fn take_required_action(&self, message: &ServerMessage) -> Option<(String, AgentEvent)> {
+        let request_id = required_action_id(message)?;
+        let event = self
+            .state
+            .required_actions
+            .lock()
+            .unwrap()
+            .get_mut(request_id)?
+            .take()?;
+        Some((request_id.to_owned(), event))
+    }
+
     /// Clear the event sender (called when the turn ends).
     pub async fn clear_event_channel(&self) {
         *self.state.event_tx.lock().await = None;
     }
 }
 
+fn required_action_id(message: &ServerMessage) -> Option<&str> {
+    match message {
+        ServerMessage::PermissionRequest { request_id, .. }
+        | ServerMessage::WorkspacePermissionRequest { request_id, .. }
+        | ServerMessage::SubagentPermissionRequest { request_id, .. }
+        | ServerMessage::AskUserRequest { request_id, .. }
+        | ServerMessage::GoalProposed { request_id, .. } => Some(request_id),
+        _ => None,
+    }
+}
+
 /// Translate a `ServerMessage` into zero or more `AgentEvent`s.
 /// Channel-bearing wire messages get fresh `oneshot::channel`s; the
-/// `Receiver` goes into the `AgentEvent`, and a spawned task forwards
+/// `Sender` goes into the `AgentEvent`, and a spawned task forwards
 /// the response back to the daemon.
 async fn translate_server_message(
     msg: &ServerMessage,
     state: &Arc<ClientState>,
 ) -> Vec<AgentEvent> {
     match msg {
+        ServerMessage::TodoUpdated { .. } | ServerMessage::TodoUpdateError { .. } => Vec::new(),
         ServerMessage::RemoteReady { .. } => Vec::new(),
         ServerMessage::SessionReady { .. } => Vec::new(),
 
@@ -424,7 +640,9 @@ async fn translate_server_message(
             }
         }
 
-        ServerMessage::UserMessage { .. } => Vec::new(),
+        ServerMessage::UserMessage { .. } | ServerMessage::SessionActivitySnapshot { .. } => {
+            Vec::new()
+        }
 
         ServerMessage::ToolStart { call_id } => {
             vec![AgentEvent::ToolStart {
@@ -501,6 +719,7 @@ async fn translate_server_message(
             request_id,
             call_id,
             questions,
+            subagent,
         } => {
             let (tx, rx) = oneshot::channel();
             state
@@ -510,6 +729,7 @@ async fn translate_server_message(
                 .insert(request_id.clone(), rx);
 
             let request_id = request_id.clone();
+            let child_question = subagent.is_some();
             let state = state.clone();
             tokio::spawn(async move {
                 let rx = {
@@ -517,10 +737,12 @@ async fn translate_server_message(
                     guard.remove(&request_id)
                 };
                 if let Some(rx) = rx {
-                    if let Ok(answers) = rx.await {
+                    let answer = rx.await;
+                    if answer.is_ok() || child_question {
                         let msg = ClientMessage::AskUserResponse {
                             request_id,
-                            answers,
+                            cancelled: answer.is_err(),
+                            answers: answer.unwrap_or_default(),
                         };
                         if let Ok(json) = mew_protocol::encode_json(&msg) {
                             let _ = state.ws_out.send(json).await;
@@ -529,71 +751,33 @@ async fn translate_server_message(
                 }
             });
 
-            vec![AgentEvent::AskUser {
-                call_id: call_id.clone(),
-                questions: questions
-                    .iter()
-                    .map(|q| AskUserQuestion {
-                        prompt: q.prompt.clone(),
-                        options: q
-                            .options
-                            .iter()
-                            .map(|o| AgentQuestionOption {
-                                label: o.label.clone(),
-                                description: o.description.clone(),
-                            })
-                            .collect(),
-                    })
-                    .collect(),
-                tx,
-            }]
-        }
-
-        ServerMessage::PlanApprovalRequest {
-            request_id,
-            call_id,
-            plan_path,
-            plan_markdown,
-            persona,
-        } => {
-            let (tx, rx) = oneshot::channel();
-            state
-                .pending_plan_approvals
-                .lock()
-                .await
-                .insert(request_id.clone(), rx);
-
-            let request_id = request_id.clone();
-            let state = state.clone();
-            tokio::spawn(async move {
-                let rx = {
-                    let mut guard = state.pending_plan_approvals.lock().await;
-                    guard.remove(&request_id)
-                };
-                if let Some(rx) = rx {
-                    if let Ok(decision) = rx.await {
-                        let (approved, feedback) = match decision {
-                            PlanDecision::Approved => (true, None),
-                            PlanDecision::ChangesRequested(f) => (false, Some(f)),
-                        };
-                        let msg = ClientMessage::PlanApprovalResponse {
-                            request_id,
-                            approved,
-                            feedback,
-                        };
-                        if let Ok(json) = mew_protocol::encode_json(&msg) {
-                            let _ = state.ws_out.send(json).await;
-                        }
-                    }
+            let questions = questions
+                .iter()
+                .map(|q| AskUserQuestion {
+                    prompt: q.prompt.clone(),
+                    options: q
+                        .options
+                        .iter()
+                        .map(|o| AgentQuestionOption {
+                            label: o.label.clone(),
+                            description: o.description.clone(),
+                        })
+                        .collect(),
+                })
+                .collect();
+            vec![if let Some(source) = subagent {
+                AgentEvent::SubagentAskUser {
+                    source: source.clone(),
+                    call_id: call_id.clone(),
+                    questions,
+                    tx,
                 }
-            });
-
-            vec![AgentEvent::PlanApprovalRequest {
-                call_id: call_id.clone(),
-                plan_path: plan_path.clone(),
-                plan_markdown: plan_markdown.clone(),
-                persona: persona.clone(),
-                tx,
+            } else {
+                AgentEvent::AskUser {
+                    call_id: call_id.clone(),
+                    questions,
+                    tx,
+                }
             }]
         }
 
@@ -730,10 +914,6 @@ async fn translate_server_message(
             }]
         }
 
-        ServerMessage::PersonaSwitchRequested { name } => {
-            vec![AgentEvent::PersonaSwitchRequested { name: name.clone() }]
-        }
-
         ServerMessage::JobUpdate {
             job_id,
             command,
@@ -773,7 +953,25 @@ async fn translate_server_message(
             ]
         }
 
-        ServerMessage::ModelList { .. }
+        ServerMessage::SessionActivityChanged {
+            session_id,
+            activity,
+        } => {
+            // Idle is emitted only after the agent's full event stream drains,
+            // including tools and continuations. Closing this prompt-scoped
+            // channel lets the TUI finish after its buffered events, in order.
+            if *activity == mew_protocol::SessionState::Idle
+                && state.session_id.lock().await.as_ref() == Some(session_id)
+            {
+                *state.event_tx.lock().await = None;
+            }
+            let _ = state.notify_tx.send(msg.clone()).await;
+            Vec::new()
+        }
+
+        ServerMessage::BrowserPageRegistration { .. }
+        | ServerMessage::PromptReceipt { .. }
+        | ServerMessage::ModelList { .. }
         | ServerMessage::ModelSwitched { .. }
         | ServerMessage::RequestResolved { .. }
         | ServerMessage::SessionCleared
@@ -782,13 +980,14 @@ async fn translate_server_message(
         | ServerMessage::ClientAttached { .. }
         | ServerMessage::ClientDetached { .. }
         | ServerMessage::ControlYielded { .. }
-        | ServerMessage::SessionActivityChanged { .. }
         | ServerMessage::SessionStatsChanged { .. }
         | ServerMessage::GroupList { .. }
         | ServerMessage::GroupsChanged { .. }
         | ServerMessage::DirListing { .. }
         | ServerMessage::FilePreview { .. }
         | ServerMessage::GitStatusResult { .. }
+        | ServerMessage::SessionDiff { .. }
+        | ServerMessage::SessionDiffError { .. }
         | ServerMessage::FsChanged { .. }
         | ServerMessage::SessionUsageChanged { .. }
         | ServerMessage::SessionMetaChanged { .. }
@@ -818,6 +1017,9 @@ async fn translate_server_message(
         ServerMessage::SessionList { .. }
         | ServerMessage::SessionHistory { .. }
         | ServerMessage::SessionHistoryPage { .. }
+        | ServerMessage::SubagentHistory { .. }
+        | ServerMessage::JobOutput { .. }
+        | ServerMessage::JobOutputError { .. }
         | ServerMessage::SessionTitleChanged { .. }
         | ServerMessage::SessionSummaryChanged { .. }
         | ServerMessage::SessionAlert { .. }
@@ -902,4 +1104,456 @@ fn wire_to_provider_event(
         },
         ProviderEventWire::Error(e) => ProviderEvent::Error(e.clone()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn accept_current_handshake(
+        ws: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    ) {
+        let frame = ws.next().await.unwrap().unwrap();
+        assert!(
+            matches!(frame, Message::Text(text) if matches!(mew_protocol::decode_json::<ClientMessage>(&text).unwrap(), ClientMessage::Ping))
+        );
+        let pong = ServerMessage::Pong {
+            version: "test".into(),
+            protocol_version: mew_protocol::PROTOCOL_VERSION,
+        };
+        ws.send(Message::Text(mew_protocol::encode_json(&pong).unwrap()))
+            .await
+            .unwrap();
+    }
+
+    async fn connect_test_daemon(
+        session_dir: &std::path::Path,
+    ) -> (
+        DaemonClient,
+        mpsc::Receiver<ServerMessage>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let daemon = crate::DaemonServer::with_session_dir(
+            Arc::new(|params| {
+                Ok((
+                    mew_agent::Agent::new(
+                        Arc::new(mew_provider_fake::FakeProvider::new(Vec::new())),
+                        Arc::new(mew_hooks::NopDispatcher),
+                        Some(params.writer),
+                        Vec::new(),
+                        None,
+                    ),
+                    None,
+                    None,
+                ))
+            }),
+            session_dir.to_path_buf(),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let connection = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            crate::handle_connection(
+                socket,
+                daemon.session_manager,
+                daemon.groups_store,
+                daemon.thinking_setter,
+                daemon.auto_summary_enabled,
+            )
+            .await
+            .unwrap();
+        });
+        let (client, notifications) = DaemonClient::connect(&format!("ws://{address}"))
+            .await
+            .unwrap();
+        (client, notifications, connection)
+    }
+
+    #[tokio::test]
+    async fn session_command_errors_arrive_without_an_active_prompt() {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let directory = tempfile::tempdir().unwrap();
+            let (client, mut notifications, connection) =
+                connect_test_daemon(directory.path()).await;
+
+            client.attach_session("missing").await.unwrap();
+
+            assert!(matches!(notifications.recv().await,
+                Some(ServerMessage::Error { message }) if message == "session not found"
+            ));
+            connection.abort();
+        })
+        .await
+        .expect("session command error was lost");
+    }
+
+    #[tokio::test]
+    async fn attaching_replays_complete_persisted_history_across_page_boundaries() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let directory = tempfile::tempdir().unwrap();
+            let (client, mut notifications, connection) =
+                connect_test_daemon(directory.path()).await;
+            let limit = mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT;
+            for count in [0, 1, limit, limit + 1, 2 * limit + 1] {
+                let session_id = mew_message::SessionId::new();
+                let id = session_id.to_string();
+                let mut writer = mew_session::Writer::open_at(directory.path(), &id)
+                    .await
+                    .unwrap();
+                let mut expected = Vec::new();
+                for index in 0..count {
+                    let message_id = mew_message::MessageId::new();
+                    let message = mew_message::Message {
+                        id: message_id,
+                        session_id,
+                        role: mew_message::Role::User,
+                        parts: vec![Part::Text(mew_message::TextPart {
+                            base: mew_message::PartBase {
+                                id: mew_message::PartId::new(),
+                                message_id,
+                                session_id,
+                            },
+                            text: format!("message {index}"),
+                            synthetic: false,
+                        })],
+                        time: mew_message::Time {
+                            created: index as i64,
+                            completed: None,
+                        },
+                        assistant: None,
+                    };
+                    writer.write_message(&message).await.unwrap();
+                    expected.push(message);
+                }
+                writer.close().await.unwrap();
+
+                client.attach_session(&id).await.unwrap();
+                let mut recovered = Vec::new();
+                let mut first_page = true;
+                loop {
+                    let notification = notifications.recv().await.unwrap();
+                    if let ServerMessage::SessionHistoryPage {
+                        session_id,
+                        messages,
+                        next_cursor,
+                        replace,
+                    } = notification
+                    {
+                        assert_eq!(session_id, id);
+                        assert_eq!(replace, first_page);
+                        assert!(messages.len() <= limit);
+                        recovered.splice(..0, messages);
+                        first_page = false;
+                        if next_cursor.is_none() {
+                            break;
+                        }
+                    }
+                }
+                assert_eq!(recovered, expected, "history with {count} messages");
+            }
+            connection.abort();
+        })
+        .await
+        .expect("complete-history replay timed out");
+    }
+
+    #[tokio::test]
+    async fn required_actions_are_available_without_prompt_and_not_duplicated_in_prompt_stream() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            for active_prompt in [false, true] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
+                let server = tokio::spawn(async move {
+                    let (socket, _) = listener.accept().await.unwrap();
+                    let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+                    accept_current_handshake(&mut ws).await;
+                    ws.send(Message::Text(mew_protocol::encode_json(&ServerMessage::SessionReady {
+                        session_id: "active".into(), cwd: None, model: None, provider: None, permission_mode: None,
+                    }).unwrap())).await.unwrap();
+                    if active_prompt {
+                        assert!(matches!(ws.next().await.unwrap().unwrap(), Message::Text(text) if text.contains("prompt")));
+                    }
+                    let requests = [
+                        ServerMessage::PermissionRequest { request_id: "p".into(), tool_name: "bash".into(), input: serde_json::json!({"command":"pwd"}) },
+                        ServerMessage::WorkspacePermissionRequest { request_id: "w".into(), path: "/elsewhere".into() },
+                        ServerMessage::SubagentPermissionRequest { request_id: "s".into(), parent_call_id: "parent".into(), tool_name: "write".into(), input: serde_json::json!({}) },
+                        ServerMessage::AskUserRequest { subagent: None, request_id: "q".into(), call_id: "call-q".into(), questions: vec![mew_protocol::Question { prompt: "pick".into(), options: vec![] }] },
+                        ServerMessage::AskUserRequest { subagent: Some(mew_protocol::SubagentQuestionSource {
+                            parent_call_id: "task".into(), child_session_id: "child".into(), name: "worker".into(), display_name: Some("Curie".into()),
+                        }), request_id: "child-q".into(), call_id: "child-ask".into(), questions: vec![] },
+                        ServerMessage::GoalProposed { request_id: "g".into(), call_id: "call-g".into(), objective: "finish".into() },
+                    ];
+                    for request in requests {
+                        ws.send(Message::Text(mew_protocol::encode_json(&request).unwrap())).await.unwrap();
+                        let Message::Text(response) = ws.next().await.unwrap().unwrap() else { panic!("expected response") };
+                        let response: ClientMessage = mew_protocol::decode_json(&response).unwrap();
+                        let request_id = match response {
+                            ClientMessage::PermissionResponse { request_id, decision } => {
+                                assert_eq!(decision, WirePermissionDecision::AllowOnce); request_id
+                            }
+                            ClientMessage::AskUserResponse { request_id, answers, cancelled } => {
+                                if request_id == "child-q" { assert!(cancelled); assert!(answers.is_empty()); }
+                                else { assert!(!cancelled); assert_eq!(answers, vec!["answer"]); }
+                                request_id
+                            }
+                            ClientMessage::GoalResponse { request_id, accepted } => {
+                                assert!(accepted); request_id
+                            }
+                            other => panic!("unexpected response: {other:?}"),
+                        };
+                        assert_eq!(Some(request_id.as_str()), required_action_id(&request));
+                        ws.send(Message::Text(mew_protocol::encode_json(&ServerMessage::RequestResolved { request_id }).unwrap())).await.unwrap();
+                    }
+                    ws.send(Message::Text(mew_protocol::encode_json(&ServerMessage::SessionActivityChanged {
+                        session_id: "active".into(), activity: mew_protocol::SessionState::Idle,
+                    }).unwrap())).await.unwrap();
+                    while ws.next().await.is_some() {}
+                });
+                let (client, mut notifications) = DaemonClient::connect(&format!("ws://{addr}")).await.unwrap();
+                assert!(matches!(notifications.recv().await, Some(ServerMessage::SessionReady { .. })));
+                let mut prompt = if active_prompt { Some(client.prompt("go".into(), vec![]).await) } else { None };
+                for expected_id in ["p", "w", "s", "q", "child-q", "g"] {
+                    let request = notifications.recv().await.unwrap();
+                    let (request_id, action) = client.take_required_action(&request).unwrap();
+                    assert_eq!(request_id, expected_id);
+                    assert!(client.take_required_action(&request).is_none());
+                    match action {
+                        AgentEvent::PermissionRequest { tx, .. } | AgentEvent::WorkspacePermissionRequest { tx, .. } | AgentEvent::SubagentPermissionRequest { tx, .. } => { tx.send(PermissionDecision::AllowOnce).unwrap(); }
+                        AgentEvent::AskUser { tx, .. } => { tx.send(vec!["answer".into()]).unwrap(); }
+                        AgentEvent::SubagentAskUser { source, tx, .. } => {
+                            assert_eq!(source.child_session_id, "child");
+                            assert_eq!(source.display_name.as_deref(), Some("Curie"));
+                            drop(tx);
+                        }
+                        AgentEvent::GoalProposed { tx, .. } => { tx.send(GoalDecision::Accepted).unwrap(); }
+                        other => panic!("unexpected action: {other:?}"),
+                    }
+                    assert!(matches!(notifications.recv().await, Some(ServerMessage::RequestResolved { request_id }) if request_id == expected_id));
+                }
+                assert!(matches!(notifications.recv().await, Some(ServerMessage::SessionActivityChanged { .. })));
+                if let Some(prompt) = prompt.as_mut() { assert!(prompt.recv().await.is_none()); }
+                server.abort();
+            }
+        }).await.expect("required-action client sequence timed out");
+    }
+
+    #[tokio::test]
+    async fn resolving_another_clients_request_does_not_send_a_decision_or_cancel() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+                accept_current_handshake(&mut ws).await;
+                for message in [
+                    ServerMessage::SessionReady {
+                        session_id: "active".into(),
+                        cwd: None,
+                        model: None,
+                        provider: None,
+                        permission_mode: None,
+                    },
+                    ServerMessage::AskUserRequest {
+                        subagent: None,
+                        request_id: "q".into(),
+                        call_id: "c".into(),
+                        questions: vec![],
+                    },
+                ] {
+                    ws.send(Message::Text(mew_protocol::encode_json(&message).unwrap()))
+                        .await
+                        .unwrap();
+                }
+                let Message::Text(ping) = ws.next().await.unwrap().unwrap() else {
+                    panic!("expected ping")
+                };
+                assert!(matches!(
+                    mew_protocol::decode_json::<ClientMessage>(&ping).unwrap(),
+                    ClientMessage::Ping
+                ));
+                ws.send(Message::Text(
+                    mew_protocol::encode_json(&ServerMessage::RequestResolved {
+                        request_id: "q".into(),
+                    })
+                    .unwrap(),
+                ))
+                .await
+                .unwrap();
+                let Message::Text(ping) = ws.next().await.unwrap().unwrap() else {
+                    panic!("expected ping")
+                };
+                assert!(matches!(
+                    mew_protocol::decode_json::<ClientMessage>(&ping).unwrap(),
+                    ClientMessage::Ping
+                ));
+            });
+            let (client, mut notifications) = DaemonClient::connect(&format!("ws://{address}"))
+                .await
+                .unwrap();
+            assert!(matches!(
+                notifications.recv().await,
+                Some(ServerMessage::SessionReady { .. })
+            ));
+            let request = notifications.recv().await.unwrap();
+            let (_, event) = client.take_required_action(&request).unwrap();
+            let ping = mew_protocol::encode_json(&ClientMessage::Ping).unwrap();
+            client.send_raw(&ping).await.unwrap();
+            assert!(matches!(
+                notifications.recv().await,
+                Some(ServerMessage::RequestResolved { .. })
+            ));
+            drop(event);
+            client.send_raw(&ping).await.unwrap();
+            server.await.unwrap();
+        })
+        .await
+        .expect("external request resolution timed out");
+    }
+
+    #[tokio::test]
+    async fn connection_rejects_legacy_daemon_before_attaching() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let message = ws.next().await.unwrap().unwrap();
+            assert!(matches!(message, Message::Text(text) if text.contains("ping")));
+            ws.send(Message::Text(r#"{"type":"pong","version":"0.2.0"}"#.into()))
+                .await
+                .unwrap();
+            while ws.next().await.is_some() {}
+        });
+        let result = DaemonClient::connect(&format!("ws://{address}")).await;
+        let error = result.err().expect("legacy daemon must be rejected");
+        assert!(error.to_string().contains("protocol"));
+        assert!(error.to_string().contains("restart"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn prompt_stream_closes_only_when_attached_turn_is_idle() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (finish_tx, finish_rx) = oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+                accept_current_handshake(&mut ws).await;
+                let ready = ServerMessage::SessionReady {
+                    session_id: "active".into(),
+                    cwd: None,
+                    provider: Some("codex".into()),
+                    model: Some("test".into()),
+                    permission_mode: None,
+                };
+                ws.send(Message::Text(mew_protocol::encode_json(&ready).unwrap()))
+                    .await
+                    .unwrap();
+                ws.next().await.unwrap().unwrap(); // Prompt
+                for msg in [
+                    ServerMessage::Provider {
+                        event: mew_message::ProviderEventWire::MessageEnd {
+                            finish: mew_message::Finish::Stop,
+                            usage: mew_message::Tokens::default(),
+                            cost: 0.0,
+                            manifest: None,
+                        },
+                    },
+                    ServerMessage::ToolStart {
+                        call_id: "tool".into(),
+                    },
+                    ServerMessage::SessionActivityChanged {
+                        session_id: "other".into(),
+                        activity: mew_protocol::SessionState::Idle,
+                    },
+                ] {
+                    ws.send(Message::Text(mew_protocol::encode_json(&msg).unwrap()))
+                        .await
+                        .unwrap();
+                }
+                finish_rx.await.unwrap();
+                let idle = ServerMessage::SessionActivityChanged {
+                    session_id: "active".into(),
+                    activity: mew_protocol::SessionState::Idle,
+                };
+                ws.send(Message::Text(mew_protocol::encode_json(&idle).unwrap()))
+                    .await
+                    .unwrap();
+                // Wait for the test to close the connection so websocket closure
+                // cannot accidentally stand in for the Idle notification.
+                while ws.next().await.is_some() {}
+            });
+            let (client, mut notifications) = DaemonClient::connect(&format!("ws://{addr}"))
+                .await
+                .unwrap();
+            assert!(matches!(
+                notifications.recv().await,
+                Some(ServerMessage::SessionReady { .. })
+            ));
+            let mut events = client.prompt("hello".into(), Vec::new()).await;
+            assert!(matches!(
+                events.recv().await,
+                Some(AgentEvent::Provider(ProviderEvent::MessageEnd { .. }))
+            ));
+            assert!(matches!(
+                events.recv().await,
+                Some(AgentEvent::ToolStart { .. })
+            ));
+            assert!(matches!(
+                notifications.recv().await,
+                Some(ServerMessage::SessionActivityChanged { .. })
+            ));
+            assert!(matches!(
+                events.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+            finish_tx.send(()).unwrap();
+            assert!(events.recv().await.is_none());
+            server.abort();
+        })
+        .await
+        .expect("prompt stream did not finish");
+    }
+
+    #[tokio::test]
+    async fn disconnected_prompt_stream_reports_error_and_closes() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+                accept_current_handshake(&mut ws).await;
+                let ready = ServerMessage::SessionReady {
+                    session_id: "active".into(),
+                    cwd: None,
+                    provider: None,
+                    model: None,
+                    permission_mode: None,
+                };
+                ws.send(Message::Text(mew_protocol::encode_json(&ready).unwrap()))
+                    .await
+                    .unwrap();
+                ws.next().await.unwrap().unwrap();
+                ws.close(None).await.unwrap();
+            });
+            let (client, mut notifications) = DaemonClient::connect(&format!("ws://{addr}"))
+                .await
+                .unwrap();
+            notifications.recv().await.unwrap();
+            let mut events = client.prompt("hello".into(), Vec::new()).await;
+            assert!(matches!(events.recv().await, Some(AgentEvent::Error(_))));
+            assert!(events.recv().await.is_none());
+            // A queued follow-up must also terminate if the connection is gone.
+            let mut events = client.prompt("next".into(), Vec::new()).await;
+            assert!(matches!(events.recv().await, Some(AgentEvent::Error(_))));
+            assert!(events.recv().await.is_none());
+            server.await.unwrap();
+        })
+        .await
+        .expect("disconnected prompt stream did not finish");
+    }
 }

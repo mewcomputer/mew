@@ -7,13 +7,15 @@ use ratatui::{
 
 use crate::app::{App, Mode, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH};
 
+mod activity;
 pub(crate) mod chat;
 mod companion;
-mod input;
+pub(crate) mod input;
 pub(crate) mod overlays;
 mod sidebar;
 mod spinner;
 mod status;
+mod todos;
 mod welcome;
 
 /// Max lines of bash output shown when collapsed.
@@ -29,16 +31,21 @@ pub(super) const DIFF_LINES_MAX: usize = 30;
 
 /// Compute display width of a string using Unicode standard widths.
 pub(super) fn display_width(s: &str) -> usize {
-    s.chars()
-        .map(|ch| unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0))
-        .sum()
+    unicode_width::UnicodeWidthStr::width(s)
 }
 
 /// Render the full UI.
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
+    f.render_widget(
+        Block::default().style(Style::default().bg(app.theme.resolve("chat.surface.background"))),
+        area,
+    );
 
     let show_sidebar = area.width >= SIDEBAR_MIN_WIDTH + SIDEBAR_WIDTH;
+    app.sidebar_rect = Rect::default();
+    app.sidebar_header_rows.clear();
+    app.sidebar_item_rows.clear();
 
     let main_chunks: Vec<Rect> = if show_sidebar {
         let chunks = Layout::default()
@@ -58,6 +65,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     };
 
     let main_area = main_chunks[0];
+    app.autocomplete_area = Rect::default();
+    app.picker_mouse.list = Rect::default();
+    app.picker_mouse.details = Rect::default();
+    app.picker_mouse.details_max_scroll = 0;
+    app.picker_mouse.rows.clear();
+    app.picker_mouse.scrollbar = Default::default();
+    app.chat_content_area = Rect::default();
+    app.chat_scrollbar = Default::default();
 
     let slash_cmds = app.filtered_slash_commands();
     let show_slash = app.mode == Mode::SlashCommand && !slash_cmds.is_empty();
@@ -73,22 +88,23 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let show_ref = app.mode == Mode::CommandPalette
         && app.picker.as_ref().is_some_and(|p| p.is_at_picker())
         && ref_count > 0;
-    // Cap the visible list at min(12, half the terminal height) so a long
-    // command set doesn't eat the whole screen, and tall terminals get more
-    // items. If fewer commands exist than the cap, show them all.
-    let max_visible_items: u16 = (area.height / 2).min(12);
-    let autocomplete_height = if show_slash {
-        (slash_cmds.len() as u16).min(max_visible_items) + 2
-    } else if show_ref {
-        (ref_count as u16).min(max_visible_items) + 2
+    // Long lists can use three fifths of the screen. Each layout clips this
+    // budget to preserve its composer; short lists shrink to their content.
+    let max_autocomplete_height = (main_area.height as u32 * 3 / 5) as u16;
+    let autocomplete_count = if show_slash {
+        slash_cmds.len()
+    } else {
+        ref_count
+    };
+    let autocomplete_height = if show_slash || show_ref {
+        autocomplete_count
+            .min(u16::MAX as usize)
+            .saturating_add(4)
+            .min(max_autocomplete_height as usize) as u16
     } else {
         0
     };
-    app.slash_visible = if show_slash {
-        (slash_cmds.len()).min(max_visible_items as usize)
-    } else {
-        0
-    };
+    app.slash_visible = 0;
 
     // Landing / start screen: when there's no conversation yet, show the cat +
     // "mew" hero with a centered input directly beneath it instead of the
@@ -109,14 +125,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             main_area.width,
             main_area.height.saturating_sub(1),
         );
-
-        // Match the chat layout: paint the chat surface color behind the hero
-        // and centered input so the landing screen reads as the same canvas.
-        {
-            let landing_bg = Block::default()
-                .style(Style::default().bg(app.theme.resolve("chat.surface.background")));
-            f.render_widget(landing_bg, hero_area);
-        }
 
         let input_rect = welcome::draw_landing(f, app, hero_area);
         if app.mode == Mode::UserQuestion {
@@ -155,34 +163,19 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         return;
     }
 
-    // Estimate the input's content width (the slot minus the 1-cell border
-    // on each side and the 2-char prefix) so the layout reserves enough
-    // vertical space for wrapped lines. The exact width is computed again
-    // in `draw_input` once the slot is laid out.
-    let input_content_width = main_area.width.saturating_sub(2).saturating_sub(2);
-    let input_height = (app
-        .input_visual_line_count(input_content_width)
-        .clamp(1, 12)
-        + 2) as u16;
+    let input_height = input::desired_height(app, main_area.width);
+    let autocomplete_height = autocomplete_height.min(
+        main_area
+            .height
+            .saturating_sub(input_height.saturating_add(2)),
+    );
 
     // When an ask_user question is active, the input slot is replaced by the
     // question overlay. Reserve enough vertical space for the prompt + a few
     // options + the hint. Cap at half the terminal so a short terminal still
     // gets to see the chat above.
     let question_height = if app.mode == Mode::UserQuestion {
-        let rows = app
-            .user_question
-            .as_ref()
-            .and_then(|uq| uq.questions.get(uq.page))
-            .map(|q| {
-                // Each option takes 2 rows (label + always-rendered description
-                // row, even if empty) plus the freeform row. Plus prompt, blank,
-                // hint, and padding.
-                let n = q.options.len() as u16;
-                n * 2 + 1 + 1 + 1 + 1 + 2
-            })
-            .unwrap_or(6);
-        rows.min(main_area.height / 2).max(6)
+        input_height.min(main_area.height / 2).max(6)
     } else {
         input_height
     };
@@ -196,14 +189,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             Constraint::Length(1), // status
         ])
         .split(main_area);
-
-    // Optional chat surface background. The chat widget itself is transparent
-    // so this block fills the area behind the conversation.
-    {
-        let chat_bg = Block::default()
-            .style(Style::default().bg(app.theme.resolve("chat.surface.background")));
-        f.render_widget(chat_bg, vert[0]);
-    }
 
     chat::draw_chat(f, app, vert[0]);
 
@@ -240,6 +225,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 /// directly by the layout that hosts it (it occupies the input slot, not a
 /// centered popup), so it's not dispatched here.
 fn draw_overlays(f: &mut Frame, app: &mut App, area: Rect) {
+    if app.mode == Mode::Activity {
+        activity::draw_activity(f, app, area);
+    }
+
     if app.mode == Mode::Settings {
         if let Some(ref settings) = app.settings {
             crate::settings::draw_settings(f, settings, area, &app.theme);
@@ -251,25 +240,19 @@ fn draw_overlays(f: &mut Frame, app: &mut App, area: Rect) {
     }
 
     if app.mode == Mode::PermissionPrompt {
-        if let Some(ref perm) = app.permission {
+        if let Some(ref mut perm) = app.permission {
             overlays::draw_permission_modal(f, perm, area, &app.theme);
         }
     }
 
     if app.mode == Mode::PersonaSwitchConfirm {
-        if let Some(ref state) = app.persona_switch_confirm {
+        if let Some(ref mut state) = app.persona_switch_confirm {
             overlays::draw_persona_confirm_modal(f, state, area, &app.theme);
         }
     }
 
-    if app.mode == Mode::PlanApproval {
-        if let Some(ref state) = app.plan_approval {
-            overlays::draw_plan_approval(f, state, area, &app.theme);
-        }
-    }
-
     if app.mode == Mode::GoalProposal {
-        if let Some(ref state) = app.goal_proposal {
+        if let Some(ref mut state) = app.goal_proposal {
             overlays::draw_goal_proposal(f, state, area, &app.theme);
         }
     }
@@ -280,17 +263,47 @@ fn draw_overlays(f: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
+    if app.mode == Mode::TodoEditor {
+        todos::draw(f, app, area);
+    }
+
     if app.mode == Mode::CommandPalette {
         if let Some(ref mut picker) = app.picker {
             // The inline `@`-mention picker is drawn above the input by the
             // layout; only centered pickers render as a modal overlay.
             if !picker.is_at_picker() {
-                overlays::draw_picker(f, picker, area, &app.theme);
+                overlays::draw_picker(f, picker, &mut app.picker_mouse, area, &app.theme);
             }
         }
     }
 
     if app.mode == Mode::Help {
-        overlays::draw_help_overlay(f, area, &app.theme);
+        overlays::draw_help_overlay(f, app, area);
+    }
+}
+
+/// Read the thumb painted by ratatui so hit testing follows its exact geometry.
+pub(super) fn mouse_scrollbar(
+    f: &mut Frame,
+    area: Rect,
+    max_scroll: usize,
+) -> crate::app::MouseScrollbar {
+    if area.is_empty() {
+        return Default::default();
+    }
+    let mut thumb = Rect::default();
+    for y in area.y..area.bottom() {
+        if f.buffer_mut()[(area.x, y)].symbol() == "█" {
+            if thumb.is_empty() {
+                thumb = Rect::new(area.x, y, area.width, 1);
+            } else {
+                thumb.height += 1;
+            }
+        }
+    }
+    crate::app::MouseScrollbar {
+        area,
+        thumb,
+        max_scroll,
     }
 }

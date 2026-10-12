@@ -16,20 +16,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
+          - os: macos-15
             target: aarch64-apple-darwin
             archive: tar.gz
-          - os: macos-13
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             archive: tar.gz
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             archive: tar.gz
-          - os: ubuntu-latest
+          - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             archive: tar.gz
-            cross_linker: aarch64-linux-gnu-gcc
-            cross_pkg: gcc-aarch64-linux-gnu
 
     steps:
       - uses: actions/checkout@v4
@@ -48,17 +46,14 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config
+          sudo apt-get install -y libssl-dev pkg-config libc++-dev
 
-      - name: Install cross-compilation toolchain
-        if: matrix.cross_pkg
-        run: |
-          sudo apt-get install -y ${{ matrix.cross_pkg }}
+      - name: Install Zig for Ghostty terminal emulation
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
 
       - name: Build release binary
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: >-
-            ${{ matrix.cross_linker }}
         run: cargo build --release --target ${{ matrix.target }} -p mew
 
       - name: Package binary
@@ -94,10 +89,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
+          - os: macos-15
             target: aarch64-apple-darwin
-          - os: macos-13
+            browser_arch: arm64
+            browser_sha256: d680a7a96ab86e9ab9d2b571b12919b761e93682ad1de714bbd5ac849c8d7c9c
+          - os: macos-15-intel
             target: x86_64-apple-darwin
+            browser_arch: x64
+            browser_sha256: dad3c9f9e67791a44a768a98847510c61a7b568a0499c602632b8aee411101e7
 
     steps:
       - uses: actions/checkout@v4
@@ -111,6 +110,31 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: desktop-release-${{ matrix.target }}
+
+      - name: Install Zig for Ghostty terminal emulation
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Install native browser build tools
+        run: |
+          command -v cmake >/dev/null || brew install cmake
+          command -v ninja >/dev/null || brew install ninja
+
+      - name: Install standalone agent-browser
+        env:
+          BROWSER_ARCH: ${{ matrix.browser_arch }}
+          BROWSER_SHA256: ${{ matrix.browser_sha256 }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/mew-browser-bin"
+          browser="$RUNNER_TEMP/mew-browser-bin/agent-browser"
+          curl --fail --location --retry 3 \
+            "https://github.com/vercel-labs/agent-browser/releases/download/v0.34.0/agent-browser-darwin-$BROWSER_ARCH" \
+            --output "$browser"
+          printf '%s  %s\n' "$BROWSER_SHA256" "$browser" | shasum -a 256 -c -
+          chmod +x "$browser"
+          "$browser" --version
+          echo "$RUNNER_TEMP/mew-browser-bin" >> "$GITHUB_PATH"
 
       - name: Build desktop client, daemon, and CEF helper
         run: |

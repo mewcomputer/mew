@@ -57,9 +57,9 @@ pub struct TuiConfig {
     /// file in `~/.config/mew/themes/` or `.mew/themes/`.
     #[serde(default)]
     pub theme: String,
-    /// How long (seconds) sidebar entries stay visible after finishing:
-    /// completed subagents and done todos are hidden once they are older
-    /// than this. 0 hides them immediately. Defaults to 180 (3 minutes).
+    /// How long (seconds) failed activity stays visible in the sidebar.
+    /// Successful and cancelled activity hides immediately. 0 also hides
+    /// failures immediately. Defaults to 180 (3 minutes).
     #[serde(default = "default_sidebar_finished_ttl_secs")]
     pub sidebar_finished_ttl_secs: u64,
 }

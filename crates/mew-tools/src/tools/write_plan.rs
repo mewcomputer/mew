@@ -39,7 +39,7 @@ impl Tool for WritePlan {
     fn description(&self) -> &str {
         "Write the full content of the configured plan file (creates or \
          overwrites). Intended for the planning workflow: draft the plan here, \
-         then submit it with handoff_plan."
+         then summarize it for the user."
     }
 
     fn schema(&self) -> &Value {

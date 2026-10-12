@@ -309,10 +309,11 @@ theme-codegen-check:
     cargo build -p mew-tui --bin theme_codegen
     cargo run -p mew-tui --bin theme_codegen -- --check
 
-# CI-ready check: format, clippy, unit/integration tests (Rust + JS),
+# CI-ready check: format, clippy, unit/integration tests (Rust + JS), site build,
 # and the subprocess e2e test. The e2e test needs the binaries built;
 # `build-web` depends on the right set.
 ci: fmt clippy arch-check theme-codegen-check test-all e2e
+    pnpm --filter site build
 
 # End-to-end check: build binaries and run subprocess e2e tests.
 # The e2e test in mew-web-bridge spawns real `mew` and `mew-web`
@@ -403,9 +404,9 @@ ios-core:
 
     echo "── Generating Swift bindings ──"
     mkdir -p "${BINDINGS_DIR}"
-    cargo run -p mew-mobile-core --bin uniffi-bindgen -- generate \
+    cargo run -p mew-mobile-core --release --bin uniffi-bindgen -- generate \
         --library target/release/libmew_mobile_core.dylib \
-        --language swift --out-dir "${BINDINGS_DIR}"
+        --language swift --metadata-no-deps --out-dir "${BINDINGS_DIR}"
 
     # SwiftPM binary targets need module.modulemap (not <name>.modulemap)
     cp "${BINDINGS_DIR}/mew_mobile_coreFFI.modulemap" "${BINDINGS_DIR}/module.modulemap" 2>/dev/null || true

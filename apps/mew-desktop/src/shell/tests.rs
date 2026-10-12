@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod shell_tests {
+    use super::super::browser::replace_browser_event_value;
     use super::super::composer::composer_input_height;
     use super::super::lifecycle::transcript_is_scrolled_away;
-    use super::super::session::replace_browser_event_value;
     use super::super::session_data::transcript_part_block_count;
     use super::super::*;
 
@@ -488,14 +488,17 @@ mod shell_tests {
 
     #[test]
     fn selected_session_path_uses_the_session_cwd() {
+        let home = PathBuf::from(std::env::var_os("HOME").expect("session path test needs HOME"));
         let conversations = [ConversationItem {
             session_id: "session-1".into(),
             title: "A session".into(),
-            cwd: Some("/Users/natalie/code/mew".into()),
-            workspace_path: Some("/Users/natalie/code/mew".into()),
+            cwd: Some(home.join("code/mew").to_string_lossy().into_owned()),
+            workspace_path: Some(home.join("code/other").to_string_lossy().into_owned()),
             last_message_at: None,
             state: mew_protocol::SessionState::Idle,
             last_turn_failed: false,
+            failure_detail: None,
+            unread_completion: false,
             needs_attention: false,
             archived: false,
             pinned: false,
@@ -598,6 +601,16 @@ mod shell_tests {
     }
 
     #[test]
+    fn failed_partial_assistant_turn_has_retry_attention() {
+        assert_eq!(
+            transcript_attention(false, false, true, false),
+            Some(TranscriptAttention::Failed)
+        );
+        assert_eq!(transcript_attention(false, true, true, false), None);
+        assert_eq!(transcript_attention(false, false, true, true), None);
+    }
+
+    #[test]
     fn message_and_action_events_request_full_client_snapshots() {
         assert!(client_event_requires_transcript_snapshot(
             &ClientEvent::SessionReady {
@@ -633,6 +646,33 @@ mod shell_tests {
 
     #[test]
     fn activity_events_request_full_session_snapshots() {
+        assert!(client_event_requires_session_snapshot(
+            &ClientEvent::ActivitySnapshot {
+                session_id: "session".into()
+            }
+        ));
+        assert!(client_event_requires_transcript_snapshot(
+            &ClientEvent::ProviderMessageEnded {
+                session_id: "session".into(),
+                cost: 0.0,
+                input_tokens: 0,
+                output_tokens: 0,
+            }
+        ));
+        assert!(client_event_requires_session_snapshot(
+            &ClientEvent::SessionActivityChanged {
+                session_id: "session".into(),
+                running: true,
+            }
+        ));
+        assert!(client_event_requires_session_snapshot(
+            &ClientEvent::ProviderMessageEnded {
+                session_id: "session".into(),
+                cost: 0.0,
+                input_tokens: 0,
+                output_tokens: 0,
+            }
+        ));
         assert!(client_event_requires_session_snapshot(
             &ClientEvent::SubagentsChanged {
                 session_id: "session".into(),
@@ -958,6 +998,81 @@ mod shell_tests {
     }
 
     #[test]
+    fn browser_pages_require_a_confirmed_loopback_profile() {
+        for url in [
+            "ws://127.0.0.1:25566",
+            "ws://[::1]:25566",
+            "ws://localhost:25566",
+        ] {
+            let profile = DesktopConnectionProfile::LocalWebSocket { url: url.into() };
+            assert!(browser_profile_is_local(&profile));
+        }
+        for url in [
+            "ws://192.0.2.1:25566",
+            "ws://127.0.0.1.evil:25566",
+            "ws://user@127.0.0.1:25566",
+            "ws://localhost:0",
+        ] {
+            let profile = DesktopConnectionProfile::LocalWebSocket { url: url.into() };
+            assert!(!browser_profile_is_local(&profile));
+        }
+        let profile = DesktopConnectionProfile::RemoteIroh {
+            node_id: "remote".into(),
+            pairing_token: None,
+            device_name: "test".into(),
+        };
+        assert!(!browser_profile_is_local(&profile));
+    }
+
+    #[test]
+    fn deferred_browser_creation_rejects_replaced_or_disconnected_owners() {
+        let owner = BrowserOwner {
+            connection_profile: "ws://127.0.0.1:25566".into(),
+            session_id: "a".into(),
+        };
+        let first = BrowserPage {
+            owner: owner.clone(),
+            page_instance: "first".into(),
+        };
+        let replacement = BrowserPage {
+            owner,
+            page_instance: "replacement".into(),
+        };
+        assert!(browser_creation_is_current(
+            Some(&first),
+            &first,
+            true,
+            false
+        ));
+        assert!(!browser_creation_is_current(
+            Some(&replacement),
+            &first,
+            true,
+            false
+        ));
+        assert!(!browser_creation_is_current(None, &first, true, false));
+        assert!(!browser_creation_is_current(
+            Some(&first),
+            &first,
+            false,
+            false
+        ));
+        assert!(!browser_creation_is_current(
+            Some(&first),
+            &first,
+            true,
+            true
+        ));
+    }
+
+    #[test]
+    fn hidden_browser_pump_survives_until_runtime_exit() {
+        assert!(browser_pump_is_needed(true, false));
+        assert!(!browser_pump_is_needed(false, false));
+        assert!(!browser_pump_is_needed(true, true));
+    }
+
+    #[test]
     fn browser_view_state_allows_the_default_and_web_urls() {
         assert!(browser_url_is_navigable("about:blank"));
         assert!(browser_url_is_navigable("https://example.com"));
@@ -1058,6 +1173,41 @@ mod shell_tests {
     }
 
     #[test]
+    fn revealing_workbench_preserves_sidebar_when_it_fits() {
+        let mut layout = ShellLayoutState {
+            workbench_collapsed: true,
+            ..Default::default()
+        };
+        assert!(layout.reveal_workbench(1240., SIDEBAR_EXPANDED_WIDTH));
+        assert!(!layout.sidebar_collapsed);
+        assert!(!layout.workbench_collapsed);
+    }
+
+    #[test]
+    fn revealing_workbench_folds_sidebar_only_when_needed() {
+        let mut layout = ShellLayoutState {
+            workbench_collapsed: true,
+            ..Default::default()
+        };
+        assert!(layout.reveal_workbench(720., SIDEBAR_EXPANDED_WIDTH));
+        assert!(layout.sidebar_collapsed);
+        assert!(!layout.workbench_collapsed);
+        let mut layout = ShellLayoutState {
+            workbench_collapsed: true,
+            ..Default::default()
+        };
+        let original = layout;
+        assert!(!layout.reveal_workbench(
+            CHAT_MIN_WIDTH + WORKBENCH_MIN_WIDTH - 1.,
+            SIDEBAR_EXPANDED_WIDTH
+        ));
+        assert_eq!(layout, original);
+        assert!(
+            layout.reveal_workbench(CHAT_MIN_WIDTH + WORKBENCH_MIN_WIDTH, SIDEBAR_EXPANDED_WIDTH)
+        );
+    }
+
+    #[test]
     fn metadata_only_updates_are_synced_without_display_events() {
         assert!(client_update_requires_metadata_sync(&[]));
         assert!(!client_update_requires_metadata_sync(&[
@@ -1074,10 +1224,10 @@ mod shell_tests {
         let mut history = PromptHistory::default();
         assert_eq!(history.recall_older("draft"), None);
 
-        history.record("first");
-        history.record("second");
-        history.record("second");
-        history.record("  ");
+        history.record("first".into());
+        history.record("second".into());
+        history.record("second".into());
+        history.record("  ".into());
 
         assert_eq!(history.recall_older("draft").as_deref(), Some("second"));
         assert_eq!(history.recall_older("").as_deref(), Some("first"));
@@ -1091,14 +1241,14 @@ mod shell_tests {
     #[test]
     fn prompt_history_recording_resets_recall_and_caps_entries() {
         let mut history = PromptHistory::default();
-        history.record("one");
+        history.record("one".into());
         history.recall_older("");
         assert!(history.is_recalling());
-        history.record("two");
+        history.record("two".into());
         assert!(!history.is_recalling());
 
         for index in 0..PROMPT_HISTORY_LIMIT + 10 {
-            history.record(&format!("prompt-{index}"));
+            history.record(format!("prompt-{index}"));
         }
         let mut oldest = None;
         history.recall_older("");
@@ -1244,6 +1394,8 @@ mod shell_tests {
             last_message_at,
             state: mew_protocol::SessionState::Idle,
             last_turn_failed: false,
+            failure_detail: None,
+            unread_completion: false,
             needs_attention: false,
             archived,
             pinned: false,

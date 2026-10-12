@@ -11,6 +11,60 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+fn conversation_marker(permissions: u32, questions: u32, unread: bool, running: bool) -> char {
+    if permissions > 0 {
+        '!'
+    } else if questions > 0 {
+        '?'
+    } else if unread {
+        '●'
+    } else if running {
+        '▶'
+    } else {
+        '○'
+    }
+}
+
+fn session_metadata(permissions: u32, questions: u32, last_message_at: Option<i64>) -> String {
+    use std::fmt::Write as _;
+
+    let mut metadata = String::new();
+    if permissions > 0 {
+        write!(
+            metadata,
+            "{permissions} {}",
+            if permissions == 1 {
+                "approval"
+            } else {
+                "approvals"
+            }
+        )
+        .unwrap();
+    }
+    if questions > 0 {
+        if !metadata.is_empty() {
+            metadata.push_str(" · ");
+        }
+        write!(
+            metadata,
+            "{questions} {}",
+            if questions == 1 {
+                "question"
+            } else {
+                "questions"
+            }
+        )
+        .unwrap();
+    }
+    if let Some(last) = last_message_at.and_then(chrono::DateTime::from_timestamp_millis) {
+        if !metadata.is_empty() {
+            metadata.push_str(" · ");
+        }
+        write!(metadata, "{}", last.format("%m-%d %H:%M")).unwrap();
+    }
+    metadata
+}
+
 impl App {
     pub fn open_model_picker(&mut self) {
         let mut items: Vec<PickerItem> = Vec::new();
@@ -71,81 +125,277 @@ impl App {
             cursor: 0,
             filter_undo: editor::UndoHistory::default(),
             scroll: 0,
+            details_scroll: 0,
+            visible_details: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: Some("→ thinking variants".into()),
             budget: None,
         });
     }
 
-    pub fn open_session_picker(&mut self) {
-        let active_id = &self.status.session_id;
-        let items: Vec<PickerItem> = self
+    pub fn session_attention_count(&self) -> usize {
+        let (needed, results) = self.notification_counts();
+        needed + results
+    }
+
+    fn unlisted_attention_ids(&self) -> std::collections::BTreeSet<&str> {
+        self.session_attention
+            .iter()
+            .filter(|(_, (permissions, questions))| *permissions > 0 || *questions > 0)
+            .map(|(id, _)| id.as_str())
+            .chain(self.unread_completions.iter().map(String::as_str))
+            .chain(
+                self.session_turn_outcomes
+                    .keys()
+                    .map(String::as_str)
+                    .filter(|id| self.conversation_failed(id)),
+            )
+            .filter(|id| {
+                self.conversation_is_open(id)
+                    && !self
+                        .daemon_sessions
+                        .iter()
+                        .any(|session| session.session_id == *id)
+            })
+            .collect()
+    }
+
+    fn session_needs_attention(&self, session: &mew_protocol::SessionInfo) -> bool {
+        if !self.conversation_is_open(&session.session_id) {
+            return false;
+        }
+        self.conversation_needs_input(&session.session_id)
+            || self.unread_completions.contains(&session.session_id)
+    }
+
+    pub(crate) fn session_label(&self, session: &mew_protocol::SessionInfo) -> String {
+        let id = &session.session_id;
+        let title = self
+            .session_titles
+            .get(id)
+            .map(String::as_str)
+            .or(session.summary.as_deref())
+            .or(session.first_message.as_deref());
+        let (permissions, questions) = self
+            .session_attention
+            .get(id)
+            .copied()
+            .unwrap_or((session.pending_permissions, session.pending_questions));
+        let marker = if self.conversation_is_open(id)
+            && self.conversation_failed(id)
+            && permissions == 0
+            && questions == 0
+        {
+            '×'
+        } else {
+            conversation_marker(
+                permissions,
+                questions,
+                self.unread_completions.contains(id),
+                session.state == mew_protocol::SessionState::Running,
+            )
+        };
+        match title {
+            Some(title) => format!("{marker} {title}"),
+            None => format!("{marker} {id:.8}"),
+        }
+    }
+
+    pub(crate) fn session_context(&self, session: &mew_protocol::SessionInfo) -> PickerContext {
+        let (permissions, questions) = self
+            .session_attention
+            .get(&session.session_id)
+            .copied()
+            .unwrap_or((session.pending_permissions, session.pending_questions));
+        PickerContext {
+            path: session
+                .cwd
+                .as_deref()
+                .filter(|cwd| !cwd.is_empty())
+                .map(|cwd| format_cwd(Path::new(cwd)))
+                .unwrap_or_else(|| "Project unavailable".into()),
+            metadata: session_metadata(permissions, questions, session.last_message_at),
+        }
+    }
+
+    pub(crate) fn session_picker_item(&self, session: &mew_protocol::SessionInfo) -> PickerItem {
+        let id = &session.session_id;
+        let mut description = String::new();
+        for (present, label) in [
+            (session.archived, "Archived"),
+            (session.pinned, "Pinned"),
+            (id == &self.status.session_id, "current"),
+        ] {
+            if present {
+                if !description.is_empty() {
+                    description.push_str(" · ");
+                }
+                description.push_str(label);
+            }
+        }
+        let failure = match self.session_turn_outcomes.get(id) {
+            Some(mew_client_core::TurnOutcome::Failed { detail }) => Some(
+                detail
+                    .as_deref()
+                    .filter(|text| !text.is_empty())
+                    .unwrap_or("Last turn failed"),
+            ),
+            None if session.last_turn_failed => Some("Last turn failed"),
+            _ => None,
+        };
+        if let Some(detail) = failure {
+            if !description.is_empty() {
+                description.push('\n');
+            }
+            description.push_str(detail);
+        }
+        PickerItem {
+            id: id.clone(),
+            label: self.session_label(session),
+            description,
+            context: Some(self.session_context(session)),
+            ..Default::default()
+        }
+    }
+
+    fn session_picker_items(&self, kind: &str) -> Vec<PickerItem> {
+        let mut items: Vec<_> = self
             .daemon_sessions
             .iter()
-            .filter(|s| !s.archived)
-            .map(|s| {
+            .filter(|session| match kind {
+                "session_open" => self.conversation_is_open(&session.session_id),
+                "session_attention" => self.session_needs_attention(session),
+                "session_archived" => session.archived,
+                _ => !session.archived,
+            })
+            .map(|session| self.session_picker_item(session))
+            .collect();
+        if matches!(kind, "session_attention" | "session_open") {
+            let unlisted = if kind == "session_attention" {
+                self.unlisted_attention_ids()
+            } else {
+                self.open_sessions
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|id| {
+                        !self
+                            .daemon_sessions
+                            .iter()
+                            .any(|session| session.session_id == *id)
+                    })
+                    .collect()
+            };
+            items.extend(unlisted.into_iter().map(|id| {
                 let title = self
                     .session_titles
-                    .get(&s.session_id)
+                    .get(id)
                     .cloned()
-                    .or_else(|| s.summary.clone())
-                    .unwrap_or_else(|| s.session_id.chars().take(8).collect());
-                let glyph = match s.state {
-                    mew_protocol::SessionState::Running => "▶",
-                    mew_protocol::SessionState::Active => "●",
-                    mew_protocol::SessionState::Idle => "○",
+                    .unwrap_or_else(|| id.chars().take(12).collect());
+                let (permissions, questions) =
+                    self.session_attention.get(id).copied().unwrap_or_default();
+                let marker = if self.conversation_failed(id) && permissions == 0 && questions == 0 {
+                    '×'
+                } else {
+                    conversation_marker(
+                        permissions,
+                        questions,
+                        self.unread_completions.contains(id),
+                        false,
+                    )
                 };
-                let cost = s
-                    .usage
-                    .as_ref()
-                    .map(|u| format!("${:.2}", u.cost))
-                    .unwrap_or_default();
-                let is_active = &s.session_id == active_id;
-                let marker = if is_active { " ● active" } else { "" };
-                let label = format!("{} {} {}{}", glyph, title, cost, marker);
-
-                let cwd_str = s.cwd.as_deref().unwrap_or("—");
-                let last = s
-                    .last_message_at
-                    .map(|ts| {
-                        chrono::DateTime::from_timestamp(ts, 0)
-                            .map(|dt| dt.format("%m-%d %H:%M").to_string())
-                            .unwrap_or_else(|| "—".to_string())
-                    })
-                    .unwrap_or_else(|| "—".to_string());
-                let desc = format!("cwd: {}  ·  last: {}", cwd_str, last);
-
                 PickerItem {
-                    id: s.session_id.clone(),
-                    label,
-                    description: desc,
+                    id: id.into(),
+                    label: format!("{marker} {title}"),
+                    context: Some(PickerContext {
+                        path: "Project unavailable".into(),
+                        metadata: session_metadata(permissions, questions, None),
+                    }),
                     ..Default::default()
                 }
-            })
-            .collect();
+            }));
+        }
+        items
+    }
+
+    pub fn open_session_picker(&mut self) {
+        self.open_session_picker_kind("session");
+    }
+
+    pub fn open_window_picker(&mut self) {
+        self.open_session_picker_kind("session_open");
+    }
+
+    pub fn open_attention_picker(&mut self) {
+        self.open_session_picker_kind("session_attention");
+    }
+
+    fn open_session_picker_kind(&mut self, kind: &str) {
         self.mode = Mode::CommandPalette;
         self.picker = Some(PickerState {
-            kind: "session".into(),
-            items,
+            kind: kind.into(),
+            items: self.session_picker_items(kind),
             filter: String::new(),
             selected: 0,
             cursor: 0,
             filter_undo: editor::UndoHistory::default(),
             scroll: 0,
+            details_scroll: 0,
+            visible_details: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
-            hint: Some("⏎ attach · ^A archive · ^P pin".into()),
+            hint: Some(
+                match kind {
+                    "session_open" => "Tab all conversations · Ctrl+Alt+W close here",
+                    "session_attention" => {
+                        "Tab all conversations · Ctrl+Alt+W close here · Ctrl+Alt+A archive/restore"
+                    }
+                    "session_archived" => "Tab recent · Ctrl+Alt+A restore · Ctrl+Alt+P pin",
+                    _ => {
+                        "Tab archived · Ctrl+Alt+O open here · Ctrl+Alt+A archive · Ctrl+Alt+P pin"
+                    }
+                }
+                .into(),
+            ),
             budget: None,
         });
     }
 
-    pub fn open_project_picker(&mut self) {
-        let items: Vec<PickerItem> = self
-            .projects
+    pub fn toggle_session_picker_archive(&mut self) {
+        let Some(picker) = self.picker.as_ref() else {
+            return;
+        };
+        let kind = if picker.kind == "session" {
+            "session_archived"
+        } else {
+            "session"
+        };
+        self.open_session_picker_kind(kind);
+    }
+
+    pub fn refresh_session_picker(&mut self) {
+        let Some(picker) = self.picker.as_ref().filter(|picker| {
+            matches!(
+                picker.kind.as_str(),
+                "session" | "session_open" | "session_attention" | "session_archived"
+            )
+        }) else {
+            return;
+        };
+        let selected = picker.selected_item().map(|item| item.id.clone());
+        let items = self.session_picker_items(&picker.kind);
+        let picker = self.picker.as_mut().unwrap();
+        picker.items = items;
+        picker.selected = selected
+            .and_then(|id| picker.filtered().iter().position(|item| item.id == id))
+            .unwrap_or(0);
+    }
+
+    fn project_picker_items(&self) -> Vec<PickerItem> {
+        self.projects
             .iter()
             .map(|p| {
                 let last = p
                     .last_used_at
-                    .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+                    .and_then(chrono::DateTime::from_timestamp_millis)
                     .map(|dt| dt.format("%m-%d %H:%M").to_string())
                     .unwrap_or_else(|| "—".to_string());
                 PickerItem {
@@ -153,12 +403,35 @@ impl App {
                     label: p.display_name.clone(),
                     description: format!(
                         "{}  ·  {} sessions  ·  last: {}",
-                        p.path, p.session_count, last
+                        format_cwd(Path::new(&p.path)),
+                        p.session_count,
+                        last
                     ),
                     ..Default::default()
                 }
             })
-            .collect();
+            .collect()
+    }
+
+    pub fn refresh_project_picker(&mut self) {
+        let Some(picker) = self
+            .picker
+            .as_ref()
+            .filter(|picker| picker.kind == "project")
+        else {
+            return;
+        };
+        let selected = picker.selected_item().map(|item| item.id.clone());
+        let items = self.project_picker_items();
+        let picker = self.picker.as_mut().unwrap();
+        picker.items = items;
+        picker.selected = selected
+            .and_then(|id| picker.filtered().iter().position(|item| item.id == id))
+            .unwrap_or(0);
+    }
+
+    pub fn open_project_picker(&mut self) {
+        let items = self.project_picker_items();
         self.mode = Mode::CommandPalette;
         self.picker = Some(PickerState {
             kind: "project".into(),
@@ -168,8 +441,10 @@ impl App {
             cursor: 0,
             filter_undo: editor::UndoHistory::default(),
             scroll: 0,
+            details_scroll: 0,
+            visible_details: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
-            hint: Some("new session in project".into()),
+            hint: None,
             budget: None,
         });
     }
@@ -253,6 +528,8 @@ impl App {
             cursor: 0,
             filter_undo: editor::UndoHistory::default(),
             scroll: 0,
+            details_scroll: 0,
+            visible_details: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: None,
             budget: None,
@@ -335,6 +612,8 @@ impl App {
             cursor: 0,
             filter_undo: editor::UndoHistory::default(),
             scroll: 0,
+            details_scroll: 0,
+            visible_details: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: None,
             budget: picker_budget,
@@ -385,6 +664,8 @@ impl App {
             cursor: 0,
             filter_undo: editor::UndoHistory::default(),
             scroll: 0,
+            details_scroll: 0,
+            visible_details: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: None,
             budget: None,
@@ -418,6 +699,8 @@ impl App {
             cursor: 0,
             filter_undo: editor::UndoHistory::default(),
             scroll: 0,
+            details_scroll: 0,
+            visible_details: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: None,
             budget: None,
@@ -466,6 +749,8 @@ impl App {
             cursor: 0,
             filter_undo: editor::UndoHistory::default(),
             scroll: 0,
+            details_scroll: 0,
+            visible_details: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: None,
             budget: None,
@@ -519,7 +804,7 @@ impl App {
     /// [`App::sync_at_picker`]; files are fuzzy-searched with fff once the
     /// background index is ready.
     pub fn open_at_picker(&mut self) {
-        self.at_file_items = file_mention_items();
+        self.at_file_items = file_mention_items(&self.project_cwd());
         self.at_reference_items = self.build_reference_items();
         self.fff_file_results = None;
         self.pending_file_query = None;
@@ -535,6 +820,8 @@ impl App {
             cursor: 0,
             filter_undo: editor::UndoHistory::default(),
             scroll: 0,
+            details_scroll: 0,
+            visible_details: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: None,
             budget: None,
@@ -672,6 +959,16 @@ impl App {
             .unwrap_or(false)
     }
 
+    pub(super) fn invalidate_file_catalog(&mut self) {
+        self.file_search_gen = self.file_search_gen.wrapping_add(1);
+        self.file_index = None;
+        self.file_index_building = false;
+        self.fff_file_results = None;
+        self.pending_file_query = None;
+        self.file_query_deadline = None;
+        self.at_file_items.clear();
+    }
+
     fn schedule_file_index_build(&mut self) {
         if self.file_index.is_some() || self.file_index_building {
             return;
@@ -682,10 +979,11 @@ impl App {
         }
         self.file_index_building = true;
         let tx = self.file_search_tx.clone();
-        let cwd = std::env::current_dir().unwrap_or_default();
+        let cwd = self.project_cwd();
+        let generation = self.file_search_gen;
         tokio::task::spawn_blocking(move || {
             let result = build_file_index(&cwd);
-            let _ = tx.blocking_send(FileSearchEvent::IndexReady(result));
+            let _ = tx.blocking_send(FileSearchEvent::IndexReady { generation, result });
         });
     }
 
@@ -714,17 +1012,20 @@ impl App {
     pub fn poll_file_search(&mut self) {
         while let Ok(event) = self.file_search_rx.try_recv() {
             match event {
-                FileSearchEvent::IndexReady(Ok(index)) => {
-                    self.file_index = Some(index);
+                FileSearchEvent::IndexReady { generation, result } => {
+                    if generation != self.file_search_gen {
+                        continue;
+                    }
                     self.file_index_building = false;
+                    let Ok(index) = result else {
+                        continue;
+                    };
+                    self.file_index = Some(index);
                     if let Some(q) = self.pending_file_query.clone() {
                         self.pending_file_query = None;
                         self.file_query_deadline = None;
                         self.schedule_file_search(q);
                     }
-                }
-                FileSearchEvent::IndexReady(Err(_)) => {
-                    self.file_index_building = false;
                 }
                 FileSearchEvent::Results {
                     generation,
@@ -815,6 +1116,8 @@ impl App {
             cursor: 0,
             filter_undo: editor::UndoHistory::default(),
             scroll: 0,
+            details_scroll: 0,
+            visible_details: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: None,
             budget: None,
@@ -831,11 +1134,10 @@ impl App {
 /// truncated to 50 entries sorted by modification time (newest first), with
 /// shortest path breaking ties. The fff index, when ready, supersedes this
 /// walk for non-empty plain queries.
-fn file_mention_items() -> Vec<PickerItem> {
-    let cwd = std::env::current_dir().unwrap_or_default();
+fn file_mention_items(cwd: &Path) -> Vec<PickerItem> {
     let mut entries: Vec<(PickerItem, std::time::SystemTime)> = Vec::new();
 
-    let walker = ignore::WalkBuilder::new(&cwd)
+    let walker = ignore::WalkBuilder::new(cwd)
         .max_depth(Some(4))
         .hidden(false)
         .git_ignore(true)
@@ -853,7 +1155,7 @@ fn file_mention_items() -> Vec<PickerItem> {
             continue;
         }
         let rel = path
-            .strip_prefix(&cwd)
+            .strip_prefix(cwd)
             .unwrap_or(path)
             .to_string_lossy()
             .to_string();

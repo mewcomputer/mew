@@ -18,7 +18,27 @@ impl App {
             },
             SlashCommand {
                 name: "/todo".into(),
-                description: "show the session todo list".into(),
+                description: "view and edit session todos".into(),
+            },
+            SlashCommand {
+                name: "/agents".into(),
+                description: "view session subagents".into(),
+            },
+            SlashCommand {
+                name: "/jobs".into(),
+                description: "view background jobs".into(),
+            },
+            SlashCommand {
+                name: "/tools".into(),
+                description: "inspect tool arguments and results".into(),
+            },
+            SlashCommand {
+                name: "/review".into(),
+                description: "review workspace changes".into(),
+            },
+            SlashCommand {
+                name: "/diff".into(),
+                description: "alias for /review".into(),
             },
             SlashCommand {
                 name: "/cost".into(),
@@ -127,6 +147,10 @@ impl App {
             "/clear" => SlashResult::Clear,
             "/compact" => SlashResult::Compact,
             "/todo" => SlashResult::Todo,
+            "/agents" => SlashResult::OpenSubagents,
+            "/jobs" => SlashResult::OpenJobs,
+            "/tools" => SlashResult::OpenTools,
+            "/review" | "/diff" => SlashResult::OpenReview,
             "/cost" => SlashResult::Message(self.build_cost_report()),
             "/help" => SlashResult::OpenHelp,
             "/model" | "/models" => {

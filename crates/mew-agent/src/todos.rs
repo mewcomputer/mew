@@ -238,9 +238,16 @@ impl TodoList {
                 .map_err(|e| e.to_string())?;
         }
         let data = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        tokio::fs::write(path, data)
-            .await
-            .map_err(|e| e.to_string())
+        let temporary = path.with_extension(format!("{}.tmp", ulid::Ulid::new()));
+        let result = async {
+            tokio::fs::write(&temporary, data).await?;
+            tokio::fs::rename(&temporary, path).await
+        }
+        .await;
+        if result.is_err() {
+            let _ = tokio::fs::remove_file(&temporary).await;
+        }
+        result.map_err(|e| e.to_string())
     }
 }
 
@@ -399,6 +406,30 @@ mod tests {
         let list = TodoList::load(&path).await.unwrap();
         assert!(list.items.is_empty());
         assert_eq!(list.next_id, 1);
+    }
+
+    #[tokio::test]
+    async fn saving_todos_keeps_an_open_reader_on_a_complete_snapshot() {
+        use std::io::Read;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("todos.json");
+        let mut list = TodoList::new();
+        list.create(vec![("original".into(), vec![])]);
+        list.save(&path).await.unwrap();
+        let original = list.clone();
+        let mut reader = std::fs::File::open(&path).unwrap();
+        list.update(1, Some("updated".into()), Some(TodoStatus::Blocked))
+            .unwrap();
+        list.save(&path).await.unwrap();
+
+        let mut snapshot = String::new();
+        reader.read_to_string(&mut snapshot).unwrap();
+        assert_eq!(
+            serde_json::from_str::<TodoList>(&snapshot).unwrap(),
+            original
+        );
+        assert_eq!(TodoList::load(&path).await.unwrap(), list);
     }
 }
 

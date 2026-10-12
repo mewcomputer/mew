@@ -299,6 +299,11 @@ void uniffi_mew_mobile_core_fn_method_mobilecore_attach(uint64_t ptr, RustBuffer
 void uniffi_mew_mobile_core_fn_method_mobilecore_cancel(uint64_t ptr, RustBuffer id, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_CANCEL_ASK_USER
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_CANCEL_ASK_USER
+void uniffi_mew_mobile_core_fn_method_mobilecore_cancel_ask_user(uint64_t ptr, RustBuffer id, RustBuffer request_id, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_CONNECT
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_CONNECT
 void uniffi_mew_mobile_core_fn_method_mobilecore_connect(uint64_t ptr, RustBuffer id, RustCallStatus *_Nonnull out_status
@@ -361,7 +366,7 @@ void uniffi_mew_mobile_core_fn_method_mobilecore_pin_session(uint64_t ptr, RustB
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_PROMPT
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_PROMPT
-void uniffi_mew_mobile_core_fn_method_mobilecore_prompt(uint64_t ptr, RustBuffer id, RustBuffer text, RustCallStatus *_Nonnull out_status
+int8_t uniffi_mew_mobile_core_fn_method_mobilecore_prompt(uint64_t ptr, RustBuffer id, RustBuffer text, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_REMOVE_DAEMON
@@ -382,11 +387,6 @@ void uniffi_mew_mobile_core_fn_method_mobilecore_respond_ask_user(uint64_t ptr, 
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_RESPOND_PERMISSION
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_RESPOND_PERMISSION
 void uniffi_mew_mobile_core_fn_method_mobilecore_respond_permission(uint64_t ptr, RustBuffer id, RustBuffer request_id, RustBuffer decision, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_RESPOND_PLAN_APPROVAL
-#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_RESPOND_PLAN_APPROVAL
-void uniffi_mew_mobile_core_fn_method_mobilecore_respond_plan_approval(uint64_t ptr, RustBuffer id, RustBuffer request_id, int8_t approved, RustBuffer feedback, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_RESPOND_TO_GOAL
@@ -421,7 +421,7 @@ void uniffi_mew_mobile_core_fn_method_mobilecore_set_thinking_variant(uint64_t p
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_SLASH_COMMAND
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_SLASH_COMMAND
-void uniffi_mew_mobile_core_fn_method_mobilecore_slash_command(uint64_t ptr, RustBuffer id, RustBuffer command, RustCallStatus *_Nonnull out_status
+int8_t uniffi_mew_mobile_core_fn_method_mobilecore_slash_command(uint64_t ptr, RustBuffer id, RustBuffer command, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_SNAPSHOT
@@ -760,6 +760,12 @@ uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_cancel(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_CANCEL_ASK_USER
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_CANCEL_ASK_USER
+uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_cancel_ask_user(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_CONNECT
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_CONNECT
 uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_connect(void
@@ -859,12 +865,6 @@ uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_respond_ask_user(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_RESPOND_PERMISSION
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_RESPOND_PERMISSION
 uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_respond_permission(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_RESPOND_PLAN_APPROVAL
-#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_RESPOND_PLAN_APPROVAL
-uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_respond_plan_approval(void
     
 );
 #endif

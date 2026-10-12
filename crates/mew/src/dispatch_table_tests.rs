@@ -10,6 +10,7 @@ use strum::IntoEnumIterator;
 /// lets one struct cover both the "happy path" and "unsupported" tests.
 struct RecordingTarget {
     calls: Vec<&'static str>,
+    closed_questions: Vec<(String, String)>,
     failing: bool,
 }
 
@@ -17,12 +18,14 @@ impl RecordingTarget {
     fn new() -> Self {
         Self {
             calls: Vec::new(),
+            closed_questions: Vec::new(),
             failing: false,
         }
     }
     fn failing() -> Self {
         Self {
             calls: Vec::new(),
+            closed_questions: Vec::new(),
             failing: true,
         }
     }
@@ -41,20 +44,41 @@ impl RecordingTarget {
 
 #[async_trait::async_trait]
 impl runtime::target::CommandTarget for RecordingTarget {
-    fn prompt(
+    async fn close_question(&mut self, session_id: &str, request_id: &str) -> anyhow::Result<()> {
+        self.record("close_question");
+        self.closed_questions
+            .push((session_id.into(), request_id.into()));
+        if self.failing {
+            anyhow::bail!("close rejected")
+        }
+        Ok(())
+    }
+    async fn prompt(
         &mut self,
+        _session_id: &str,
+        _request_id: &str,
         _enriched: String,
         _parts: Vec<Part>,
-    ) -> tokio::sync::mpsc::Receiver<AgentEvent> {
+    ) -> anyhow::Result<()> {
         self.record("prompt");
-        let (_tx, rx) = tokio::sync::mpsc::channel(1);
-        rx
+        if self.failing {
+            anyhow::bail!("submission rejected")
+        }
+        Ok(())
     }
-    async fn cancel(&mut self) {
+    async fn cancel(&mut self, _session_id: &str) -> anyhow::Result<()> {
         self.record("cancel");
+        if self.failing {
+            anyhow::bail!("cancel rejected")
+        }
+        Ok(())
     }
-    async fn guide(&mut self, _text: String) {
+    async fn guide(&mut self, _session_id: &str, _text: String) -> anyhow::Result<()> {
         self.record("guide");
+        if self.failing {
+            anyhow::bail!("guide rejected")
+        }
+        Ok(())
     }
     async fn clear(&mut self) -> Result<(), runtime::target::Unsupported> {
         self.record("clear");
@@ -64,12 +88,48 @@ impl runtime::target::CommandTarget for RecordingTarget {
         self.record("compact");
         self.check()
     }
-    async fn todos(&mut self) -> Result<String, runtime::target::Unsupported> {
-        self.record("todos");
+    async fn read_job_output(
+        &mut self,
+        _session_id: &str,
+        _job_id: &str,
+        _request_id: &str,
+        _offset: u64,
+    ) -> Result<(), runtime::target::Unsupported> {
+        self.record("read_job_output");
+        self.check()
+    }
+    async fn read_session_diff(
+        &mut self,
+        _session_id: &str,
+        _request_id: &str,
+    ) -> Result<(), runtime::target::Unsupported> {
+        self.record("read_session_diff");
+        self.check()
+    }
+    async fn read_subagent_history(
+        &mut self,
+        _session_id: &str,
+        _child_session_id: &str,
+        _request_id: &str,
+    ) -> Result<(), runtime::target::Unsupported> {
+        self.record("read_subagent_history");
+        self.check()
+    }
+    async fn update_todo(
+        &mut self,
+        _session_id: &str,
+        edit: mew_protocol::TodoEdit,
+    ) -> anyhow::Result<Vec<mew_agent::Todo>> {
+        self.record("update_todo");
         if self.failing {
-            Err(runtime::target::Unsupported("test"))
+            anyhow::bail!("save rejected")
         } else {
-            Ok("test".into())
+            Ok(vec![mew_agent::Todo {
+                id: edit.todo_id,
+                content: edit.content,
+                status: mew_agent::TodoStatus::parse(&edit.status).unwrap(),
+                depends_on: vec![],
+            }])
         }
     }
     async fn switch_model(
@@ -247,17 +307,44 @@ async fn test_action_variant_table() {
             }
             Action::SetThinkingVariant(_) => Action::SetThinkingVariant("off".into()),
             Action::AttachSession(_) => Action::AttachSession("sess_123".into()),
-            Action::SendQueuedNow(_) => Action::SendQueuedNow("queued text".into()),
-            Action::GuideQueued(_) => Action::GuideQueued("guided text".into()),
+            Action::SendQueuedNow { .. } => Action::SendQueuedNow {
+                session_id: String::new(),
+                text: "queued text".into(),
+            },
+            Action::GuideQueued { .. } => Action::GuideQueued {
+                session_id: String::new(),
+                text: "guided text".into(),
+            },
+            Action::UpdateTodo { .. } => Action::UpdateTodo {
+                session_id: String::new(),
+                edit: mew_protocol::TodoEdit {
+                    todo_id: 7,
+                    expected_content: "old".into(),
+                    expected_status: "pending".into(),
+                    content: "edited".into(),
+                    status: "pending".into(),
+                },
+            },
             other => other,
         };
         let mut app = mew_tui::App::new();
+        if matches!(
+            action,
+            Action::SubmitQueued { .. }
+                | Action::SendQueuedNow { .. }
+                | Action::GuideQueued { .. }
+                | Action::CloseQuestion { .. }
+        ) {
+            app.status.session_id = String::new();
+        }
+        if matches!(action, Action::UpdateTodo { .. }) {
+            app.open_todos(None);
+        }
         let mut target = RecordingTarget::new();
         let mut should_break = false;
         let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
             active_persona: None,
         }));
-        let (event_loop, _event_rx) = mew_tui::EventLoop::new();
 
         let chat_dirty_before = app.chat_dirty;
         let messages_before = app.messages().len();
@@ -267,7 +354,6 @@ async fn test_action_variant_table() {
         let mut cx = runtime::Ctx {
             app: &mut app,
             target: &mut target,
-            event_loop: &event_loop,
             should_break: &mut should_break,
             cat: None,
             loaded_personas: &[],
@@ -312,14 +398,12 @@ async fn test_synthetic_message_renders_immediately() {
     let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
         active_persona: None,
     }));
-    let (event_loop, _event_rx) = mew_tui::EventLoop::new();
 
     // /cost returns SlashResult::Message which pushes a synthetic message.
     let dirty_before = app.chat_dirty;
     let mut cx = runtime::Ctx {
         app: &mut app,
         target: &mut target,
-        event_loop: &event_loop,
         should_break: &mut should_break,
         cat: None,
         loaded_personas: &[],
@@ -350,12 +434,10 @@ async fn test_unknown_slash_falls_through() {
     let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
         active_persona: None,
     }));
-    let (event_loop, _event_rx) = mew_tui::EventLoop::new();
 
     let mut cx = runtime::Ctx {
         app: &mut app,
         target: &mut target,
-        event_loop: &event_loop,
         should_break: &mut should_break,
         cat: None,
         loaded_personas: &[],
@@ -372,6 +454,108 @@ async fn test_unknown_slash_falls_through() {
     );
 }
 
+#[tokio::test]
+async fn submission_waits_for_confirmation_and_failed_submission_preserves_editor() {
+    let mut app = mew_tui::App::new();
+    app.daemon_mode = true;
+    app.status.session_id = "owner".into();
+    app.input = "  unsent draft  ".into();
+    app.cursor = 5;
+    let mut target = RecordingTarget::failing();
+    let mut should_break = false;
+    let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
+        active_persona: None,
+    }));
+    let mut cx = runtime::Ctx {
+        app: &mut app,
+        target: &mut target,
+        should_break: &mut should_break,
+        cat: None,
+        loaded_personas: &[],
+        plugin_info: &plugin_info,
+    };
+    cx.app.attaching_session = true;
+    runtime::handle_action(&mut cx, Action::Submit("unsent draft".into())).await;
+    assert!(cx.target.calls.is_empty());
+    assert_eq!(cx.app.input, "  unsent draft  ");
+    cx.app.attaching_session = false;
+    runtime::handle_action(&mut cx, Action::Submit("unsent draft".into())).await;
+    assert_eq!(cx.target.calls, ["prompt"]);
+    assert_eq!(cx.app.input, "  unsent draft  ");
+    assert_eq!(cx.app.cursor, 5);
+    assert!(cx.app.messages().is_empty());
+    assert!(!cx.app.streaming);
+    assert!(cx.app.submission_pending());
+    runtime::handle_action(&mut cx, Action::Submit("unsent draft".into())).await;
+    assert_eq!(cx.target.calls, ["prompt"]);
+}
+
+#[tokio::test]
+async fn stale_queued_guidance_returns_to_its_owner_without_reaching_the_new_turn() {
+    let mut app = mew_tui::App::new();
+    app.daemon_mode = true;
+    app.status.session_id = "b".into();
+    app.streaming = true;
+    let mut target = RecordingTarget::new();
+    let mut should_break = false;
+    let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
+        active_persona: None,
+    }));
+    let mut cx = runtime::Ctx {
+        app: &mut app,
+        target: &mut target,
+        should_break: &mut should_break,
+        cat: None,
+        loaded_personas: &[],
+        plugin_info: &plugin_info,
+    };
+    runtime::handle_action(
+        &mut cx,
+        Action::GuideQueued {
+            session_id: "a".into(),
+            text: "a guidance".into(),
+        },
+    )
+    .await;
+    assert!(cx.target.calls.is_empty());
+    assert!(cx.app.messages().is_empty());
+    cx.app
+        .apply_daemon_notification(&mew_protocol::ServerMessage::SessionReady {
+            session_id: "a".into(),
+            cwd: None,
+            model: None,
+            provider: None,
+            permission_mode: None,
+        });
+    assert_eq!(cx.app.queued_messages, ["a guidance"]);
+}
+
+#[tokio::test]
+async fn new_conversation_keeps_the_confirmed_view_until_ready() {
+    let mut app = mew_tui::App::new();
+    app.daemon_mode = true;
+    app.push_synthetic_message("current conversation".into());
+    let mut target = RecordingTarget::new();
+    let mut should_break = false;
+    let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
+        active_persona: None,
+    }));
+    let mut cx = runtime::Ctx {
+        app: &mut app,
+        target: &mut target,
+        should_break: &mut should_break,
+        cat: None,
+        loaded_personas: &[],
+        plugin_info: &plugin_info,
+    };
+    runtime::handle_action(&mut cx, Action::NewSessionInProject("/tmp/new".into())).await;
+    assert!(cx.app.attaching_session);
+    assert_eq!(cx.app.messages().len(), 1);
+    assert!(
+        matches!(&cx.app.messages()[0].parts[0],Part::Text(text) if text.text == "current conversation")
+    );
+}
+
 // -----------------------------------------------------------------------
 // AC.6: /quit (Action::Quit) returns Flow::Quit regardless of target.
 // -----------------------------------------------------------------------
@@ -384,12 +568,10 @@ async fn test_daemon_quit() {
     let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
         active_persona: None,
     }));
-    let (event_loop, _event_rx) = mew_tui::EventLoop::new();
 
     let mut cx = runtime::Ctx {
         app: &mut app,
         target: &mut target,
-        event_loop: &event_loop,
         should_break: &mut should_break,
         cat: None,
         loaded_personas: &[],
@@ -417,12 +599,10 @@ async fn test_paste_clipboard_image_ssh_warning() {
     let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
         active_persona: None,
     }));
-    let (event_loop, _event_rx) = mew_tui::EventLoop::new();
 
     let mut cx = runtime::Ctx {
         app: &mut app,
         target: &mut target,
-        event_loop: &event_loop,
         should_break: &mut should_break,
         cat: None,
         loaded_personas: &[],
@@ -461,12 +641,10 @@ async fn test_paste_clipboard_image_no_tool_error() {
     let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
         active_persona: None,
     }));
-    let (event_loop, _event_rx) = mew_tui::EventLoop::new();
 
     let mut cx = runtime::Ctx {
         app: &mut app,
         target: &mut target,
-        event_loop: &event_loop,
         should_break: &mut should_break,
         cat: None,
         loaded_personas: &[],
@@ -589,14 +767,12 @@ async fn test_unsupported_ops_render_alerts() {
     let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
         active_persona: None,
     }));
-    let (event_loop, _event_rx) = mew_tui::EventLoop::new();
 
     // Clear with a failing target should set an alert, not clear messages.
     let messages_before = app.messages().len();
     let mut cx = runtime::Ctx {
         app: &mut app,
         target: &mut target,
-        event_loop: &event_loop,
         should_break: &mut should_break,
         cat: None,
         loaded_personas: &[],
@@ -626,7 +802,6 @@ async fn test_set_permission_mode_not_dropped() {
     let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
         active_persona: None,
     }));
-    let (event_loop, _event_rx) = mew_tui::EventLoop::new();
 
     let original_mode = app.permission_mode;
     let new_mode = mew_hooks::PermissionMode::Dangerous;
@@ -635,7 +810,6 @@ async fn test_set_permission_mode_not_dropped() {
     let mut cx = runtime::Ctx {
         app: &mut app,
         target: &mut target,
-        event_loop: &event_loop,
         should_break: &mut should_break,
         cat: None,
         loaded_personas: &[],
@@ -672,11 +846,9 @@ async fn test_cycle_persona_forward_through_list() {
     let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
         active_persona: None,
     }));
-    let (event_loop, _event_rx) = mew_tui::EventLoop::new();
     let mut cx = runtime::Ctx {
         app: &mut app,
         target: &mut target,
-        event_loop: &event_loop,
         should_break: &mut should_break,
         cat: None,
         loaded_personas: &personas,
@@ -701,11 +873,9 @@ async fn test_cycle_persona_forward_wraps_to_default() {
     let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
         active_persona: None,
     }));
-    let (event_loop, _event_rx) = mew_tui::EventLoop::new();
     let mut cx = runtime::Ctx {
         app: &mut app,
         target: &mut target,
-        event_loop: &event_loop,
         should_break: &mut should_break,
         cat: None,
         loaded_personas: &personas,
@@ -732,11 +902,9 @@ async fn test_cycle_persona_backward_from_default_wraps_to_last() {
     let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
         active_persona: None,
     }));
-    let (event_loop, _event_rx) = mew_tui::EventLoop::new();
     let mut cx = runtime::Ctx {
         app: &mut app,
         target: &mut target,
-        event_loop: &event_loop,
         should_break: &mut should_break,
         cat: None,
         loaded_personas: &personas,
@@ -759,11 +927,9 @@ async fn test_cycle_persona_empty_list_sets_alert() {
     let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
         active_persona: None,
     }));
-    let (event_loop, _event_rx) = mew_tui::EventLoop::new();
     let mut cx = runtime::Ctx {
         app: &mut app,
         target: &mut target,
-        event_loop: &event_loop,
         should_break: &mut should_break,
         cat: None,
         loaded_personas: &[],
@@ -814,11 +980,9 @@ async fn test_autotitle_autosummary_yield_reach_target() {
         let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
             active_persona: None,
         }));
-        let (event_loop, _event_rx) = mew_tui::EventLoop::new();
         let mut cx = runtime::Ctx {
             app: &mut app,
             target: &mut target,
-            event_loop: &event_loop,
             should_break: &mut should_break,
             cat: None,
             loaded_personas: &[],
@@ -842,11 +1006,9 @@ async fn test_autotitle_unsupported_renders_alert() {
     let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
         active_persona: None,
     }));
-    let (event_loop, _event_rx) = mew_tui::EventLoop::new();
     let mut cx = runtime::Ctx {
         app: &mut app,
         target: &mut target,
-        event_loop: &event_loop,
         should_break: &mut should_break,
         cat: None,
         loaded_personas: &[],
@@ -871,11 +1033,9 @@ async fn test_unflag_reaches_target_and_updates_display() {
     let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
         active_persona: None,
     }));
-    let (event_loop, _event_rx) = mew_tui::EventLoop::new();
     let mut cx = runtime::Ctx {
         app: &mut app,
         target: &mut target,
-        event_loop: &event_loop,
         should_break: &mut should_break,
         cat: None,
         loaded_personas: &[],
@@ -905,11 +1065,9 @@ async fn test_project_picker_flow_reaches_target() {
     let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
         active_persona: None,
     }));
-    let (event_loop, _event_rx) = mew_tui::EventLoop::new();
     let mut cx = runtime::Ctx {
         app: &mut app,
         target: &mut target,
-        event_loop: &event_loop,
         should_break: &mut should_break,
         cat: None,
         loaded_personas: &[],
@@ -963,11 +1121,9 @@ async fn test_session_meta_actions_reach_target() {
     let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
         active_persona: None,
     }));
-    let (event_loop, _event_rx) = mew_tui::EventLoop::new();
     let mut cx = runtime::Ctx {
         app: &mut app,
         target: &mut target,
-        event_loop: &event_loop,
         should_break: &mut should_break,
         cat: None,
         loaded_personas: &[],
@@ -1019,12 +1175,10 @@ async fn test_cancel_keeps_streaming_until_turn_ends() {
     let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
         active_persona: None,
     }));
-    let (event_loop, _event_rx) = mew_tui::EventLoop::new();
 
     let mut cx = runtime::Ctx {
         app: &mut app,
         target: &mut target,
-        event_loop: &event_loop,
         should_break: &mut should_break,
         cat: None,
         loaded_personas: &[],
@@ -1043,4 +1197,256 @@ async fn test_cancel_keeps_streaming_until_turn_ends() {
     app.handle_agent_event(mew_agent::AgentEvent::Error("aborted".into()));
     assert!(!app.streaming, "turn end should clear streaming");
     assert!(!app.cancelling, "turn end should clear cancelling");
+}
+
+#[tokio::test]
+async fn test_submit_queues_until_full_turn_finishes() {
+    let mut app = mew_tui::App::new();
+    app.daemon_mode = true;
+    app.streaming = true;
+    let mut target = RecordingTarget::new();
+    let mut should_break = false;
+    let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
+        active_persona: None,
+    }));
+    let mut cx = runtime::Ctx {
+        app: &mut app,
+        target: &mut target,
+        should_break: &mut should_break,
+        cat: None,
+        loaded_personas: &[],
+        plugin_info: &plugin_info,
+    };
+
+    // Hidden reasoning can have no visible parts at all.
+    runtime::handle_action(&mut cx, Action::Submit("first".into())).await;
+    cx.app.handle_agent_event(AgentEvent::Provider(
+        mew_provider::ProviderEvent::MessageEnd {
+            finish: mew_message::Finish::Stop,
+            usage: mew_message::Tokens::default(),
+            cost: 0.0,
+        },
+    ));
+    runtime::handle_action(&mut cx, Action::Submit("second".into())).await;
+    runtime::handle_action(&mut cx, Action::SlashCommand("/unknown".into())).await;
+    assert_eq!(cx.app.queued_messages, vec!["first", "second", "/unknown"]);
+    assert!(cx.target.calls.is_empty());
+    assert!(cx.app.messages().is_empty());
+    assert!(!cx.app.pending_queued_send);
+
+    cx.app.finish_turn();
+    assert!(cx.app.pending_queued_send);
+    let first = cx.app.pop_queued_message().unwrap();
+    runtime::handle_action(&mut cx, Action::Submit(first)).await;
+    assert_eq!(cx.target.calls, vec!["prompt"]);
+    assert!(cx.app.streaming);
+    assert_eq!(cx.app.queued_messages, vec!["second", "/unknown"]);
+}
+
+#[tokio::test]
+async fn test_send_queued_now_waits_for_cancellation_shutdown() {
+    let mut app = mew_tui::App::new();
+    app.daemon_mode = true;
+    app.streaming = true;
+    app.queued_messages = vec!["later".into()];
+    let mut target = RecordingTarget::new();
+    let mut should_break = false;
+    let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
+        active_persona: None,
+    }));
+    let mut cx = runtime::Ctx {
+        app: &mut app,
+        target: &mut target,
+        should_break: &mut should_break,
+        cat: None,
+        loaded_personas: &[],
+        plugin_info: &plugin_info,
+    };
+    let session_id = cx.app.status.session_id.clone();
+    runtime::handle_action(
+        &mut cx,
+        Action::SendQueuedNow {
+            session_id,
+            text: "next".into(),
+        },
+    )
+    .await;
+    assert_eq!(cx.target.calls, vec!["cancel"]);
+    assert!(cx.app.streaming);
+    assert!(cx.app.cancelling);
+    assert_eq!(cx.app.queued_messages, vec!["next", "later"]);
+    cx.app
+        .handle_agent_event(AgentEvent::Error("aborted".into()));
+    runtime::handle_action(&mut cx, Action::Submit("also later".into())).await;
+    assert_eq!(cx.target.calls, vec!["cancel"]);
+    cx.app.finish_turn();
+    let next = cx.app.pop_queued_message().unwrap();
+    runtime::handle_action(&mut cx, Action::Submit(next)).await;
+    assert_eq!(cx.target.calls, vec!["cancel", "prompt"]);
+    assert_eq!(cx.app.queued_messages, vec!["later", "also later"]);
+}
+
+#[tokio::test]
+async fn closing_a_child_question_is_scoped_and_preserves_the_parent_turn() {
+    for (requested_session, failing, attaching) in [
+        ("active", false, false),
+        ("other", false, false),
+        ("active", true, false),
+        ("active", false, true),
+    ] {
+        let mut app = mew_tui::App::new();
+        app.status.session_id = "active".into();
+        app.streaming = true;
+        app.attaching_session = attaching;
+        let mut target = if failing {
+            RecordingTarget::failing()
+        } else {
+            RecordingTarget::new()
+        };
+        let mut should_break = false;
+        let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
+            active_persona: None,
+        }));
+        let mut cx = runtime::Ctx {
+            app: &mut app,
+            target: &mut target,
+            should_break: &mut should_break,
+            cat: None,
+            loaded_personas: &[],
+            plugin_info: &plugin_info,
+        };
+        runtime::handle_action(
+            &mut cx,
+            Action::CloseQuestion {
+                session_id: requested_session.into(),
+                request_id: "child-question".into(),
+            },
+        )
+        .await;
+        assert!(cx.app.streaming);
+        assert!(!cx.app.cancelling);
+        assert!(!*cx.should_break);
+        if requested_session == "active" && !attaching {
+            assert_eq!(cx.target.calls, vec!["close_question"]);
+            assert_eq!(
+                cx.target.closed_questions,
+                vec![("active".into(), "child-question".into())]
+            );
+        } else {
+            assert!(cx.target.calls.is_empty());
+        }
+        if failing || requested_session != "active" || attaching {
+            assert!(
+                cx.app.alert.is_some(),
+                "close rejection must remain visible"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn explicit_project_command_opens_the_picker_without_waiting_for_catalog_refresh() {
+    let mut app = mew_tui::App::new();
+    app.daemon_mode = true;
+    let mut target = RecordingTarget::new();
+    let mut should_break = false;
+    let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
+        active_persona: None,
+    }));
+    let mut cx = runtime::Ctx {
+        app: &mut app,
+        target: &mut target,
+        should_break: &mut should_break,
+        cat: None,
+        loaded_personas: &[],
+        plugin_info: &plugin_info,
+    };
+    runtime::handle_action(&mut cx, Action::SlashCommand("/project".into())).await;
+    assert!(target.calls.contains(&"list_projects"));
+    assert_eq!(
+        app.picker.as_ref().map(|picker| picker.kind.as_str()),
+        Some("project")
+    );
+}
+
+#[tokio::test]
+async fn activity_read_commands_reject_foreign_or_unconfirmed_session() {
+    for (owner, attaching, should_read) in [
+        ("active", false, true),
+        ("foreign", false, false),
+        ("active", true, false),
+    ] {
+        let mut app = mew_tui::App::new();
+        app.status.session_id = "active".into();
+        app.attaching_session = attaching;
+        let mut target = RecordingTarget::new();
+        let mut should_break = false;
+        let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
+            active_persona: None,
+        }));
+        let mut cx = runtime::Ctx {
+            app: &mut app,
+            target: &mut target,
+            should_break: &mut should_break,
+            cat: None,
+            loaded_personas: &[],
+            plugin_info: &plugin_info,
+        };
+        runtime::handle_action(
+            &mut cx,
+            Action::ReadJobOutput {
+                session_id: owner.into(),
+                job_id: "job".into(),
+                request_id: "read".into(),
+                offset: 42,
+            },
+        )
+        .await;
+        runtime::handle_action(
+            &mut cx,
+            Action::ReadSessionDiff {
+                session_id: owner.into(),
+                request_id: "diff".into(),
+            },
+        )
+        .await;
+        if should_read {
+            assert_eq!(
+                cx.target.calls,
+                vec!["read_job_output", "read_session_diff"]
+            );
+        } else {
+            assert!(cx.target.calls.is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn tools_and_review_slash_commands_open_details_without_submitting() {
+    for command in ["/tools", "/review", "/diff"] {
+        let mut app = mew_tui::App::new();
+        app.input = "saved draft".into();
+        let mut target = RecordingTarget::new();
+        let mut should_break = false;
+        let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
+            active_persona: None,
+        }));
+        let mut cx = runtime::Ctx {
+            app: &mut app,
+            target: &mut target,
+            should_break: &mut should_break,
+            cat: None,
+            loaded_personas: &[],
+            plugin_info: &plugin_info,
+        };
+        runtime::handle_action(&mut cx, Action::SlashCommand(command.into())).await;
+        assert_eq!(cx.app.input, "saved draft");
+        assert!(cx.target.calls.is_empty());
+        assert!(cx.app.messages().is_empty());
+        if command == "/tools" {
+            assert_eq!(cx.app.picker.as_ref().unwrap().kind, "tool");
+        } else {
+            assert_eq!(cx.app.mode, mew_tui::app::Mode::Activity);
+        }
+    }
 }

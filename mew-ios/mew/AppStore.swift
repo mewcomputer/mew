@@ -63,6 +63,15 @@ enum MewFontChoice: String, CaseIterable {
     }
 }
 
+struct PendingGoalProposal: Identifiable {
+    let daemon: String
+    let sessionId: String
+    let requestId: String
+    let objective: String
+
+    var id: String { "\(daemon):\(sessionId):\(requestId)" }
+}
+
 // MARK: - App Store
 
 /// The single source of truth for the app, mirroring the web UI's session store.
@@ -119,6 +128,7 @@ final class AppStore: ObservableObject {
     // Pending requests
     @Published var pendingPermissions: [PendingPermission] = []
     @Published var pendingAskUser: [PendingAskUser] = []
+    @Published var pendingGoals: [PendingGoalProposal] = []
 
     // Models
     @Published var availableModels: [ModelSummary] = []
@@ -142,6 +152,8 @@ final class AppStore: ObservableObject {
     // Alerts
     @Published var alerts: [AlertItem] = []
     @Published var activeBanner: AlertItem?
+
+    @Published private var pendingSubmissions: [String: Set<String>] = [:]
 
     // Retry: last prompt per session + per-session turn-failure tracking
     @Published var lastPrompt: [String: String] = [:]
@@ -240,6 +252,13 @@ final class AppStore: ObservableObject {
         }
     }
 
+    func openAlertSession(_ alert: AlertItem) {
+        guard !alert.sessionId.isEmpty,
+              alert.daemon != selectedDaemonId?.nodeId || alert.sessionId != selectedSessionId else { return }
+        selectedDaemonId = DaemonId(nodeId: alert.daemon)
+        path.append(.chat(daemonNodeId: alert.daemon, sessionId: alert.sessionId))
+    }
+
     func selectSession(_ sessionId: String) {
         guard let daemonId = selectedDaemonId, let core else { return }
         selectedSessionId = sessionId
@@ -288,16 +307,23 @@ final class AppStore: ObservableObject {
         return "\(sessionId)::\(p)"
     }
 
-    func sendPrompt(_ text: String) {
-        guard let daemonId = selectedDaemonId, let core else { return }
-        // Optimistically enter the streaming state so the "working" indicator
-        // (typing dots) shows immediately, before the first token arrives.
-        // Cleared on turnEnded.
-        isStreaming = true
+    var canSendPrompt: Bool {
+        guard !isStreaming, let daemonId = selectedDaemonId,
+              let sessionId = selectedSessionId,
+              case .connected? = daemonStatuses[daemonId.nodeId],
+              let snapshot = core?.snapshot(id: daemonId) else { return false }
+        return snapshot.attachedSession == sessionId && pendingSubmissions[daemonId.nodeId]?.contains(sessionId) != true
+    }
+
+    @discardableResult
+    func sendPrompt(_ text: String) -> Bool {
+        guard canSendPrompt, let daemonId = selectedDaemonId, let core,
+              core.prompt(id: daemonId, text: text) else { return false }
         if let sessionId = selectedSessionId {
+            pendingSubmissions[daemonId.nodeId, default: []].insert(sessionId)
             lastPrompt[sessionId] = text
         }
-        core.prompt(id: daemonId, text: text)
+        return true
     }
 
     /// Re-send the last prompt for the selected session (retry after a failed
@@ -307,9 +333,10 @@ final class AppStore: ObservableObject {
         guard let sessionId = selectedSessionId,
               let prompt = lastPrompt[sessionId],
               !prompt.isEmpty else { return }
-        isStreaming = true
-        lastTurnFailed[sessionId] = false
-        core.prompt(id: daemonId, text: prompt)
+        if canSendPrompt, core.prompt(id: daemonId, text: prompt) {
+            pendingSubmissions[daemonId.nodeId, default: []].insert(sessionId)
+            lastTurnFailed[sessionId] = false
+        }
     }
 
     func cancelTurn() {
@@ -318,13 +345,36 @@ final class AppStore: ObservableObject {
     }
 
     func respondPermission(requestId: String, decision: Decision) {
-        guard let daemonId = selectedDaemonId, let core else { return }
-        core.respondPermission(id: daemonId, requestId: requestId, decision: decision)
+        guard let daemonId = selectedDaemonId, let core,
+              let request = pendingPermissions.first(where: {
+                  $0.daemon == daemonId.nodeId && $0.sessionId == selectedSessionId && $0.requestId == requestId
+              }) else { return }
+        core.respondPermission(id: DaemonId(nodeId: request.daemon), requestId: request.requestId, decision: decision)
+    }
+
+    func respondToGoal(requestId: String, accepted: Bool) {
+        guard let daemonId = selectedDaemonId, let core,
+              let goal = pendingGoals.first(where: {
+                  $0.requestId == requestId && $0.daemon == daemonId.nodeId
+                      && $0.sessionId == selectedSessionId
+              }) else { return }
+        core.respondToGoal(id: DaemonId(nodeId: goal.daemon), requestId: goal.requestId, accepted: accepted)
     }
 
     func respondAskUser(requestId: String, answers: [String]) {
-        guard let daemonId = selectedDaemonId, let core else { return }
-        core.respondAskUser(id: daemonId, requestId: requestId, answers: answers)
+        guard let daemonId = selectedDaemonId, let core,
+              let request = pendingAskUser.first(where: {
+                  $0.daemon == daemonId.nodeId && $0.sessionId == selectedSessionId && $0.requestId == requestId
+              }) else { return }
+        core.respondAskUser(id: DaemonId(nodeId: request.daemon), requestId: request.requestId, answers: answers)
+    }
+
+    func cancelAskUser(requestId: String) {
+        guard let daemonId = selectedDaemonId, let core,
+              let request = pendingAskUser.first(where: {
+                  $0.daemon == daemonId.nodeId && $0.sessionId == selectedSessionId && $0.requestId == requestId
+              }), request.subagent != nil else { return }
+        core.cancelAskUser(id: DaemonId(nodeId: request.daemon), requestId: request.requestId)
     }
 
     func listModels() {
@@ -342,9 +392,10 @@ final class AppStore: ObservableObject {
         core.setPermissionMode(id: daemonId, mode: mode)
     }
 
-    func sendSlashCommand(_ command: String) {
-        guard let daemonId = selectedDaemonId, let core else { return }
-        core.slashCommand(id: daemonId, command: command)
+    @discardableResult
+    func sendSlashCommand(_ command: String) -> Bool {
+        guard canSendPrompt, let daemonId = selectedDaemonId, let core else { return false }
+        return core.slashCommand(id: daemonId, command: command)
     }
 
     func setThinkingVariant(_ variant: String) {
@@ -359,16 +410,7 @@ final class AppStore: ObservableObject {
 
     func switchPersona(name: String) {
         guard let daemonId = selectedDaemonId, let core else { return }
-        // "default" is a client-side concept meaning "no persona selected."
-        // The daemon has no persona named "default" — sending SwitchPersona
-        // would return an error. Just clear locally.
-        if name == "default" {
-            currentPersona[daemonId.nodeId] = nil
-        } else {
-            // Optimistic update — PersonaSwitched event will confirm.
-            currentPersona[daemonId.nodeId] = name
-            core.switchPersona(id: daemonId, name: name)
-        }
+        core.switchPersona(id: daemonId, name: name)
     }
 
     func setAutoTitle(enabled: Bool) {
@@ -413,6 +455,8 @@ final class AppStore: ObservableObject {
                     let id = DaemonId(nodeId: daemon)
                     core.listSessions(id: id)
                 }
+            } else {
+                pendingSubmissions.removeValue(forKey: daemon)
             }
 
         case .daemonVersion(let daemon, let version):
@@ -422,7 +466,7 @@ final class AppStore: ObservableObject {
             sessionLists[daemon] = sessions
             // Seed per-session turn-failure state from the rail summaries so
             // the ChatView retry banner is correct on fresh attach (before any
-            // turnEnded event fires for this session).
+            // providerMessageEnded event fires for this session).
             for session in sessions {
                 lastTurnFailed[session.sessionId] = session.lastTurnFailed
             }
@@ -443,7 +487,23 @@ final class AppStore: ObservableObject {
             directoryLoading.remove(key)
             objectWillChange.send()
 
+        case .sessionReady(let daemon, let sessionId):
+            pendingSubmissions[daemon]?.remove(sessionId)
+            pendingPermissions.removeAll { $0.daemon == daemon }
+            pendingAskUser.removeAll { $0.daemon == daemon }
+            pendingGoals.removeAll { $0.daemon == daemon }
+
         case .sessionReloaded(let daemon, let sessionId):
+            guard selectedDaemonId?.nodeId == daemon else { return }
+            // A newly created session becomes selected before its snapshot is applied.
+            if pendingNewSessionDaemon == daemon {
+                pendingNewSessionDaemon = nil
+                selectedSessionId = sessionId
+                path.append(.chat(daemonNodeId: daemon, sessionId: sessionId))
+            } else if selectedSessionId == nil {
+                selectedSessionId = sessionId
+            }
+            guard selectedSessionId == sessionId else { return }
             // Pull snapshot after reload
             if let snap = core?.snapshot(id: DaemonId(nodeId: daemon)) {
                 applySnapshot(snap)
@@ -455,16 +515,8 @@ final class AppStore: ObservableObject {
             if autoTitle { setAutoTitle(enabled: true) }
             let autoSummary = UserDefaults.standard.bool(forKey: "autoSummary_\(sessionId)")
             if autoSummary { setAutoSummary(enabled: true) }
-            // If we just created this session via "new chat", navigate into it.
-            if pendingNewSessionDaemon == daemon {
-                pendingNewSessionDaemon = nil
-                selectedSessionId = sessionId
-                path.append(.chat(daemonNodeId: daemon, sessionId: sessionId))
-            } else if selectedSessionId == nil {
-                selectedSessionId = sessionId
-            }
-
-        case .textDelta(_, _, let partId, let delta):
+        case .textDelta(let daemon, let sessionId, let partId, let delta):
+            guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
             if streamingPartId == partId {
                 streamingText += delta
             } else {
@@ -472,12 +524,22 @@ final class AppStore: ObservableObject {
                 streamingText = delta
             }
 
-        case .partUpdated(_, _, let partId, _, _):
+        case .partUpdated(let daemon, let sessionId, let partId, _, _):
+            guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
             // Update the message part in place
             updatePartInMessages(partId: partId)
 
-        case .turnEnded(let daemon, let sessionId, let inputTokens, let outputTokens, let cost, let failed, _):
-            isStreaming = false
+        case .sessionActivityChanged(let daemon, let sessionId, let running):
+            if running { pendingSubmissions[daemon]?.remove(sessionId) }
+            guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
+            isStreaming = running
+            if !running {
+                streamingPartId = nil
+                streamingText = ""
+            }
+
+        case .providerMessageEnded(let daemon, let sessionId, let inputTokens, let outputTokens, let cost, let failed, _):
+            guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
             streamingPartId = nil
             streamingText = ""
             if let sessionId = selectedSessionId {
@@ -500,47 +562,71 @@ final class AppStore: ObservableObject {
             // Refresh messages from snapshot
             refreshMessages()
 
-        case .permissionRequested(_, _, let requestId, let toolName, let input):
+        case .permissionRequested(let daemon, let sessionId, let requestId, let toolName, let input):
             // Dedup: the daemon replays outstanding requests on re-attach.
-            if !pendingPermissions.contains(where: { $0.requestId == requestId }) {
+            if !pendingPermissions.contains(where: { $0.daemon == daemon && $0.sessionId == sessionId && $0.requestId == requestId }) {
                 pendingPermissions.append(PendingPermission(
+                    daemon: daemon,
                     requestId: requestId,
-                    sessionId: selectedSessionId ?? "",
+                    sessionId: sessionId,
                     toolName: toolName,
                     input: input
                 ))
             }
 
-        case .askUserRequested(_, _, let requestId, let callId, let questions):
-            if !pendingAskUser.contains(where: { $0.requestId == requestId }) {
+        case .askUserRequested(let subagent, let daemon, let sessionId, let requestId, let callId, let questions):
+            if !pendingAskUser.contains(where: { $0.daemon == daemon && $0.sessionId == sessionId && $0.requestId == requestId }) {
                 pendingAskUser.append(PendingAskUser(
+                    subagent: subagent,
+                    daemon: daemon,
                     requestId: requestId,
-                    sessionId: selectedSessionId ?? "",
+                    sessionId: sessionId,
                     callId: callId,
                     questions: questions
                 ))
             }
 
-        case .requestResolved(_, let requestId):
-            pendingPermissions.removeAll { $0.requestId == requestId }
-            pendingAskUser.removeAll { $0.requestId == requestId }
+        case .goalProposed(let daemon, let sessionId, let requestId, _, let objective):
+            if !pendingGoals.contains(where: { $0.daemon == daemon && $0.requestId == requestId }) {
+                pendingGoals.append(PendingGoalProposal(daemon: daemon, sessionId: sessionId,
+                    requestId: requestId, objective: objective))
+            }
 
-        case .alert(_, let sessionId, let kind, let title, let detail):
+        case .subagentEnd:
+            break
+
+        case .requestResolved(let daemon, let requestId):
+            pendingGoals.removeAll { $0.daemon == daemon && $0.requestId == requestId }
+            pendingPermissions.removeAll { $0.daemon == daemon && $0.requestId == requestId }
+            pendingAskUser.removeAll { $0.daemon == daemon && $0.requestId == requestId }
+
+        case .alert(let daemon, let sessionId, let kind, let title, let detail):
+            switch kind {
+            case "error", "turncomplete", "turnfailed":
+                pendingSubmissions[daemon]?.remove(sessionId)
+            default:
+                break
+            }
             let item = AlertItem(
+                daemon: daemon,
                 sessionId: sessionId,
                 kind: kind,
                 title: title,
                 detail: detail
             )
             alerts.append(item)
-            // Show banner if the alert is for a different session than the one
-            // the user is currently viewing.
-            if sessionId != selectedSessionId {
+            if kind == "error" || daemon != selectedDaemonId?.nodeId || sessionId != selectedSessionId {
                 activeBanner = item
             }
+            if kind == "error", daemon == selectedDaemonId?.nodeId, sessionId == selectedSessionId {
+                lastTurnFailed[sessionId] = true
+            }
 
-        case .attentionChanged:
-            break
+        case .attentionChanged(let daemon, let sessionId, let permissions, let questions):
+            if let index = sessionLists[daemon]?.firstIndex(where: { $0.sessionId == sessionId }) {
+                sessionLists[daemon]?[index].pendingPermissions = permissions
+                sessionLists[daemon]?[index].pendingQuestions = questions
+            }
 
         case .todosUpdated(_, let sessionId, let todoItems):
             todos[sessionId] = todoItems
@@ -583,6 +669,7 @@ final class AppStore: ObservableObject {
 
         case .personaList(let daemon, let personas):
             availablePersonas[daemon] = personas
+            currentPersona[daemon] = personas.first(where: { $0.active })?.name
 
         case .personaSwitched(let daemon, let name):
             currentPersona[daemon] = name
@@ -592,8 +679,19 @@ final class AppStore: ObservableObject {
     // MARK: - Helpers
 
     private func applySnapshot(_ snap: DaemonSnapshot) {
-        if let session = snap.sessions.first {
+        if let session = snap.sessions.first(where: { $0.sessionId == selectedSessionId }) {
             messages = session.messages
+            isStreaming = session.running
+            if let daemon = selectedDaemonId?.nodeId {
+                pendingPermissions.removeAll { $0.daemon == daemon && $0.sessionId == session.sessionId }
+                pendingPermissions.append(contentsOf: snap.pendingPermissions.filter {
+                    $0.daemon == daemon && $0.sessionId == session.sessionId
+                })
+                pendingAskUser.removeAll { $0.daemon == daemon && $0.sessionId == session.sessionId }
+                pendingAskUser.append(contentsOf: snap.pendingAskUser.filter {
+                    $0.daemon == daemon && $0.sessionId == session.sessionId
+                })
+            }
             // Seed usage + todos from snapshot
             if let sessionId = session.sessionId.isEmpty ? nil : Optional(session.sessionId) {
                 sessionUsage[sessionId] = SessionUsage(
@@ -652,6 +750,7 @@ struct DirListing {
 
 struct AlertItem: Identifiable, Equatable {
     let id = UUID()
+    let daemon: String
     let sessionId: String
     let kind: String
     let title: String
@@ -660,7 +759,7 @@ struct AlertItem: Identifiable, Equatable {
 
 // MARK: - Session usage
 
-/// Usage stats for a session, assembled from TurnEnded events + SessionInfo.
+/// Usage stats for a session, assembled from provider messages and SessionInfo.
 struct SessionUsage: Equatable {
     var inputTokens: UInt64
     var outputTokens: UInt64

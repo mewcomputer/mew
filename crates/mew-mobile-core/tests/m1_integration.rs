@@ -190,9 +190,11 @@ async fn mobile_core_emits_events_through_listener() -> Result<()> {
     // Send a prompt.
     core.prompt(daemon_id.clone(), "hello from M1 test".into());
 
-    // Wait for TurnEnded (the fake provider streams "hello from mobile core M1").
-    wait_for_event(&events, 15, |e| matches!(e, CoreEvent::TurnEnded { .. }));
-    println!("✓ Received TurnEnded (streaming complete)");
+    // Wait for ProviderMessageEnded (the fake provider streams "hello from mobile core M1").
+    wait_for_event(&events, 15, |e| {
+        matches!(e, CoreEvent::ProviderMessageEnded { .. })
+    });
+    println!("✓ Received ProviderMessageEnded (streaming complete)");
 
     // Verify we got TextDelta events (streaming text).
     let delta_count = count_events(&events, |e| matches!(e, CoreEvent::TextDelta { .. }));
@@ -252,7 +254,9 @@ async fn mobile_core_emits_events_through_listener() -> Result<()> {
         let has_reloaded = evs
             .iter()
             .any(|e| matches!(e, CoreEvent::SessionReloaded { .. }));
-        let has_turn_ended = evs.iter().any(|e| matches!(e, CoreEvent::TurnEnded { .. }));
+        let has_turn_ended = evs
+            .iter()
+            .any(|e| matches!(e, CoreEvent::ProviderMessageEnded { .. }));
         (
             total,
             has_connected,
@@ -265,7 +269,7 @@ async fn mobile_core_emits_events_through_listener() -> Result<()> {
         has_connected && has_version && has_reloaded && has_turn_ended,
         "expected all key events"
     );
-    println!("✓ All key events present: Connected, Version, Reloaded, TurnEnded");
+    println!("✓ All key events present: Connected, Version, Reloaded, ProviderMessageEnded");
     println!("✓ Total events: {total}");
 
     println!("\n✓✓✓ M1 integration test complete: events verified through listener");
@@ -282,6 +286,9 @@ struct Harness {
     events: Arc<StdMutex<Vec<CoreEvent>>>,
     _dir: tempfile::TempDir,
     router: iroh::protocol::Router,
+    daemon_key: iroh::SecretKey,
+    server: DaemonServer,
+    allowlist: Arc<NodeIdAllowlist>,
 }
 
 impl Harness {
@@ -304,7 +311,9 @@ impl Harness {
             remote_store: None,
         };
 
+        let daemon_key = iroh::SecretKey::generate();
         let daemon_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
+            .secret_key(daemon_key.clone())
             .alpns(vec![MEW_ALPN.to_vec()])
             .bind()
             .await?;
@@ -354,6 +363,9 @@ impl Harness {
             events,
             _dir: dir,
             router,
+            daemon_key,
+            server,
+            allowlist,
         })
     }
 }
@@ -428,8 +440,10 @@ async fn b1_b6_feature_parity_tests() -> Result<()> {
 
     // ── AC.5: Usage fields in snapshot after a turn ──
     h.core.prompt(h.daemon_id.clone(), "hello".into());
-    wait_for_event(&h.events, 15, |e| matches!(e, CoreEvent::TurnEnded { .. }));
-    println!("✓ AC.5: Received TurnEnded");
+    wait_for_event(&h.events, 15, |e| {
+        matches!(e, CoreEvent::ProviderMessageEnded { .. })
+    });
+    println!("✓ AC.5: Received ProviderMessageEnded");
     {
         let snapshot = h
             .core
@@ -486,5 +500,90 @@ async fn b1_b6_feature_parity_tests() -> Result<()> {
 
     let _ = h.router.shutdown().await;
     println!("\n✓✓✓ B1-B6 feature parity integration tests complete");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reconnect_replays_the_confirmed_session_and_disconnect_stops_retries() -> Result<()> {
+    let h = Harness::new().await?;
+    let session_id = h
+        .core
+        .snapshot(h.daemon_id.clone())
+        .unwrap()
+        .attached_session
+        .unwrap();
+    h.core.connect(h.daemon_id.clone());
+    assert!(h
+        .core
+        .prompt(h.daemon_id.clone(), "before reconnect".into()));
+    wait_for_event(&h.events, 15, |e| {
+        matches!(e, CoreEvent::SessionActivityChanged { running: false, .. })
+    });
+    h.events.lock().unwrap().clear();
+    h.router.shutdown().await?;
+    wait_for_event(&h.events, 15, |e| {
+        matches!(
+            e,
+            CoreEvent::DaemonStatusChanged {
+                status: mew_mobile_core::DaemonStatus::Backoff { .. },
+                ..
+            }
+        )
+    });
+    assert!(!h.core.prompt(h.daemon_id.clone(), "offline".into()));
+    assert!(h
+        .core
+        .snapshot(h.daemon_id.clone())
+        .unwrap()
+        .attached_session
+        .is_none());
+    let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
+        .secret_key(h.daemon_key)
+        .alpns(vec![MEW_ALPN.to_vec()])
+        .bind()
+        .await?;
+    let _ = tokio::time::timeout(Duration::from_secs(15), endpoint.online()).await;
+    let router = iroh::protocol::Router::builder(endpoint)
+        .accept(
+            MEW_ALPN,
+            MewIrohHandler {
+                allowlist: h.allowlist,
+                session_manager: h.server.session_manager,
+                groups_store: h.server.groups_store,
+                thinking_setter: None,
+                auto_summary_enabled: h.server.auto_summary_enabled,
+                remote_scope: None,
+                remote_token: None,
+                remote_store: None,
+            },
+        )
+        .spawn();
+    wait_for_event(
+        &h.events,
+        60,
+        |e| matches!(e, CoreEvent::SessionReloaded { session_id: id, .. } if id == &session_id),
+    );
+    assert_eq!(
+        h.core
+            .snapshot(h.daemon_id.clone())
+            .unwrap()
+            .attached_session
+            .as_deref(),
+        Some(session_id.as_str())
+    );
+    assert!(h.core.prompt(h.daemon_id.clone(), "after reconnect".into()));
+    wait_for_event(&h.events, 15, |e| {
+        matches!(e, CoreEvent::ProviderMessageEnded { .. })
+    });
+    h.core.disconnect(h.daemon_id.clone());
+    assert!(h.core.snapshot(h.daemon_id.clone()).is_none());
+    assert!(matches!(
+        h.events.lock().unwrap().last(),
+        Some(CoreEvent::DaemonStatusChanged {
+            status: mew_mobile_core::DaemonStatus::Disconnected,
+            ..
+        })
+    ));
+    router.shutdown().await?;
     Ok(())
 }

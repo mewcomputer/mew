@@ -13,11 +13,16 @@ use anyhow::{Context, Result};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio_util::sync::CancellationToken;
 
-use mew_agent::{Agent, GoalDecision, PlanDecision};
+use mew_agent::{Agent, GoalDecision};
 use mew_hooks::PermissionDecision;
 use mew_protocol::{ServerMessage, SessionInfo, SessionState};
 
 use crate::projects::ProjectPinsStore;
+
+pub struct PendingRequest<T> {
+    pub sender: oneshot::Sender<T>,
+    pub message: ServerMessage,
+}
 use crate::{AgentBuildParams, AgentBuilder, ModelLister, ModelSwitcher};
 
 /// Error returned when attaching to a session fails.
@@ -59,8 +64,13 @@ pub struct Session {
     /// The single agent for this session. Cloned for each turn; mutated in
     /// place for model switches.
     pub agent: Mutex<Agent>,
+    pub browser_access: mew_tools::browser::BrowserAccess,
     /// Ensures only one turn or model switch runs at a time.
     pub turn_lock: Mutex<()>,
+    pub(crate) activity: Mutex<crate::activity::SessionActivity>,
+    pub(crate) job_observers: Mutex<HashMap<String, tokio::task::AbortHandle>>,
+    pub(crate) prompt_receipts:
+        Mutex<HashMap<String, (mew_protocol::PromptStatus, Option<String>)>>,
     /// Broadcast targets: (client_id, sender, kind) per attached client.
     pub clients: Mutex<
         Vec<(
@@ -70,13 +80,13 @@ pub struct Session {
         )>,
     >,
     /// Pending permission / workspace-permission / subagent-permission requests.
-    pub pending_permissions: Mutex<HashMap<String, oneshot::Sender<PermissionDecision>>>,
+    pub pending_permissions: Mutex<HashMap<String, PendingRequest<PermissionDecision>>>,
     /// Pending ask-user requests.
-    pub pending_ask_user: Mutex<HashMap<String, oneshot::Sender<Vec<String>>>>,
-    /// Pending plan-approval requests (from `handoff_plan`).
-    pub pending_plan_approvals: Mutex<HashMap<String, oneshot::Sender<PlanDecision>>>,
+    pub pending_ask_user: Mutex<HashMap<String, PendingRequest<Vec<String>>>>,
     /// Pending goal-proposal requests (from `propose_goal`).
-    pub pending_goal_proposals: Mutex<HashMap<String, oneshot::Sender<GoalDecision>>>,
+    pub pending_goal_proposals: Mutex<HashMap<String, PendingRequest<GoalDecision>>>,
+    /// Serializes request publication, attach replay, responses and cancellation.
+    pub(crate) pending_action_lock: Mutex<()>,
     /// Monotonically increasing IDs for both clients and permission requests.
     pub next_id: AtomicU64,
     /// Token for the turn currently in progress, if any.
@@ -95,6 +105,164 @@ pub struct Session {
 }
 
 impl Session {
+    pub(crate) async fn subagent_history(
+        &self,
+        child_session_id: &str,
+    ) -> Result<Vec<mew_message::Message>> {
+        ulid::Ulid::from_string(child_session_id).context("invalid child session ID")?;
+        let recorded_parent = self.agent.lock().await.session_id.to_string();
+        let mut parent = None;
+        // Both parent folder conventions require recorded child membership.
+        for id in [recorded_parent, self.id.clone()] {
+            let meta = mew_session::Meta::read(&self.session_dir, &id)
+                .await
+                .context("read parent session metadata")?;
+            if meta.as_ref().is_some_and(|meta| {
+                meta.id == id
+                    && meta
+                        .children_session_ids
+                        .iter()
+                        .any(|child| child == child_session_id)
+            }) {
+                parent = Some(id);
+                break;
+            }
+        }
+        let parent = parent.context("not a registered child of the attached parent")?;
+        let children = self.session_dir.join(&parent).join("subagents");
+        let meta = mew_session::Meta::read(&children, child_session_id)
+            .await
+            .context("read child session metadata")?
+            .context("missing child session metadata")?;
+        anyhow::ensure!(
+            meta.id == child_session_id && meta.parent_session_id.as_deref() == Some(&parent),
+            "child metadata does not match the attached parent"
+        );
+        let data = tokio::fs::read(children.join(child_session_id).join("session.jsonl"))
+            .await
+            .context("read child transcript")?;
+        // A live writer can expose an incomplete final append before its newline.
+        let last_record = data
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |index| index + 1);
+        let complete = if last_record < data.len()
+            && serde_json::from_slice::<serde::de::IgnoredAny>(&data[last_record..])
+                .is_err_and(|error| error.is_eof())
+        {
+            &data[..last_record]
+        } else {
+            &data
+        };
+        let complete = std::str::from_utf8(complete).context("invalid child transcript record")?;
+        mew_session::decode_messages(complete).context("invalid child transcript record")
+    }
+
+    pub(crate) async fn update_todo(
+        &self,
+        edit: mew_protocol::TodoEdit,
+    ) -> Result<Vec<mew_protocol::Todo>> {
+        let status = mew_agent::TodoStatus::parse(&edit.status).context("invalid todo status")?;
+        let expected_status = mew_agent::TodoStatus::parse(&edit.expected_status)
+            .context("invalid original todo status")?;
+        anyhow::ensure!(
+            !edit.content.trim().is_empty(),
+            "todo content cannot be empty"
+        );
+        let (todos, path) = {
+            let agent = self.agent.lock().await;
+            (agent.todos.clone(), agent.todos_path.clone())
+        };
+        let path = path.context("session cannot persist todo edits")?;
+        let mut list = todos.lock().await;
+        let original = list.get(edit.todo_id).context("todo no longer exists")?;
+        anyhow::ensure!(
+            original.content == edit.expected_content && original.status == expected_status,
+            "todo changed while editing; reopen it before saving"
+        );
+        let mut updated = list.clone();
+        updated
+            .update(edit.todo_id, Some(edit.content), Some(status))
+            .map_err(anyhow::Error::msg)?;
+        updated
+            .save(&path)
+            .await
+            .map_err(anyhow::Error::msg)
+            .context("could not persist todo edit")?;
+        *list = updated;
+        let snapshot = wire_todos(&list.items);
+        self.broadcast(ServerMessage::TodosUpdated {
+            todos: snapshot.clone(),
+        })
+        .await;
+        Ok(snapshot)
+    }
+
+    /// Delayed agent events publish the latest list, never an older tool snapshot.
+    pub(crate) async fn broadcast_todos(&self) {
+        let todos = self.agent.lock().await.todos.clone();
+        let list = todos.lock().await;
+        self.broadcast(ServerMessage::TodosUpdated {
+            todos: wire_todos(&list.items),
+        })
+        .await;
+    }
+
+    pub(crate) async fn send_todos(&self, sender: &mpsc::UnboundedSender<ServerMessage>) {
+        let todos = self.agent.lock().await.todos.clone();
+        let list = todos.lock().await;
+        let _ = sender.send(ServerMessage::TodosUpdated {
+            todos: wire_todos(&list.items),
+        });
+    }
+    /// Read the complete transcript, including history removed from model context
+    /// and current message state that has not yet been persisted.
+    pub(crate) async fn history(&self) -> Result<Vec<mew_message::Message>> {
+        let agent = self.agent.lock().await;
+        let Some(writer) = &agent.session else {
+            return Ok(agent.messages.lock().await.clone());
+        };
+        // Serialize with writes so the reader never sees a partial JSONL record.
+        let writer = writer.lock().await;
+        let mut history = mew_session::Reader::load_from(&self.session_dir, &self.id)
+            .await
+            .context("read session transcript")?;
+        drop(writer);
+        let positions = history
+            .iter()
+            .enumerate()
+            .map(|(index, message)| (message.id, index))
+            .collect::<HashMap<_, _>>();
+        let messages = agent.messages.lock().await;
+        for message in messages.iter() {
+            if let Some(&index) = positions.get(&message.id) {
+                if history[index] != *message {
+                    history[index] = message.clone();
+                }
+            } else {
+                history.push(message.clone());
+            }
+        }
+        Ok(history)
+    }
+
+    pub(crate) async fn policy(&self, agent: &Agent) -> mew_session::SessionPolicy {
+        mew_session::SessionPolicy {
+            model: self.model.lock().await.clone(),
+            provider: self.provider.lock().await.clone(),
+            persona: agent.persona_name.clone(),
+            thinking_variant: agent.active_thinking_variant().map(str::to_owned),
+            permission_mode: agent.permission_mode().id().to_owned(),
+        }
+    }
+
+    pub(crate) async fn save_policy(&self, policy: &mew_session::SessionPolicy) -> Result<()> {
+        policy
+            .write(&self.session_dir, &self.id)
+            .await
+            .context("save session policy")
+    }
+
     pub fn new(
         id: String,
         agent: Agent,
@@ -104,13 +272,17 @@ impl Session {
     ) -> Self {
         Self {
             id,
+            browser_access: agent.browser_access.clone(),
             agent: Mutex::new(agent),
             turn_lock: Mutex::new(()),
+            activity: Mutex::new(crate::activity::SessionActivity::default()),
+            job_observers: Mutex::new(HashMap::new()),
+            prompt_receipts: Mutex::new(HashMap::new()),
             clients: Mutex::new(Vec::new()),
             pending_permissions: Mutex::new(HashMap::new()),
             pending_ask_user: Mutex::new(HashMap::new()),
-            pending_plan_approvals: Mutex::new(HashMap::new()),
             pending_goal_proposals: Mutex::new(HashMap::new()),
+            pending_action_lock: Mutex::new(()),
             next_id: AtomicU64::new(1),
             current_turn_cancel: Mutex::new(None),
             model: Mutex::new(model),
@@ -144,51 +316,39 @@ impl Session {
         ulid::Ulid::new().to_string()
     }
 
-    /// Attach a client sender. Returns (client_id, was_first_client,
-    /// browser_capability_activated).
+    /// Attach a client sender. Returns (client_id, was_first_client).
     pub async fn attach_client(
         &self,
         sender: mpsc::UnboundedSender<ServerMessage>,
         client_kind: mew_protocol::ClientKind,
-    ) -> (u64, bool, bool) {
+    ) -> (u64, bool) {
         let mut clients = self.clients.lock().await;
         let was_first = clients.is_empty();
-        let had_browser = clients
-            .iter()
-            .any(|(_, _, kind)| *kind == mew_protocol::ClientKind::Desktop);
         let client_id = self.next_id();
         clients.push((client_id, sender, client_kind));
-        drop(clients);
-        self.set_browser_enabled().await;
-        (
-            client_id,
-            was_first,
-            !had_browser && client_kind == mew_protocol::ClientKind::Desktop,
-        )
+        (client_id, was_first)
+    }
+
+    /// Confirm ownership before exposing the client to implicit session events.
+    pub(crate) async fn attach_client_ready(
+        &self,
+        sender: mpsc::UnboundedSender<ServerMessage>,
+        client_kind: mew_protocol::ClientKind,
+        ready: ServerMessage,
+    ) -> (u64, bool) {
+        let mut clients = self.clients.lock().await;
+        let was_first = clients.is_empty();
+        let client_id = self.next_id();
+        let _ = sender.send(ready);
+        clients.push((client_id, sender, client_kind));
+        (client_id, was_first)
     }
 
     /// Detach a client by id. Returns true if this was the last client.
     pub async fn detach_client(&self, client_id: u64) -> bool {
         let mut clients = self.clients.lock().await;
         clients.retain(|(id, _, _)| *id != client_id);
-        let was_last = clients.is_empty();
-        drop(clients);
-        self.set_browser_enabled().await;
-        was_last
-    }
-
-    async fn set_browser_enabled(&self) {
-        let enabled = self
-            .clients
-            .lock()
-            .await
-            .iter()
-            .any(|(_, _, kind)| *kind == mew_protocol::ClientKind::Desktop);
-        self.agent.lock().await.set_browser_enabled(enabled);
-    }
-
-    pub async fn browser_enabled(&self) -> bool {
-        self.agent.lock().await.browser_enabled
+        clients.is_empty()
     }
 
     pub async fn client_count(&self) -> usize {
@@ -211,7 +371,23 @@ impl Session {
     }
 
     /// Broadcast a message to all attached clients. Removes any sender that fails.
-    pub async fn broadcast(&self, msg: ServerMessage) {
+    pub async fn broadcast(&self, mut msg: ServerMessage) {
+        let mut activity = if matches!(
+            &msg,
+            ServerMessage::SubagentStart { .. }
+                | ServerMessage::SubagentStatus { .. }
+                | ServerMessage::SubagentEnd { .. }
+                | ServerMessage::JobUpdate { .. }
+        ) {
+            Some(self.activity.lock().await)
+        } else {
+            None
+        };
+        if let Some(activity) = activity.as_mut() {
+            if !activity.apply(&mut msg) {
+                return;
+            }
+        }
         let mut clients = self.clients.lock().await;
         clients.retain(|(_, sender, _)| sender.send(msg.clone()).is_ok());
     }
@@ -219,34 +395,51 @@ impl Session {
     /// Cancel the current turn, if any. Also drains pending requests so the
     /// agent loop unblocks if it was waiting on a permission/ask-user oneshot.
     pub async fn cancel_turn(&self) {
-        if let Some(token) = self.current_turn_cancel.lock().await.take() {
+        let _actions = self.pending_action_lock.lock().await;
+        if let Some(token) = self.current_turn_cancel.lock().await.as_ref() {
             token.cancel();
         }
-        self.drain_pending().await;
+        let permissions = std::mem::take(&mut *self.pending_permissions.lock().await);
+        let questions = std::mem::take(&mut *self.pending_ask_user.lock().await);
+        let goals = std::mem::take(&mut *self.pending_goal_proposals.lock().await);
+        for request_id in permissions
+            .keys()
+            .chain(questions.keys())
+            .chain(goals.keys())
+        {
+            self.broadcast(ServerMessage::RequestResolved {
+                request_id: request_id.clone(),
+            })
+            .await;
+        }
+        self.broadcast(ServerMessage::SessionAttentionChanged {
+            session_id: self.id.clone(),
+            pending_permissions: 0,
+            pending_questions: 0,
+        })
+        .await;
     }
 
     /// Count of pending requests that need a user answer: `ask_user_question`,
-    /// `handoff_plan` approvals, and `propose_goal` approvals. All surface as
+    /// and `propose_goal` approvals. Both surface as
     /// "questions" in the session attention badge.
     pub async fn pending_questions_count(&self) -> u32 {
         let asks = self.pending_ask_user.lock().await.len();
-        let plans = self.pending_plan_approvals.lock().await.len();
         let goals = self.pending_goal_proposals.lock().await.len();
-        (asks + plans + goals) as u32
+        (asks + goals) as u32
     }
+}
 
-    /// Drop all pending oneshot senders. Call when the last client detaches
-    /// mid-turn so the agent loop unblocks.
-    pub async fn drain_pending(&self) {
-        let mut perms = self.pending_permissions.lock().await;
-        perms.clear();
-        let mut asks = self.pending_ask_user.lock().await;
-        asks.clear();
-        let mut plans = self.pending_plan_approvals.lock().await;
-        plans.clear();
-        let mut goals = self.pending_goal_proposals.lock().await;
-        goals.clear();
-    }
+fn wire_todos(todos: &[mew_agent::Todo]) -> Vec<mew_protocol::Todo> {
+    todos
+        .iter()
+        .map(|todo| mew_protocol::Todo {
+            id: todo.id,
+            content: todo.content.clone(),
+            status: todo.status.as_str().into(),
+            depends_on: todo.depends_on.clone(),
+        })
+        .collect()
 }
 
 /// Owns all active sessions.
@@ -280,11 +473,7 @@ impl SessionManager {
     }
 
     /// Create a brand-new session.
-    pub async fn create(
-        &self,
-        cwd: Option<PathBuf>,
-        client_kind: mew_protocol::ClientKind,
-    ) -> Result<Arc<Session>> {
+    pub async fn create(&self, cwd: Option<PathBuf>) -> Result<Arc<Session>> {
         let session_id = format!("sess_{}", ulid::Ulid::new());
         let writer = mew_session::Writer::open_at(&self.session_dir, &session_id)
             .await
@@ -293,8 +482,9 @@ impl SessionManager {
             session_id: session_id.clone(),
             writer,
             cwd,
-            browser_enabled: client_kind == mew_protocol::ClientKind::Desktop,
+            policy: None,
         })?;
+        load_todos(&agent).await?;
         let session = Arc::new(Session::new(
             session_id.clone(),
             agent,
@@ -302,6 +492,9 @@ impl SessionManager {
             provider.clone(),
             self.session_dir.clone(),
         ));
+        session
+            .save_policy(&session.policy(&*session.agent.lock().await).await)
+            .await?;
         self.active.lock().await.insert(session_id, session.clone());
         Ok(session)
     }
@@ -343,6 +536,10 @@ impl SessionManager {
         }
 
         let cwd = meta.cwd.clone().map(PathBuf::from);
+        let policy = mew_session::SessionPolicy::read(&self.session_dir, session_id)
+            .await
+            .context("read session policy")
+            .map_err(AttachError::BuildAgent)?;
         let writer = mew_session::Writer::open_at_with_meta(&self.session_dir, session_id, meta)
             .await
             .context("open session writer for resume")
@@ -352,10 +549,11 @@ impl SessionManager {
             session_id: session_id.to_string(),
             writer,
             cwd,
-            browser_enabled: false,
+            policy,
         })
         .context("build agent for resume")
         .map_err(AttachError::BuildAgent)?;
+        load_todos(&agent).await.map_err(AttachError::BuildAgent)?;
 
         let messages = mew_session::Reader::load_from(&self.session_dir, session_id)
             .await
@@ -370,6 +568,10 @@ impl SessionManager {
             provider.clone(),
             self.session_dir.clone(),
         ));
+        session
+            .save_policy(&session.policy(&*session.agent.lock().await).await)
+            .await
+            .map_err(AttachError::BuildAgent)?;
         self.active
             .lock()
             .await
@@ -379,8 +581,54 @@ impl SessionManager {
 
     /// Remove a session from active memory.
     pub async fn remove(&self, session_id: &str) {
-        self.active.lock().await.remove(session_id);
+        if let Some(session) = self.active.lock().await.remove(session_id) {
+            session.browser_access.clear();
+        }
         self.loading.lock().await.remove(session_id);
+    }
+
+    /// Unload an unused runtime, or stop reaping if it was replaced or reattached.
+    /// A connection that looked up the session but has not registered yet, or a
+    /// queued/running operation, owns another strong reference. Check ownership
+    /// under the active-map lock so lookup and unloading cannot race.
+    pub(crate) async fn unload_detached(&self, session: &Arc<Session>) -> bool {
+        let mut active = self.active.lock().await;
+        if !active
+            .get(&session.id)
+            .is_some_and(|current| Arc::ptr_eq(current, session))
+        {
+            return true;
+        }
+        // Background jobs outlive their parent turn. Read their state before
+        // locking clients, since completion publication takes state then clients.
+        let has_running_jobs = {
+            let agent = session.agent.lock().await;
+            let jobs = agent.shell_jobs.lock().await;
+            let mut running = false;
+            for job in jobs.values() {
+                if !job.state.lock().await.is_terminal() {
+                    running = true;
+                    break;
+                }
+            }
+            running
+        };
+        let clients = session.clients.lock().await;
+        if !clients.is_empty() {
+            return true;
+        }
+        // The manager and this reaper are the only expected owners of an idle
+        // runtime. Other reapers hold weak references while sleeping.
+        if has_running_jobs
+            || Arc::strong_count(session) > 2
+            || *session.is_running.lock().await
+            || session.current_turn_cancel.lock().await.is_some()
+        {
+            return false;
+        }
+        active.remove(&session.id);
+        // Keep the resume lock: an attach may already be waiting on it.
+        true
     }
 
     /// List active and idle top-level sessions.
@@ -477,11 +725,23 @@ impl SessionManager {
                             let _ = tokio::fs::remove_dir_all(&path).await;
                             continue;
                         }
+                        let policy = match mew_session::SessionPolicy::read(&self.session_dir, &id)
+                            .await
+                        {
+                            Ok(policy) => policy,
+                            Err(error) => {
+                                tracing::warn!(session_id = %id, error = %error, "failed to read listed session policy");
+                                None
+                            }
+                        };
                         infos.push(SessionInfo {
                             session_id: id.clone(),
                             state: SessionState::Idle,
-                            model: meta.model.clone(),
-                            provider: None,
+                            model: policy
+                                .as_ref()
+                                .and_then(|policy| policy.model.clone())
+                                .or_else(|| meta.model.clone()),
+                            provider: policy.and_then(|policy| policy.provider),
                             created_at: meta.created_at,
                             last_message_at: meta.last_message_at.or(Some(meta.created_at)),
                             summary: meta.summary.clone(),
@@ -591,6 +851,16 @@ impl SessionManager {
     }
 }
 
+async fn load_todos(agent: &Agent) -> Result<()> {
+    if let Some(path) = &agent.todos_path {
+        *agent.todos.lock().await = mew_agent::TodoList::load(path)
+            .await
+            .map_err(anyhow::Error::msg)
+            .context("load session todos")?;
+    }
+    Ok(())
+}
+
 /// Extract the first user message text from an agent's message list.
 /// Returns `None` if there are no user messages or the first user message
 /// has no text content. Truncates to 60 chars (matching `derive_session_title`).
@@ -649,5 +919,115 @@ fn truncate_message(text: &str) -> String {
         format!("{cleaned}…")
     } else {
         cleaned
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        for observer in self.job_observers.get_mut().values() {
+            observer.abort();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn detached_runtime_keeps_running_shell_jobs_until_they_finish() {
+        for cancelled in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let server = crate::DaemonServer::with_session_dir(
+                Arc::new(|params| {
+                    Ok((
+                        Agent::new(
+                            Arc::new(mew_provider_fake::FakeProvider::new(Vec::new())),
+                            Arc::new(mew_hooks::NopDispatcher),
+                            Some(params.writer),
+                            Vec::new(),
+                            None,
+                        ),
+                        None,
+                        None,
+                    ))
+                }),
+                directory.path().to_path_buf(),
+            );
+            let session = server.session_manager.create(None).await.unwrap();
+            let (job_id, cancel, job_state) = {
+                let agent = session.agent.lock().await;
+                let id = agent
+                    .start_shell_job(
+                        "while [ ! -e finish ]; do sleep 0.01; done; printf 'done\\n'",
+                        directory.path(),
+                    )
+                    .await;
+                let jobs = agent.shell_jobs.lock().await;
+                let job = &jobs[&id];
+                let cancel = job.cancel.clone();
+                let state = job.state.clone();
+                (id, cancel, state)
+            };
+            session
+                .publish_job_update(job_id.clone(), String::new(), "running".into())
+                .await;
+            assert_eq!(Arc::strong_count(&session), 2);
+            let current = job_state.lock().await;
+            let unload = server.session_manager.unload_detached(&session);
+            tokio::pin!(unload);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(10), &mut unload)
+                    .await
+                    .is_err()
+            );
+            let clients =
+                tokio::time::timeout(std::time::Duration::from_secs(1), session.clients.lock())
+                    .await
+                    .expect("job state must be checked before locking clients");
+            drop(clients);
+            drop(current);
+            let unloaded = unload.await;
+            if unloaded {
+                cancel.cancel();
+            }
+            assert!(
+                !unloaded,
+                "reaping must retain the idle parent's running job"
+            );
+            let (sender, _receiver) = mpsc::unbounded_channel();
+            let (client_id, _) = session
+                .attach_client(sender, mew_protocol::ClientKind::Tui)
+                .await;
+            let stopped = server.session_manager.unload_detached(&session).await;
+            if !stopped {
+                cancel.cancel();
+            }
+            assert!(stopped, "reattachment must stop the detached reaper");
+            session.detach_client(client_id).await;
+
+            if cancelled {
+                cancel.cancel();
+            } else {
+                tokio::fs::write(directory.path().join("finish"), "")
+                    .await
+                    .unwrap();
+            }
+            let (state, _) = session
+                .agent
+                .lock()
+                .await
+                .shell_job_block(&job_id, 3)
+                .await
+                .unwrap();
+            assert!(state.is_terminal());
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while !server.session_manager.unload_detached(&session).await {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("a completed or cancelled job must release the detached runtime");
+        }
     }
 }

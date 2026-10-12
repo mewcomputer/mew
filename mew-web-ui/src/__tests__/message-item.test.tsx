@@ -45,6 +45,27 @@ describe("MessageItem streaming subscriptions", () => {
     expect(screen.getByTestId("markdown").textContent).toContain("already complete");
   });
 
+  it.each(["handoff_plan", "switch_persona"])("renders historical %s as an ordinary completed tool", (toolName) => {
+    render(<MessageItem message={{
+      id: "historical-message",
+      role: "assistant",
+      timestamp: 1,
+      parts: [{
+        type: "tool-call",
+        toolName,
+        callId: "historical-call",
+        input: { name: "builder" },
+        state: "completed",
+        output: "historical result",
+      }],
+    }} />);
+
+    expect(screen.getByText(toolName).textContent).toBe(toolName);
+    expect(screen.getByText("completed").textContent).toBe("completed");
+    expect(screen.getByText("historical result").textContent).toBe("historical result");
+    expect(screen.queryByRole("button", { name: /approve|request changes/i })).toBeNull();
+  });
+
   it("still updates the active streaming message", () => {
     const message = {
       id: "message-2",

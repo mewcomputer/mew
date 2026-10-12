@@ -213,6 +213,16 @@ pub enum SubagentEvent {
         tool_name: String,
         message: String,
     },
+    AskUser {
+        source: mew_message::SubagentQuestionSource,
+        call_id: String,
+        questions: Vec<mew_message::AskUserQuestion>,
+        tx: tokio::sync::oneshot::Sender<Vec<String>>,
+    },
+    WorkspacePermissionRequest {
+        path: PathBuf,
+        tx: tokio::sync::oneshot::Sender<mew_hooks::PermissionDecision>,
+    },
     PermissionRequest {
         tool_name: String,
         call_id: String,

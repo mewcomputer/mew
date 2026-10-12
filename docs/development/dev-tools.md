@@ -114,13 +114,6 @@ let mut tools: Vec<Arc<dyn Tool>> = vec![
 if !loaded_skills.is_empty() {
     tools.push(Arc::new(Skill::new(skills.clone(), skill_filter.clone())));
 }
-if !loaded_personas.is_empty() {
-    tools.push(Arc::new(SwitchPersonaTool::new(
-        personas_arc.clone(),
-        pending_persona_switch.clone(),
-    )));
-}
-
 // MCP tools are added after connection:
 tools.extend(mcp_tools);
 ```

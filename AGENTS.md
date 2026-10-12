@@ -79,7 +79,7 @@ agent runtime
   crates/mew-tools        built-in tools and tool context
   crates/mew-mcp          MCP stdio/HTTP clients and MCP tool wrappers
   crates/mew-subagents    definitions, loaders, runners, child sessions
-  crates/mew-personas     persona definitions, loaders, transitions, model/tool policy
+  crates/mew-personas     persona definitions, loaders, model/tool policy
   crates/mew-skills       SKILL.md discovery and loading
   crates/mew-context      AGENTS.md/CLAUDE.md/project context loading
   crates/mew-prompts      embedded prompt resources and template rendering
@@ -117,9 +117,11 @@ frontend → transport → daemon → session → agent → provider
 
 The built-in TUI is daemon-only: local mode was sunset. The `mew` chat command
 spawns a `mew daemon` on a loopback TCP port (if none is running) and connects
-via `runtime::daemon::DaemonTarget` + `DaemonClient`. The daemon owns the
-`Agent`; the TUI receives the same logical `AgentEvent` stream after wire
-translation. Because the daemon serializes turns (`turn_lock` +
+via `runtime::daemon::DaemonTarget` and the persistent `runtime::client::TuiClient`
+actor. The actor drives the shared `mew-client-core::ClientEngine`, observes
+passive turns and reconciles uncertain submissions after reconnect. The daemon
+owns the `Agent`; required actions retain their session and request identities.
+Because the daemon serializes turns (`turn_lock` +
 `current_turn_cancel`), concurrent-turn races are impossible. The deprecated
 `runtime::local::LocalTarget` was removed.
 
@@ -141,6 +143,20 @@ The browser frontend remains a separate React/Vite web client. Native desktop
 packaging is handled by `scripts/package-desktop-native.sh`; the native browser
 portal uses `native/cef-host` behind `mew-browser-host` and does not share the
 web client’s host bridge.
+
+Each confirmed local desktop conversation owns a retained CEF page. Page callbacks
+carry the connection profile, session and page generation; hidden pages keep the
+app's main-thread pump. The daemon receives the ready loopback CDP endpoint and
+exact target before browser tools become available. Native packaging bundles the
+standalone `agent-browser` executable, version 0.34 or newer, beside the daemon.
+Remote profiles do not register native browser pages.
+
+Native clients negotiate protocol revision 3 before session commands. Scoped
+prompt receipts require revision 3; browser registration and session-diff commands
+were added in revision 2. Extension wire revision is independent. Review reads
+the requested daemon session's workspace, and replies carry both session and
+request IDs. Workspace watches detect worktree,
+HEAD and index changes without traversing `.git` objects.
 
 `SessionManager` owns active sessions and reloads idle top-level sessions from
 the path returned by `mew_session::session_dir()` (`MEW_SESSION_DIR` overrides
@@ -171,11 +187,11 @@ incremental renderer, while completed or earlier parts use the cache.
 ### TUI event flow
 
 1. Crossterm input becomes a `mew_tui::events::Action`.
-2. `EventLoop::forward_agent_events` pumps agent events into the TUI channel.
-3. The main loop updates `App` state and draws.
-4. The drain coalesces ticks and queued actions, processes at most four agent
-   events per frame while streaming, then replays actions through the runtime
-   dispatcher.
+2. The persistent client actor forwards shared state updates and required actions
+   through its update channel.
+3. The main loop projects those updates into `App` and draws.
+4. The input drain coalesces ticks and queued actions, then replays actions
+   through the runtime dispatcher before the next draw.
 
 ### Runtime invariants
 
@@ -190,7 +206,7 @@ These are enforced by `just arch-check` and by the deny lint in
 3. Push display messages through `app.push_message`, `app.push_synthetic_message`,
    or `app.push_user`. Direct `app.messages.push(...)` skips dirty-state updates.
 4. A new command needs a `CommandTarget` method, a dispatch arm, and a test in
-   the same change. `LocalTarget` and `DaemonTarget` are both implemented today.
+   the same change. The built-in TUI uses `DaemonTarget`.
 5. `Unsupported` is the only sanctioned backend no-op. Returning it renders a
    visible alert; never swallow an unsupported command.
 
@@ -230,7 +246,7 @@ skills and the `planner`/`builder` personas are added when not overridden.
 
 Persona frontmatter supports `name`, `description`, and a `mew:` or `polytoken:`
 block for model pinning, tool/skill allowlists, denied tools, templates,
-transitions, fallback models, and an accent color. Persona bodies are injected
+fallback models, and an accent color. Persona bodies are injected
 into a freshly rebuilt system prompt each turn.
 
 Subagent definitions can pin a fully qualified `provider/model` or a router tier
@@ -300,12 +316,11 @@ output. Permission modes are `standard`, `permissive`, `auto`, `auto_plus`, and
 `dangerous`; dangerous mode bypasses prompts and rules, so use it only when
 explicitly requested.
 
-Daemon sessions currently carry a `cwd` through the protocol and persist it in
-session metadata, but `build_session_agent` still derives its operational cwd
-from the daemon process. Treat per-session loading of context, skills, personas,
-MCP config, shell state, and workspace roots as incomplete until the builder
-accepts and uses `AgentBuildParams.cwd`. Project `.env` and MCP discovery are
-also process-startup concerns, not per-session configuration.
+Daemon sessions persist their `cwd` and use it for context, skills, personas,
+tools, shell state and workspace roots. Effective model, persona, thinking and
+permission settings are saved in `policy.json`; resume also restores todos.
+Project `.env`, MCP discovery and plugin startup remain process-startup concerns,
+not per-session configuration.
 
 ### Plugins and extensions
 

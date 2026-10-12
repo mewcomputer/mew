@@ -64,7 +64,7 @@ scripting and quick questions.
 
 ## 4. Switch models
 
-Inside the TUI, press `Ctrl+P` to open the command palette, then select
+Inside the TUI, press `Ctrl+Space` to open the command palette, then select
 "Switch Model". Or use the slash command:
 
 ```
@@ -83,7 +83,7 @@ For models that support configurable reasoning:
 /thinking high
 ```
 
-Or use `Ctrl+P` and select "Thinking Variant". Press `Ctrl+P` repeatedly
+Or use `Ctrl+Space` and select "Thinking Variant". Press `Ctrl+Alt+P` repeatedly
 to cycle through available options. See
 [Providers](/docs/using-mew/providers/#thinking-variants) for which models support
 which variants.

@@ -112,13 +112,14 @@ mod tests {
         let transport = InMemoryTransport::default();
         transport.push_server_message(ServerMessage::Pong {
             version: "test".into(),
+            protocol_version: mew_protocol::PROTOCOL_VERSION,
         });
         let mut connection = transport.connect().await.unwrap();
 
         connection.send(ClientMessage::Ping).await.unwrap();
         assert!(matches!(
             connection.receive().await.unwrap(),
-            Some(ServerMessage::Pong { version }) if version == "test"
+            Some(ServerMessage::Pong { version, .. }) if version == "test"
         ));
         assert!(matches!(
             transport.sent_messages().as_slice(),

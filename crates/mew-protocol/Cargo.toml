@@ -9,6 +9,7 @@ license.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 mew-message = { workspace = true }
+mew-diff = { workspace = true }
 mew-hooks = { workspace = true }
 mew-provider = { workspace = true }
 mew-subagents = { workspace = true }

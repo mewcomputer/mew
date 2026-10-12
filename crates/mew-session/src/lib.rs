@@ -10,6 +10,9 @@ use tracing::debug;
 
 use mew_message::Message;
 
+mod policy;
+pub use policy::SessionPolicy;
+
 #[derive(Error, Debug)]
 pub enum SessionError {
     #[error("io error: {0}")]
@@ -534,6 +537,23 @@ pub fn session_dir() -> PathBuf {
 /// Reads messages and metadata from session files.
 pub struct Reader;
 
+/// Decode complete JSONL records, keeping the latest revision of each message
+/// at its first chronological position. Any malformed record returns an error.
+pub fn decode_messages(data: &str) -> Result<Vec<Message>, SessionError> {
+    let mut messages = Vec::new();
+    let mut positions = std::collections::HashMap::new();
+    for line in data.lines().filter(|line| !line.trim().is_empty()) {
+        let message: Message = serde_json::from_str(line)?;
+        if let Some(&position) = positions.get(&message.id) {
+            messages[position] = message;
+        } else {
+            positions.insert(message.id, messages.len());
+            messages.push(message);
+        }
+    }
+    Ok(messages)
+}
+
 impl Reader {
     /// Loads all messages from the session file for the given ID.
     /// Migrates a legacy flat file to the new layout if needed.
@@ -547,11 +567,7 @@ impl Reader {
 
         let path = root.join(session_id).join("session.jsonl");
         let data = tokio::fs::read_to_string(&path).await?;
-        let messages: Vec<Message> = data
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(|l| serde_json::from_str(l).map_err(SessionError::Serialize))
-            .collect::<Result<Vec<_>, _>>()?;
+        let messages = decode_messages(&data)?;
         debug!(session = %session_id, count = messages.len(), "loaded session");
         Ok(messages)
     }
@@ -590,11 +606,7 @@ impl Reader {
             .join(child_id)
             .join("session.jsonl");
         let data = tokio::fs::read_to_string(&path).await?;
-        let messages: Vec<Message> = data
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(|l| serde_json::from_str(l).map_err(SessionError::Serialize))
-            .collect::<Result<Vec<_>, _>>()?;
+        let messages = decode_messages(&data)?;
         debug!(parent = %parent_id, child = %child_id, count = messages.len(), "loaded subagent session");
         Ok(messages)
     }
@@ -641,6 +653,38 @@ mod tests {
         assert_eq!(got.role, Role::User);
 
         let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn readers_keep_the_latest_message_revision_in_its_original_position() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        for child in [false, true] {
+            let id = Ulid::new().to_string();
+            let parent = Ulid::new().to_string();
+            let mut writer = if child {
+                Writer::open_subagent_at(tmp.path(), &parent, &id, "worker")
+                    .await
+                    .unwrap()
+            } else {
+                Writer::open_at(tmp.path(), &id).await.unwrap()
+            };
+            let original = make_message(Role::Assistant);
+            let next = make_message(Role::User);
+            let mut latest = original.clone();
+            latest.time.completed = Some(42);
+            writer.write_message(&original).await.unwrap();
+            writer.write_message(&next).await.unwrap();
+            writer.write_message(&latest).await.unwrap();
+            writer.close().await.unwrap();
+            let loaded = if child {
+                Reader::load_subagent_from(tmp.path(), &parent, &id)
+                    .await
+                    .unwrap()
+            } else {
+                Reader::load_from(tmp.path(), &id).await.unwrap()
+            };
+            assert_eq!(loaded, vec![latest, next]);
+        }
     }
 
     #[tokio::test]
@@ -720,7 +764,9 @@ mod tests {
             .unwrap();
 
         let mut w = Writer::open_at(&root, &session_id).await.expect("open");
-        w.write_message(&msg).await.expect("write");
+        w.write_message(&make_message(Role::User))
+            .await
+            .expect("write");
         w.close().await.expect("close");
 
         assert!(!legacy_path.exists(), "legacy file should have been moved");

@@ -28,9 +28,12 @@ Encoding/decoding via `encode_json` / `decode_json` in `mew-protocol`.
 | `AttachSession` | `session_id: String` | Attach to an existing session |
 | `ListSessions` | | List all known sessions |
 | `Prompt` | `text: String`, `attachments: Vec<Attachment>` | Send a user prompt |
+| `SubmitPrompt` | `session_id`, `request_id`, `text`, `attachments` | Submit input with an acceptance receipt |
+| `ReadPromptReceipt` | `session_id`, `request_id` | Query an uncertain submission after reconnect |
+| `ReadJobOutput` | `session_id`, `job_id`, `request_id`, `offset` | Read a byte-offset chunk of captured shell output |
 | `Cancel` | | Cancel the current turn |
-| `PermissionResponse` | `request_id: u64`, `decision: PermissionDecision` | Respond to a permission prompt |
-| `AskUserResponse` | `request_id: u64`, `answers: Vec<String>` | Respond to an ask-user question |
+| `PermissionResponse` | `request_id: String`, `decision: PermissionDecision` | Respond to a permission prompt |
+| `AskUserResponse` | `request_id: String`, `answers: Vec<String>`, `cancelled: bool` | Answer or explicitly close a question |
 | `SlashCommand` | `command: String` | Run `/clear`, `/compact`, etc. on the daemon |
 | `ListModels` | | Request the available model list |
 | `SwitchModel` | `provider: String`, `model: String` | Switch to a different model |
@@ -68,6 +71,8 @@ Encoding/decoding via `encode_json` / `decode_json` in `mew-protocol`.
 | `PermissionRequest` | `request_id`, `tool_name`, `input` | Ask user to approve a tool call |
 | `AskUserRequest` | `request_id`, `call_id`, `questions` | Ask user free-text questions |
 | `RequestResolved` | `request_id` | A pending request was resolved by any client |
+| `JobOutput` | `session_id`, `job_id`, `request_id`, `offset`, `next_offset`, `output`, `done`, `incomplete` | UTF-8 output chunk for a session-owned job, at most 64 KiB |
+| `JobOutputError` | `session_id`, `job_id`, `request_id`, `message` | Scoped job output read failure |
 
 ### Subagent events
 
@@ -85,15 +90,36 @@ Encoding/decoding via `encode_json` / `decode_json` in `mew-protocol`.
 | `ModelSwitched` | `provider`, `model` | Confirms model switch |
 | `ThinkingVariantChanged` | `variant?: String` | Confirms thinking variant (null = disabled) |
 | `TodosUpdated` | `todos: Vec<Todo>` | Session todo list changed |
-| `PersonaSwitchRequested` | `name` | `switch_persona` tool was called |
 | `JobUpdate` | `job_id`, `command`, `state` | Background shell job changed |
 | `SlashResult` | `text` | Slash command produced text output |
 | `Error` | `message` | Error before or outside a turn |
 | `ErrorEvent` | `message` | Terminal error during a turn |
-| `Pong` | `version: String` | Response to `Ping`; carries daemon version |
+| `Pong` | `version: String`, `protocol_version: u32` | Response to `Ping`; carries daemon version and wire revision |
+| `PromptReceipt` | `session_id`, `request_id`, `status`, `message?` | Confirms acceptance, rejection, or unknown status of a scoped submission |
 | `ProjectList` | `projects: Vec<ProjectInfo>` | Response to `ListProjects`; deduped project directories with session counts |
 
 ## Session model
+
+Native clients require wire revision 3. `SubmitPrompt` carries `session_id`,
+`request_id`, `text` and attachments. Acceptance reserves the session's next turn;
+duplicate request IDs return the original receipt without starting another turn.
+`ReadPromptReceipt` queries the original session after reconnect, including when
+another conversation is attached. Receipts live with the daemon session runtime.
+An unknown receipt requires inspecting the conversation before a manual retry;
+clients must not replay an uncertain submission automatically. Legacy `Prompt`
+remains available for clients that do not use acknowledged submissions.
+
+`ReadJobOutput` carries the confirmed `session_id`, `job_id`, `request_id` and
+byte `offset`. Replies retain those identities and return `next_offset` at a
+UTF-8 boundary. Clients append only a matching response at their current offset.
+`done` means no more captured output remains after this chunk. `incomplete`
+indicates that a reader failed or did not reach EOF within the bounded reader
+drain after process exit; it does not indicate a failed command by itself.
+
+`AskUserRequest.subagent` identifies a child question when present.
+`AskUserResponse.cancelled` closes that question's original reply channel and
+defaults to false for older clients. Cancelling a child question leaves unrelated
+parent actions pending. Cancelling its task closes its matching pending questions.
 
 The daemon owns sessions via `SessionManager` (`mew-daemon/src/session.rs`).
 Connections attach to sessions. Key behaviors:

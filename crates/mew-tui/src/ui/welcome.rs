@@ -108,11 +108,14 @@ pub(super) fn draw_landing(f: &mut Frame, app: &App, area: Rect) -> Rect {
     // the available width. The content width (minus the 1-cell inset on each
     // side and the 2-char prefix that `draw_input` applies) drives
     // wrapping/height.
-    let input_w = (area.width * 3 / 5)
-        .clamp(30, 80)
-        .min(area.width.saturating_sub(2));
-    let content_w = input_w.saturating_sub(2).saturating_sub(2);
-    let input_h = (app.input_visual_line_count(content_w).clamp(1, 12) + 2) as u16;
+    let input_w = if area.width < 32 {
+        area.width
+    } else {
+        ((area.width as u32 * 3 / 5) as u16)
+            .clamp(30, 80)
+            .min(area.width.saturating_sub(2))
+    };
+    let input_h = super::input::desired_height(app, input_w).min(area.height);
 
     // Vertical layout: hero, a 1-row gap, then the input. The block is
     // centered using a nominal single-line input so the input box's top edge
@@ -133,17 +136,21 @@ pub(super) fn draw_landing(f: &mut Frame, app: &App, area: Rect) -> Rect {
     let block_y = area.y + top_pad;
     let center_x = area.x + area.width / 2;
 
-    // Hero: centered as a fixed-width, left-aligned block.
-    let hero_w = hero_w.min(area.width);
-    let hero_x = center_x
-        .saturating_sub(hero_w / 2)
-        .clamp(area.x, area.right().saturating_sub(hero_w));
-    let hero_rect = Rect::new(hero_x, block_y, hero_w, hero_h);
-    f.render_widget(Paragraph::new(hero_rows), hero_rect);
+    // Preserve the usual hero placement while keeping the whole input inside
+    // the viewport. On short screens the editor takes priority over the hero.
+    let input_y = block_y
+        .saturating_add(hero_h)
+        .saturating_add(gap_rows)
+        .min(area.bottom().saturating_sub(input_h));
+    if input_y >= area.y.saturating_add(hero_h + gap_rows) {
+        let hero_w = hero_w.min(area.width);
+        let hero_x = center_x
+            .saturating_sub(hero_w / 2)
+            .clamp(area.x, area.right().saturating_sub(hero_w));
+        let hero_rect = Rect::new(hero_x, input_y - hero_h - gap_rows, hero_w, hero_h);
+        f.render_widget(Paragraph::new(hero_rows), hero_rect);
+    }
 
-    // Input: horizontally centered, top edge anchored directly below the
-    // hero + gap. The box grows downward from here as text wraps.
-    let input_y = block_y.saturating_add(hero_h).saturating_add(gap_rows);
     let input_x = center_x
         .saturating_sub(input_w / 2)
         .clamp(area.x, area.right().saturating_sub(input_w));

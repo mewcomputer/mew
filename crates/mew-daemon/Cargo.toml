@@ -20,6 +20,7 @@ sha2 = { workspace = true }
 
 mew-protocol = { workspace = true }
 mew-message = { workspace = true }
+mew-diff = { workspace = true }
 mew-hooks = { workspace = true }
 mew-agent = { workspace = true }
 mew-subagents = { workspace = true }
@@ -39,6 +40,9 @@ default = []
 iroh = ["dep:iroh"]
 
 [dev-dependencies]
+reqwest = { workspace = true }
+mew-personas = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"
 tokio-tungstenite = { workspace = true }
 async-trait = { workspace = true }

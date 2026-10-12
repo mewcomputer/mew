@@ -78,15 +78,30 @@ pub(crate) async fn recover_child_text(
         .iter()
         .rev()
         .find(|m| matches!(m.role, mew_message::Role::Assistant))?;
-    let text: String = last_assistant
+    let text = last_assistant
         .parts
         .iter()
-        .filter_map(|p| match p {
-            mew_message::Part::Text(t) => Some(t.text.as_str()),
+        .rev()
+        .find_map(|part| match part {
+            mew_message::Part::ToolCall(call) if call.tool_name == "exit_tool" => {
+                match &call.state {
+                    mew_message::ToolState::Completed(completed) => Some(completed.output.clone()),
+                    _ => None,
+                }
+            }
             _ => None,
         })
-        .collect::<Vec<_>>()
-        .join("\n");
+        .unwrap_or_else(|| {
+            last_assistant
+                .parts
+                .iter()
+                .filter_map(|part| match part {
+                    mew_message::Part::Text(text) => Some(text.text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
     if text.trim().is_empty() {
         None
     } else {
@@ -208,5 +223,35 @@ mod tests {
         assert!(recover_child_text(&session_dir, "sess_missing")
             .await
             .is_none());
+
+        let mut revision = msg.clone();
+        revision
+            .parts
+            .push(mew_message::Part::ToolCall(mew_message::ToolCallPart {
+                base: mew_message::PartBase {
+                    id: mew_message::PartId::new(),
+                    message_id: revision.id,
+                    session_id: revision.session_id,
+                },
+                tool_name: "exit_tool".into(),
+                call_id: "child-exit".into(),
+                state: mew_message::ToolState::Completed(mew_message::ToolStateCompleted {
+                    input: serde_json::json!({"final_answer":"exit deliverable"}),
+                    output: "exit deliverable".into(),
+                    metadata: None,
+                    diff: None,
+                    images: vec![],
+                    time: mew_message::ToolTime {
+                        start: 0,
+                        end: Some(1),
+                    },
+                }),
+                raw_input: String::new(),
+            }));
+        writer.write_message(&revision).await.unwrap();
+        assert_eq!(
+            recover_child_text(&session_dir, child_id).await.as_deref(),
+            Some("exit deliverable")
+        );
     }
 }

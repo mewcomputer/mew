@@ -57,8 +57,8 @@ interaction:
 |---------|-----|--------|
 | Streaming markdown | ratatui-mdstream | Shiki syntax highlighting |
 | Tool call cards | inline | inline with expand/collapse |
-| Model picker | `Ctrl+P` | click model pill |
-| Thinking variant | `Ctrl+P` cycle | dropdown |
+| Model picker | `Ctrl+Space` | click model pill |
+| Thinking variant | `Ctrl+Alt+P` cycle | dropdown |
 | Session list | `/sessions` | sidebar rail |
 | Subagent panel | sidebar | dedicated panel |
 | Todo list | sidebar panel | dedicated panel |

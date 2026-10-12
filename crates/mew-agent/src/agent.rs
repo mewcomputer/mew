@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -129,7 +130,8 @@ impl ShellJobState {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Running => "running",
-            Self::Completed { .. } => "completed",
+            Self::Completed { exit_code: 0 } => "completed",
+            Self::Completed { .. } => "failed",
             Self::Failed { .. } => "failed",
             Self::Cancelled => "cancelled",
         }
@@ -152,6 +154,16 @@ pub struct ShellJob {
     /// Notified once when the job reaches a terminal state. Used by
     /// `job_block` to wait without polling.
     pub done: Arc<tokio::sync::Notify>,
+    /// Readers could not reach EOF within the bounded drain after process exit.
+    pub output_incomplete: Arc<AtomicBool>,
+}
+
+/// A bounded UTF-8 chunk from a background job’s accumulated output.
+pub struct ShellJobOutput {
+    pub output: String,
+    pub next_offset: u64,
+    pub done: bool,
+    pub incomplete: bool,
 }
 
 #[derive(Clone)]
@@ -162,6 +174,7 @@ pub struct Agent {
     pub tools: HashMap<String, Arc<dyn Tool>>,
     pub messages: Arc<tokio::sync::Mutex<Vec<Message>>>,
     pub session_id: SessionId,
+    pub cwd: PathBuf,
     pub system: String,
     prompt_cache_state: Arc<std::sync::Mutex<PromptCacheState>>,
     prompt_generation: u64,
@@ -257,8 +270,8 @@ pub struct Agent {
     /// `denied_tool_names`); `Some(set)` = only tools whose name is in the
     /// set are sent to the provider.
     pub active_tool_names: Option<HashSet<String>>,
-    /// Capability gate for the desktop-only browser tools.
-    pub browser_enabled: bool,
+    /// Native page registration shared by every clone of this session's agent.
+    pub browser_access: mew_tools::browser::BrowserAccess,
     /// Active persona's tool denylist. Always applied, even when
     /// `active_tool_names` is `None` (so "all tools except X" works).
     /// Empty by default.
@@ -283,26 +296,13 @@ pub struct Agent {
     /// `rebuild_system` can re-derive `self.system` after a persona change
     /// without losing the original context prompt.
     pub base_system: String,
-    /// All personas discovered at startup. Used by the turn loop when a
-    /// `switch_persona` tool call queued a switch: the agent looks up the
-    /// persona by name at end of turn and emits `PersonaSwitchRequested`
-    /// for the main loop to apply.
+    /// Discovered personas available for explicit user selection.
     pub personas: Vec<mew_personas::Persona>,
-    /// Pending persona switch queued by the `switch_persona` tool. Shared
-    /// with the tool via `Arc<Mutex<...>>` so the tool can set it during
-    /// `execute` and the turn loop can drain it at end of turn. The
-    /// actual switch (model pin, provider rebuild) is the main loop's
-    /// responsibility, triggered by the `PersonaSwitchRequested` event.
-    pub pending_persona_switch: Arc<tokio::sync::Mutex<Option<String>>>,
     /// Short user messages queued to steer the *running* turn. Injected into
     /// the next provider request (even a tool-call continuation) rather than
     /// starting a new turn. If the turn ends first, the guidance is picked up
     /// by the next turn. Shared via `Arc` so the running turn's clone sees it.
     pub pending_guidance: Arc<tokio::sync::Mutex<VecDeque<String>>>,
-    /// Current persona name, shared with the `switch_persona` tool so it
-    /// can look up transition rules for the *active* persona before
-    /// queuing a switch. Updated by `apply_persona` and `clear_persona`.
-    pub current_persona_name: Arc<tokio::sync::RwLock<Option<String>>>,
     /// Active persona name (for display/status). `None` = no persona.
     pub persona_name: Option<String>,
     /// Active persona's autonomous hint for the Auto/Auto+ permission
@@ -310,10 +310,6 @@ pub struct Agent {
     /// (e.g. "this persona is read-only; be strict about shell commands").
     /// `None` = no hint (classifier uses its default prompt).
     pub autonomous_hint: Option<String>,
-    /// Active persona's transition rules. Controls which personas this
-    /// one can switch to and whether confirmation is required. `None` =
-    /// unrestricted.
-    pub persona_transitions: Option<mew_personas::TransitionRules>,
     /// Active persona's fallback models. Tried in order if the primary
     /// model's provider returns a stream error. `None` or empty = no
     /// fallbacks.
@@ -402,6 +398,7 @@ impl Agent {
             tools: tools_map,
             messages: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             session_id: session_id.unwrap_or_default(),
+            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             system: String::new(),
             prompt_cache_state: Arc::new(std::sync::Mutex::new(PromptCacheState::default())),
             prompt_generation: 0,
@@ -451,7 +448,7 @@ impl Agent {
             active_thinking_variant: None,
             persona_prompt: None,
             active_tool_names: None,
-            browser_enabled: false,
+            browser_access: Default::default(),
             denied_tool_names: HashSet::new(),
             skill_filter: Arc::new(tokio::sync::RwLock::new(None)),
             template_ctx: Arc::new(tokio::sync::RwLock::new(None)),
@@ -459,12 +456,9 @@ impl Agent {
             skills: Vec::new(),
             base_system: String::new(),
             personas: Vec::new(),
-            pending_persona_switch: Arc::new(tokio::sync::Mutex::new(None)),
             pending_guidance: Arc::new(tokio::sync::Mutex::new(VecDeque::new())),
-            current_persona_name: Arc::new(tokio::sync::RwLock::new(None)),
             persona_name: None,
             autonomous_hint: None,
-            persona_transitions: None,
             fallback_models: None,
             model_id: String::new(),
             provider_id: String::new(),
@@ -485,6 +479,12 @@ impl Agent {
     /// `provider_id`). The main loop calls this after constructing the agent
     /// and whenever the model is switched.
     pub fn set_model_info(&mut self, model_id: &str, provider_id: &str) {
+        if (!self.model_id.is_empty() || !self.provider_id.is_empty())
+            && (self.model_id != model_id || self.provider_id != provider_id)
+        {
+            self.prompt_cache_state = Arc::new(std::sync::Mutex::new(PromptCacheState::default()));
+            self.prompt_generation = 0;
+        }
         self.model_id = model_id.to_string();
         self.provider_id = provider_id.to_string();
     }
@@ -634,8 +634,7 @@ impl Agent {
             }
         }
 
-        let cwd = std::env::current_dir().ok();
-        let cwd_str = cwd.as_ref().map(|p| p.to_string_lossy().to_string());
+        let cwd_str = self.cwd.to_string_lossy();
 
         let model = self
             .classifier_model
@@ -646,7 +645,7 @@ impl Agent {
             &tool_call.tool_name,
             &tool_call.input,
             sensitivity_label(sensitivity),
-            cwd_str.as_deref(),
+            Some(&cwd_str),
             None,
             self.autonomous_hint.as_deref(),
         );
@@ -745,10 +744,6 @@ impl Agent {
             .retention()
     }
 
-    pub fn set_browser_enabled(&mut self, enabled: bool) {
-        self.browser_enabled = enabled;
-    }
-
     /// Append a persisted system-level session notice. This is conversation
     /// history, deliberately separate from the static system prompt.
     pub async fn append_system_message(&self, text: impl Into<String>) {
@@ -809,31 +804,9 @@ impl Agent {
         self.rebuild_system();
     }
 
-    /// Set the discovered personas. Stored for the turn loop to look up
-    /// a target persona by name when a `switch_persona` tool call is
-    /// drained at end of turn.
+    /// Set the discovered personas available for explicit user selection.
     pub fn set_personas(&mut self, personas: Vec<mew_personas::Persona>) {
         self.personas = personas;
-    }
-
-    /// Provide a shared `pending_persona_switch` slot. Should be the same
-    /// `Arc` passed to the `SwitchPersona` tool so the tool can queue a
-    /// switch and the turn loop can drain it.
-    pub fn set_pending_persona_switch(&mut self, slot: Arc<tokio::sync::Mutex<Option<String>>>) {
-        self.pending_persona_switch = slot;
-    }
-
-    /// Share the current-persona-name slot with the `switch_persona` tool
-    /// so it can look up transition rules for the active persona. The
-    /// agent keeps this in sync via `apply_persona` / `clear_persona`.
-    pub fn set_current_persona_name(&mut self, current: Arc<tokio::sync::RwLock<Option<String>>>) {
-        // Preserve the current value if the agent already has a persona active.
-        if let Some(ref name) = self.persona_name {
-            if let Ok(mut g) = current.try_write() {
-                *g = Some(name.clone());
-            }
-        }
-        self.current_persona_name = current;
     }
 
     /// Set the provider builder callback used by the turn loop to try
@@ -954,11 +927,7 @@ impl Agent {
     /// the provider.
     pub fn apply_persona(&mut self, persona: &mew_personas::Persona) -> Option<String> {
         self.persona_name = Some(persona.name.clone());
-        if let Ok(mut g) = self.current_persona_name.try_write() {
-            *g = Some(persona.name.clone());
-        }
         self.autonomous_hint = persona.config.autonomous_hint.clone();
-        self.persona_transitions = persona.config.transitions.clone();
         self.fallback_models = persona.config.fallback_models.clone();
 
         // Compute tool filters before rendering the prompt so a templated
@@ -990,9 +959,7 @@ impl Agent {
             model_id: self.model_id.clone(),
             provider_id: self.provider_id.clone(),
             session_id: self.session_id.to_string(),
-            cwd: std::env::current_dir()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default(),
+            cwd: self.cwd.to_string_lossy().into_owned(),
             current_date: mew_prompts::template::TemplateContext::today(),
             tools,
             denied_tools,
@@ -1051,14 +1018,10 @@ impl Agent {
     /// default (empty), and the unfiltered skills list.
     pub fn clear_persona(&mut self) {
         self.persona_name = None;
-        if let Ok(mut g) = self.current_persona_name.try_write() {
-            *g = None;
-        }
         self.persona_prompt = None;
         self.active_tool_names = None;
         self.denied_tool_names.clear();
         self.autonomous_hint = None;
-        self.persona_transitions = None;
         self.fallback_models = None;
         if let Ok(mut g) = self.skill_filter.try_write() {
             *g = None;
@@ -1224,15 +1187,15 @@ impl Agent {
         (chars / 4) as u32
     }
 
-    /// Resolve the configured plan path against the current working directory.
+    /// Resolve the configured plan path against the session working directory.
     /// Returns `None` when no `plan_path` is configured. Relative paths are
-    /// joined onto `std::env::current_dir()`; absolute paths are used as-is.
+    /// joined onto the session cwd; absolute paths are used as-is.
     pub fn resolved_plan_path(&self) -> Option<PathBuf> {
         self.plan_path.as_ref().map(|plan_path| {
             if plan_path.is_absolute() {
                 plan_path.clone()
             } else {
-                std::env::current_dir().unwrap_or_default().join(plan_path)
+                self.cwd.join(plan_path)
             }
         })
     }
@@ -1481,12 +1444,69 @@ impl Agent {
                             manifests,
                         },
                         mew_subagents::SubagentEvent::TextDelta { text } => {
-                            AgentEvent::ToolProgress {
-                                call_id: pump_cid.clone(),
-                                chunk: text,
+                            AgentEvent::SubagentProgress {
+                                parent_call_id: pump_cid.clone(),
+                                child_event: Box::new(AgentEvent::Provider(
+                                    mew_provider::ProviderEvent::PartDelta {
+                                        part_id: ulid::Ulid::new(),
+                                        field: "text",
+                                        delta: text,
+                                    },
+                                )),
                             }
                         }
-                        _ => continue,
+                        mew_subagents::SubagentEvent::ToolStart { call_id, .. } => {
+                            AgentEvent::SubagentProgress {
+                                parent_call_id: pump_cid.clone(),
+                                child_event: Box::new(AgentEvent::ToolStart { call_id }),
+                            }
+                        }
+                        mew_subagents::SubagentEvent::ToolEnd { call_id, success } => {
+                            AgentEvent::SubagentProgress {
+                                parent_call_id: pump_cid.clone(),
+                                child_event: Box::new(AgentEvent::ToolEnd { call_id, success }),
+                            }
+                        }
+                        mew_subagents::SubagentEvent::Progress {
+                            tool_name, message, ..
+                        } => AgentEvent::SubagentStatus {
+                            parent_call_id: pump_cid.clone(),
+                            tool_name,
+                            message,
+                        },
+                        mew_subagents::SubagentEvent::AskUser {
+                            mut source,
+                            call_id,
+                            questions,
+                            tx,
+                        } => {
+                            // Link nested questions to the visible root task while
+                            // retaining the actual child that owns the answer channel.
+                            source.parent_call_id = pump_cid.clone();
+                            AgentEvent::SubagentAskUser {
+                                source,
+                                call_id,
+                                questions,
+                                tx,
+                            }
+                        }
+                        mew_subagents::SubagentEvent::WorkspacePermissionRequest { path, tx } => {
+                            AgentEvent::WorkspacePermissionRequest { path, tx }
+                        }
+                        mew_subagents::SubagentEvent::PermissionRequest {
+                            tool_name,
+                            call_id,
+                            input,
+                            tx,
+                        } => AgentEvent::SubagentPermissionRequest {
+                            parent_call_id: pump_cid.clone(),
+                            call: mew_hooks::ToolCall {
+                                tool_name,
+                                call_id,
+                                input,
+                            },
+                            tx,
+                        },
                     };
                     let _ = ev_tx_clone.send(agent_event).await;
                 }
@@ -1634,6 +1654,7 @@ impl Agent {
         let output = Arc::new(tokio::sync::Mutex::new(String::new()));
         let state = Arc::new(tokio::sync::Mutex::new(ShellJobState::Running));
         let done = Arc::new(tokio::sync::Notify::new());
+        let output_incomplete = Arc::new(AtomicBool::new(false));
 
         let job = ShellJob {
             id: id.clone(),
@@ -1643,14 +1664,23 @@ impl Agent {
             output: output.clone(),
             state: state.clone(),
             done: done.clone(),
+            output_incomplete: output_incomplete.clone(),
         };
 
         // Spawn the background runner.
-        let _job_id = id.clone();
         let cmd = command.to_string();
         let cwd = cwd.to_path_buf();
         tokio::spawn(async move {
-            run_shell_job(&cmd, &cwd, &output, &state, &done, &cancel).await;
+            run_shell_job(
+                &cmd,
+                &cwd,
+                &output,
+                &state,
+                &done,
+                &cancel,
+                &output_incomplete,
+            )
+            .await;
         });
 
         self.shell_jobs.lock().await.insert(id.clone(), job);
@@ -1662,7 +1692,11 @@ impl Agent {
         let jobs = self.shell_jobs.lock().await;
         let job = jobs.get(job_id)?;
         let state = job.state.lock().await.clone();
-        let output = job.output.lock().await.clone();
+        let mut output = job.output.lock().await.clone();
+        if state.is_terminal() && job.output_incomplete.load(Ordering::Acquire) {
+            output
+                .push_str("\n[output incomplete: a reader did not reach EOF after process exit]\n");
+        }
         Some((state, output))
     }
 
@@ -1675,20 +1709,50 @@ impl Agent {
         job_id: &str,
         timeout_secs: u64,
     ) -> Option<(ShellJobState, String)> {
-        let done = {
+        let (done, state) = {
             let jobs = self.shell_jobs.lock().await;
-            jobs.get(job_id)?.done.clone()
+            let job = jobs.get(job_id)?;
+            (job.done.clone(), job.state.clone())
         };
-
-        // Wait for the done signal or timeout.
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(timeout_secs),
-            done.notified(),
-        )
-        .await;
+        let notified = done.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if !state.lock().await.is_terminal() {
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), notified).await;
+        }
 
         // Return whatever state we're in.
         self.shell_job_status(job_id).await
+    }
+
+    /// Read up to 64 KiB without copying the growing output buffer. Offsets
+    /// are UTF-8 byte positions returned by the preceding read.
+    pub async fn shell_job_output(
+        &self,
+        job_id: &str,
+        offset: u64,
+    ) -> Result<ShellJobOutput, String> {
+        let jobs = self.shell_jobs.lock().await;
+        let job = jobs
+            .get(job_id)
+            .ok_or_else(|| format!("unknown job: {job_id}"))?;
+        let terminal = job.state.lock().await.is_terminal();
+        let output = job.output.lock().await;
+        let start = usize::try_from(offset).map_err(|_| "invalid output offset".to_string())?;
+        if start > output.len() || !output.is_char_boundary(start) {
+            return Err("invalid output offset".to_string());
+        }
+        let mut end = start.saturating_add(65_536).min(output.len());
+        while !output.is_char_boundary(end) {
+            end -= 1;
+        }
+        Ok(ShellJobOutput {
+            output: output[start..end].to_string(),
+            next_offset: end as u64,
+            done: terminal && end == output.len(),
+            incomplete: terminal && job.output_incomplete.load(Ordering::Acquire),
+        })
     }
 
     /// Cancel a running shell job by killing the process. Returns true if
@@ -1717,6 +1781,7 @@ async fn run_shell_job(
     state: &Arc<tokio::sync::Mutex<ShellJobState>>,
     done: &Arc<tokio::sync::Notify>,
     cancel: &tokio_util::sync::CancellationToken,
+    output_incomplete: &Arc<AtomicBool>,
 ) {
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::process::Command;
@@ -1742,52 +1807,72 @@ async fn run_shell_job(
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
-    // Reader tasks for stdout and stderr.
+    let mut readers = tokio::task::JoinSet::new();
     if let Some(stdout) = stdout {
         let output = output.clone();
-        tokio::spawn(async move {
+        readers.spawn(async move {
             let mut reader = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                let mut out = output.lock().await;
-                out.push_str(&line);
-                out.push('\n');
+            loop {
+                match reader.next_line().await {
+                    Ok(Some(line)) => {
+                        let mut out = output.lock().await;
+                        out.push_str(&line);
+                        out.push('\n');
+                    }
+                    Ok(None) => return true,
+                    Err(_) => return false,
+                }
             }
         });
     }
     if let Some(stderr) = stderr {
         let output = output.clone();
-        tokio::spawn(async move {
+        readers.spawn(async move {
             let mut reader = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                let mut out = output.lock().await;
-                out.push_str(&line);
-                out.push('\n');
+            loop {
+                match reader.next_line().await {
+                    Ok(Some(line)) => {
+                        let mut out = output.lock().await;
+                        out.push_str(&line);
+                        out.push('\n');
+                    }
+                    Ok(None) => return true,
+                    Err(_) => return false,
+                }
             }
         });
     }
 
-    // Wait for exit or cancellation.
-    tokio::select! {
+    let final_state = tokio::select! {
         biased;
         _ = cancel.cancelled() => {
             let _ = child.kill().await;
-            *state.lock().await = ShellJobState::Cancelled;
+            ShellJobState::Cancelled
         }
         status = child.wait() => {
             match status {
-                Ok(s) => {
-                    *state.lock().await = ShellJobState::Completed {
-                        exit_code: s.code().unwrap_or(-1),
-                    };
-                }
-                Err(e) => {
-                    *state.lock().await = ShellJobState::Failed {
-                        reason: format!("wait failed: {}", e),
-                    };
-                }
+                Ok(s) => ShellJobState::Completed { exit_code: s.code().unwrap_or(-1) },
+                Err(e) => ShellJobState::Failed { reason: format!("wait failed: {}", e) },
             }
         }
+    };
+
+    // Descendants can inherit a pipe after the shell exits. Preserve buffered
+    // output, but bound that wait so those descendants cannot retain the job.
+    let mut complete = true;
+    let drained = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while let Some(result) = readers.join_next().await {
+            complete &= matches!(result, Ok(true));
+        }
+    })
+    .await
+    .is_ok();
+    if !drained {
+        readers.abort_all();
+        while readers.join_next().await.is_some() {}
     }
+    output_incomplete.store(!drained || !complete, Ordering::Release);
+    *state.lock().await = final_state;
 
     done.notify_waiters();
 }

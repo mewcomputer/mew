@@ -1,13 +1,5 @@
 use super::*;
 
-pub(super) fn replace_browser_event_value(current: &mut String, next: String) -> bool {
-    if *current == next {
-        return false;
-    }
-    *current = next;
-    true
-}
-
 impl DesktopShell {
     pub(super) fn new_conversation(&mut self, cx: &mut Context<Self>) {
         self.begin_new_conversation(None, None, cx);
@@ -31,85 +23,33 @@ impl DesktopShell {
         group_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        if self.session_requests.is_pending() {
+            self.report_pending_attachment();
+            cx.notify();
+            return;
+        }
         self.capture_session_view_state();
         self.close_terminal();
         self.open_new_tab();
         self.reset_unbound_tab_view();
         self.pending_model = None;
         self.awaiting_model_switch = None;
-        self.pending_prompt = None;
-        self.pending_session_request = true;
-        self.pending_session_target = None;
-        let command = match group_id {
-            Some(group_id) => self.model.ui.new_conversation_in_group(cwd, group_id),
-            None => self.model.ui.new_conversation(cwd),
-        };
+        self.create_session(cwd, group_id);
         self.composer_selection = 0..0;
         self.composer_selection_reversed = false;
         self.composer_marked_range = None;
         self.composer_is_selecting = false;
         self.restart_composer_cursor_blink(cx);
-        self.send_command(command);
         cx.notify();
-    }
-
-    pub(super) fn open_browser_panel(&mut self, cx: &mut Context<Self>) {
-        let was_open = self.browser_panel_open;
-        self.auxiliary_view = AuxiliaryView::Browser;
-        self.capture_session_view_state();
-        self.browser_panel_open = true;
-        self.browser_error = None;
-        self.browser_url_focus_requested = true;
-        if self.browser_url.is_empty() {
-            self.browser_url = self
-                .model
-                .ui
-                .browser
-                .url
-                .clone()
-                .unwrap_or_else(|| DEFAULT_BROWSER_URL.to_owned());
-        }
-        if !was_open && self.browser_portal.is_some() {
-            self.start_browser_pump(cx);
-        }
-        self.capture_session_view_state();
-        cx.notify();
-    }
-
-    pub(super) fn close_browser_panel(&mut self, cx: &mut Context<Self>) {
-        self.browser_panel_open = false;
-        self.browser_native_rect = None;
-        self.browser_pump_epoch = self.browser_pump_epoch.wrapping_add(1);
-        self.browser_pump = None;
-        self.browser_url_focus_requested = false;
-        if let Some(portal) = self.browser_portal.as_ref() {
-            let _ = portal.close(BROWSER_OWNER);
-        }
-        self.capture_session_view_state();
-        cx.notify();
-    }
-
-    fn reset_browser_for_unattached_tab(&mut self) {
-        self.browser_panel_open = false;
-        self.browser_native_rect = None;
-        self.browser_pump_epoch = self.browser_pump_epoch.wrapping_add(1);
-        self.browser_pump = None;
-        self.browser_initialization_pending = false;
-        self.browser_url_focus_requested = false;
-        self.browser_url.clear();
-        self.browser_title.clear();
-        self.browser_error = None;
-        if let Some(portal) = self.browser_portal.as_ref() {
-            let _ = portal.close(BROWSER_OWNER);
-        }
     }
 
     fn reset_unbound_tab_view(&mut self) {
-        self.pending_session_request = false;
-        self.pending_session_target = None;
-        self.model.attached_session = None;
+        self.initial_auto_attach = false;
+        self.switch_draft_owner(None);
+        self.session_requests.navigate();
+        self.model
+            .prepare_attachment(self.session_requests.needs_reconnect());
         self.model.ui.selected_session = None;
-        self.model.ui.transcript.clear();
         self.reset_browser_for_unattached_tab();
         self.markdown_cache.clear();
         self.tool_text_lists.borrow_mut().clear();
@@ -131,45 +71,19 @@ impl DesktopShell {
         self.clear_review();
     }
 
-    pub(super) fn retry_browser(&mut self, cx: &mut Context<Self>) {
-        if let Some(portal) = self.browser_portal.take() {
-            let _ = portal.close(BROWSER_OWNER);
-        }
-        self.browser_initialization_pending = false;
-        self.browser_native_rect = None;
-        self.browser_error = None;
-        self.browser_url_focus_requested = false;
-        cx.notify();
-    }
-
-    pub(super) fn navigate_browser_to(&mut self, cx: &mut Context<Self>) {
-        let Some(url) = normalize_browser_url(&self.browser_url) else {
-            self.browser_error = Some("enter a valid http(s) URL".into());
-            cx.notify();
-            return;
-        };
-        self.browser_url = url.clone();
-        self.browser_error = None;
-        if let Some(portal) = self.browser_portal.as_ref() {
-            if let Err(error) = portal.navigate(BROWSER_OWNER, &url) {
-                self.browser_error = Some(error.to_string());
-            }
-        }
-        self.capture_session_view_state();
-        cx.notify();
-    }
-
-    fn start_browser_pump(&mut self, cx: &mut Context<Self>) {
-        if self.browser_pump.is_none() {
-            let shell = cx.entity().downgrade();
-            self.browser_pump = Some(cx.new(|cx| BrowserPumpView::new(shell, cx)));
-        }
-    }
-
     pub(super) fn select_auxiliary_view(&mut self, view: AuxiliaryView, cx: &mut Context<Self>) {
         self.auxiliary_view = view;
         self.capture_session_view_state();
         self.sync_workspace_watch();
+        if view == AuxiliaryView::Local {
+            if let Some(session_id) = self.model.attached_session.clone() {
+                self.refresh_file_tree(&session_id);
+            }
+        }
+        if view == AuxiliaryView::Changes {
+            self.review_requests.invalidate();
+            self.refresh_review(cx);
+        }
         if view == AuxiliaryView::Browser {
             self.open_browser_panel(cx);
         } else if self.browser_panel_open {
@@ -179,145 +93,30 @@ impl DesktopShell {
         }
     }
 
-    pub(super) fn ensure_browser_portal(&mut self, window: &Window, cx: &mut Context<Self>) {
-        if !browser_initialization_is_needed(
-            self.browser_panel_open,
-            self.browser_portal.is_some(),
-            self.browser_initialization_pending,
-            self.browser_error.is_some(),
-        ) {
-            return;
-        }
-        let Some(parent_view) = parent_view_handle(window) else {
-            self.browser_error = Some("native browser is unavailable on this platform".into());
-            cx.notify();
-            return;
-        };
-        let initial_url = if self.browser_url.is_empty() {
-            DEFAULT_BROWSER_URL
-        } else {
-            self.browser_url.as_str()
-        };
-        self.browser_initialization_pending = true;
-        let initial_url = initial_url.to_owned();
-        let shell = cx.entity();
-        cx.defer(move |cx| {
-            shell.update(cx, |shell, cx| {
-                shell.initialize_browser_portal(parent_view, initial_url, cx);
-            });
-        });
-    }
-
-    fn initialize_browser_portal(
-        &mut self,
-        parent_view: usize,
-        initial_url: String,
-        cx: &mut Context<Self>,
-    ) {
-        self.browser_initialization_pending = false;
-        if !self.browser_panel_open || self.browser_portal.is_some() {
-            return;
-        }
-        // GPUI's render pass runs on AppKit's main thread. The native CEF
-        // message loop must be pumped there, so the render loop below is the
-        // scheduler for this child surface.
-        let pump_trigger: PumpTrigger = std::sync::Arc::new(|| {});
-        let portal = match BrowserPortal::initialize(parent_view, &initial_url, pump_trigger) {
-            Ok(Some(portal)) => portal,
-            Ok(None) => {
-                self.browser_error = Some(
-                    "native browser is unavailable; install the packaged browser runtime".into(),
-                );
-                eprintln!("native browser unavailable: packaged browser runtime missing");
-                return;
-            }
-            Err(error) => {
-                self.browser_error = Some(format!("could not start native browser: {error:#}"));
-                return;
-            }
-        };
-        self.browser_portal = Some(portal);
-        self.start_browser_pump(cx);
-        if let Some(portal) = self.browser_portal.as_ref() {
-            let _ = portal.set_visible(BROWSER_OWNER, true);
-            if !initial_url.is_empty() {
-                let _ = portal.navigate(BROWSER_OWNER, &initial_url);
-            }
-        }
-        cx.notify();
-    }
-
-    pub(super) fn apply_browser_events(&mut self, _cx: &mut Context<Self>) -> bool {
-        let mut changed = false;
-        let events = self
-            .browser_portal
-            .as_ref()
-            .map(BrowserPortal::drain_events)
-            .unwrap_or_default();
-        for event in events {
-            match event {
-                BrowserEvent::AddressChanged { owner, url }
-                    if owner.as_deref().is_none_or(|owner| owner == BROWSER_OWNER) =>
-                {
-                    if replace_browser_event_value(&mut self.browser_url, url) {
-                        self.browser_error = None;
-                        changed = true;
-                    }
-                }
-                BrowserEvent::TitleChanged { owner, title, .. }
-                    if owner.as_deref().is_none_or(|owner| owner == BROWSER_OWNER) =>
-                {
-                    changed |= replace_browser_event_value(&mut self.browser_title, title);
-                }
-                _ => {}
-            }
-        }
-        changed
-    }
-
-    pub(super) fn update_browser_bounds(&mut self, bounds: Bounds<Pixels>, window: &Window) {
-        let Some(portal) = self.browser_portal.as_ref() else {
-            return;
-        };
-        let rect = browser_native_rect(
-            bounds,
-            window.bounds().size,
-            self.browser_panel_open && !self.layout.workbench_collapsed,
-        );
-        if self.browser_native_rect == Some(rect) {
-            return;
-        }
-        if let Err(error) = portal.set_rect(BROWSER_OWNER, rect) {
-            self.browser_error = Some(error.to_string());
-        } else {
-            self.browser_native_rect = Some(rect);
-        }
-    }
-
     pub(super) fn attach_session(&mut self, session_id: String, cx: &mut Context<Self>) {
         self.capture_session_view_state();
-        if let Some(command) = self.model.ui.select_session(&session_id) {
+        if self.model.ui.select_session(&session_id).is_some() {
+            self.initial_auto_attach = false;
+            self.switch_draft_owner(Some(&session_id));
             self.restore_session_view_state(&session_id, cx);
             self.clear_pending_session_view();
             self.transcript_selection = None;
             self.transcript_selection_anchor = None;
             self.transcript_selected_text = None;
             self.transcript_is_selecting = false;
-            self.pending_session_request = true;
-            self.pending_session_target = Some(session_id.clone());
+            self.session_requests.navigate();
             if self.model.attached_session.as_deref() != Some(session_id.as_str()) {
                 self.close_terminal();
             }
             self.open_session_tab(&session_id);
-            self.send_command(command);
+            self.dispatch_attachment(&session_id);
             cx.notify();
         }
     }
 
     fn clear_pending_session_view(&mut self) {
-        self.model.attached_session = None;
-        self.model.last_error = None;
-        self.model.ui.clear_attached_session_projection();
+        self.model
+            .prepare_attachment(self.session_requests.needs_reconnect());
         self.markdown_cache.clear();
         self.tool_text_lists.borrow_mut().clear();
         self.tool_text_cache.borrow_mut().clear();
@@ -464,19 +263,21 @@ impl DesktopShell {
     }
 
     pub(super) fn toggle_workbench(&mut self, cx: &mut Context<Self>) {
-        if self.layout.workbench_collapsed
-            && !workbench_fits_window(
-                self.window_width,
-                if self.layout.sidebar_collapsed {
-                    SIDEBAR_COLLAPSED_WIDTH
-                } else {
-                    self.sidebar_width
-                },
-            )
-        {
-            return;
+        if self.layout.workbench_collapsed {
+            if !self
+                .layout
+                .reveal_workbench(self.window_width, self.sidebar_width)
+            {
+                return;
+            }
+        } else {
+            self.layout.workbench_collapsed = true;
         }
-        self.layout.workbench_collapsed = !self.layout.workbench_collapsed;
+        self.sync_workspace_watch();
+        if !self.layout.workbench_collapsed && self.auxiliary_view == AuxiliaryView::Changes {
+            self.review_requests.invalidate();
+            self.refresh_review(cx);
+        }
         self.workbench_animation_id = self.workbench_animation_id.wrapping_add(1);
         self.capture_session_view_state();
         self.persist_layout();
@@ -683,12 +484,77 @@ impl DesktopShell {
         }
     }
 
-    pub(super) fn send_command(&self, command: ClientMessage) {
+    pub(super) fn send_command(&self, command: ClientMessage) -> bool {
         if let Some(command_tx) = &self.command_tx {
             if let Err(error) = command_tx.send(command) {
                 tracing::warn!(error = %error, "desktop: command channel closed");
+                return false;
             }
+            return true;
         }
+        false
+    }
+
+    pub(super) fn report_pending_attachment(&mut self) {
+        self.model.last_error = Some(
+            if self.session_requests.needs_reconnect() {
+                "Task attachment could not be confirmed. Reconnect the client to continue."
+            } else {
+                "Still attaching the task. Your draft is saved; submit again when it is ready."
+            }
+            .into(),
+        );
+    }
+
+    pub(super) fn create_session(&mut self, cwd: Option<String>, group_id: Option<String>) -> bool {
+        let accepted = self.session_requests.create(
+            self.command_tx.as_ref(),
+            self.task_drafts.owner().clone(),
+            cwd,
+            group_id,
+        );
+        if !accepted {
+            self.model.last_error =
+                Some("Could not request a new task. Your draft is saved.".into());
+        }
+        accepted
+    }
+
+    pub(super) fn dispatch_attachment(&mut self, session_id: &str) {
+        if !self.session_requests.is_pending()
+            && !self
+                .session_requests
+                .attach(self.command_tx.as_ref(), session_id)
+        {
+            self.model.last_error =
+                Some("Could not request task attachment. Reconnect the client to continue.".into());
+        }
+    }
+
+    pub(super) fn switch_draft_owner(&mut self, session_id: Option<&str>) {
+        let profile = self
+            .connection_profile
+            .as_ref()
+            .map(DesktopConnectionProfile::endpoint_label)
+            .unwrap_or_default();
+        if !self.task_drafts.activate(
+            profile,
+            session_id,
+            &mut self.model.ui.composer,
+            &mut self.attachments,
+            &mut self.prompt_history,
+        ) {
+            return;
+        }
+        self.session_requests.navigate();
+        let end = self.model.ui.composer.len();
+        self.composer_selection = end..end;
+        self.composer_selection_reversed = false;
+        self.composer_marked_range = None;
+        self.composer_is_selecting = false;
+        self.attachment_error = None;
+        self.pending_model = None;
+        self.awaiting_model_switch = None;
     }
 
     pub(super) fn yield_control(&mut self, cx: &mut Context<Self>) {
@@ -807,31 +673,9 @@ impl DesktopShell {
         self.browser_url = view_state.browser_url;
         self.browser_title = view_state.browser_title;
         self.browser_error = None;
-        self.browser_initialization_pending = false;
         self.sync_browser_portal_to_view_state();
         if self.browser_panel_open && self.browser_portal.is_some() {
             self.start_browser_pump(cx);
-        }
-    }
-
-    fn sync_browser_portal_to_view_state(&mut self) {
-        let Some(portal) = self.browser_portal.as_ref() else {
-            return;
-        };
-        if !self.browser_panel_open {
-            if let Err(error) = portal.set_visible(BROWSER_OWNER, false) {
-                self.browser_error = Some(error.to_string());
-            }
-            return;
-        }
-        if let Err(error) = portal.set_visible(BROWSER_OWNER, true) {
-            self.browser_error = Some(error.to_string());
-            return;
-        }
-        if browser_url_is_navigable(&self.browser_url) {
-            if let Err(error) = portal.navigate(BROWSER_OWNER, &self.browser_url) {
-                self.browser_error = Some(error.to_string());
-            }
         }
     }
 
@@ -843,6 +687,7 @@ impl DesktopShell {
             &self.expanded_workspaces,
             &self.sidebar_search,
             self.model.ui.selected_session.as_deref(),
+            self.sidebar_filter,
         );
     }
 
@@ -1376,11 +1221,11 @@ impl DesktopShell {
 
     pub(super) fn apply_client_update(
         &mut self,
-        events: &[ClientEvent],
+        events: &mut [ClientEvent],
         state: &ClientState,
         cx: &mut Context<Self>,
     ) {
-        for event in events {
+        for event in events.iter() {
             match event {
                 ClientEvent::TerminalOpened { terminal_id } => {
                     self.terminal_id = Some(terminal_id.clone());
@@ -1416,30 +1261,49 @@ impl DesktopShell {
                 } => {
                     self.model.append_tool_progress(session_id, call_id, chunk);
                 }
-                ClientEvent::BrowserStateChanged {
-                    open, url, title, ..
+                ClientEvent::SessionReady { session_id } => {
+                    self.browser_confirmed_sessions.insert(session_id.clone());
+                }
+                ClientEvent::BrowserPageRegistration {
+                    session_id,
+                    page_instance,
+                    error,
                 } => {
-                    self.browser_panel_open = *open;
-                    if let Some(url) = url {
-                        self.browser_url = url.clone();
+                    let page = self
+                        .browser_portal
+                        .as_ref()
+                        .and_then(|portal| portal.page_for_instance(page_instance))
+                        .filter(|page| {
+                            page.owner.session_id == *session_id
+                                && self.browser_owner_is_confirmed(&page.owner)
+                        });
+                    if let Some(page) = page {
+                        if let Some(portal) = &self.browser_portal {
+                            portal.set_error(&page, error.clone());
+                        }
+                        if self.current_browser_owner().as_ref() == Some(&page.owner) {
+                            self.browser_error = error.clone();
+                            cx.notify();
+                        }
                     }
-                    if let Some(title) = title {
-                        self.browser_title = title.clone();
+                }
+                ClientEvent::BrowserError {
+                    message,
+                    tab_id: Some(instance),
+                } => {
+                    let page = self
+                        .browser_portal
+                        .as_ref()
+                        .and_then(|portal| portal.page_for_instance(instance))
+                        .filter(|page| self.browser_owner_is_confirmed(&page.owner));
+                    if let Some(page) = page {
+                        if let Some(portal) = &self.browser_portal {
+                            portal.set_error(&page, Some(message.clone()));
+                        }
+                        if self.current_browser_owner().as_ref() == Some(&page.owner) {
+                            self.browser_error = Some(message.clone());
+                        }
                     }
-                    self.browser_error = None;
-                }
-                ClientEvent::BrowserSnapshot { url, title, .. } => {
-                    self.browser_panel_open = true;
-                    self.browser_url = url.clone();
-                    self.browser_title = title.clone();
-                    self.browser_error = None;
-                }
-                ClientEvent::BrowserScreenshot { url, .. } => {
-                    self.browser_panel_open = true;
-                    self.browser_url = url.clone();
-                }
-                ClientEvent::BrowserError { message, .. } => {
-                    self.browser_error = Some(message.clone());
                 }
                 _ => {}
             }
@@ -1448,6 +1312,32 @@ impl DesktopShell {
             ClientEvent::SessionReady { session_id } => Some(session_id.as_str()),
             _ => None,
         });
+        if events
+            .iter()
+            .any(|event| matches!(event, ClientEvent::Error(_)))
+        {
+            self.session_requests.ambiguous_error();
+        }
+        let ready = ready_session_id.and_then(|session_id| {
+            self.session_requests
+                .acknowledge_from(self.session_requests.generation(), session_id)
+        });
+        let mut initial_prompt = None;
+        if let Some(ready) = ready {
+            if let (Some(owner), Some(session_id)) = (ready.created_for, ready_session_id) {
+                self.task_drafts
+                    .bind_created_task(&owner, session_id, ready.follow_creation);
+                if ready.follow_creation {
+                    self.bind_new_tab_to_session(session_id);
+                    initial_prompt = ready.initial_prompt;
+                }
+            }
+            if let Some(desired) = self.task_drafts.owner().session_id.clone() {
+                if ready_session_id != Some(desired.as_str()) {
+                    self.dispatch_attachment(&desired);
+                }
+            }
+        }
         let has_browser_event = events.iter().any(|event| {
             matches!(
                 event,
@@ -1457,22 +1347,29 @@ impl DesktopShell {
                     | ClientEvent::BrowserError { .. }
             )
         });
-        self.model.apply_events(events);
+        self.model
+            .apply_events(events, self.session_requests.needs_reconnect());
         if let Some(session_id) = ready_session_id {
             if should_track_session_ready(
                 self.model.ui.selected_session.as_deref(),
-                self.pending_session_target.as_deref(),
+                self.task_drafts.owner().session_id.as_deref(),
                 session_id,
             ) {
                 self.ensure_session_view_state(session_id);
             }
         }
         if client_update_requires_metadata_sync(events) {
-            if let Some(target) = self.pending_session_target.as_deref() {
-                self.model
-                    .sync_client_metadata_while_attaching(state, target);
+            if !self.initial_auto_attach {
+                self.model.sync_client_metadata_for_selection(
+                    state,
+                    self.task_drafts.owner().session_id.as_deref(),
+                );
             } else {
                 self.model.sync_client_metadata(state);
+            }
+            if self.session_requests.is_pending() {
+                self.model.attached_session = None;
+                self.model.ui.clear_attached_session_projection();
             }
             self.rebuild_sidebar_rows();
         }
@@ -1481,6 +1378,23 @@ impl DesktopShell {
             .any(|event| matches!(event, ClientEvent::FileTreeChanged))
         {
             self.apply_file_tree_update(state);
+        }
+        if let Some(session_id) = ready_session_id {
+            if let Some(profile) = &self.connection_profile {
+                let owner = BrowserOwner {
+                    connection_profile: profile.endpoint_label(),
+                    session_id: session_id.to_owned(),
+                };
+                if let Some(page) = self
+                    .browser_portal
+                    .as_ref()
+                    .and_then(|portal| portal.page_state(&owner))
+                    .map(|state| state.page)
+                {
+                    self.register_ready_browser_page(&page);
+                }
+            }
+            self.sync_browser_portal_to_view_state();
         }
         self.sync_workspace_watch();
         if has_browser_event {
@@ -1498,9 +1412,6 @@ impl DesktopShell {
         }) {
             self.refresh_open_tab_titles();
         }
-        if let Some(target) = self.pending_session_target.as_deref() {
-            self.model.ui.selected_session = Some(target.to_owned());
-        }
         if let Some(session_id) = events.iter().find_map(|event| match event {
             ClientEvent::SessionHistoryPageLoaded { session_id, .. } => Some(session_id),
             _ => None,
@@ -1510,34 +1421,17 @@ impl DesktopShell {
                 .and_then(|session| session.history_before);
             self.history_loading = false;
         }
-        if events.iter().any(|event| {
-            matches!(
-                event,
-                ClientEvent::SessionReady { .. }
-                    | ClientEvent::SessionHistoryLoaded { .. }
-                    | ClientEvent::SessionHistoryPageLoaded { .. }
-                    | ClientEvent::MessageChanged { .. }
-                    | ClientEvent::FlaggedFilesChanged { .. }
-                    | ClientEvent::SessionMetaChanged { .. }
-            )
-        }) {
-            self.refresh_review(cx);
-        }
         if let Some(session_id) = self.model.ui.selected_session.clone() {
             if !self
                 .open_tabs
                 .iter()
                 .any(|tab| tab.session_id.as_deref() == Some(session_id.as_str()))
             {
-                if self.pending_session_request && self.pending_session_target.is_none() {
-                    self.bind_new_tab_to_session(&session_id);
-                } else {
-                    self.open_session_tab(&session_id);
-                }
+                self.open_session_tab(&session_id);
             }
         }
         if events.iter().any(client_event_is_text_delta) {
-            for event in events {
+            for event in events.iter() {
                 if let ClientEvent::TextDelta {
                     session_id, delta, ..
                 } = event
@@ -1586,7 +1480,12 @@ impl DesktopShell {
             .iter()
             .any(|event| matches!(event, ClientEvent::SessionListChanged));
         if session_list_changed
-            && !self.pending_session_request
+            && drafts::may_auto_attach(
+                self.initial_auto_attach,
+                &self.model.ui.composer,
+                &self.attachments,
+            )
+            && !self.session_requests.is_pending()
             && self.model.ui.selected_session.is_none()
         {
             let session_id = self
@@ -1597,21 +1496,12 @@ impl DesktopShell {
                 .find(|conversation| !conversation.archived)
                 .map(|conversation| conversation.session_id.clone());
             if let Some(session_id) = session_id {
-                if let Some(command) = self.model.ui.select_session(&session_id) {
-                    self.restore_session_view_state(&session_id, cx);
-                    self.pending_session_request = true;
-                    self.pending_session_target = Some(session_id);
-                    self.send_command(command);
-                }
+                self.attach_session(session_id, cx);
             }
         }
-        let session_ready = ready_session_id.is_some_and(|session_id| {
-            self.pending_session_request
-                && self
-                    .pending_session_target
-                    .as_deref()
-                    .is_none_or(|target| target == session_id)
-        });
+        let session_ready = ready_session_id.is_some()
+            && !self.session_requests.is_pending()
+            && self.model.session_is_ready();
         if session_ready {
             self.terminal_view.update(cx, |view, cx| view.clear(cx));
             self.terminal_status = "opening".into();
@@ -1620,8 +1510,6 @@ impl DesktopShell {
                 cols: TERMINAL_COLS,
             });
             self.send_command(ClientMessage::ListPersonas);
-            self.pending_session_request = false;
-            self.pending_session_target = None;
             if let Some((provider, model)) = self.pending_model.take() {
                 self.awaiting_model_switch = Some((provider.clone(), model.clone()));
                 self.send_command(ClientMessage::SwitchModel { provider, model });
@@ -1635,11 +1523,51 @@ impl DesktopShell {
                 self.awaiting_model_switch = None;
             }
         }
-        if self.awaiting_model_switch.is_none()
-            && (session_ready || self.model.ui.selected_session.is_some())
-        {
-            self.send_pending_prompt();
+        if let Some(prompt) = initial_prompt {
+            if self.model.session_is_ready() && self.awaiting_model_switch.is_none() {
+                if let Some(accepted) = session_requests::queue_initial_prompt(
+                    prompt,
+                    self.command_tx.as_ref(),
+                    &mut self.model.ui.composer,
+                    &mut self.attachments,
+                    &mut self.prompt_history,
+                ) {
+                    self.finish_prompt_submission(accepted, cx);
+                }
+            } else {
+                self.model.last_error =
+                    Some("Your task draft is saved. Submit it when the model is ready.".into());
+            }
         }
+        if self.model.session_is_ready() {
+            if let Some(session_id) = self.model.attached_session.clone() {
+                for event in events.iter() {
+                    self.review_requests.observe(event, &session_id);
+                    if matches!(event, ClientEvent::WorkspaceChanged { session_id: origin } if origin == &session_id)
+                    {
+                        self.refresh_file_tree(&session_id);
+                    }
+                }
+                for event in events.iter_mut() {
+                    if let Some(result) = self.review_requests.complete_event(event, &session_id) {
+                        self.review_loading = false;
+                        match result {
+                            Ok(files) => {
+                                self.review_diffs = files;
+                                self.review_selected_file = None;
+                                self.review_lines.clear();
+                                self.review_line_list.reset(0);
+                                if !self.review_diffs.is_empty() {
+                                    self.select_review_file(0, cx);
+                                }
+                            }
+                            Err(message) => self.review_error = Some(message),
+                        }
+                    }
+                }
+            }
+        }
+        self.refresh_review(cx);
     }
 }
 
@@ -1760,6 +1688,8 @@ mod tests {
             last_message_at: None,
             state: mew_protocol::SessionState::Idle,
             last_turn_failed: false,
+            failure_detail: None,
+            unread_completion: false,
             needs_attention: false,
             archived: false,
             pinned: false,

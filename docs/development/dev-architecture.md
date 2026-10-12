@@ -111,8 +111,8 @@ let mut tools: Vec<Arc<dyn Tool>> = vec![
 ];
 ```
 
-The `Skill` tool registers only when skills are discovered. The
-`SwitchPersonaTool` registers only when personas exist.
+The `Skill` tool registers only when skills are discovered. Personas are
+selected explicitly by the user.
 
 4. **Load MCP servers** via `connect_mcp_servers()`. Each server's tools
    are wrapped as `McpTool` and appended via `tools.extend(mcp_tools)`.
@@ -234,7 +234,6 @@ translated to `ServerMessage` and broadcast to every attached client:
 | `SubagentStatus { ... }` | Subagent progress update |
 | `SubagentEnd { ... }` | Subagent finished |
 | `TodosUpdated { todos }` | Todo list changed |
-| `PersonaSwitchRequested { name }` | `switch_persona` tool was called |
 | `JobUpdate { ... }` | Background shell job state changed |
 | `Error(String)` | Terminal error |
 | `AskUser { questions, tx }` | Ask the user free-text questions |

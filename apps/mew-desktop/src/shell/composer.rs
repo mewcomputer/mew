@@ -123,6 +123,8 @@ impl DesktopShell {
     /// Used by slash completion and history recall; unlike
     /// `replace_composer_text` this does not reset the recall position.
     pub(super) fn set_composer_text(&mut self, text: String, cx: &mut Context<Self>) {
+        self.initial_auto_attach = false;
+        self.session_requests.cancel_initial_prompt();
         self.model.ui.set_composer(text);
         let end = self.model.ui.composer.len();
         self.composer_selection = end..end;
@@ -488,6 +490,8 @@ impl DesktopShell {
         cx: &mut Context<Self>,
     ) {
         let mut updated = self.model.ui.composer.clone();
+        self.initial_auto_attach = false;
+        self.session_requests.cancel_initial_prompt();
         updated.replace_range(range.clone(), replacement);
         let cursor = range.start + replacement.len();
         self.composer_selection = cursor..cursor;
@@ -508,6 +512,8 @@ impl DesktopShell {
         cx: &mut Context<Self>,
     ) {
         let current = self.model.ui.composer.clone();
+        self.initial_auto_attach = false;
+        self.session_requests.cancel_initial_prompt();
         let range = range_utf16
             .as_ref()
             .map(|range| {
@@ -751,8 +757,10 @@ impl DesktopShell {
     }
 
     pub(super) fn release_browser_focus(&self) {
-        if let Some(portal) = self.browser_portal.as_ref() {
-            let _ = portal.blur(BROWSER_OWNER);
+        if let (Some(portal), Some(owner)) =
+            (self.browser_portal.as_ref(), self.current_browser_owner())
+        {
+            let _ = portal.blur(&owner);
         }
     }
 
@@ -875,13 +883,7 @@ impl Element for ComposerElement {
         let content = shell.text_input_value(self.target).to_owned();
         let display_text = if content.is_empty() {
             match self.target {
-                TextInputTarget::Composer => {
-                    if shell.plan_feedback_request.is_some() {
-                        "Plan feedback… (Enter to send, Esc to cancel)".to_owned()
-                    } else {
-                        "Do anything…".to_owned()
-                    }
-                }
+                TextInputTarget::Composer => "Do anything…".to_owned(),
                 TextInputTarget::SidebarSearch => "Search sessions…".to_owned(),
                 TextInputTarget::ModelSearch => "Filter models…".to_owned(),
                 _ => String::new(),

@@ -13,7 +13,7 @@ Type any of these in the input box (they autocomplete as you type).
 | `/compact` | Force context compaction on the next turn |
 | `/rewind <n>` | Rewind to keep only the first N messages |
 | `/rewind` | List recent messages with indices |
-| `/sessions` | List previous sessions (up to 20) (`/session` also works) |
+| `/sessions` | Open conversations ordered by latest activity (`/session` also works) |
 | `/resume <id>` | Resume a previous session by ID |
 
 See [Sessions](/docs/getting-started/sessions/) for details on persistence, resume, and rewind.
@@ -50,6 +50,25 @@ See [Permissions](/docs/using-mew/permissions/) for mode details, rules, and san
 |---------|-------------|
 | `/help` | Show available commands |
 | `/cost` | Show cost breakdown (tokens, $) |
-| `/todo` | Show the session todo list |
+| `/todo` | Browse and edit the session todo list |
+| `/agents` | Open a subagent's recorded conversation and tool trace |
+| `/jobs` | Open a background shell job and read its captured output |
+| `/tools` | Browse tool calls with full arguments, results and errors |
+| `/review` `/diff` | Review changes in this conversation's workspace; press `r` to refresh |
 | `/mouse` `/m` | Toggle mouse capture for text selection |
 | `/quit` `/q` | Exit mew |
+
+The bell and `Ctrl+Alt+N` open this terminal window's conversations with pending
+questions, permissions, failures or unread results. `Ctrl+Alt+O` lists all views
+open here, and `Tab` opens global history from either list. Each conversation
+keeps its draft, attachments and queued
+follow-ups when you switch. Submitted input stays visible until the daemon
+acknowledges it; an uncertain submission is never replayed automatically.
+
+Conversation icons show state: `○` idle or complete, `●` unread update, `?`
+question, `!` approval, `×` a failed turn in an open conversation, and `▶` working.
+Each title has a second row with its
+project path on the left and pending action counts and time on the right.
+Paths inside your home directory use `~/`; search accepts either form. Selected
+details show failures and any clipped context, with `PgUp`/`PgDn` to scroll.
+Use `/cost` for cost details.

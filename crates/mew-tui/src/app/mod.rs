@@ -2,13 +2,16 @@ use mew_agent::{AgentEvent, AskUserQuestion};
 use mew_message::{Message, Part, PartId, Role, ToolState};
 use mew_provider::ProviderEvent;
 use ratatui::layout::Rect;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+pub(crate) use activity::RenderedActivity;
+pub use activity::{ActivityTarget, ActivityView, SidebarItem, SubagentTranscript};
+pub(crate) use input::visual_rows;
 pub use mdstream;
 
-pub const SIDEBAR_MIN_WIDTH: u16 = 120;
+pub const SIDEBAR_MIN_WIDTH: u16 = 80;
 pub const SIDEBAR_WIDTH: u16 = 32;
 pub const PICKER_VISIBLE_ITEMS: usize = 8;
 const SPINNER_TICK_DIVISOR: u8 = 5;
@@ -35,6 +38,10 @@ pub enum SlashResult {
     ToggleMouseCapture,
     Compact,
     Todo,
+    OpenSubagents,
+    OpenJobs,
+    OpenTools,
+    OpenReview,
     Rewind(usize),
     PluginCommand {
         name: String,
@@ -96,23 +103,29 @@ pub struct App {
     pub scroll: u16,
     pub auto_scroll: bool,
     pub mode: Mode,
+    pub help_scroll: u16,
+    pub help_max_scroll: u16,
+    pub help_page_rows: u16,
     pub status: Status,
     pub permission: Option<PermissionState>,
     pub user_question: Option<UserQuestionState>,
-    pub plan_approval: Option<PlanApprovalState>,
     pub goal_proposal: Option<GoalProposalState>,
+    /// Identity of the daemon request currently shown in the input overlay.
+    pub daemon_request_id: Option<String>,
+    daemon_required_actions: VecDeque<(String, AgentEvent)>,
     /// The user's active goal (sidebar chip + status), mirroring the
     /// daemon's authoritative state.
     pub active_goal: Option<GoalView>,
     /// A pending `/goal <text>` being edited before confirmation.
     pub goal_compose: Option<GoalComposeState>,
+    pub todo_editor: Option<todos::TodoEditor>,
     pub persona_switch_confirm: Option<PersonaSwitchConfirmState>,
-    pub pending_persona_switch_apply: Option<String>,
     pub todos: Vec<mew_agent::Todo>,
     pub tool_states: HashMap<PartId, ToolDisplayState>,
     pub history: Vec<String>,
     pub history_index: Option<usize>,
     pub history_draft: Option<String>,
+    /// A full turn is in flight, including hidden reasoning and tool execution.
     pub streaming: bool,
     pub spinner_frame: usize,
     spinner_sub_tick: u8,
@@ -132,7 +145,11 @@ pub struct App {
     pub subagent_catalog: Vec<mew_subagents::SubagentDef>,
     pub sidebar_collapsed: std::collections::HashMap<String, bool>,
     pub sidebar_header_rows: Vec<(u16, String)>,
+    pub sidebar_item_rows: Vec<(u16, SidebarItem)>,
+    pub activity_view: Option<ActivityView>,
     pub sidebar_rect: Rect,
+    pub sidebar_scroll: u16,
+    pub sidebar_max_scroll: u16,
     pub models: Vec<(String, String)>,
     pub thinking_variants: HashMap<String, Vec<String>>,
     /// Numeric thinking-budget ranges keyed by bare model id, for models
@@ -142,9 +159,9 @@ pub struct App {
     /// Recently used models (most recent first), capped at 6.
     /// Loaded from persisted state and updated on model switch.
     pub recent_models: Vec<String>,
-    /// Messages queued while a turn is streaming. Each is sent (oldest first)
+    /// Messages queued while a turn is in flight. Each is sent (oldest first)
     /// when the current turn finishes. Up-Up cancels the current turn and
-    /// sends the oldest immediately.
+    /// sends the oldest as soon as cancellation finishes.
     pub queued_messages: Vec<String>,
     /// Tracks Up-Up detection for sending queued messages immediately.
     /// Holds the count and the timestamp of the first press; resets after 15s.
@@ -153,6 +170,9 @@ pub struct App {
     /// The main loop checks this after processing agent events and, if set,
     /// submits the oldest queued message.
     pub pending_queued_send: bool,
+    session_drafts: HashMap<String, drafts::ConversationDraft>,
+    submissions: HashMap<String, drafts::Submission>,
+    pub attaching_session: bool,
     pub picker: Option<PickerState>,
     /// Cached fff file index for fuzzy `@` file search. Built lazily on a
     /// background thread on first picker open; `None` until it is ready.
@@ -173,9 +193,11 @@ pub struct App {
     pub slash_selected: usize,
     pub slash_scroll: usize,
     /// Last visible item count used to lay out the slash-autocomplete popup.
-    /// Updated by `ui/mod.rs` each frame so `adjust_slash_scroll` can keep the
+    /// Updated by the autocomplete renderer so `adjust_slash_scroll` can keep the
     /// selection in view.
     pub slash_visible: usize,
+    /// Rendered inline list bounds for routing wheel input above the composer.
+    pub autocomplete_area: Rect,
     pub bash_expanded: bool,
     pub reasoning_expanded: HashSet<PartId>,
     pub reasoning_active_id: Option<PartId>,
@@ -194,7 +216,7 @@ pub struct App {
     pub md_stream: Option<mdstream::MdStream>,
     pub md_render_cache: ratatui_mdstream::cache::RenderCache,
     pub rendered_md_cache:
-        HashMap<mew_message::PartId, (u16, String, Rc<Vec<ratatui::text::Line<'static>>>)>,
+        HashMap<mew_message::PartId, (u16, String, Rc<ratatui_mdstream::RenderedLines>)>,
     pub last_md_width: u16,
     pub max_scroll: u16,
     pub rendered_chat: Option<RenderedChat>,
@@ -210,12 +232,19 @@ pub struct App {
     pub mouse_capture: bool,
     pub pending_mouse_toggle: bool,
     pub chat_area: Rect,
+    pub chat_content_area: Rect,
+    pub chat_rendered_scroll: usize,
+    pub chat_scrollbar: MouseScrollbar,
+    pub bell_area: Rect,
+    pub picker_mouse: PickerMouseView,
+    pub mouse_scroll_drag: Option<(MouseScrollTarget, u16)>,
     pub input_area: Rect,
     pub sel_anchor_row: Option<usize>,
     pub sel_anchor_col: Option<usize>,
     pub sel_end_row: Option<usize>,
     pub sel_end_col: Option<usize>,
     pub chat_rows: Vec<String>,
+    pub chat_copy_metadata: Vec<ratatui_mdstream::LineMetadata>,
     pub alert: Option<(String, Instant)>,
     pub toasts: Vec<(String, Instant)>,
     pub plugin_ui: std::collections::HashMap<String, String>,
@@ -226,15 +255,16 @@ pub struct App {
     pub git_branch: Option<String>,
     pub git_branch_resolved: bool,
     pub short_cwd: String,
+    pub session_cwd: Option<std::path::PathBuf>,
+    pub connection: Option<mew_client_core::ConnectionStatus>,
     pub subagents: Vec<SubagentState>,
-    /// When finished subagents and done todos stay visible in the sidebar
-    /// (seconds). 0 hides them immediately. Set from `tui.sidebar_finished_ttl_secs`.
+    /// How long failed activity remains visible in the sidebar (seconds).
+    /// Set from `tui.sidebar_finished_ttl_secs`; completed activity hides immediately.
     pub sidebar_finished_ttl: u64,
-    /// When each currently-done todo became Done, so the sidebar can hide
-    /// long-finished todos without touching the agent-owned list.
-    pub todo_done_at: std::collections::HashMap<usize, Instant>,
     pub background_jobs: Vec<BackgroundJobState>,
     pub undo_history: editor::UndoHistory,
+    pub kill_ring: editor::KillRing,
+    pub(crate) kill_ring_mode: Mode,
     pub history_search_query: String,
     /// Cursor into `history_search_query`, shared with the editor module.
     pub history_search_cursor: usize,
@@ -250,6 +280,15 @@ pub struct App {
     // is the single gate — UI surfaces check it before rendering.
     pub daemon_mode: bool,
     pub daemon_sessions: Vec<mew_protocol::SessionInfo>,
+    /// Confirmed conversations kept open in this terminal window.
+    pub open_sessions: Vec<String>,
+    closing_conversation: Option<String>,
+    /// An attach confirmation can arrive before the conversation's transcript.
+    awaiting_transcript: bool,
+    /// Unknown until the terminal reports focus; interaction acknowledges visible results.
+    pub terminal_focused: Option<bool>,
+    pub session_turn_outcomes: std::collections::BTreeMap<String, mew_client_core::TurnOutcome>,
+    pub unread_completions: std::collections::BTreeSet<String>,
     pub session_titles: std::collections::HashMap<String, String>,
     pub session_summaries: std::collections::HashMap<String, String>,
     pub session_attention: std::collections::HashMap<String, (u32, u32)>,
@@ -298,12 +337,14 @@ pub struct RenderedChat {
 pub struct BuiltChat {
     pub lines: Vec<ratatui::text::Line<'static>>,
     pub chat_rows: Vec<String>,
+    pub copy_metadata: Vec<ratatui_mdstream::LineMetadata>,
 }
 
 /// A running or completed subagent task shown in the sidebar.
 #[derive(Debug, Clone)]
 pub struct SubagentState {
     pub task_id: String,
+    pub child_session_id: String,
     pub name: String,
     pub started_at: Instant,
     pub status: SubagentStatus,
@@ -329,6 +370,7 @@ pub struct BackgroundJobState {
     pub command: String,
     pub started_at: Instant,
     pub status: BackgroundJobStatus,
+    pub finished_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -347,13 +389,21 @@ pub enum Mode {
     CommandPalette,
     Settings,
     UserQuestion,
-    PlanApproval,
     PersonaSwitchConfirm,
     Help,
     HistorySearch,
     PasteConfirm,
     GoalProposal,
     GoalCompose,
+    TodoEditor,
+    Activity,
+}
+
+/// Project and activity metadata displayed beneath a conversation title.
+#[derive(Debug, Clone)]
+pub struct PickerContext {
+    pub path: String,
+    pub metadata: String,
 }
 
 /// A single item in the command palette.
@@ -362,6 +412,7 @@ pub struct PickerItem {
     pub id: String,
     pub label: String,
     pub description: String,
+    pub context: Option<PickerContext>,
     /// When true, this item renders as a non-selectable section header
     /// (e.g. "Recent" in the model picker). It is skipped by selection
     /// and filtered out when the user types a filter.
@@ -371,6 +422,31 @@ pub struct PickerItem {
     /// Lets a filter like `model:gpt` match the value after the prefix
     /// instead of requiring the prefix itself to appear in the label.
     pub namespace: Option<&'static str>,
+}
+
+/// Scrollbar geometry captured from the rendered frame, including its thumb.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct MouseScrollbar {
+    pub area: Rect,
+    pub thumb: Rect,
+    pub max_scroll: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseScrollTarget {
+    Chat,
+    Slash,
+    Picker,
+}
+
+/// Only visible selectable rows are recorded; section headers remain inert.
+#[derive(Debug, Default)]
+pub struct PickerMouseView {
+    pub list: Rect,
+    pub details: Rect,
+    pub details_max_scroll: usize,
+    pub rows: Vec<(u16, usize)>,
+    pub scrollbar: MouseScrollbar,
 }
 
 /// State for the cmdk-style command palette.
@@ -383,11 +459,13 @@ pub struct PickerState {
     pub cursor: usize,
     /// Undo history for the filter field.
     pub filter_undo: editor::UndoHistory,
-    /// Vertical scroll offset in rendered display rows (each wrapped line
-    /// counts as one row). Set by the draw pass, which also keeps the
-    /// selected item's row span in view.
+    /// Logical item offset, including section headers.
     pub scroll: usize,
-    /// Number of display rows the list area can show. Set by the draw pass.
+    /// Wrapped description offset, controlled by Page Up and Page Down.
+    pub details_scroll: usize,
+    /// Visible description rows, used for page-sized navigation.
+    pub visible_details: usize,
+    /// Visible logical items in the list area, set by the draw pass.
     pub visible_items: usize,
     pub hint: Option<String>,
     /// Numeric budget row state for the thinking-variant picker. `None` for
@@ -476,15 +554,44 @@ impl PickerState {
         if self.is_at_picker() {
             return self.items.iter().filter(|i| !i.header).collect();
         }
+        if self.filter.is_empty() {
+            return self.items.iter().collect();
+        }
         let f = self.filter.to_lowercase();
+        let home = std::env::var_os("HOME").map(|home| home.to_string_lossy().to_lowercase());
+        let normalized_path = home
+            .as_deref()
+            .and_then(|home| std::path::Path::new(&f).strip_prefix(home).ok())
+            .map(|rest| {
+                if rest.as_os_str().is_empty() {
+                    "~".into()
+                } else {
+                    format!("~/{}", rest.display())
+                }
+            });
+        let path_filter = normalized_path.as_deref().unwrap_or(&f);
+        let mut seen_models = std::collections::HashSet::new();
         self.items
             .iter()
             .filter(|i| {
-                // Headers only appear when filter is empty.
+                // Section headers only appear while browsing.
                 if i.header {
-                    return f.is_empty();
+                    return false;
                 }
-                i.label.to_lowercase().contains(&f) || i.description.to_lowercase().contains(&f)
+                let matches = i.label.to_lowercase().contains(&f)
+                    || {
+                        let description = i.description.to_lowercase();
+                        description.contains(&f)
+                            || (path_filter != f && description.contains(path_filter))
+                    }
+                    || i.context.as_ref().is_some_and(|context| {
+                        let path = context.path.to_lowercase();
+                        path.contains(&f)
+                            || path.contains(path_filter)
+                            || context.metadata.to_lowercase().contains(&f)
+                    });
+                // Recent shortcuts duplicate full-list entries only while browsing.
+                matches && (self.kind != "model" || seen_models.insert(i.id.as_str()))
             })
             .collect()
     }
@@ -533,6 +640,7 @@ impl PickerState {
             attempts += 1;
         }
         self.selected = new as usize;
+        self.details_scroll = 0;
     }
 }
 
@@ -540,9 +648,11 @@ impl PickerState {
 /// debounced fuzzy searches) and consumed by [`App::poll_file_search`].
 pub enum FileSearchEvent {
     /// A lazy fff index finished building (or failed).
-    IndexReady(
-        Result<std::sync::Arc<std::sync::Mutex<fff_search::file_picker::FilePicker>>, String>,
-    ),
+    IndexReady {
+        generation: u64,
+        result:
+            Result<std::sync::Arc<std::sync::Mutex<fff_search::file_picker::FilePicker>>, String>,
+    },
     /// A fuzzy file search finished. `generation` discards stale results when
     /// the user has typed again before an older search returned.
     Results {
@@ -587,44 +697,110 @@ pub struct PermissionState {
     /// Vertical scroll offset for the tool-input text when it overflows the
     /// content area.
     pub scroll: u16,
+    pub view: DecisionView,
+}
+
+/// The currently rendered body viewport of a decision dialog.
+#[derive(Debug, Clone, Default)]
+pub struct DecisionView {
+    pub max_scroll: u16,
+    pub page_rows: u16,
+}
+
+/// Shared body and pinned action geometry for decision dialogs.
+pub(crate) struct DecisionLayout {
+    pub popup: Rect,
+    pub body: Rect,
+    pub actions: Rect,
+    pub hint: Rect,
+}
+
+impl DecisionLayout {
+    pub fn content_width(area_width: u16, width_cap: u16) -> u16 {
+        let margin = if area_width > 12 { 4 } else { 0 };
+        width_cap
+            .min(area_width.saturating_sub(margin))
+            .saturating_sub(4)
+    }
+
+    pub fn new(area: Rect, width_cap: u16, body_rows: usize, action_rows: u16) -> Self {
+        let horizontal_margin = if area.width > 12 { 4 } else { 0 };
+        let vertical_margin = if area.height > 8 { 2 } else { 0 };
+        let width = width_cap.min(area.width.saturating_sub(horizontal_margin));
+        let height = (body_rows.min(u16::MAX as usize) as u16)
+            .saturating_add(action_rows + 4)
+            .min(area.height.saturating_sub(vertical_margin));
+        let popup = Rect::new(
+            area.x + area.width.saturating_sub(width) / 2,
+            area.y + area.height.saturating_sub(height) / 2,
+            width,
+            height,
+        );
+        let inner = popup.inner(ratatui::layout::Margin::new(2, 1));
+        let action_height = action_rows.min(inner.height);
+        let hint_height = u16::from(inner.height > action_height);
+        let body_height = inner.height.saturating_sub(action_height + hint_height + 1);
+        let body = Rect::new(inner.x, inner.y, inner.width, body_height);
+        let actions = Rect::new(
+            inner.x,
+            inner.bottom().saturating_sub(action_height + hint_height),
+            inner.width,
+            action_height,
+        );
+        let hint = Rect::new(
+            inner.x,
+            inner.bottom().saturating_sub(hint_height),
+            inner.width,
+            hint_height,
+        );
+        Self {
+            popup,
+            body,
+            actions,
+            hint,
+        }
+    }
+
+    pub fn clamp_scroll(&self, scroll: &mut u16, view: &mut DecisionView, rows: usize) {
+        view.page_rows = self.body.height;
+        view.max_scroll = (rows.min(u16::MAX as usize) as u16).saturating_sub(self.body.height);
+        *scroll = (*scroll).min(view.max_scroll);
+    }
 }
 
 impl PermissionState {
-    /// Width of the popup's inner content area for the given main-area width,
-    /// mirroring the layout math in `draw_permission_modal`.
-    fn inner_width(chat_width: u16) -> u16 {
-        60u16.min(chat_width.saturating_sub(4)).saturating_sub(4)
-    }
-
-    /// Maximum scroll offset that keeps the tool input content in view.
-    /// `chat_width`/`chat_height` are the terminal's main-area dimensions
-    /// (used to derive the popup size). The offset is measured in rendered
-    /// rows, so wrapped content is counted exactly. Returns `None` when the
-    /// content fits without scrolling.
-    pub fn max_scroll(&self, chat_width: u16, chat_height: u16) -> Option<u16> {
-        let popup_height = Self::popup_height(chat_height);
-        let content_height = popup_height.saturating_sub(4).max(3);
-        let total = 5u16 + self.input_rows(chat_width) as u16;
-        if total <= content_height {
-            return None;
-        }
-        Some(total.saturating_sub(content_height))
-    }
-
-    /// Number of display rows the tool input occupies once wrapped to the
-    /// popup's content width (Unicode width aware, matching the render).
-    fn input_rows(&self, chat_width: u16) -> usize {
+    pub(crate) fn body_lines(&self, chat_width: u16) -> Vec<String> {
+        let width = DecisionLayout::content_width(chat_width, 60);
         let json = serde_json::to_string_pretty(&self.input).unwrap_or_default();
-        let width = Self::inner_width(chat_width);
-        json.lines()
-            .map(|l| crate::ui::chat::wrap_text_to_width(l, width).len())
-            .sum()
+        let mut rows =
+            crate::ui::chat::wrap_text_to_width(&format!("tool  {}", self.tool_name), width);
+        rows.push(String::new());
+        rows.extend(
+            json.lines()
+                .flat_map(|line| crate::ui::chat::wrap_text_to_width(line, width)),
+        );
+        rows
     }
 
-    /// Height of the popup for the given terminal main-area height.
-    pub fn popup_height(chat_height: u16) -> u16 {
-        // Popup is the terminal height minus a 2-row margin top and bottom.
-        chat_height.saturating_sub(4).max(10)
+    pub(crate) fn action_rows(chat_width: u16) -> u16 {
+        if DecisionLayout::content_width(chat_width, 60) < 43 {
+            3
+        } else {
+            1
+        }
+    }
+
+    /// The scroll range uses the same wrapped rows and body viewport as rendering.
+    pub fn max_scroll(&self, chat_width: u16, chat_height: u16) -> Option<u16> {
+        let rows = self.body_lines(chat_width).len();
+        let layout = DecisionLayout::new(
+            Rect::new(0, 0, chat_width, chat_height),
+            60,
+            rows,
+            Self::action_rows(chat_width),
+        );
+        let max = (rows.min(u16::MAX as usize) as u16).saturating_sub(layout.body.height);
+        (max > 0).then_some(max)
     }
 }
 
@@ -636,6 +812,8 @@ pub struct PersonaSwitchConfirmState {
     pub target: PersonaSummary,
     pub current: Option<PersonaSummary>,
     pub selected: usize,
+    pub scroll: u16,
+    pub view: DecisionView,
 }
 
 /// Display-friendly snapshot of a persona's identity + restrictions. Built
@@ -658,6 +836,7 @@ pub struct PersonaSummary {
 /// and an implicit "type your own" final option.
 #[derive(Debug)]
 pub struct UserQuestionState {
+    pub subagent: Option<mew_message::SubagentQuestionSource>,
     pub call_id: String,
     pub questions: Vec<AskUserQuestion>,
     pub answers: Vec<String>,
@@ -682,6 +861,8 @@ pub struct GoalProposalState {
     /// 0 = accept, 1 = reject.
     pub selected: usize,
     pub tx: Option<tokio::sync::oneshot::Sender<mew_agent::GoalDecision>>,
+    pub scroll: u16,
+    pub view: DecisionView,
 }
 
 /// The user's active goal as shown in the sidebar and status bar. The
@@ -710,28 +891,6 @@ pub struct GoalComposeState {
     pub replacing: Option<String>,
 }
 
-/// A pending `handoff_plan` approval. Shown as a large centered modal with
-/// the full plan rendered as markdown, an approve / request-changes toggle,
-/// and a feedback editor for the request-changes path.
-#[derive(Debug)]
-pub struct PlanApprovalState {
-    pub call_id: String,
-    pub plan_path: String,
-    pub persona: String,
-    pub plan_markdown: String,
-    pub scroll: u16,
-    /// 0 = approve, 1 = request changes.
-    pub selected: usize,
-    /// True while the user is typing feedback for the request-changes path.
-    pub editing_feedback: bool,
-    pub feedback: String,
-    /// Cursor into `feedback`, shared with the editor module.
-    pub feedback_cursor: usize,
-    /// Undo history for the feedback editor.
-    pub feedback_undo: editor::UndoHistory,
-    pub tx: Option<tokio::sync::oneshot::Sender<mew_agent::PlanDecision>>,
-}
-
 #[derive(Debug, Clone)]
 pub enum ToolDisplayState {
     Running,
@@ -753,15 +912,19 @@ impl App {
             scroll: 0,
             auto_scroll: true,
             mode: Mode::Normal,
+            help_scroll: 0,
+            help_max_scroll: 0,
+            help_page_rows: 0,
             status: Status::default(),
             permission: None,
             user_question: None,
-            plan_approval: None,
             goal_proposal: None,
+            daemon_request_id: None,
+            daemon_required_actions: VecDeque::new(),
             active_goal: None,
             goal_compose: None,
+            todo_editor: None,
             persona_switch_confirm: None,
-            pending_persona_switch_apply: None,
             todos: Vec::new(),
             tool_states: HashMap::new(),
             history: Vec::new(),
@@ -782,7 +945,11 @@ impl App {
             subagent_catalog: Vec::new(),
             sidebar_collapsed: std::collections::HashMap::new(),
             sidebar_header_rows: Vec::new(),
+            sidebar_item_rows: Vec::new(),
+            activity_view: None,
             sidebar_rect: Rect::default(),
+            sidebar_scroll: 0,
+            sidebar_max_scroll: 0,
             models: Vec::new(),
             thinking_variants: HashMap::new(),
             thinking_budget: HashMap::new(),
@@ -791,6 +958,9 @@ impl App {
             queued_messages: Vec::new(),
             up_press: None,
             pending_queued_send: false,
+            session_drafts: HashMap::new(),
+            submissions: HashMap::new(),
+            attaching_session: false,
             picker: None,
             file_index: None,
             file_index_building: false,
@@ -806,6 +976,7 @@ impl App {
             slash_selected: 0,
             slash_scroll: 0,
             slash_visible: 0,
+            autocomplete_area: Rect::default(),
             bash_expanded: false,
             reasoning_expanded: HashSet::new(),
             reasoning_active_id: None,
@@ -831,12 +1002,19 @@ impl App {
             mouse_capture: true,
             pending_mouse_toggle: false,
             chat_area: Rect::ZERO,
+            chat_content_area: Rect::ZERO,
+            chat_rendered_scroll: 0,
+            chat_scrollbar: MouseScrollbar::default(),
+            bell_area: Rect::default(),
+            picker_mouse: PickerMouseView::default(),
+            mouse_scroll_drag: None,
             input_area: Rect::ZERO,
             sel_anchor_row: None,
             sel_anchor_col: None,
             sel_end_row: None,
             sel_end_col: None,
             chat_rows: Vec::new(),
+            chat_copy_metadata: Vec::new(),
             alert: None,
             toasts: Vec::new(),
             plugin_ui: std::collections::HashMap::new(),
@@ -847,11 +1025,14 @@ impl App {
             git_branch: None,
             git_branch_resolved: false,
             short_cwd: short_cwd(),
+            session_cwd: None,
+            connection: None,
             subagents: Vec::new(),
             sidebar_finished_ttl: 180,
-            todo_done_at: std::collections::HashMap::new(),
             background_jobs: Vec::new(),
             undo_history: editor::UndoHistory::default(),
+            kill_ring: editor::KillRing::default(),
+            kill_ring_mode: Mode::Normal,
             history_search_query: String::new(),
             history_search_cursor: 0,
             history_search_undo: editor::UndoHistory::default(),
@@ -860,6 +1041,12 @@ impl App {
             pending_paste: None,
             daemon_mode: false,
             daemon_sessions: Vec::new(),
+            open_sessions: Vec::new(),
+            closing_conversation: None,
+            awaiting_transcript: false,
+            terminal_focused: None,
+            session_turn_outcomes: std::collections::BTreeMap::new(),
+            unread_completions: std::collections::BTreeSet::new(),
             session_titles: std::collections::HashMap::new(),
             session_summaries: std::collections::HashMap::new(),
             session_attention: std::collections::HashMap::new(),
@@ -881,6 +1068,35 @@ impl App {
     pub fn apply_daemon_notification(&mut self, msg: &mew_protocol::ServerMessage) {
         use mew_protocol::ServerMessage;
         match msg {
+            ServerMessage::SubagentHistory {
+                session_id,
+                child_session_id,
+                request_id,
+                messages,
+                error,
+            } => {
+                self.apply_subagent_history(
+                    session_id,
+                    child_session_id,
+                    request_id,
+                    messages,
+                    error.as_deref(),
+                );
+            }
+            ServerMessage::TodosUpdated { todos } => {
+                self.todos = todos
+                    .iter()
+                    .filter_map(|todo| {
+                        Some(mew_agent::Todo {
+                            id: todo.id,
+                            content: todo.content.clone(),
+                            status: mew_agent::TodoStatus::parse(&todo.status)?,
+                            depends_on: todo.depends_on.clone(),
+                        })
+                    })
+                    .collect();
+            }
+            ServerMessage::Error { message } => self.set_alert(message.clone()),
             ServerMessage::SessionList { sessions } => {
                 // Sync the active session's cumulative change stats (gives
                 // the per-file list that `SessionStatsChanged` lacks).
@@ -926,14 +1142,23 @@ impl App {
                     (*pending_permissions, *pending_questions),
                 );
             }
+            ServerMessage::SessionActivityChanged {
+                session_id,
+                activity,
+            } if session_id == &self.status.session_id
+                && *activity == mew_protocol::SessionState::Idle =>
+            {
+                // Passive observers have no prompt stream to clear a pending
+                // cancellation. Active streams still finish after buffered events.
+                self.cancelling = false;
+            }
             ServerMessage::SessionAlert {
                 title,
                 kind,
                 detail,
                 session_id,
-            } => {
-                // Show a toast for the alert. If it's for a non-active
-                // session, prefix with the session title.
+            } if self.conversation_is_open(session_id) => {
+                // Background views in this window identify their alert owner.
                 let prefix = if session_id != &self.status.session_id {
                     let name = self
                         .session_titles
@@ -969,14 +1194,37 @@ impl App {
                     self.messages.push(msg.clone());
                 }
                 self.auto_scroll = true;
+                self.awaiting_transcript = false;
                 self.pending_md_rerender = self.messages.last().map(|m| m.id);
                 self.mark_chat_dirty();
             }
             ServerMessage::SessionHistoryPage {
-                messages, replace, ..
+                session_id,
+                messages,
+                replace,
+                ..
             } => {
+                if session_id != &self.status.session_id {
+                    return;
+                }
+                let scroll_anchor = if !replace && !self.auto_scroll {
+                    self.rendered_chat.as_ref().map(|rendered| {
+                        (
+                            self.rendered_chat_width,
+                            rendered.total_wrapped.saturating_sub(rendered.max_scroll),
+                        )
+                    })
+                } else {
+                    None
+                };
+                let scroll_anchor = scroll_anchor.map(|(width, height)| {
+                    // Measure only the prepend, excluding queued growth at the tail.
+                    self.ensure_chat_rendered(width.saturating_sub(2), width, height);
+                    (width, height, self.max_scroll)
+                });
                 if *replace {
                     self.messages.clear();
+                    self.awaiting_transcript = false;
                 }
                 if *replace {
                     self.messages.extend(messages.iter().cloned());
@@ -988,9 +1236,15 @@ impl App {
                 self.md_stream = None;
                 self.md_state = mdstream::DocumentState::new();
                 self.md_render_cache.invalidate();
-                self.auto_scroll = *replace;
+                self.auto_scroll |= *replace;
                 self.pending_md_rerender = self.messages.last().map(|m| m.id);
                 self.mark_chat_dirty();
+                if let Some((width, height, previous_max_scroll)) = scroll_anchor {
+                    self.ensure_chat_rendered(width.saturating_sub(2), width, height);
+                    self.scroll = self
+                        .scroll
+                        .saturating_add(self.max_scroll.saturating_sub(previous_max_scroll));
+                }
             }
             ServerMessage::ModelSwitched {
                 provider, model, ..
@@ -1000,9 +1254,7 @@ impl App {
             }
             ServerMessage::ProjectList { projects } => {
                 self.projects = projects.clone();
-                // The project list is only requested in response to
-                // `/project`, so its arrival opens the picker.
-                self.open_project_picker();
+                self.refresh_project_picker();
             }
             ServerMessage::GroupList { groups } | ServerMessage::GroupsChanged { groups } => {
                 self.groups = groups.clone();
@@ -1056,7 +1308,17 @@ impl App {
                 permission_mode,
                 ..
             } => {
+                self.clear_daemon_required_actions();
+                if self.status.session_id != *session_id {
+                    self.switch_conversation_draft(session_id);
+                    self.todos.clear();
+                    self.subagents.clear();
+                    self.background_jobs.clear();
+                }
                 self.status.session_id = session_id.clone();
+                self.awaiting_transcript = true;
+                self.confirm_window_conversation(session_id);
+                self.attaching_session = false;
                 // On attach, update the active model/provider from the
                 // daemon's session state. Fields may be empty if the
                 // session hasn't been used yet.
@@ -1112,11 +1374,66 @@ impl App {
                     })
                     .collect();
             }
+            ServerMessage::RequestResolved { request_id } => {
+                self.daemon_required_actions
+                    .retain(|(id, _)| id != request_id);
+                if self.daemon_request_id.as_ref() == Some(request_id) {
+                    self.clear_daemon_required_action();
+                    self.show_next_daemon_required_action();
+                }
+            }
             _ => {
                 // Other notifications (ClientAttached, FsChanged, etc.)
                 // are not yet consumed by the TUI.
             }
         }
+    }
+
+    /// Show daemon input requests in arrival order without losing concurrent
+    /// subagent permissions or resetting an answer when a request is replayed.
+    pub fn handle_daemon_required_action(&mut self, request_id: String, event: AgentEvent) {
+        if self.daemon_request_id.as_ref() == Some(&request_id)
+            || self
+                .daemon_required_actions
+                .iter()
+                .any(|(id, _)| id == &request_id)
+        {
+            return;
+        }
+        self.daemon_required_actions.push_back((request_id, event));
+        self.show_next_daemon_required_action();
+    }
+
+    fn show_next_daemon_required_action(&mut self) {
+        if self.daemon_request_id.is_none() {
+            if let Some((request_id, event)) = self.daemon_required_actions.pop_front() {
+                self.daemon_request_id = Some(request_id);
+                self.handle_agent_event(event);
+            } else if self.todo_editor.as_ref().is_some_and(|state| {
+                state.session_id == self.status.session_id && state.draft.is_some()
+            }) {
+                self.mode = Mode::TodoEditor;
+            }
+        }
+    }
+
+    fn clear_daemon_required_action(&mut self) {
+        if self.daemon_request_id.take().is_some() {
+            self.permission = None;
+            self.user_question = None;
+            self.goal_proposal = None;
+            self.mode = Mode::Normal;
+        }
+    }
+
+    fn clear_daemon_required_actions(&mut self) {
+        self.daemon_required_actions.clear();
+        self.clear_daemon_required_action();
+    }
+
+    fn finish_daemon_required_action(&mut self) {
+        self.daemon_request_id = None;
+        self.show_next_daemon_required_action();
     }
 
     /// Open a session picker that reads from disk (standalone mode).
@@ -1163,6 +1480,8 @@ impl App {
             cursor: 0,
             filter_undo: editor::UndoHistory::default(),
             scroll: 0,
+            details_scroll: 0,
+            visible_details: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: None,
             budget: None,
@@ -1214,6 +1533,8 @@ impl App {
     pub fn start_history_search(&mut self) {
         self.history_search_saved = Some((self.input.clone(), self.cursor));
         self.history_search_query.clear();
+        self.history_search_cursor = 0;
+        self.history_search_undo = Default::default();
         self.history_search_index = None;
         self.mode = Mode::HistorySearch;
     }
@@ -1361,49 +1682,36 @@ impl App {
         } else {
             (ac.min(ec), ac.max(ec))
         };
-        let mut parts: Vec<String> = Vec::new();
-        for (row, line) in self
-            .chat_rows
-            .iter()
-            .enumerate()
-            .skip(lo)
-            .take(hi.saturating_sub(lo) + 1)
-        {
-            let byte_lo = byte_at_display_offset(line, lo_col);
-            let byte_hi = byte_at_display_offset(line, hi_col);
-            if row == lo && row == hi {
-                if byte_lo < byte_hi {
-                    parts.push(line[byte_lo..byte_hi].to_string());
-                }
-            } else if row == lo {
-                parts.push(line[byte_lo..].to_string());
-            } else if row == hi {
-                parts.push(line[..byte_hi].to_string());
+        let mut result = String::new();
+        let mut breaks = 0;
+        for row in lo..=hi {
+            let line = &self.chat_rows[row];
+            let Some(metadata) = self.chat_copy_metadata.get(row) else {
+                continue;
+            };
+            let start = if row == lo {
+                byte_at_display_offset(line, lo_col).max(metadata.content.start)
             } else {
-                parts.push(line.to_string());
+                metadata.content.start
+            };
+            let end = if row == hi {
+                byte_at_display_offset(line, hi_col).min(metadata.content.end)
+            } else {
+                metadata.content.end
+            };
+            if !result.is_empty() && !metadata.continues_previous {
+                breaks += 1;
             }
-        }
-
-        // For multi-line selections, strip the common leading whitespace
-        // prefix (the TUI's left margin / padding that the user didn't
-        // intend to copy). Single-line selections are left verbatim since
-        // the user explicitly positioned the column cursor.
-        if parts.len() > 1 {
-            let common_ws = parts
-                .iter()
-                .map(|p| p.chars().take_while(|c| c.is_whitespace()).count())
-                .min()
-                .unwrap_or(0);
-            if common_ws > 0 {
-                for part in &mut parts {
-                    *part = part.chars().skip(common_ws).collect();
-                }
+            if start >= end {
+                continue;
             }
+            for _ in 0..breaks {
+                result.push('\n');
+            }
+            breaks = 0;
+            result.extend(line[start..end].chars().filter(|&ch| ch != '\r'));
         }
-
-        // Strip carriage returns that leak from terminal rendering.
-        let result = parts.join("\n");
-        result.replace('\r', "")
+        result
     }
 
     pub fn clear_selection(&mut self) {
@@ -1418,7 +1726,7 @@ impl App {
     /// start expanded; the environment section holds static info and starts
     /// collapsed.
     pub fn sidebar_default_collapsed(section: &str) -> bool {
-        section == "environment"
+        matches!(section, "environment" | "companion")
     }
 
     /// Toggle a sidebar section's collapsed state by name ("todos",
@@ -1443,6 +1751,8 @@ impl App {
             target,
             current,
             selected: 0, // default focus is the confirm button
+            scroll: 0,
+            view: Default::default(),
         });
         self.mode = Mode::PersonaSwitchConfirm;
     }
@@ -1480,38 +1790,28 @@ impl App {
         visual_col: usize,
         content_width: u16,
     ) -> Option<usize> {
-        let w = content_width.max(1) as usize;
-        let mut current_row = 0;
-        for (line_idx, line) in self.input.split('\n').enumerate() {
-            let dw = unicode_width::UnicodeWidthStr::width(line);
-            let rows_in_line = if w == 0 { 1 } else { dw.div_ceil(w).max(1) };
-            if current_row + rows_in_line > visual_row {
-                // Target is within this logical line.
-                let row_in_line = visual_row - current_row;
-                let target_byte_col = (row_in_line * w) + visual_col;
-                // Find the byte offset at this display column.
-                let mut display_col = 0;
-                let mut byte_offset = 0;
-                for (byte_idx, ch) in line.char_indices() {
-                    if display_col >= target_byte_col {
-                        break;
-                    }
-                    let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-                    display_col += ch_w;
-                    byte_offset = byte_idx + ch.len_utf8();
-                }
-                // Compute the start of this logical line in the full input.
-                let line_start = self
+        self.input_visual_rows(content_width)
+            .nth(visual_row)
+            .map(|(start, text, _)| {
+                let width = unicode_width::UnicodeWidthStr::width(text);
+                let end = start + text.len();
+                let continues = self
                     .input
-                    .split('\n')
-                    .take(line_idx)
-                    .map(|l| l.len() + 1) // +1 for the '\n'
-                    .sum::<usize>();
-                return Some(line_start + byte_offset);
-            }
-            current_row += rows_in_line;
-        }
-        None
+                    .as_bytes()
+                    .get(end)
+                    .is_some_and(|byte| *byte != b'\n');
+                let visual_col = if continues {
+                    visual_col.min(width.min(content_width.max(1) as usize).saturating_sub(1))
+                } else {
+                    visual_col
+                };
+                let offset = if width > content_width.max(1) as usize && visual_col > 0 {
+                    text.len()
+                } else {
+                    byte_at_display_offset(text, visual_col)
+                };
+                start + offset
+            })
     }
 
     /// Map a (visual_row, visual_col) in the wrapped input grid to a byte
@@ -1523,24 +1823,8 @@ impl App {
         visual_col: usize,
         content_width: u16,
     ) -> usize {
-        let w = content_width.max(1) as usize;
-        let mut current_visual_row = 0usize;
-        let mut byte_offset = 0usize;
-        for line in self.input.split('\n') {
-            let dw = unicode_width::UnicodeWidthStr::width(line);
-            let rows = if w == 0 { 1 } else { dw.div_ceil(w).max(1) };
-            if visual_row < current_visual_row + rows {
-                let row_in_line = visual_row - current_visual_row;
-                let start_col = row_in_line * w;
-                let col_clamped = visual_col.min(dw.saturating_sub(start_col));
-                let target_col = start_col + col_clamped;
-                let target_byte = byte_at_display_offset(line, target_col);
-                return byte_offset + target_byte;
-            }
-            current_visual_row += rows;
-            byte_offset += line.len() + 1; // +1 for the '\n'
-        }
-        self.input.len()
+        self.visual_to_byte_offset_opt(visual_row, visual_col, content_width)
+            .unwrap_or(self.input.len())
     }
 
     /// Scroll chat up (show older messages). Disables auto-scroll.
@@ -1609,6 +1893,7 @@ impl App {
             // companion overlay. Only on rebuild — idle scroll frames skip
             // this clone, keeping them O(visible).
             self.chat_rows = built.chat_rows.clone();
+            self.chat_copy_metadata = built.copy_metadata;
             self.rendered_chat = Some(RenderedChat {
                 lines: built.lines,
                 chat_rows: built.chat_rows,
@@ -1964,42 +2249,64 @@ impl App {
         }
     }
 
-    /// How long a finished sidebar entry stays visible.
+    /// How long a failed sidebar entry stays visible.
     pub fn finished_ttl(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.sidebar_finished_ttl)
     }
 
-    /// Whether a todo should still show in the sidebar: not Done, or Done
-    /// recently enough (within `sidebar_finished_ttl`). View-only — the
-    /// agent's list keeps done todos until the model or user deletes them.
+    /// Completed todos remain in the task record, but leave the activity view.
     pub fn todo_visible(&self, t: &mew_agent::Todo) -> bool {
-        if t.status != mew_agent::TodoStatus::Done {
-            return true;
-        }
-        match self.todo_done_at.get(&t.id) {
-            Some(at) => at.elapsed() <= self.finished_ttl(),
-            // No done_at recorded (pre-feature state): treat as fresh.
-            None => true,
+        t.status != mew_agent::TodoStatus::Done
+    }
+
+    pub fn background_job_visible(&self, job: &BackgroundJobState) -> bool {
+        match job.status {
+            BackgroundJobStatus::Running => true,
+            BackgroundJobStatus::Failed => job
+                .finished_at
+                .is_some_and(|at| at.elapsed() <= self.finished_ttl()),
+            BackgroundJobStatus::Completed | BackgroundJobStatus::Cancelled => false,
         }
     }
 
-    /// Drop finished subagent entries older than the retention window so the
-    /// sidebar reads as a recent-activity feed instead of an ever-growing
-    /// log. Running entries are never pruned. Runs on every draw.
+    /// Keep current work and recent failures in the activity view.
     pub fn prune_sidebar_state(&mut self) {
+        if self.mode != Mode::Activity {
+            self.activity_view = None;
+        }
+        let viewing = self
+            .activity_view
+            .as_ref()
+            .filter(|view| view.session_id == self.status.session_id)
+            .and_then(|view| match &view.target {
+                ActivityTarget::Subagent(id) => Some(id.as_str()),
+                ActivityTarget::Job(_) | ActivityTarget::Tool { .. } | ActivityTarget::Review => {
+                    None
+                }
+            });
         let ttl = self.finished_ttl();
-        self.subagents.retain(|s| match s.finished_at {
-            Some(at) => at.elapsed() <= ttl,
-            None => true, // still running
+        self.subagents.retain(|s| {
+            viewing == Some(s.task_id.as_str())
+                || match s.status {
+                    SubagentStatus::Running => true,
+                    SubagentStatus::Failed { .. } => {
+                        s.finished_at.is_some_and(|at| at.elapsed() <= ttl)
+                    }
+                    SubagentStatus::Completed | SubagentStatus::Cancelled => false,
+                }
         });
-        // Drop done-timestamps for todos that are no longer Done or gone;
-        // expiry itself is a view concern (todo_visible) so a re-render
-        // never resurrects an expired entry via a fresh timestamp.
-        self.todo_done_at.retain(|id, _at| {
-            self.todos
-                .iter()
-                .any(|t| t.id == *id && t.status == mew_agent::TodoStatus::Done)
-        });
+    }
+
+    /// Release the input queue only after the full turn has shut down.
+    pub fn finish_turn(&mut self) {
+        self.streaming = false;
+        self.cancelling = false;
+        self.esc_cancel_pending = None;
+        self.ctrl_c_quit_pending = None;
+        self.retry_status = None;
+        self.record_reasoning_elapsed(false);
+        self.pending_queued_send = !self.queued_messages.is_empty();
+        self.mark_chat_dirty();
     }
 
     /// Process an agent event and update state.
@@ -2111,20 +2418,11 @@ impl App {
                 if let Some(msg) = self.messages.last() {
                     self.pending_md_rerender = Some(msg.id);
                 }
-                // Invalidate cache so next render re-highlights from scratch.
-                // ToolUse means the agent is still working - it will execute tools
-                // and request another stream. Stay in streaming mode.
-                if finish != mew_message::Finish::ToolUse {
-                    self.streaming = false;
-                    self.cancelling = false;
-                    self.esc_cancel_pending = None;
-                    self.ctrl_c_quit_pending = None;
-                    self.retry_status = None;
-                    // If there are queued messages, signal the main loop to
-                    // send the oldest one as a new turn.
-                    if !self.queued_messages.is_empty() {
-                        self.pending_queued_send = true;
-                    }
+                // In daemon mode, a provider response can end before tool
+                // execution or goal continuation. The turn stream owns busy
+                // state; MessageEnd only finalizes this response's rendering.
+                if !self.daemon_mode && finish != mew_message::Finish::ToolUse {
+                    self.finish_turn();
                 }
                 // The latest request's prompt size is the current context
                 // occupancy; snapshot it so the reading tracks growth and
@@ -2151,11 +2449,9 @@ impl App {
                 ));
             }
             AgentEvent::Provider(ProviderEvent::Error(err)) => {
-                self.streaming = false;
-                self.cancelling = false;
-                self.esc_cancel_pending = None;
-                self.ctrl_c_quit_pending = None;
-                self.retry_status = None;
+                if !self.daemon_mode {
+                    self.finish_turn();
+                }
                 self.push_synthetic_message(format!("Provider error: {}", err.message));
             }
             AgentEvent::PermissionRequest { call, tx } => {
@@ -2167,6 +2463,7 @@ impl App {
                     tx: Some(tx),
                     selected: 0,
                     scroll: 0,
+                    view: Default::default(),
                 });
             }
             AgentEvent::AskUser {
@@ -2177,6 +2474,7 @@ impl App {
                 let answers = vec![String::new(); questions.len()];
                 self.mode = Mode::UserQuestion;
                 self.user_question = Some(UserQuestionState {
+                    subagent: None,
                     call_id,
                     questions,
                     answers,
@@ -2190,50 +2488,23 @@ impl App {
                     tx: Some(tx),
                 });
             }
-            AgentEvent::PlanApprovalRequest {
+            AgentEvent::SubagentAskUser {
+                source,
                 call_id,
-                plan_path,
-                plan_markdown,
-                persona,
+                questions,
                 tx,
             } => {
-                self.mode = Mode::PlanApproval;
-                self.plan_approval = Some(PlanApprovalState {
+                self.handle_agent_event(AgentEvent::AskUser {
                     call_id,
-                    plan_path,
-                    persona,
-                    plan_markdown,
-                    scroll: 0,
-                    selected: 0,
-                    editing_feedback: false,
-                    feedback: String::new(),
-                    feedback_cursor: 0,
-                    feedback_undo: editor::UndoHistory::default(),
-                    tx: Some(tx),
+                    questions,
+                    tx,
                 });
+                if let Some(question) = self.user_question.as_mut() {
+                    question.subagent = Some(source);
+                }
             }
             AgentEvent::TodosUpdated { todos } => {
-                // Track when each todo became Done so the sidebar can hide
-                // long-finished todos (view-only; the agent's list is
-                // untouched). Ids that are no longer Done drop out, and a
-                // re-done todo restarts its clock.
-                let now = Instant::now();
-                let mut next = std::collections::HashMap::new();
-                for t in &todos {
-                    if t.status == mew_agent::TodoStatus::Done {
-                        let at = self.todo_done_at.get(&t.id).copied().unwrap_or(now);
-                        next.insert(t.id, at);
-                    }
-                }
-                self.todo_done_at = next;
                 self.todos = todos;
-            }
-            AgentEvent::PersonaSwitchRequested { name } => {
-                // Stash the requested name so the main loop can pick it up
-                // and apply the switch. The main loop owns the agent
-                // reference and the provider-builder plumbing, so it has
-                // to be the one to do the actual swap.
-                self.pending_persona_switch_apply = Some(name);
             }
             AgentEvent::ToolStart { call_id } => {
                 // Find the tool call part and mark as running.
@@ -2321,27 +2592,37 @@ impl App {
                 self.mark_chat_dirty();
             }
             AgentEvent::Error(msg) => {
-                self.streaming = false;
-                self.cancelling = false;
-                self.esc_cancel_pending = None;
-                self.ctrl_c_quit_pending = None;
+                if !self.daemon_mode {
+                    self.finish_turn();
+                }
                 self.push_synthetic_message(format!("Error: {}", msg));
             }
             AgentEvent::SubagentStart {
                 parent_call_id,
+                child_session_id,
                 name,
                 display_name,
                 ..
             } => {
-                self.subagents.push(SubagentState {
-                    task_id: parent_call_id.clone(),
-                    name: name.clone(),
+                let state = SubagentState {
+                    task_id: parent_call_id,
+                    child_session_id,
+                    name,
                     started_at: Instant::now(),
                     status: SubagentStatus::Running,
                     last_progress: None,
-                    display_name: display_name.clone(),
+                    display_name,
                     finished_at: None,
-                });
+                };
+                if let Some(existing) = self
+                    .subagents
+                    .iter_mut()
+                    .find(|sa| sa.task_id == state.task_id)
+                {
+                    *existing = state;
+                } else {
+                    self.subagents.push(state);
+                }
             }
             AgentEvent::SubagentProgress { .. } => {}
             AgentEvent::SubagentStatus {
@@ -2359,13 +2640,14 @@ impl App {
             }
             AgentEvent::SubagentEnd {
                 parent_call_id,
+                child_session_id,
                 outcome,
                 ..
             } => {
                 if let Some(sa) = self
                     .subagents
                     .iter_mut()
-                    .find(|s| s.task_id == parent_call_id)
+                    .find(|s| s.task_id == parent_call_id && s.child_session_id == child_session_id)
                 {
                     sa.status = match outcome {
                         mew_agent::SubagentOutcome::Completed => SubagentStatus::Completed,
@@ -2375,6 +2657,9 @@ impl App {
                         }
                     };
                     sa.finished_at = Some(Instant::now());
+                    if self.activity_view.as_ref().is_some_and(|view| view.session_id == self.status.session_id && matches!(&view.target, ActivityTarget::Subagent(id) if id == &parent_call_id)) {
+                        self.refresh_activity();
+                    }
                 }
             }
             AgentEvent::SubagentPermissionRequest { call, tx, .. } => {
@@ -2385,6 +2670,7 @@ impl App {
                     tx: Some(tx),
                     selected: 0,
                     scroll: 0,
+                    view: Default::default(),
                 });
                 self.mode = crate::app::Mode::PermissionPrompt;
             }
@@ -2396,6 +2682,7 @@ impl App {
                     tx: Some(tx),
                     selected: 0,
                     scroll: 0,
+                    view: Default::default(),
                 });
                 self.mode = crate::app::Mode::PermissionPrompt;
             }
@@ -2412,8 +2699,17 @@ impl App {
                     _ => BackgroundJobStatus::Cancelled,
                 };
                 if let Some(job) = self.background_jobs.iter_mut().find(|j| j.job_id == job_id) {
-                    // Existing entry: transition its state. Preserve the
-                    // original started_at so the elapsed counter is stable.
+                    if matches!(status, BackgroundJobStatus::Running)
+                        && !matches!(job.status, BackgroundJobStatus::Running)
+                    {
+                        job.started_at = Instant::now();
+                    }
+                    job.finished_at = if matches!(status, BackgroundJobStatus::Running) {
+                        None
+                    } else {
+                        job.finished_at.or_else(|| Some(Instant::now()))
+                    };
+                    job.command = command;
                     job.status = status;
                 } else {
                     // First update we've seen for this job.
@@ -2421,6 +2717,8 @@ impl App {
                         job_id,
                         command,
                         started_at: Instant::now(),
+                        finished_at: (!matches!(status, BackgroundJobStatus::Running))
+                            .then(Instant::now),
                         status,
                     });
                 }
@@ -2446,6 +2744,8 @@ impl App {
                     objective,
                     selected: 0,
                     tx: Some(tx),
+                    scroll: 0,
+                    view: Default::default(),
                 });
             }
         }
@@ -2459,6 +2759,7 @@ impl App {
             }
         }
         self.mode = Mode::Normal;
+        self.finish_daemon_required_action();
     }
 
     /// Select next permission option.
@@ -2585,17 +2886,13 @@ impl App {
         enum Next {
             Advance,
             Submit,
+            Cancel,
         }
         let next = if let Some(ref mut uq) = self.user_question {
             if uq.review {
                 match uq.review_selected {
                     0 => Next::Submit,
-                    _ => {
-                        // Cancel: drop without sending.
-                        self.user_question = None;
-                        self.mode = Mode::Normal;
-                        return;
-                    }
+                    _ => Next::Cancel,
                 }
             } else {
                 let question = match uq.questions.get(uq.page) {
@@ -2631,8 +2928,10 @@ impl App {
             return;
         };
 
-        if matches!(next, Next::Submit) {
-            self.submit_user_question();
+        match next {
+            Next::Submit => self.submit_user_question(),
+            Next::Cancel => self.cancel_user_question(),
+            Next::Advance => {}
         }
     }
 
@@ -2644,100 +2943,24 @@ impl App {
             }
         }
         self.mode = Mode::Normal;
+        self.finish_daemon_required_action();
     }
 
-    /// Cancel the question prompt. Dropping `tx` without sending makes the
-    /// agent's `rx.await` return `Err`, which the handler turns into a
-    /// cancelled tool result.
+    /// Dismiss the question locally. Daemon cancellation is an explicit
+    /// input action so replacing UI state does not answer a pending request.
     pub fn cancel_user_question(&mut self) {
+        let child_question = self
+            .user_question
+            .as_ref()
+            .is_some_and(|question| question.subagent.is_some());
         self.user_question = None;
         self.mode = Mode::Normal;
-    }
-
-    pub fn plan_approval_scroll_down(&mut self, lines: u16) {
-        if let Some(pa) = self.plan_approval.as_mut() {
-            pa.scroll = pa.scroll.saturating_add(lines);
+        if child_question {
+            self.finish_daemon_required_action();
+        } else {
+            self.clear_daemon_required_actions();
+            self.show_next_daemon_required_action();
         }
-    }
-
-    pub fn plan_approval_scroll_up(&mut self, lines: u16) {
-        if let Some(pa) = self.plan_approval.as_mut() {
-            pa.scroll = pa.scroll.saturating_sub(lines);
-        }
-    }
-
-    /// Toggle between the approve (0) and request-changes (1) options.
-    pub fn plan_approval_toggle(&mut self) {
-        if let Some(pa) = self.plan_approval.as_mut() {
-            if pa.editing_feedback {
-                // Cycle: Approve (0) → Request changes (1) → Submit (2) → Approve (0)
-                pa.selected = (pa.selected + 1) % 3;
-            } else {
-                // Toggle between Approve (0) and Request changes (1) only.
-                pa.selected = if pa.selected == 0 { 1 } else { 0 };
-            }
-        }
-    }
-
-    pub fn plan_approval_type_char(&mut self, c: char) {
-        if let Some(pa) = self.plan_approval.as_mut() {
-            if pa.editing_feedback {
-                editor::insert(&mut pa.feedback, &mut pa.feedback_cursor, c);
-            }
-        }
-    }
-
-    pub fn plan_approval_backspace(&mut self) {
-        if let Some(pa) = self.plan_approval.as_mut() {
-            if pa.editing_feedback {
-                editor::backspace(&mut pa.feedback, &mut pa.feedback_cursor);
-            }
-        }
-    }
-
-    /// Confirm the current selection. Approve sends `Approved`. Request-changes
-    /// enters the feedback editor first; once feedback is present a second
-    /// confirm sends `ChangesRequested`.
-    pub fn plan_approval_confirm(&mut self) {
-        let ready = match self.plan_approval.as_mut() {
-            Some(pa) if pa.selected == 1 && !pa.editing_feedback => {
-                pa.editing_feedback = true;
-                false
-            }
-            // selected 2 (Submit) or 1 (Request changes) with feedback: send it.
-            Some(pa)
-                if (pa.selected == 1 || pa.selected == 2)
-                    && pa.editing_feedback
-                    && pa.feedback.trim().is_empty() =>
-            {
-                // Stay in the editor until there's something to send.
-                false
-            }
-            Some(_) => true,
-            None => false,
-        };
-        if !ready {
-            return;
-        }
-        if let Some(pa) = self.plan_approval.take() {
-            if let Some(tx) = pa.tx {
-                let decision = if pa.selected == 0 {
-                    mew_agent::PlanDecision::Approved
-                } else {
-                    mew_agent::PlanDecision::ChangesRequested(pa.feedback)
-                };
-                let _ = tx.send(decision);
-            }
-        }
-        self.mode = Mode::Normal;
-    }
-
-    /// Cancel the plan approval. Dropping `tx` without sending makes the
-    /// agent's `rx.await` return `Err`, which the handler turns into a
-    /// cancelled tool result.
-    pub fn cancel_plan_approval(&mut self) {
-        self.plan_approval = None;
-        self.mode = Mode::Normal;
     }
 
     /// Toggle between accept (0) and reject (1) in the goal proposal modal.
@@ -2766,13 +2989,21 @@ impl App {
             }
         }
         self.mode = Mode::Normal;
+        self.finish_daemon_required_action();
     }
 
     /// Cancel the goal proposal. Dropping `tx` without sending makes the
     /// agent's `rx.await` return `Err`, treated as a rejection.
     pub fn cancel_goal_proposal(&mut self) {
-        self.goal_proposal = None;
+        if let Some(gp) = self.goal_proposal.take() {
+            if self.daemon_request_id.is_some() {
+                if let Some(tx) = gp.tx {
+                    let _ = tx.send(mew_agent::GoalDecision::Rejected);
+                }
+            }
+        }
         self.mode = Mode::Normal;
+        self.finish_daemon_required_action();
     }
 
     /// Record the active goal locally (sidebar chip + status bar).
@@ -2829,25 +3060,47 @@ fn append_to_part(part: &mut Part, delta: &str) {
 /// Current dir with `$HOME` collapsed to `~`, for the status pill.
 fn short_cwd() -> String {
     let cwd = match std::env::current_dir() {
-        Ok(p) => p.display().to_string(),
+        Ok(p) => p,
         Err(_) => return String::new(),
     };
+    format_cwd(&cwd)
+}
+
+fn format_cwd(path: &std::path::Path) -> String {
     if let Some(home) = std::env::var_os("HOME") {
-        let home = home.to_string_lossy().into_owned();
-        if let Some(rest) = cwd.strip_prefix(&home) {
-            return format!("~{}", rest);
+        if let Ok(rest) = path.strip_prefix(std::path::Path::new(&home)) {
+            return if rest.as_os_str().is_empty() {
+                "~".into()
+            } else {
+                format!("~/{}", rest.display())
+            };
         }
     }
-    cwd
+    path.display().to_string()
 }
 
 /// Walk up from cwd to find a `.git/HEAD` and parse the branch name.
 /// Returns `None` outside a repo. Used for the status pill.
 pub fn current_git_branch() -> Option<String> {
-    let mut dir = std::env::current_dir().ok()?;
+    git_branch_in(&std::env::current_dir().ok()?)
+}
+
+fn git_branch_in(cwd: &std::path::Path) -> Option<String> {
+    let mut dir = cwd.to_path_buf();
     loop {
-        let head = dir.join(".git").join("HEAD");
-        if let Ok(content) = std::fs::read_to_string(&head) {
+        let git = dir.join(".git");
+        let metadata = if git.is_file() {
+            std::fs::read_to_string(&git).ok().and_then(|content| {
+                content
+                    .trim()
+                    .strip_prefix("gitdir: ")
+                    .map(|path| dir.join(path))
+            })
+        } else {
+            Some(git)
+        };
+        let head = metadata.map(|path| path.join("HEAD"));
+        if let Some(Ok(content)) = head.map(std::fs::read_to_string) {
             let content = content.trim();
             if let Some(branch) = content.strip_prefix("ref: refs/heads/") {
                 return Some(branch.to_string());
@@ -2870,8 +3123,8 @@ impl Default for App {
 
 pub(crate) fn byte_at_display_offset(s: &str, target_col: usize) -> usize {
     let mut col = 0usize;
-    for (i, ch) in s.char_indices() {
-        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+    for (i, grapheme) in unicode_segmentation::UnicodeSegmentation::grapheme_indices(s, true) {
+        let w = unicode_width::UnicodeWidthStr::width(grapheme);
         if col + w > target_col {
             return i;
         }
@@ -2954,7 +3207,12 @@ pub fn parse_namespace_refs(text: &str) -> Vec<NamespaceRef> {
 #[cfg(test)]
 mod tests;
 
+pub mod activity;
+mod client;
+mod drafts;
 pub mod editor;
 pub mod input;
 pub mod pickers;
 pub mod slash;
+pub mod todos;
+mod window;

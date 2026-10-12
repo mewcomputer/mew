@@ -7,11 +7,13 @@ license.workspace = true
 
 [dependencies]
 mew-message = { workspace = true }
+mew-diff = { workspace = true }
 mew-agent = { workspace = true }
 mew-provider = { workspace = true }
 mew-session = { workspace = true }
 mew-hooks = { workspace = true }
 mew-protocol = { workspace = true }
+mew-client-core = { workspace = true }
 mew-raster = { path = "../mew-raster" }
 tiny-skia = "0.12"
 tokio = { workspace = true }
@@ -28,6 +30,7 @@ ratatui-mdstream = { workspace = true }
 mdstream = { workspace = true }
 ignore = { workspace = true }
 unicode-width = "0.2"
+unicode-segmentation = { workspace = true }
 rand.workspace = true
 strum = { version = "0.26", features = ["derive"] }
 mew-config = { workspace = true }

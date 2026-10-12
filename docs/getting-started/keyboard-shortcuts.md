@@ -3,18 +3,23 @@ title: Keyboard Shortcuts
 description: All TUI keyboard shortcuts in one place.
 ---
 
-Press `?` in the TUI to toggle the shortcuts overlay at any time.
+Press `?` with an empty composer to open the shortcuts overlay.
 
 ## Global
 
 | Shortcut | Action |
 |----------|--------|
-| `Ctrl+P` | Open command palette (or cycle thinking variants in the variant picker) |
+| `Ctrl+Space` | Open command palette |
+| `Ctrl+Alt+N` | Open the attention bell's conversation list |
+| `Ctrl+Alt+O` | Show conversations open in this terminal window |
+| `Ctrl+Alt+Left` / `Ctrl+Alt+Right` | Switch between open conversations |
+| `Ctrl+Alt+Enter` | Start a conversation in the current project |
+| `Ctrl+Alt+W` | Close the current view, or the selected conversation view in a picker |
 | `?` | Toggle keyboard shortcuts overlay |
 | `Ctrl+L` | Scroll to bottom (re-attach auto-scroll) |
 | `Ctrl+C` | Cancel stream / clear input / quit (press twice) |
 | `Esc` | Cancel stream (press twice) / close modal / clear selection |
-| `Ctrl+D` | Delete char forward / quit when input is empty |
+| `Ctrl+D` | Delete character forward / quit when input is empty and idle |
 | `Ctrl+Home` | Scroll to top |
 | `Ctrl+End` | Scroll to bottom |
 
@@ -22,28 +27,49 @@ Press `?` in the TUI to toggle the shortcuts overlay at any time.
 
 | Shortcut | Action |
 |----------|--------|
-| `Enter` | Submit (or insert newline in multi-line mode) |
-| `Alt+Enter` | Insert newline (multi-line input) |
+| `Enter` | Submit the composer, confirm a dialog, or insert a newline in a todo draft |
+| `Shift+Enter` / `Alt+Enter` / `Ctrl+J` | Insert newline in the composer, goal, question answer or todo draft |
 | `Ctrl+A` / `Ctrl+E` | Cursor to start / end of line |
 | `Ctrl+F` / `Ctrl+B` | Cursor right / left |
-| `Ctrl+W` | Delete word backward |
-| `Ctrl+K` | Delete from cursor to end of line |
-| `Ctrl+U` | Clear entire input |
-| `Ctrl+Z` | Undo |
-| `Ctrl+Shift+Z` / `Ctrl+Y` | Redo |
-| `Ctrl+S` | Forward search through input history |
-| `Alt+Left` / `Alt+Right` | Move word left / right |
-| `Alt+Backspace` | Delete word backward |
+| `Ctrl+H` / `Backspace` | Delete the previous character |
+| `Ctrl+W` | Kill the previous whitespace-delimited word |
+| `Ctrl+K` | Kill to this line's end, or kill its newline when already at the end |
+| `Ctrl+U` | Kill to this line's beginning |
+| `Ctrl+Y` | Yank the most recently killed text |
+| `Alt+Y` | Replace the last yank with an older kill |
+| `Ctrl+T` | Transpose characters at the cursor |
+| `Ctrl+Z` / `Ctrl+_` | Undo |
+| `Ctrl+Shift+Z` | Redo |
+| `Ctrl+P` / `Ctrl+N` | Recall previous / next composer history, or navigate picker results |
+| `Ctrl+S` | Search forward while history search is open |
+| `Alt+B` / `Alt+F`, `Alt+Left` / `Alt+Right` | Move backward / forward by word |
+| `Alt+Backspace` / `Alt+D` | Kill the previous / next word, using alphanumeric word boundaries |
+| `Alt+<` / `Alt+>` | Move to the beginning / end of the entire field |
 | `Up` / `Down` | Navigate between input lines / history |
 | `PageUp` / `PageDown` | Scroll chat up / down by 10 lines |
 | `Ctrl+R` | Reverse search through input history |
+
+Editing keys work in the composer, reference input, picker filters, question
+answers, goals, todo drafts, history search and settings. Each field has its
+own undo history; killed text is shared between fields. Consecutive kills
+combine into one entry. Moving, typing, pasting or changing fields ends that
+sequence and stops `Alt+Y` from replacing unrelated text. Characters with
+combining marks and joined emoji move, delete and transpose together.
+
+In conversation pickers, `Ctrl+Alt+A` archives/restores the selected conversation
+and `Ctrl+Alt+P` pins it. Closing a view keeps its draft and queued follow-ups
+for this TUI process and leaves daemon work running. Closing the last view exits
+the TUI. `Tab` opens global history from the open-view or notification picker;
+in history, it switches between current and archived conversations.
+In the thinking picker, `Ctrl+Alt+P` cycles variants.
+Plain `Ctrl+A` and `Ctrl+P/N` retain their editing/navigation meanings.
 
 ## Chat
 
 | Shortcut | Action |
 |----------|--------|
 | `Ctrl+Shift+C` | Copy selected text to clipboard |
-| `Ctrl+T` | Toggle reasoning/thinking block expansion |
+| `Ctrl+Alt+T` | Toggle reasoning/thinking block expansion |
 | `Ctrl+O` | Toggle bash output expansion |
 | `Ctrl+1` | Toggle the sidebar Environment section (context files / MCP) |
 | `x` | Cancel most recently started subagent (when input empty) |
@@ -53,6 +79,8 @@ Press `?` in the TUI to toggle the shortcuts overlay at any time.
 
 | Action | Effect |
 |--------|--------|
-| Scroll wheel | Scroll chat up/down |
-| Click scrollbar | Seek to position |
+| Scroll wheel | Scroll the chat, picker list or details under the pointer |
+| Click scrollbar track | Page the corresponding view |
+| Drag scrollbar thumb | Scroll the corresponding view |
+| Click sidebar task, subagent or job | Open its details |
 | Click + drag | Select text (when mouse capture is on) |

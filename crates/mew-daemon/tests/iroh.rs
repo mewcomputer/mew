@@ -167,6 +167,45 @@ async fn iroh_peer_connects_and_exchanges_protocol() -> Result<()> {
         .await
         .expect("websocket handshake over iroh");
 
+    send(
+        &mut ws,
+        ClientMessage::RemoteHello {
+            token: None,
+            device_name: "paired mobile".into(),
+        },
+    )
+    .await;
+    let msgs = recv_until(&mut ws, |m| {
+        matches!(
+            m,
+            ServerMessage::RemoteReady { .. } | ServerMessage::Error { .. }
+        )
+    })
+    .await;
+    assert!(matches!(
+        msgs.last(),
+        Some(ServerMessage::RemoteReady {
+            scope: mew_protocol::RemoteScope::Control,
+        })
+    ));
+
+    // The handshake acknowledges the allowlisted peer without changing its
+    // legacy transport restrictions.
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: ClientKind::Desktop,
+        },
+    )
+    .await;
+    let msgs = recv_until(&mut ws, |m| matches!(m, ServerMessage::Error { .. })).await;
+    assert!(matches!(
+        msgs.last(),
+        Some(ServerMessage::Error { message })
+            if message == "legacy iroh connections cannot use desktop-only capabilities"
+    ));
+
     // Send NewSession.
     send(
         &mut ws,

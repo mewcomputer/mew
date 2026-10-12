@@ -1,19 +1,64 @@
 //! A small headless client driver that connects a transport to the reducer.
 
 use crate::{ClientConnection, ClientEvent, ClientState, ClientTransport, TransportError};
-use mew_protocol::ClientMessage;
+use mew_protocol::{ClientMessage, ServerMessage, PROTOCOL_VERSION};
+use std::time::Duration;
+
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub struct ClientEngine {
     state: ClientState,
     connection: Box<dyn ClientConnection>,
+    session_list_pending: bool,
+    session_list_dirty: bool,
 }
 
 impl ClientEngine {
     pub async fn connect(transport: &dyn ClientTransport) -> Result<Self, TransportError> {
-        let connection = transport.connect().await?;
+        let mut connection = transport.connect().await?;
         let mut state = ClientState::default();
+        let handshake = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+            connection.send(ClientMessage::Ping).await?;
+            loop {
+                match connection.receive().await? {
+                    Some(ServerMessage::Pong { protocol_version, version }) => {
+                        if protocol_version != PROTOCOL_VERSION {
+                            return Err(TransportError::Other(format!(
+                                "incompatible daemon protocol {protocol_version} (daemon {version}); \
+                                 this app requires {PROTOCOL_VERSION}"
+                            )));
+                        }
+                        state.apply_server_message(ServerMessage::Pong { protocol_version, version });
+                        return Ok(());
+                    }
+                    Some(message @ ServerMessage::RemoteReady { .. }) => {
+                        state.apply_server_message(message);
+                    }
+                    Some(_) => return Err(TransportError::Other(
+                        "daemon sent session data before completing the protocol handshake".into(),
+                    )),
+                    None => return Err(TransportError::Closed),
+                }
+            }
+        }).await;
+        let result = handshake.unwrap_or_else(|_| {
+            Err(TransportError::Other(
+                "daemon protocol handshake timed out".into(),
+            ))
+        });
+        if let Err(error) = result {
+            let _ = tokio::time::timeout(Duration::from_millis(250), connection.close()).await;
+            return Err(TransportError::Other(format!(
+                "daemon protocol handshake failed: {error}; restart or update the daemon and app to connect"
+            )));
+        }
         state.set_connection_status(crate::ConnectionStatus::Connected);
-        Ok(Self { state, connection })
+        Ok(Self {
+            state,
+            connection,
+            session_list_pending: false,
+            session_list_dirty: false,
+        })
     }
 
     pub fn state(&self) -> &ClientState {
@@ -33,19 +78,30 @@ impl ClientEngine {
     }
 
     pub async fn send(&mut self, message: ClientMessage) -> Result<(), TransportError> {
-        self.connection.send(message).await
+        if matches!(message, ClientMessage::ListSessions) {
+            if self.session_list_pending {
+                self.session_list_dirty = true;
+                return Ok(());
+            }
+            self.connection.send(message).await?;
+            self.session_list_pending = true;
+            Ok(())
+        } else {
+            self.connection.send(message).await
+        }
     }
 
     pub async fn send_prompt(&mut self, text: String) -> Result<(), TransportError> {
         let session_id = self.state.attached_session.clone().ok_or_else(|| {
             TransportError::Other("cannot send a prompt without an attached session".into())
         })?;
-        self.state.record_prompt(&session_id, text.clone());
         self.send(ClientMessage::Prompt {
-            text,
+            text: text.clone(),
             attachments: Vec::new(),
         })
-        .await
+        .await?;
+        self.state.record_prompt(&session_id, text);
+        Ok(())
     }
 
     pub async fn yield_control(&mut self) -> Result<(), TransportError> {
@@ -98,7 +154,42 @@ impl ClientEngine {
 
     pub async fn receive(&mut self) -> Result<Vec<ClientEvent>, TransportError> {
         match self.connection.receive().await? {
-            Some(message) => Ok(self.state.apply_server_message(message)),
+            Some(message) => {
+                let personas = matches!(&message, ServerMessage::SessionReady { .. });
+                match &message {
+                    ServerMessage::SessionList { .. } => self.session_list_pending = false,
+                    ServerMessage::SessionReady { .. }
+                    | ServerMessage::SessionMetaChanged { .. } => self.session_list_dirty = true,
+                    ServerMessage::SessionActivityChanged {
+                        session_id,
+                        activity,
+                    } => {
+                        let running = *activity == mew_protocol::SessionState::Running;
+                        if self
+                            .state
+                            .session(session_id)
+                            .is_none_or(|session| session.running != running)
+                            || !self
+                                .state
+                                .session_list
+                                .iter()
+                                .any(|session| session.session_id == *session_id)
+                        {
+                            self.session_list_dirty = true;
+                        }
+                    }
+                    _ => {}
+                }
+                let events = self.state.apply_server_message(message);
+                if self.session_list_dirty && !self.session_list_pending {
+                    self.send(ClientMessage::ListSessions).await?;
+                    self.session_list_dirty = false;
+                }
+                if personas {
+                    self.send(ClientMessage::ListPersonas).await?;
+                }
+                Ok(events)
+            }
             None => {
                 self.state
                     .set_connection_status(crate::ConnectionStatus::Disconnected);
@@ -125,8 +216,48 @@ mod tests {
     const SESSION_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
 
     #[tokio::test]
+    async fn connection_rejects_legacy_daemon_before_sending_session_commands() {
+        let transport = InMemoryTransport::default();
+        transport.push_server_message(
+            serde_json::from_str(r#"{"type":"pong","version":"0.2.0"}"#).unwrap(),
+        );
+
+        let result = ClientEngine::connect(&transport).await;
+
+        let error = result.err().expect("legacy daemon must be rejected");
+        assert!(error.to_string().contains("protocol"));
+        assert!(error.to_string().contains("restart"));
+        assert!(matches!(
+            transport.sent_messages().as_slice(),
+            [ClientMessage::Ping]
+        ));
+    }
+
+    #[tokio::test]
+    async fn previous_native_schema_cannot_activate_a_client() {
+        let transport = InMemoryTransport::default();
+        transport.push_server_message(ServerMessage::Pong {
+            version: "previous-native".into(),
+            protocol_version: 1,
+        });
+        let error = ClientEngine::connect(&transport)
+            .await
+            .err()
+            .expect("previous native schema must be rejected");
+        assert!(error.to_string().contains("protocol"));
+        assert!(matches!(
+            transport.sent_messages().as_slice(),
+            [ClientMessage::Ping]
+        ));
+    }
+
+    #[tokio::test]
     async fn headless_engine_handles_prompt_stream_and_required_action() {
         let transport = InMemoryTransport::default();
+        transport.push_server_message(ServerMessage::Pong {
+            version: "test".into(),
+            protocol_version: PROTOCOL_VERSION,
+        });
         let mut engine = ClientEngine::connect(&transport).await.unwrap();
         assert!(matches!(
             engine.state().connection,
@@ -149,7 +280,7 @@ mod tests {
         engine.send_prompt("hello".into()).await.unwrap();
         assert!(matches!(
             transport.sent_messages().as_slice(),
-            [ClientMessage::Prompt { text, .. }] if text == "hello"
+            [ClientMessage::Ping, ClientMessage::ListSessions, ClientMessage::ListPersonas, ClientMessage::Prompt { text, .. }] if text == "hello"
         ));
 
         let session_id = Ulid::from_string(SESSION_ID).unwrap();
@@ -212,7 +343,7 @@ mod tests {
         let events = engine.receive().await.unwrap();
         assert!(matches!(
             events.as_slice(),
-            [ClientEvent::TurnEnded {
+            [ClientEvent::ProviderMessageEnded {
                 input_tokens: 3,
                 output_tokens: 2,
                 ..
@@ -237,6 +368,10 @@ mod tests {
         let history = engine.state().session(SESSION_ID).unwrap().messages.clone();
         engine.close().await.unwrap();
 
+        transport.push_server_message(ServerMessage::Pong {
+            version: "test".into(),
+            protocol_version: PROTOCOL_VERSION,
+        });
         let mut reconnected = ClientEngine::connect(&transport).await.unwrap();
         transport.push_server_message(ServerMessage::SessionReady {
             session_id: SESSION_ID.into(),
@@ -266,6 +401,10 @@ mod tests {
     #[tokio::test]
     async fn history_pages_replace_then_prepend_and_update_cursor() {
         let transport = InMemoryTransport::default();
+        transport.push_server_message(ServerMessage::Pong {
+            version: "test".into(),
+            protocol_version: PROTOCOL_VERSION,
+        });
         let mut engine = ClientEngine::connect(&transport).await.unwrap();
         transport.push_server_message(ServerMessage::SessionReady {
             session_id: SESSION_ID.into(),
@@ -332,6 +471,10 @@ mod tests {
     #[tokio::test]
     async fn engine_sends_session_management_and_workspace_messages() {
         let transport = InMemoryTransport::default();
+        transport.push_server_message(ServerMessage::Pong {
+            version: "test".into(),
+            protocol_version: PROTOCOL_VERSION,
+        });
         let mut engine = ClientEngine::connect(&transport).await.unwrap();
 
         engine.yield_control().await.unwrap();
@@ -344,6 +487,8 @@ mod tests {
         engine.watch_workspace("sess-1".into(), true).await.unwrap();
 
         let sent = transport.sent_messages();
+        assert!(matches!(sent[0], ClientMessage::Ping));
+        let sent = &sent[1..];
         assert!(matches!(sent[0], ClientMessage::YieldControl {}));
         assert!(matches!(
             &sent[1],

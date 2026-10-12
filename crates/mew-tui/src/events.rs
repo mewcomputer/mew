@@ -15,6 +15,8 @@ pub enum Event {
     Input(CrosstermEvent),
     /// An agent event.
     Agent(mew_agent::AgentEvent),
+    /// The full turn's event stream has closed, after all buffered events.
+    TurnFinished,
     /// A tick for rendering.
     Tick,
     /// Application should quit.
@@ -43,14 +45,7 @@ impl EventLoop {
             loop {
                 match reader.next().await {
                     Some(Ok(event)) => {
-                        if matches!(
-                            event,
-                            CrosstermEvent::Key(_)
-                                | CrosstermEvent::Mouse(_)
-                                | CrosstermEvent::Paste(_)
-                                | CrosstermEvent::Resize(_, _)
-                        ) && tx.send(Event::Input(event)).await.is_err()
-                        {
+                        if tx.send(Event::Input(event)).await.is_err() {
                             break;
                         }
                     }
@@ -81,16 +76,32 @@ impl EventLoop {
         tokio::spawn(async move {
             while let Some(event) = agent_rx.recv().await {
                 if tx.send(Event::Agent(event)).await.is_err() {
-                    break;
+                    return;
                 }
             }
+            let _ = tx.send(Event::TurnFinished).await;
         });
     }
 }
 
 /// Process any crossterm input event and return an action.
 pub fn handle_input_event(app: &mut crate::app::App, event: CrosstermEvent) -> Option<Action> {
+    if matches!(
+        event,
+        CrosstermEvent::Key(_) | CrosstermEvent::Mouse(_) | CrosstermEvent::Paste(_)
+    ) {
+        app.acknowledge_result_on_interaction();
+    }
     match event {
+        CrosstermEvent::FocusGained => {
+            app.terminal_focused = Some(true);
+            app.acknowledge_visible_result();
+            None
+        }
+        CrosstermEvent::FocusLost => {
+            app.terminal_focused = Some(false);
+            None
+        }
         CrosstermEvent::Key(key) => handle_key_event(app, key),
         CrosstermEvent::Mouse(mouse) => handle_mouse_event(app, mouse),
         CrosstermEvent::Paste(text) => handle_paste_event(app, text),
@@ -102,18 +113,34 @@ pub fn handle_input_event(app: &mut crate::app::App, event: CrosstermEvent) -> O
             app.mark_chat_dirty();
             None
         }
-        _ => None,
     }
 }
 
 /// Process a crossterm key event and return an action.
 pub fn handle_key_event(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
+    let editor_mode = if matches!(
+        app.mode,
+        crate::app::Mode::Normal | crate::app::Mode::SlashCommand
+    ) || app
+        .picker
+        .as_ref()
+        .is_some_and(|picker| picker.is_at_picker())
+    {
+        crate::app::Mode::Normal
+    } else {
+        app.mode
+    };
+    if app.kill_ring_mode != editor_mode || !crate::app::editor::is_kill_or_yank(key) {
+        app.kill_ring.end_sequence();
+    }
+    app.kill_ring_mode = editor_mode;
     match app.mode {
+        crate::app::Mode::Activity => handle_activity_key(app, key),
         crate::app::Mode::PermissionPrompt => handle_permission_key(app, key),
         crate::app::Mode::UserQuestion => handle_user_question_key(app, key),
-        crate::app::Mode::PlanApproval => handle_plan_approval_key(app, key),
         crate::app::Mode::GoalProposal => handle_goal_proposal_key(app, key),
         crate::app::Mode::GoalCompose => handle_goal_compose_key(app, key),
+        crate::app::Mode::TodoEditor => app.handle_todo_key(key),
         crate::app::Mode::CommandPalette => handle_picker_key(app, key),
         crate::app::Mode::PersonaSwitchConfirm => handle_persona_confirm_key(app, key),
         crate::app::Mode::Help => handle_help_key(app, key),
@@ -123,7 +150,7 @@ pub fn handle_key_event(app: &mut crate::app::App, key: KeyEvent) -> Option<Acti
         // Settings mode is handled by the in-app SettingsState.
         crate::app::Mode::Settings => {
             if let Some(settings) = app.settings.as_mut() {
-                if !settings.handle_key(key) {
+                if !settings.handle_key(key, &mut app.kill_ring) {
                     // Closing settings.
                     if settings.is_dirty() {
                         app.set_alert("Settings closed (unsaved changes discarded)");
@@ -141,14 +168,28 @@ pub fn handle_key_event(app: &mut crate::app::App, key: KeyEvent) -> Option<Acti
 
 /// Handle keys while the help overlay is open.
 fn handle_help_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
-    use crossterm::event::{KeyCode, KeyModifiers};
     match key.code {
         KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Char(' ') => {
+            app.help_scroll = 0;
             app.mode = crate::app::Mode::Normal;
         }
+        KeyCode::Up => app.help_scroll = app.help_scroll.saturating_sub(1),
+        KeyCode::Down => {
+            app.help_scroll = app.help_scroll.saturating_add(1).min(app.help_max_scroll);
+        }
+        KeyCode::PageUp => {
+            app.help_scroll = app.help_scroll.saturating_sub(app.help_page_rows);
+        }
+        KeyCode::PageDown => {
+            app.help_scroll = app
+                .help_scroll
+                .saturating_add(app.help_page_rows)
+                .min(app.help_max_scroll);
+        }
+        KeyCode::Home => app.help_scroll = 0,
+        KeyCode::End => app.help_scroll = app.help_max_scroll,
         _ => {}
     }
-    let _ = KeyModifiers::empty();
     None
 }
 
@@ -159,7 +200,7 @@ fn handle_history_search_key(app: &mut crate::app::App, key: KeyEvent) -> Option
         KeyCode::Esc => {
             app.history_search_cancel();
         }
-        KeyCode::Enter => {
+        KeyCode::Enter if key.modifiers.is_empty() => {
             app.history_search_confirm();
         }
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -178,14 +219,16 @@ fn handle_history_search_key(app: &mut crate::app::App, key: KeyEvent) -> Option
         }
         _ => {}
     }
-    // Editing keys (chars, backspace, cursor + word moves, ^A/^E/^F/^B/
-    // ^D/^K/^U/^W, ^Z/^Y undo) route through the shared readline editor.
+    // Editing keys use the shared editor; cursor movement keeps the selected match.
     if crate::app::editor::handle_key_with_undo(
         &mut app.history_search_query,
         &mut app.history_search_cursor,
         key,
         &mut app.history_search_undo,
-    ) {
+        &mut app.kill_ring,
+    )
+    .changed()
+    {
         // Reset to first match on any edit.
         app.history_search_index = if app.history_search_matches().is_empty() {
             None
@@ -201,15 +244,19 @@ fn handle_paste_confirm_key(app: &mut crate::app::App, key: KeyEvent) -> Option<
     use crossterm::event::KeyCode;
     match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            app.mode = crate::app::Mode::Normal;
             if let Some(pending) = app.pending_paste.take() {
                 insert_paste(app, &pending);
             }
-            app.mode = crate::app::Mode::Normal;
         }
         _ => {
             // Any other key cancels the paste.
             app.pending_paste = None;
-            app.mode = crate::app::Mode::Normal;
+            app.mode = if app.input.starts_with('/') {
+                crate::app::Mode::SlashCommand
+            } else {
+                crate::app::Mode::Normal
+            };
         }
     }
     None
@@ -221,6 +268,17 @@ fn handle_paste_confirm_key(app: &mut crate::app::App, key: KeyEvent) -> Option<
 fn handle_persona_confirm_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
     use crossterm::event::{KeyCode, KeyModifiers};
     match key.code {
+        KeyCode::PageUp
+        | KeyCode::PageDown
+        | KeyCode::Home
+        | KeyCode::End
+        | KeyCode::Up
+        | KeyCode::Down => {
+            if let Some(state) = app.persona_switch_confirm.as_mut() {
+                scroll_decision(&mut state.scroll, &state.view, key.code);
+            }
+            None
+        }
         KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
             app.persona_switch_confirm = None;
             app.mode = crate::app::Mode::Normal;
@@ -266,6 +324,105 @@ fn handle_persona_confirm_key(app: &mut crate::app::App, key: KeyEvent) -> Optio
 }
 
 fn handle_paste_event(app: &mut crate::app::App, text: String) -> Option<Action> {
+    app.kill_ring.end_sequence();
+    let text = if text.contains('\r') {
+        let mut normalized = String::with_capacity(text.len());
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\r' {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                normalized.push('\n');
+            } else {
+                normalized.push(ch);
+            }
+        }
+        normalized
+    } else {
+        text
+    };
+    if text.is_empty() {
+        return None;
+    }
+    if app.mode == crate::app::Mode::TodoEditor {
+        app.paste_todo(&text);
+        return None;
+    }
+    if app.mode == crate::app::Mode::GoalCompose {
+        if let Some(goal) = app.goal_compose.as_mut() {
+            goal.undo.snapshot(&goal.title, goal.cursor);
+            goal.title.insert_str(goal.cursor, &text);
+            goal.cursor += text.len();
+        }
+        return None;
+    }
+    if app.mode == crate::app::Mode::UserQuestion {
+        if let Some(question) = app.user_question.as_mut() {
+            let freeform = question
+                .questions
+                .get(question.page)
+                .map(|q| q.options.len())
+                .unwrap_or(0);
+            if !question.review && question.selected == freeform {
+                question
+                    .freeform_undo
+                    .snapshot(&question.freeform_text, question.freeform_cursor);
+                question
+                    .freeform_text
+                    .insert_str(question.freeform_cursor, &text);
+                question.freeform_cursor += text.len();
+            }
+        }
+        return None;
+    }
+    if app.mode == crate::app::Mode::HistorySearch {
+        let query = if text.contains('\n') {
+            text.replace('\n', " ")
+        } else {
+            text
+        };
+        app.history_search_undo
+            .snapshot(&app.history_search_query, app.history_search_cursor);
+        app.history_search_query
+            .insert_str(app.history_search_cursor, &query);
+        app.history_search_cursor += query.len();
+        app.history_search_index = if app.history_search_matches().is_empty() {
+            None
+        } else {
+            Some(0)
+        };
+        return None;
+    }
+    if app.mode == crate::app::Mode::CommandPalette
+        && !app
+            .picker
+            .as_ref()
+            .is_some_and(|picker| picker.is_at_picker())
+    {
+        if let Some(picker) = app.picker.as_mut() {
+            let query = if text.contains('\n') {
+                text.replace('\n', " ")
+            } else {
+                text
+            };
+            picker.filter_undo.snapshot(&picker.filter, picker.cursor);
+            picker.filter.insert_str(picker.cursor, &query);
+            picker.cursor += query.len();
+            picker.selected = 0;
+            picker.scroll = 0;
+            picker.details_scroll = 0;
+        }
+        return None;
+    }
+    if !matches!(
+        app.mode,
+        crate::app::Mode::Normal
+            | crate::app::Mode::SlashCommand
+            | crate::app::Mode::CommandPalette
+    ) {
+        return None;
+    }
     // If the whole paste is a path to an image, turn it into an @mention.
     let candidate = text.trim().strip_prefix("file://").unwrap_or(text.trim());
     let is_image = std::path::Path::new(candidate)
@@ -286,7 +443,7 @@ fn handle_paste_event(app: &mut crate::app::App, text: String) -> Option<Action>
 
     // Large paste confirmation: if >2000 chars, ask the user first.
     const PASTE_CONFIRM_THRESHOLD: usize = 2000;
-    if content.len() > PASTE_CONFIRM_THRESHOLD {
+    if content.chars().count() > PASTE_CONFIRM_THRESHOLD {
         app.pending_paste = Some(content);
         app.mode = crate::app::Mode::PasteConfirm;
         return None;
@@ -299,96 +456,273 @@ fn handle_paste_event(app: &mut crate::app::App, text: String) -> Option<Action>
 /// Insert pasted content into the input buffer (single undo entry).
 fn insert_paste(app: &mut crate::app::App, content: &str) {
     app.push_undo();
-    for c in content.chars() {
-        app.input.insert(app.cursor, c);
-        app.cursor += c.len_utf8();
-    }
-    if app.input.starts_with('/') {
-        app.mode = crate::app::Mode::SlashCommand;
+    app.input.insert_str(app.cursor, content);
+    app.cursor += content.len();
+    if app
+        .picker
+        .as_ref()
+        .is_some_and(|picker| picker.is_at_picker())
+    {
+        app.sync_at_picker();
+    } else {
+        app.mode = if app.input.starts_with('/') {
+            crate::app::Mode::SlashCommand
+        } else {
+            crate::app::Mode::Normal
+        };
     }
 }
 
 pub(crate) fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Option<Action> {
-    // The thinking picker's budget track is mouse-interactive; the wheel
-    // scrolls every picker list. All other picker content stays inert.
+    app.kill_ring.end_sequence();
+    // A release consumed by a modal must not leave an old scrollbar grab alive.
+    if !matches!(
+        app.mode,
+        crate::app::Mode::Normal
+            | crate::app::Mode::SlashCommand
+            | crate::app::Mode::CommandPalette
+    ) {
+        app.mouse_scroll_drag = None;
+    }
+    if app.mode == crate::app::Mode::TodoEditor {
+        if let Some(state) = app.todo_editor.as_mut() {
+            if state.body.contains((mouse.column, mouse.row).into()) && state.draft.is_none() {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => state.scroll = state.scroll.saturating_sub(2),
+                    MouseEventKind::ScrollDown => {
+                        state.scroll = state.scroll.saturating_add(2).min(state.max_scroll)
+                    }
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        if let Some((_, id)) =
+                            state.row_hits.iter().find(|(row, _)| *row == mouse.row)
+                        {
+                            state.selected = Some(*id);
+                            state.reveal_selection = true;
+                            return app.handle_todo_key(KeyEvent::new(
+                                KeyCode::Enter,
+                                KeyModifiers::NONE,
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        return None;
+    }
+    if app.mode == crate::app::Mode::Activity {
+        let code = match mouse.kind {
+            MouseEventKind::ScrollUp => KeyCode::Up,
+            MouseEventKind::ScrollDown => KeyCode::Down,
+            _ => return None,
+        };
+        app.scroll_activity(code);
+        return None;
+    }
+    if app.mode == crate::app::Mode::Help {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => app.help_scroll = app.help_scroll.saturating_sub(1),
+            MouseEventKind::ScrollDown => {
+                app.help_scroll = app.help_scroll.saturating_add(1).min(app.help_max_scroll);
+            }
+            _ => {}
+        }
+        return None;
+    }
+    if matches!(
+        app.mode,
+        crate::app::Mode::Normal | crate::app::Mode::SlashCommand
+    ) && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        && app.bell_area.contains((mouse.column, mouse.row).into())
+    {
+        app.open_attention_picker();
+        return None;
+    }
+    let inline_picker = app.mode == crate::app::Mode::CommandPalette
+        && app
+            .picker
+            .as_ref()
+            .is_some_and(|picker| picker.is_at_picker());
+    if matches!(
+        app.mode,
+        crate::app::Mode::Normal
+            | crate::app::Mode::SlashCommand
+            | crate::app::Mode::CommandPalette
+    ) && handle_scrollbar_mouse(app, mouse)
+    {
+        return None;
+    }
+    let in_choices = app
+        .picker_mouse
+        .list
+        .contains((mouse.column, mouse.row).into())
+        || app
+            .picker_mouse
+            .scrollbar
+            .area
+            .contains((mouse.column, mouse.row).into());
+    if app.mode == crate::app::Mode::SlashCommand
+        && app
+            .autocomplete_area
+            .contains((mouse.column, mouse.row).into())
+    {
+        match mouse.kind {
+            MouseEventKind::ScrollUp if in_choices => app.slash_prev(),
+            MouseEventKind::ScrollDown if in_choices => app.slash_next(),
+            MouseEventKind::Down(MouseButton::Left)
+                if app
+                    .picker_mouse
+                    .list
+                    .contains((mouse.column, mouse.row).into()) =>
+            {
+                if let Some((_, index)) = app
+                    .picker_mouse
+                    .rows
+                    .iter()
+                    .find(|(row, _)| *row == mouse.row)
+                {
+                    app.slash_selected = *index;
+                }
+            }
+            _ => {}
+        }
+        return None;
+    }
     if app.mode == crate::app::Mode::CommandPalette {
-        return handle_picker_mouse_event(app, mouse);
+        let inside = in_choices
+            || app
+                .picker_mouse
+                .details
+                .contains((mouse.column, mouse.row).into());
+        if !inline_picker || inside {
+            return handle_picker_mouse_event(app, mouse);
+        }
     }
     // The permission modal scrolls with the wheel like the chat view.
     if app.mode == crate::app::Mode::PermissionPrompt {
         return handle_permission_mouse_event(app, mouse);
     }
+    if matches!(
+        app.mode,
+        crate::app::Mode::PersonaSwitchConfirm | crate::app::Mode::GoalProposal
+    ) {
+        let code = match mouse.kind {
+            MouseEventKind::ScrollUp => KeyCode::Up,
+            MouseEventKind::ScrollDown => KeyCode::Down,
+            _ => return None,
+        };
+        if app.mode == crate::app::Mode::PersonaSwitchConfirm {
+            if let Some(state) = app.persona_switch_confirm.as_mut() {
+                scroll_decision(&mut state.scroll, &state.view, code);
+            }
+        } else if let Some(state) = app.goal_proposal.as_mut() {
+            scroll_decision(&mut state.scroll, &state.view, code);
+        }
+        return None;
+    }
     if !matches!(
         app.mode,
         crate::app::Mode::Normal | crate::app::Mode::SlashCommand
-    ) {
+    ) && !inline_picker
+    {
         return None;
     }
     match mouse.kind {
         MouseEventKind::ScrollUp => {
-            app.scroll_up(1);
+            if app.sidebar_rect.contains((mouse.column, mouse.row).into()) {
+                app.sidebar_scroll = app.sidebar_scroll.saturating_sub(1);
+            } else if app
+                .chat_content_area
+                .contains((mouse.column, mouse.row).into())
+                || app
+                    .chat_scrollbar
+                    .area
+                    .contains((mouse.column, mouse.row).into())
+            {
+                app.scroll_up(1);
+            }
             None
         }
         MouseEventKind::ScrollDown => {
-            app.scroll_down(1);
+            if app.sidebar_rect.contains((mouse.column, mouse.row).into()) {
+                app.sidebar_scroll = app
+                    .sidebar_scroll
+                    .saturating_add(1)
+                    .min(app.sidebar_max_scroll);
+            } else if app
+                .chat_content_area
+                .contains((mouse.column, mouse.row).into())
+                || app
+                    .chat_scrollbar
+                    .area
+                    .contains((mouse.column, mouse.row).into())
+            {
+                app.scroll_down(1);
+            }
             None
         }
         MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Down(MouseButton::Right) => {
-            let row = mouse.row.saturating_sub(1);
-            let col = mouse.column.saturating_sub(1);
+            let row = mouse.row;
+            let col = mouse.column;
 
-            // Scrollbar click → seek.
-            let scrollbar_col = app.chat_area.right().saturating_sub(1);
-            if col == scrollbar_col && app.chat_area.height > 0 && app.max_scroll > 0 {
-                let rel_y = row.saturating_sub(app.chat_area.y) as f64;
-                let ratio = (rel_y / app.chat_area.height as f64).clamp(0.0, 1.0);
-                let target = (app.max_scroll as f64 * ratio).round() as u16;
-                let target = target.min(app.max_scroll);
-                if target >= app.max_scroll {
-                    app.auto_scroll = true;
-                    app.scroll = app.max_scroll;
-                } else {
-                    app.auto_scroll = false;
-                    app.scroll = target;
+            // Sidebar click → toggle section.
+            if app.sidebar_rect.contains((mouse.column, mouse.row).into()) {
+                if let Some((_, item)) = app
+                    .sidebar_item_rows
+                    .iter()
+                    .find(|(row, _)| *row == mouse.row)
+                {
+                    match item.clone() {
+                        crate::app::SidebarItem::Sessions => app.open_window_picker(),
+                        crate::app::SidebarItem::Attention => app.open_attention_picker(),
+                        crate::app::SidebarItem::Session(id) => {
+                            return Some(Action::AttachSession(id))
+                        }
+                        crate::app::SidebarItem::Todo(id) => app.open_todos(Some(id)),
+                        crate::app::SidebarItem::Subagent(id) => app.open_subagent(id),
+                        crate::app::SidebarItem::Job(id) => app.open_job(id),
+                    }
+                    return None;
+                }
+                for (header_row, section) in &app.sidebar_header_rows.clone() {
+                    if mouse.row == *header_row {
+                        app.toggle_sidebar_section(section);
+                        return None;
+                    }
                 }
                 return None;
             }
 
             // Input click → position cursor and clear selection.
-            if app.input_area.contains((col, row).into()) {
+            if app.input_area.contains((mouse.column, mouse.row).into()) {
                 app.clear_selection();
-                let rel_x = col.saturating_sub(app.input_area.x) as usize;
-                let rel_y = row.saturating_sub(app.input_area.y) as usize;
-                // The input has a 1-cell border on each side and a 2-cell
-                // prefix (`> `) on the first visual row of each logical
-                // line. Convert the mouse cell to a (visual_row, visual_col)
-                // pair in the wrapped content grid.
-                let content_width = app.input_area.width.saturating_sub(2);
-                let visual_row = rel_y.saturating_sub(1);
-                let visual_col = rel_x.saturating_sub(1).saturating_sub(2);
-                let total = app.input_visual_line_count(content_width);
+                let layout = crate::ui::input::InputLayout::new(app, app.input_area);
+                if !layout.content.contains((mouse.column, mouse.row).into()) {
+                    return None;
+                }
+                let first_visual_row = app
+                    .cursor_visual_row_col(layout.wrap_width)
+                    .0
+                    .saturating_sub(layout.content.height.saturating_sub(1) as usize);
+                let visual_row =
+                    mouse.row.saturating_sub(layout.content.y) as usize + first_visual_row;
+                let visual_col = mouse.column.saturating_sub(layout.content.x) as usize;
+                let total = app.input_visual_line_count(layout.wrap_width);
                 if visual_row < total {
                     app.cursor = app
-                        .visual_to_byte_offset(visual_row, visual_col, content_width)
+                        .visual_to_byte_offset(visual_row, visual_col, layout.wrap_width)
                         .min(app.input.len());
                 }
                 return None;
             }
 
-            // Sidebar click → toggle section.
-            if app.sidebar_rect.contains((col, row).into()) {
-                for (header_row, section) in &app.sidebar_header_rows.clone() {
-                    if row == *header_row {
-                        app.toggle_sidebar_section(section);
-                        return None;
-                    }
-                }
-            }
-
             // Chat area click → start selection.
-            if app.chat_area.contains((col, row).into()) && !app.chat_rows.is_empty() {
-                let rel_row = row.saturating_sub(app.chat_area.y) as usize;
-                let visual_row = (app.scroll as usize + rel_row).min(app.chat_rows.len() - 1);
+            if app.chat_content_area.contains((col, row).into()) && !app.chat_rows.is_empty() {
+                let rel_row = row.saturating_sub(app.chat_content_area.y) as usize;
+                let visual_row = app.chat_rendered_scroll + rel_row;
+                if visual_row >= app.chat_rows.len() {
+                    return None;
+                }
 
                 // Check if this click landed on a reasoning block header.
                 if let Some(&(id, _)) = app
@@ -437,7 +771,7 @@ pub(crate) fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -
                     return None;
                 }
 
-                let rel_col = col.saturating_sub(app.chat_area.x) as usize;
+                let rel_col = col.saturating_sub(app.chat_content_area.x) as usize;
                 app.sel_anchor_row = Some(visual_row);
                 app.sel_anchor_col = Some(rel_col);
                 app.sel_end_row = Some(visual_row);
@@ -448,15 +782,18 @@ pub(crate) fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -
             None
         }
         MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Right) => {
-            let row = mouse.row.saturating_sub(1);
-            let col = mouse.column.saturating_sub(1);
-            if app.chat_area.contains((col, row).into())
+            let row = mouse.row;
+            let col = mouse.column;
+            if app.chat_content_area.contains((col, row).into())
                 && !app.chat_rows.is_empty()
                 && app.sel_anchor_row.is_some()
             {
-                let rel_row = row.saturating_sub(app.chat_area.y) as usize;
-                let visual_row = (app.scroll as usize + rel_row).min(app.chat_rows.len() - 1);
-                let rel_col = col.saturating_sub(app.chat_area.x) as usize;
+                let rel_row = row.saturating_sub(app.chat_content_area.y) as usize;
+                let visual_row = app.chat_rendered_scroll + rel_row;
+                if visual_row >= app.chat_rows.len() {
+                    return None;
+                }
+                let rel_col = col.saturating_sub(app.chat_content_area.x) as usize;
                 app.sel_end_row = Some(visual_row);
                 app.sel_end_col = Some(rel_col);
                 app.mark_chat_dirty();
@@ -475,15 +812,143 @@ pub(crate) fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -
     }
 }
 
-/// Mouse handling while a picker is open. The thinking picker's budget
-/// track is interactive: click/drag sets the draft, release commits it as
-/// `budget:<n>` (the picker stays open), and the wheel over the track nudges
-/// by one step and commits immediately. The wheel anywhere else on the list
-/// scrolls it by moving the selection; the draw pass keeps the selected
-/// item's wrapped rows in view.
+/// Thumb drags retain the initial grab offset; track clicks page the viewport.
+fn handle_scrollbar_mouse(app: &mut crate::app::App, mouse: MouseEvent) -> bool {
+    use crate::app::MouseScrollTarget;
+    let point = (mouse.column, mouse.row).into();
+    let active_target = if app.mode == crate::app::Mode::SlashCommand {
+        MouseScrollTarget::Slash
+    } else if app.mode == crate::app::Mode::CommandPalette {
+        MouseScrollTarget::Picker
+    } else {
+        MouseScrollTarget::Chat
+    };
+    let active_bar = if active_target == MouseScrollTarget::Chat {
+        app.chat_scrollbar
+    } else {
+        app.picker_mouse.scrollbar
+    };
+    if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left)) {
+        return app.mouse_scroll_drag.take().is_some();
+    }
+    if let Some((target, grab)) = app.mouse_scroll_drag {
+        let chat_allowed = app.mode != crate::app::Mode::CommandPalette
+            || app
+                .picker
+                .as_ref()
+                .is_some_and(|picker| picker.is_at_picker());
+        if target != active_target && (target != MouseScrollTarget::Chat || !chat_allowed) {
+            app.mouse_scroll_drag = None;
+            return false;
+        }
+        if matches!(mouse.kind, MouseEventKind::Drag(MouseButton::Left)) {
+            let bar = if target == MouseScrollTarget::Chat {
+                app.chat_scrollbar
+            } else {
+                active_bar
+            };
+            if bar.area.is_empty() || bar.thumb.is_empty() {
+                app.mouse_scroll_drag = None;
+                return true;
+            }
+            let travel = bar.area.height.saturating_sub(bar.thumb.height);
+            if travel > 0 {
+                let top = mouse
+                    .row
+                    .saturating_sub(grab)
+                    .saturating_sub(bar.area.y)
+                    .min(travel);
+                set_mouse_scroll(
+                    app,
+                    target,
+                    (top as usize * bar.max_scroll + travel as usize / 2) / travel as usize,
+                );
+            }
+            return true;
+        }
+    }
+    let (target, bar) = if active_bar.area.contains(point) {
+        (active_target, active_bar)
+    } else if (active_target != MouseScrollTarget::Picker
+        || app
+            .picker
+            .as_ref()
+            .is_some_and(|picker| picker.is_at_picker()))
+        && app.chat_scrollbar.area.contains(point)
+    {
+        (MouseScrollTarget::Chat, app.chat_scrollbar)
+    } else {
+        return false;
+    };
+    if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+        app.clear_selection();
+        if bar.thumb.contains(point) {
+            app.mouse_scroll_drag = Some((target, mouse.row - bar.thumb.y));
+        } else {
+            let current = match target {
+                MouseScrollTarget::Chat => app.chat_rendered_scroll,
+                MouseScrollTarget::Slash => app.slash_scroll,
+                MouseScrollTarget::Picker => app.picker.as_ref().map_or(0, |picker| picker.scroll),
+            };
+            let page = if target == MouseScrollTarget::Picker {
+                app.picker.as_ref().map_or(0, |picker| picker.visible_items)
+            } else {
+                bar.area.height as usize
+            };
+            let offset = if mouse.row < bar.thumb.y {
+                current.saturating_sub(page)
+            } else {
+                current.saturating_add(page).min(bar.max_scroll)
+            };
+            set_mouse_scroll(app, target, offset);
+        }
+        return true;
+    }
+    false
+}
+
+fn set_mouse_scroll(
+    app: &mut crate::app::App,
+    target: crate::app::MouseScrollTarget,
+    offset: usize,
+) {
+    use crate::app::MouseScrollTarget;
+    match target {
+        MouseScrollTarget::Chat => {
+            app.scroll = offset.min(app.max_scroll as usize) as u16;
+            app.auto_scroll = app.scroll == app.max_scroll;
+        }
+        MouseScrollTarget::Slash => {
+            app.slash_scroll = offset;
+            app.slash_selected = app
+                .slash_selected
+                .clamp(offset, offset + app.slash_visible.saturating_sub(1));
+        }
+        MouseScrollTarget::Picker => {
+            if let Some(picker) = app.picker.as_mut() {
+                let end = offset + picker.visible_items.saturating_sub(1);
+                let selected = picker.selected.clamp(offset, end);
+                let index = picker
+                    .filtered()
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, item)| *index >= offset && *index <= end && !item.header)
+                    .min_by_key(|(index, _)| index.abs_diff(selected))
+                    .map(|(index, _)| index);
+                if let Some(index) = index {
+                    picker.selected = index;
+                }
+                picker.scroll = offset;
+                picker.details_scroll = 0;
+            }
+        }
+    }
+}
+
+/// Route picker rows, details and the budget track through their rendered bounds.
 fn handle_picker_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Option<Action> {
-    let row = mouse.row.saturating_sub(1);
-    let col = mouse.column.saturating_sub(1);
+    let row = mouse.row;
+    let col = mouse.column;
     // Snapshot the budget track state (read-only borrow). Only the thinking
     // picker's budget row is a hit target; everything else is list space.
     let (in_track, dragging) = {
@@ -498,16 +963,27 @@ fn handle_picker_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Op
         let dragging = picker.budget.as_ref().map(|b| b.dragging).unwrap_or(false);
         (in_track, dragging)
     };
-    // Track interactions need the track; Up only needs an active drag (the
-    // pointer may have left the track mid-drag). The wheel scrolls the list
-    // everywhere else.
-    if !in_track
-        && !dragging
-        && !matches!(
-            mouse.kind,
-            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-        )
-    {
+    let in_list = app.picker_mouse.list.contains((col, row).into())
+        || app.picker_mouse.scrollbar.area.contains((col, row).into());
+    let in_details = app.picker_mouse.details.contains((col, row).into());
+    if !in_track && !dragging && !in_list && !in_details {
+        return None;
+    }
+    if in_details && !dragging {
+        if let Some(picker) = app.picker.as_mut() {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    picker.details_scroll = picker.details_scroll.saturating_sub(1)
+                }
+                MouseEventKind::ScrollDown => {
+                    picker.details_scroll = picker
+                        .details_scroll
+                        .saturating_add(1)
+                        .min(app.picker_mouse.details_max_scroll)
+                }
+                _ => {}
+            }
+        }
         return None;
     }
     match mouse.kind {
@@ -526,7 +1002,7 @@ fn handle_picker_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Op
                 budget.snapped()
             )))
         }
-        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if in_list => {
             if matches!(mouse.kind, MouseEventKind::ScrollUp) {
                 app.picker_up();
             } else {
@@ -544,6 +1020,19 @@ fn handle_picker_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Op
             budget.dragging = true;
             if let Some(rect) = budget.track_rect {
                 budget.set_from_col(col, rect);
+            }
+            None
+        }
+        MouseEventKind::Down(MouseButton::Left) if in_list => {
+            if let Some((_, index)) = app
+                .picker_mouse
+                .rows
+                .iter()
+                .find(|(row, _)| *row == mouse.row)
+            {
+                let picker = app.picker.as_mut()?;
+                picker.selected = *index;
+                picker.details_scroll = 0;
             }
             None
         }
@@ -568,82 +1057,64 @@ fn handle_picker_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Op
     }
 }
 
-/// Wheel over the permission modal scrolls the wrapped tool-input content.
-fn handle_permission_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Option<Action> {
-    app.permission.as_ref()?;
-    match mouse.kind {
-        MouseEventKind::ScrollUp => {
-            if let Some(ref mut perm) = app.permission {
-                perm.scroll = perm.scroll.saturating_sub(1);
-            }
-            None
-        }
-        MouseEventKind::ScrollDown => {
-            if let Some(ref mut perm) = app.permission {
-                perm.scroll = perm.scroll.saturating_add(1).min(
-                    perm.max_scroll(app.chat_area.width, app.chat_area.height)
-                        .unwrap_or(perm.scroll),
-                );
-            }
-            None
-        }
-        _ => None,
+/// Scroll the body without moving the focused decision action.
+fn scroll_decision(scroll: &mut u16, view: &crate::app::DecisionView, code: KeyCode) {
+    let page = view.page_rows.max(1);
+    *scroll = match code {
+        KeyCode::Up => scroll.saturating_sub(1),
+        KeyCode::Down => scroll.saturating_add(1).min(view.max_scroll),
+        KeyCode::PageUp => scroll.saturating_sub(page),
+        KeyCode::PageDown => scroll.saturating_add(page).min(view.max_scroll),
+        KeyCode::Home => 0,
+        KeyCode::End => view.max_scroll,
+        _ => *scroll,
+    };
+}
+
+fn handle_activity_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
+    if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
+        app.close_activity();
+    } else if key.code == KeyCode::Char('r') {
+        app.refresh_activity();
+    } else {
+        app.scroll_activity(key.code);
     }
+    None
+}
+
+fn handle_permission_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Option<Action> {
+    let perm = app.permission.as_mut()?;
+    match mouse.kind {
+        MouseEventKind::ScrollUp => scroll_decision(&mut perm.scroll, &perm.view, KeyCode::Up),
+        MouseEventKind::ScrollDown => scroll_decision(&mut perm.scroll, &perm.view, KeyCode::Down),
+        _ => {}
+    }
+    None
 }
 
 fn handle_permission_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
-    let page_lines = (app.chat_area.height.saturating_sub(8)).max(3);
     match key.code {
         KeyCode::Char('a') | KeyCode::Char('A') => {
-            app.send_permission_decision(mew_hooks::PermissionDecision::AllowOnce);
-            None
+            app.send_permission_decision(mew_hooks::PermissionDecision::AllowOnce)
         }
         KeyCode::Char('s') | KeyCode::Char('S') => {
-            app.send_permission_decision(mew_hooks::PermissionDecision::AllowSession);
-            None
+            app.send_permission_decision(mew_hooks::PermissionDecision::AllowSession)
         }
         KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Esc => {
-            app.send_permission_decision(mew_hooks::PermissionDecision::Deny);
-            None
+            app.send_permission_decision(mew_hooks::PermissionDecision::Deny)
         }
-        KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if let Some(ref mut perm) = app.permission {
-                perm.scroll = perm.scroll.saturating_sub(1);
+        KeyCode::Up | KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(perm) = app.permission.as_mut() {
+                scroll_decision(&mut perm.scroll, &perm.view, key.code);
             }
-            None
         }
-        KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if let Some(ref mut perm) = app.permission {
-                perm.scroll = perm.scroll.saturating_add(1).min(
-                    perm.max_scroll(app.chat_area.width, app.chat_area.height)
-                        .unwrap_or(perm.scroll),
-                );
+        KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End => {
+            if let Some(perm) = app.permission.as_mut() {
+                scroll_decision(&mut perm.scroll, &perm.view, key.code);
             }
-            None
         }
-        KeyCode::Down | KeyCode::Tab => {
-            app.permission_next();
-            None
-        }
-        KeyCode::Up => {
-            app.permission_prev();
-            None
-        }
-        KeyCode::PageDown => {
-            if let Some(ref mut perm) = app.permission {
-                perm.scroll = perm.scroll.saturating_add(page_lines).min(
-                    perm.max_scroll(app.chat_area.width, app.chat_area.height)
-                        .unwrap_or(perm.scroll),
-                );
-            }
-            None
-        }
-        KeyCode::PageUp => {
-            if let Some(ref mut perm) = app.permission {
-                perm.scroll = perm.scroll.saturating_sub(page_lines);
-            }
-            None
-        }
+        KeyCode::Down | KeyCode::Tab => app.permission_next(),
+        KeyCode::Up | KeyCode::BackTab => app.permission_prev(),
         KeyCode::Enter => {
             let decision = app.permission.as_ref().map(|p| match p.selected {
                 0 => mew_hooks::PermissionDecision::AllowOnce,
@@ -653,10 +1124,10 @@ fn handle_permission_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Act
             if let Some(d) = decision {
                 app.send_permission_decision(d);
             }
-            None
         }
-        _ => None,
+        _ => {}
     }
+    None
 }
 
 fn handle_user_question_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
@@ -675,15 +1146,20 @@ fn handle_user_question_key(app: &mut crate::app::App, key: KeyEvent) -> Option<
                     .unwrap_or(0)
     });
     if freeform_active {
+        if crate::app::editor::is_newline(key) {
+            if let Some(uq) = app.user_question.as_mut() {
+                crate::app::editor::insert_with_undo(
+                    &mut uq.freeform_text,
+                    &mut uq.freeform_cursor,
+                    '\n',
+                    &mut uq.freeform_undo,
+                );
+            }
+            return None;
+        }
         return match key.code {
-            KeyCode::Enter => {
-                app.user_question_confirm();
-                None
-            }
-            KeyCode::Esc => {
-                app.cancel_user_question();
-                None
-            }
+            KeyCode::Enter if key.modifiers.is_empty() => confirm_user_question(app),
+            KeyCode::Esc => cancel_user_question(app),
             KeyCode::Tab => {
                 app.user_question_select_next();
                 None
@@ -701,14 +1177,14 @@ fn handle_user_question_key(app: &mut crate::app::App, key: KeyEvent) -> Option<
                 None
             }
             _ => {
-                // All editing keys (chars, arrows, ^A/^E/^F/^B/^D/^K/^U/^W,
-                // word moves, ^Z/^Y undo) go through the shared readline editor.
+                // Freeform answers use the same editor as the composer.
                 if let Some(uq) = app.user_question.as_mut() {
                     crate::app::editor::handle_key_with_undo(
                         &mut uq.freeform_text,
                         &mut uq.freeform_cursor,
                         key,
                         &mut uq.freeform_undo,
+                        &mut app.kill_ring,
                     );
                 }
                 None
@@ -723,14 +1199,8 @@ fn handle_user_question_key(app: &mut crate::app::App, key: KeyEvent) -> Option<
         .unwrap_or(false);
 
     match key.code {
-        KeyCode::Enter => {
-            app.user_question_confirm();
-            None
-        }
-        KeyCode::Esc => {
-            app.cancel_user_question();
-            None
-        }
+        KeyCode::Enter if key.modifiers.is_empty() => confirm_user_question(app),
+        KeyCode::Esc => cancel_user_question(app),
         KeyCode::Tab => {
             if on_review {
                 app.user_question_review_next();
@@ -779,9 +1249,10 @@ fn handle_user_question_key(app: &mut crate::app::App, key: KeyEvent) -> Option<
         }
         KeyCode::Char('n') => {
             if on_review {
-                app.cancel_user_question();
+                cancel_user_question(app)
+            } else {
+                None
             }
-            None
         }
         KeyCode::Backspace => {
             if !on_review {
@@ -795,7 +1266,7 @@ fn handle_user_question_key(app: &mut crate::app::App, key: KeyEvent) -> Option<
             }
             None
         }
-        KeyCode::Char(c) => {
+        KeyCode::Char(c) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
             if !on_review {
                 app.user_question_type_char(c);
             }
@@ -805,106 +1276,51 @@ fn handle_user_question_key(app: &mut crate::app::App, key: KeyEvent) -> Option<
     }
 }
 
-fn handle_plan_approval_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
-    let editing = app
-        .plan_approval
-        .as_ref()
-        .map(|pa| pa.editing_feedback)
-        .unwrap_or(false);
+fn cancel_user_question(app: &mut crate::app::App) -> Option<Action> {
+    let action = app.daemon_request_id.as_ref().map(|request_id| {
+        if app
+            .user_question
+            .as_ref()
+            .is_some_and(|question| question.subagent.is_some())
+        {
+            Action::CloseQuestion {
+                session_id: app.status.session_id.clone(),
+                request_id: request_id.clone(),
+            }
+        } else {
+            Action::Cancel
+        }
+    });
+    app.cancel_user_question();
+    action
+}
 
-    match key.code {
-        KeyCode::Char('s') if editing && key.modifiers.contains(KeyModifiers::CONTROL) => {
-            // Ctrl+S submits the feedback.
-            app.plan_approval_confirm();
-            None
-        }
-        KeyCode::Enter => {
-            if editing {
-                // Enter inserts a newline at the cursor in the feedback editor.
-                if let Some(pa) = app.plan_approval.as_mut() {
-                    crate::app::editor::insert_with_undo(
-                        &mut pa.feedback,
-                        &mut pa.feedback_cursor,
-                        '\n',
-                        &mut pa.feedback_undo,
-                    );
-                }
-            } else {
-                app.plan_approval_confirm();
-            }
-            None
-        }
-        KeyCode::Esc => {
-            // While editing feedback, Esc backs out of the editor; otherwise
-            // it cancels the whole approval.
-            if editing {
-                if let Some(pa) = app.plan_approval.as_mut() {
-                    pa.editing_feedback = false;
-                }
-            } else {
-                app.cancel_plan_approval();
-            }
-            None
-        }
-        // While the feedback editor is active these would cycle the
-        // Approve/Request-changes/Submit selection mid-edit and could
-        // approve the plan or submit changes, dropping the typed feedback.
-        KeyCode::Tab | KeyCode::Left | KeyCode::Right if !editing => {
-            app.plan_approval_toggle();
-            None
-        }
-        KeyCode::Up if !editing => {
-            app.plan_approval_scroll_up(1);
-            None
-        }
-        KeyCode::Down if !editing => {
-            app.plan_approval_scroll_down(1);
-            None
-        }
-        KeyCode::PageUp => {
-            app.plan_approval_scroll_up(10);
-            None
-        }
-        KeyCode::PageDown => {
-            app.plan_approval_scroll_down(10);
-            None
-        }
-        KeyCode::Char('a') if !editing => {
-            if let Some(pa) = app.plan_approval.as_mut() {
-                pa.selected = 0;
-            }
-            app.plan_approval_confirm();
-            None
-        }
-        KeyCode::Char('r') if !editing => {
-            if let Some(pa) = app.plan_approval.as_mut() {
-                pa.selected = 1;
-            }
-            app.plan_approval_confirm();
-            None
-        }
-        _ if editing => {
-            // Every other key while editing goes through the shared
-            // readline editor: chars, Backspace/Delete, arrow + word
-            // moves, ^A/^E/^F/^B/^D/^K/^U/^W, ^Z/^Y undo. Keys the editor
-            // doesn't own (Tab, PageUp/PageDown) fall through to the
-            // catch-all.
-            if let Some(pa) = app.plan_approval.as_mut() {
-                crate::app::editor::handle_key_with_undo(
-                    &mut pa.feedback,
-                    &mut pa.feedback_cursor,
-                    key,
-                    &mut pa.feedback_undo,
-                );
-            }
-            None
-        }
-        _ => None,
+fn confirm_user_question(app: &mut crate::app::App) -> Option<Action> {
+    if app
+        .user_question
+        .as_ref()
+        .is_some_and(|question| question.review && question.review_selected != 0)
+    {
+        cancel_user_question(app)
+    } else {
+        app.user_question_confirm();
+        None
     }
 }
 
 fn handle_goal_proposal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
     match key.code {
+        KeyCode::PageUp
+        | KeyCode::PageDown
+        | KeyCode::Home
+        | KeyCode::End
+        | KeyCode::Up
+        | KeyCode::Down => {
+            if let Some(state) = app.goal_proposal.as_mut() {
+                scroll_decision(&mut state.scroll, &state.view, key.code);
+            }
+            None
+        }
         KeyCode::Enter => {
             app.goal_proposal_confirm();
             None
@@ -913,7 +1329,7 @@ fn handle_goal_proposal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<
             app.cancel_goal_proposal();
             None
         }
-        KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
+        KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right => {
             app.goal_proposal_toggle();
             None
         }
@@ -936,8 +1352,14 @@ fn handle_goal_proposal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<
 }
 
 fn handle_goal_compose_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
+    if crate::app::editor::is_newline(key) {
+        if let Some(g) = app.goal_compose.as_mut() {
+            crate::app::editor::insert_with_undo(&mut g.title, &mut g.cursor, '\n', &mut g.undo);
+        }
+        return None;
+    }
     match key.code {
-        KeyCode::Enter => {
+        KeyCode::Enter if key.modifiers.is_empty() => {
             let text = app
                 .goal_compose
                 .as_ref()
@@ -960,14 +1382,14 @@ fn handle_goal_compose_key(app: &mut crate::app::App, key: KeyEvent) -> Option<A
             None
         }
         _ => {
-            // The objective is a text field: all editing keys route through
-            // the shared readline editor (incl. ^Z/^Y undo).
+            // Objectives use the same editor as the composer.
             if let Some(g) = app.goal_compose.as_mut() {
                 crate::app::editor::handle_key_with_undo(
                     &mut g.title,
                     &mut g.cursor,
                     key,
                     &mut g.undo,
+                    &mut app.kill_ring,
                 );
             }
             None
@@ -987,6 +1409,28 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
 
     // Global shortcuts.
     match key.code {
+        KeyCode::Char('o') if key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+            app.open_window_picker();
+            return None;
+        }
+        KeyCode::Char('w') if key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+            return app.close_window_conversation(&app.status.session_id.clone());
+        }
+        KeyCode::Left if key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+            return app.adjacent_window_conversation(-1);
+        }
+        KeyCode::Right if key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+            return app.adjacent_window_conversation(1);
+        }
+        KeyCode::Enter if key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+            return Some(Action::NewSessionInProject(
+                app.project_cwd().display().to_string(),
+            ));
+        }
+        KeyCode::Char('n') if key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+            app.open_attention_picker();
+            return None;
+        }
         KeyCode::Esc => {
             // If there's an active selection, clear it on Esc.
             if app.sel_anchor_row.is_some() {
@@ -1052,12 +1496,12 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             }
         }
         KeyCode::Char('d')
-            if key.modifiers.contains(KeyModifiers::CONTROL) && app.input.is_empty() =>
+            if key.modifiers == KeyModifiers::CONTROL && app.input.is_empty() && !app.streaming =>
         {
             app.should_quit = true;
             return Some(Action::Quit);
         }
-        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Null | KeyCode::Char(' ') if key.modifiers == KeyModifiers::CONTROL => {
             app.open_command_palette();
             return None;
         }
@@ -1071,7 +1515,7 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             app.toggle_bash_expanded();
             return None;
         }
-        KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char('t') if key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT) => {
             app.toggle_reasoning_expanded();
             return None;
         }
@@ -1089,11 +1533,14 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
         // of waiting for the turn to end (the Up-Up fallback).
         KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
             if let Some(text) = app.pop_queued_message() {
-                return Some(Action::GuideQueued(text));
+                return Some(Action::GuideQueued {
+                    session_id: app.status.session_id.clone(),
+                    text,
+                });
             }
             return None;
         }
-        KeyCode::Char('x') if app.input.is_empty() => {
+        KeyCode::Char('x') if key.modifiers.is_empty() && app.input.is_empty() => {
             // Cancel the most recently started running subagent. Only
             // triggers when the input is empty so it doesn't shadow the
             // literal character in chat messages.
@@ -1105,12 +1552,34 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
         _ => {}
     }
 
+    let edit = app.edit_input(key);
+    if edit.handled() {
+        if edit.changed() {
+            app.mode = if app.input.starts_with('/') {
+                crate::app::Mode::SlashCommand
+            } else {
+                crate::app::Mode::Normal
+            };
+            app.slash_selected = 0;
+            app.slash_scroll = 0;
+            if key.code == KeyCode::Char('@') {
+                let before = &app.input[..app.cursor.saturating_sub(1)];
+                if before.is_empty() || before.ends_with(' ') {
+                    app.open_at_picker();
+                }
+            }
+        }
+        return None;
+    }
+
     // Input handling.
     match key.code {
         KeyCode::Enter => {
-            // Alt+Enter inserts a newline (multiline input).
-            if key.modifiers.contains(KeyModifiers::ALT) {
+            if matches!(key.modifiers, KeyModifiers::ALT | KeyModifiers::SHIFT) {
                 app.insert_newline();
+                return None;
+            }
+            if !key.modifiers.is_empty() {
                 return None;
             }
             // While the slash autocomplete is open, Enter runs the highlighted
@@ -1138,164 +1607,30 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             }
             None
         }
-        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.cursor_home();
-            None
-        }
-        KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.cursor_end();
-            None
-        }
-        KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.cursor_right();
-            None
-        }
-        KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.cursor_left();
-            None
-        }
-        // Ctrl+R: reverse search through input history.
-        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char('r') if key.modifiers == KeyModifiers::CONTROL => {
             app.start_history_search();
             None
         }
-        // Ctrl+Z: undo. Coalesces consecutive edits within 500ms.
-        KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.undo();
+        KeyCode::Char('j') if key.modifiers == KeyModifiers::CONTROL => {
+            app.insert_newline();
             None
         }
-        // Ctrl+Shift+Z (or Ctrl+Y): redo.
-        KeyCode::Char('Z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.redo();
+        KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
+            app.history_up();
             None
         }
-        KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.redo();
+        KeyCode::Char('n') if key.modifiers == KeyModifiers::CONTROL => {
+            app.history_down();
             None
         }
-        // Ctrl+U: clear to beginning of line (macOS Cmd+Backspace sends this).
-        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.push_undo();
-            app.input.clear();
-            app.cursor = 0;
-            app.mode = crate::app::Mode::Normal;
-            None
-        }
-        // Ctrl+W: delete word backward (macOS Option+Delete sends this).
-        KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.push_undo();
-            // Delete back to the previous word boundary.
-            let before = &app.input[..app.cursor];
-            let new_cursor = before
-                .trim_end_matches(|c: char| c.is_whitespace())
-                .rfind(|c: char| c.is_whitespace())
-                .map(|i| i + 1)
-                .unwrap_or(0);
-            app.input.replace_range(new_cursor..app.cursor, "");
-            app.cursor = new_cursor;
-            if !app.input.starts_with('/') {
-                app.mode = crate::app::Mode::Normal;
-            }
-            None
-        }
-        // Ctrl+K: kill from cursor to end of line (readline convention).
-        KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if app.cursor < app.input.len() {
-                app.push_undo();
-                app.input.truncate(app.cursor);
-                if !app.input.starts_with('/') {
-                    app.mode = crate::app::Mode::Normal;
-                }
-            }
-            None
-        }
-        // Ctrl+D: delete char forward (readline convention). Also quits
-        // on empty input when not streaming (matching shell behavior).
-        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if app.input.is_empty() && !app.streaming {
-                app.should_quit = true;
-                return Some(Action::Quit);
-            }
-            app.delete_char();
-            None
-        }
-        KeyCode::Char(c) => {
-            app.insert_char(c);
-            if app.input.starts_with('/') {
-                app.mode = crate::app::Mode::SlashCommand;
-                app.slash_selected = 0;
-                app.slash_scroll = 0;
-            }
-            // Auto-open the reference picker when @ is typed at start or
-            // after a space.
-            if c == '@' {
-                let before = &app.input[..app.cursor.saturating_sub(1)];
-                if before.is_empty() || before.ends_with(' ') {
-                    app.open_at_picker();
-                }
-            }
-            None
-        }
-        KeyCode::Backspace if key.modifiers.contains(KeyModifiers::ALT) => {
-            app.push_undo();
-            app.delete_word_left();
-            if !app.input.starts_with('/') {
-                app.mode = crate::app::Mode::Normal;
-            }
-            None
-        }
-        KeyCode::Backspace if key.modifiers.contains(KeyModifiers::META) => {
-            app.push_undo();
-            app.input.clear();
-            app.cursor = 0;
-            app.mode = crate::app::Mode::Normal;
-            None
-        }
-        KeyCode::Backspace => {
-            app.backspace();
-            if !app.input.starts_with('/') {
-                app.mode = crate::app::Mode::Normal;
-            }
-            app.slash_selected = 0;
-            app.slash_scroll = 0;
-            None
-        }
-        KeyCode::Delete => {
-            app.delete_char();
-            None
-        }
-        KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) => {
-            app.cursor_word_left();
-            None
-        }
-        KeyCode::Left => {
-            app.cursor_left();
-            None
-        }
-        KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) => {
-            app.cursor_word_right();
-            None
-        }
-        KeyCode::Right => {
-            app.cursor_right();
-            None
-        }
-        KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Home if key.modifiers == KeyModifiers::CONTROL => {
             app.auto_scroll = false;
             app.scroll = 0;
             None
         }
-        KeyCode::Home => {
-            app.cursor_home();
-            None
-        }
-        KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::End if key.modifiers == KeyModifiers::CONTROL => {
             app.auto_scroll = true;
             app.scroll = app.max_scroll;
-            None
-        }
-        KeyCode::End => {
-            app.cursor_end();
             None
         }
         KeyCode::Tab if app.mode == crate::app::Mode::SlashCommand => {
@@ -1310,7 +1645,8 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             } else {
                 // If input is multi-line, move cursor between visual lines.
                 // Only navigate history when on the first visual line.
-                let content_width = app.input_area.width.saturating_sub(2);
+                let content_width =
+                    crate::ui::input::InputLayout::new(app, app.input_area).wrap_width;
                 if app.input_visual_line_count(content_width) > 1
                     && !app.input.is_empty()
                     && app.cursor_visual_up(content_width)
@@ -1323,7 +1659,10 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                     if count >= 2 {
                         app.up_press = None;
                         if let Some(text) = app.pop_queued_message() {
-                            return Some(Action::SendQueuedNow(text));
+                            return Some(Action::SendQueuedNow {
+                                session_id: app.status.session_id.clone(),
+                                text,
+                            });
                         }
                     } else {
                         app.up_press = Some((count, std::time::Instant::now()));
@@ -1344,7 +1683,8 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             } else {
                 // If input is multi-line, move cursor between visual lines.
                 // Only navigate history when on the last visual line.
-                let content_width = app.input_area.width.saturating_sub(2);
+                let content_width =
+                    crate::ui::input::InputLayout::new(app, app.input_area).wrap_width;
                 if app.input_visual_line_count(content_width) > 1
                     && !app.input.is_empty()
                     && app.cursor_visual_down(content_width)
@@ -1423,142 +1763,72 @@ fn at_mention_action(label: &str) -> Option<Action> {
 }
 
 fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
+    if key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key.code == KeyCode::Char('o') {
+            app.open_window_picker();
+            return None;
+        }
+        if key.code == KeyCode::Char('w')
+            && app.picker.as_ref().is_some_and(|picker| {
+                matches!(
+                    picker.kind.as_str(),
+                    "session" | "session_open" | "session_attention" | "session_archived"
+                )
+            })
+        {
+            let id = app
+                .picker
+                .as_ref()
+                .and_then(|picker| picker.selected_item())
+                .map(|item| item.id.clone());
+            return id.and_then(|id| app.close_window_conversation(&id));
+        }
+    }
     // Inline `@` picker: editing keys mutate the chat input (not a separate
     // picker filter field), then re-derive the picker filter from the token
     // after the last `@`. Navigation/selection/close fall through to the
     // shared picker handling below.
     if app.picker.as_ref().is_some_and(|p| p.is_at_picker()) {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = key.modifiers.contains(KeyModifiers::ALT);
-        let meta = key.modifiers.contains(KeyModifiers::META);
+        if crate::app::editor::is_newline(key) {
+            app.insert_newline();
+            app.sync_at_picker();
+            return None;
+        }
+        if app.edit_input(key).handled() {
+            app.sync_at_picker();
+            return None;
+        }
+    }
+
+    if key.modifiers == KeyModifiers::CONTROL {
         match key.code {
-            KeyCode::Char(c) if !ctrl && !alt && !meta => {
-                app.insert_char(c);
-                app.sync_at_picker();
+            KeyCode::Char('p') => {
+                app.picker_up();
                 return None;
             }
-            KeyCode::Backspace if meta => {
-                app.push_undo();
-                app.input.clear();
-                app.cursor = 0;
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Backspace if alt => {
-                app.push_undo();
-                app.delete_word_left();
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Backspace => {
-                app.backspace();
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Delete => {
-                app.delete_char();
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Left if alt => {
-                app.cursor_word_left();
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Left => {
-                app.cursor_left();
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Right if alt => {
-                app.cursor_word_right();
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Right => {
-                app.cursor_right();
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Home => {
-                app.cursor_home();
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::End => {
-                app.cursor_end();
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Char('a') if ctrl => {
-                app.cursor_home();
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Char('e') if ctrl => {
-                app.cursor_end();
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Char('f') if ctrl => {
-                app.cursor_right();
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Char('b') if ctrl => {
-                app.cursor_left();
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Char('w') if ctrl => {
-                app.push_undo();
-                let before = &app.input[..app.cursor];
-                let new_cursor = before
-                    .trim_end_matches(|c: char| c.is_whitespace())
-                    .rfind(|c: char| c.is_whitespace())
-                    .map(|i| i + 1)
-                    .unwrap_or(0);
-                app.input.replace_range(new_cursor..app.cursor, "");
-                app.cursor = new_cursor;
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Char('k') if ctrl => {
-                if app.cursor < app.input.len() {
-                    app.push_undo();
-                    app.input.truncate(app.cursor);
-                }
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Char('u') if ctrl => {
-                app.push_undo();
-                app.input.clear();
-                app.cursor = 0;
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Char('z') if ctrl => {
-                app.undo();
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Char('Z') if ctrl => {
-                app.redo();
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Char('y') if ctrl => {
-                app.redo();
-                app.sync_at_picker();
+            KeyCode::Char('n') => {
+                app.picker_down();
                 return None;
             }
             _ => {}
         }
     }
 
-    // Ctrl+P in the thinking variant picker cycles to the next variant.
-    if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
+    if key.code == KeyCode::Tab
+        && app.picker.as_ref().is_some_and(|picker| {
+            matches!(
+                picker.kind.as_str(),
+                "session" | "session_open" | "session_attention" | "session_archived"
+            )
+        })
+    {
+        app.toggle_session_picker_archive();
+        return None;
+    }
+    // Ctrl+Alt+P in the thinking variant picker cycles to the next variant.
+    if key.code == KeyCode::Char('p')
+        && key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
         if let Some(ref mut picker) = app.picker {
             if picker.kind == "thinking_variant" {
                 picker.move_selection(1);
@@ -1568,8 +1838,11 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                 if let Some(variant) = item {
                     return Some(Action::SetThinkingVariant(variant));
                 }
-            } else if picker.kind == "session" {
-                // ^P toggles pinned on the highlighted session row.
+            } else if matches!(
+                picker.kind.as_str(),
+                "session" | "session_open" | "session_attention" | "session_archived"
+            ) {
+                // Ctrl+Alt+P toggles pinned on the highlighted session row.
                 let id = picker.selected_item().map(|i| i.id.clone());
                 if let Some(id) = id {
                     return Some(Action::ToggleSessionPinned(id));
@@ -1578,10 +1851,15 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
         }
         return None;
     }
-    // ^A in the session picker toggles archived on the highlighted row.
-    if key.code == KeyCode::Char('a') && key.modifiers.contains(KeyModifiers::CONTROL) {
+    // Ctrl+Alt+A in the session picker toggles archived on the highlighted row.
+    if key.code == KeyCode::Char('a')
+        && key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
         if let Some(ref picker) = app.picker {
-            if picker.kind == "session" {
+            if matches!(
+                picker.kind.as_str(),
+                "session" | "session_open" | "session_attention" | "session_archived"
+            ) {
                 let id = picker.selected_item().map(|i| i.id.clone());
                 if let Some(id) = id {
                     return Some(Action::ToggleSessionArchived(id));
@@ -1595,7 +1873,7 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             app.close_picker();
             None
         }
-        KeyCode::Enter => {
+        KeyCode::Enter if key.modifiers.is_empty() => {
             let picker_data = app.picker.as_ref().and_then(|p| {
                 p.selected_item()
                     .map(|item| (item.id.clone(), p.kind.clone(), item.label.clone()))
@@ -1627,6 +1905,15 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                             _ => None,
                         }
                     }
+                } else if kind == "subagent" {
+                    app.open_subagent(id);
+                    None
+                } else if kind == "tool" {
+                    app.open_tool_selection(&id);
+                    None
+                } else if kind == "job" {
+                    app.open_job(id);
+                    None
                 } else if kind == "model" {
                     Some(Action::SwitchModel(id))
                 } else if kind == "thinking_variant" {
@@ -1635,7 +1922,10 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                     mew_hooks::PermissionMode::from_id(&id).map(Action::SetPermissionMode)
                 } else if kind == "at" {
                     at_mention_action(&label)
-                } else if kind == "session" {
+                } else if matches!(
+                    kind.as_str(),
+                    "session" | "session_open" | "session_attention" | "session_archived"
+                ) {
                     Some(Action::AttachSession(id))
                 } else if kind == "project" {
                     Some(Action::NewSessionInProject(id))
@@ -1660,31 +1950,45 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             app.picker_down();
             None
         }
+        KeyCode::PageUp | KeyCode::PageDown => {
+            if let Some(picker) = app.picker.as_mut() {
+                if key.code == KeyCode::PageUp {
+                    picker.details_scroll = picker
+                        .details_scroll
+                        .saturating_sub(picker.visible_details.max(1));
+                } else {
+                    picker.details_scroll = picker
+                        .details_scroll
+                        .saturating_add(picker.visible_details.max(1));
+                }
+            }
+            None
+        }
         _ => {
             // Budget row (thinking-variant budget): digits and editing keys
             // operate on the draft, not the filter.
             if let Some(p) = app.picker.as_mut() {
                 if budget_row_selected(p) {
                     let handled = match key.code {
-                        KeyCode::Char(c) if c.is_ascii_digit() => {
+                        KeyCode::Char(c) if c.is_ascii_digit() && key.modifiers.is_empty() => {
                             if let Some(b) = p.budget.as_mut() {
                                 b.type_digit(c);
                             }
                             true
                         }
-                        KeyCode::Backspace => {
+                        KeyCode::Backspace if key.modifiers.is_empty() => {
                             if let Some(b) = p.budget.as_mut() {
                                 b.backspace();
                             }
                             true
                         }
-                        KeyCode::Left => {
+                        KeyCode::Left if key.modifiers.is_empty() => {
                             if let Some(b) = p.budget.as_mut() {
                                 b.step(-b.info.step);
                             }
                             true
                         }
-                        KeyCode::Right => {
+                        KeyCode::Right if key.modifiers.is_empty() => {
                             if let Some(b) = p.budget.as_mut() {
                                 b.step(b.info.step);
                             }
@@ -1717,24 +2021,20 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                     }
                 }
             }
-            // Everything else edits the filter through the shared readline
-            // editor (chars, backspace, cursor + word moves, ^A/^E/^F/^B/
-            // ^D/^K/^U/^W, ^Z/^Y undo). Mutations reset the selection like
-            // the previous insert/backspace arms did.
+            // Editing a filter resets the result selection; movement does not.
             if let Some(p) = app.picker.as_mut() {
-                let before = p.filter.len();
-                if crate::app::editor::handle_key_with_undo(
+                let edit = crate::app::editor::handle_key_with_undo(
                     &mut p.filter,
                     &mut p.cursor,
                     key,
                     &mut p.filter_undo,
-                ) {
-                    if p.filter.len() != before {
-                        if p.filter.len() > before {
-                            p.selected = 0;
-                        } else {
-                            p.selected = p.selected.min(p.filtered().len().saturating_sub(1));
-                        }
+                    &mut app.kill_ring,
+                );
+                if edit.handled() {
+                    if edit.changed() {
+                        p.details_scroll = 0;
+                        p.scroll = 0;
+                        p.selected = 0;
                     }
                     return None;
                 }
@@ -1747,8 +2047,33 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
 /// High-level actions produced by input handling.
 #[derive(Debug, Clone, strum::EnumIter)]
 pub enum Action {
+    CloseQuestion {
+        session_id: String,
+        request_id: String,
+    },
+    ReadJobOutput {
+        session_id: String,
+        job_id: String,
+        request_id: String,
+        offset: u64,
+    },
+    ReadSessionDiff {
+        session_id: String,
+        request_id: String,
+    },
+    ReadSubagentHistory {
+        session_id: String,
+        child_session_id: String,
+        request_id: String,
+    },
+    UpdateTodo {
+        session_id: String,
+        edit: mew_protocol::TodoEdit,
+    },
     /// Submit a user message.
     Submit(String),
+    /// Submit a queued follow-up owned by the confirmed conversation.
+    SubmitQueued { session_id: String, text: String },
     /// Execute a slash command.
     SlashCommand(String),
     /// Cancel the current streaming turn.
@@ -1785,18 +2110,18 @@ pub enum Action {
     /// from the permission-mode picker.
     SetPermissionMode(mew_hooks::PermissionMode),
     /// Set or clear the thinking variant. Fires from `/thinking <variant>`,
-    /// the thinking variant picker, or Ctrl+P cycling.
+    /// the thinking variant picker, or Ctrl+Alt+P cycling.
     SetThinkingVariant(String),
     /// Attach to a different daemon session (switch chat). Only meaningful
     /// in daemon mode; local `run_tui` handles it as a no-op with an alert.
     AttachSession(String),
     /// Cancel the current turn and immediately submit the given text as a
     /// new turn. Fires from Up-Up when there are queued messages.
-    SendQueuedNow(String),
+    SendQueuedNow { session_id: String, text: String },
     /// Inject the given text as guidance into the running turn's *next*
     /// provider request (even a tool-call continuation), without cancelling.
     /// Fires from Ctrl+Up when there are queued messages.
-    GuideQueued(String),
+    GuideQueued { session_id: String, text: String },
     /// Paste image data from the system clipboard (Ctrl+Shift+V). If the
     /// clipboard contains a PNG image, it is saved to a temp file and
     /// inserted as an @-mention so the existing image attachment pipeline
@@ -1805,15 +2130,29 @@ pub enum Action {
     /// Create and attach to a new daemon session in the given project
     /// directory (project picker selection). Daemon mode only.
     NewSessionInProject(String),
-    /// Toggle the archived flag on a daemon session (session picker ^A).
+    /// Toggle the archived flag on a daemon session (session picker Ctrl+Alt+A).
     ToggleSessionArchived(String),
-    /// Toggle the pinned flag on a daemon session (session picker ^P).
+    /// Toggle the pinned flag on a daemon session (session picker Ctrl+Alt+P).
     ToggleSessionPinned(String),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn turn_finished_follows_all_buffered_agent_events() {
+        let (event_loop, mut rx) = EventLoop::new();
+        let (tx, agent_rx) = mpsc::channel(8);
+        event_loop.forward_agent_events(agent_rx);
+        tx.send(mew_agent::AgentEvent::Error("aborted".into()))
+            .await
+            .unwrap();
+        assert!(matches!(rx.recv().await, Some(Event::Agent(_))));
+        assert!(rx.try_recv().is_err());
+        drop(tx);
+        assert!(matches!(rx.recv().await, Some(Event::TurnFinished)));
+    }
 
     #[test]
     fn test_at_mention_action_file() {
@@ -1878,6 +2217,57 @@ mod tests {
     }
 
     #[test]
+    fn daemon_question_escape_cancels_the_waiting_turn_without_answering() {
+        let mut app = crate::app::App::new();
+        app.daemon_mode = true;
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        app.handle_daemon_required_action(
+            "q".into(),
+            mew_agent::AgentEvent::AskUser {
+                call_id: "c".into(),
+                questions: vec![mew_agent::AskUserQuestion {
+                    prompt: "pick".into(),
+                    options: vec![],
+                }],
+                tx,
+            },
+        );
+
+        let action = handle_key_event(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(matches!(action, Some(Action::Cancel)));
+        assert!(app.user_question.is_none());
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+        ));
+    }
+
+    #[test]
+    fn daemon_goal_escape_sends_rejection_without_canceling_the_turn() {
+        let mut app = crate::app::App::new();
+        app.daemon_mode = true;
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        app.handle_daemon_required_action(
+            "g".into(),
+            mew_agent::AgentEvent::GoalProposed {
+                call_id: "c".into(),
+                objective: "finish".into(),
+                tx,
+            },
+        );
+
+        let action = handle_key_event(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(action.is_none());
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            mew_agent::GoalDecision::Rejected
+        ));
+        assert!(app.goal_proposal.is_none());
+    }
+
+    #[test]
     fn user_question_freeform_accepts_navigation_letters_and_digits() {
         let (mut app, _rx) = question_app();
         // Row 3 is the implicit freeform row.
@@ -1921,13 +2311,13 @@ mod tests {
         let uq = app.user_question.as_ref().expect("question stored");
         assert_eq!(uq.freeform_text, "aXb");
         assert_eq!(uq.freeform_cursor, 2);
-        // ^U clears the whole line.
+        // ^U kills only the text before the cursor.
         handle_key_event(
             &mut app,
             KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
         );
         let uq = app.user_question.as_ref().expect("question stored");
-        assert!(uq.freeform_text.is_empty());
+        assert_eq!(uq.freeform_text, "b");
         assert_eq!(uq.freeform_cursor, 0);
     }
 
@@ -1938,7 +2328,7 @@ mod tests {
         for c in ['h', 'i'] {
             handle_key_event(&mut app, char_key(c));
         }
-        // ^Z undoes the coalesced typing, ^Y redoes it.
+        // ^Z undoes the coalesced typing, ^Shift+Z redoes it.
         handle_key_event(
             &mut app,
             KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL),
@@ -1947,7 +2337,10 @@ mod tests {
         assert_eq!(uq.freeform_text, "");
         handle_key_event(
             &mut app,
-            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
+            KeyEvent::new(
+                KeyCode::Char('Z'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
         );
         let uq = app.user_question.as_ref().expect("question stored");
         assert_eq!(uq.freeform_text, "hi");
@@ -2060,28 +2453,6 @@ mod tests {
     }
 
     #[test]
-    fn plan_approval_feedback_supports_kill_to_end() {
-        let (mut app, _rx) = plan_app();
-        // "Request changes" opens the feedback editor.
-        handle_key_event(&mut app, char_key('r'));
-        for c in ['h', 'e', 'l', 'l', 'o', ' ', 'w'] {
-            handle_key_event(&mut app, char_key(c));
-        }
-        // ^A home, then ^K kills to the end.
-        handle_key_event(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
-        );
-        handle_key_event(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
-        );
-        let pa = app.plan_approval.as_ref().unwrap();
-        assert_eq!(pa.feedback, "");
-        assert_eq!(pa.feedback_cursor, 0);
-    }
-
-    #[test]
     fn user_question_off_freeform_keys_still_navigate() {
         let (mut app, _rx) = question_app();
         // On an option row, j/k still move the highlight and digits still
@@ -2094,58 +2465,5 @@ mod tests {
         let uq = app.user_question.as_ref().expect("question stored");
         assert_eq!(uq.selected, 2);
         assert!(uq.freeform_text.is_empty());
-    }
-
-    // -----------------------------------------------------------------------
-    // Plan approval feedback editor
-    // -----------------------------------------------------------------------
-
-    /// An app in PlanApproval mode.
-    fn plan_app() -> (
-        crate::app::App,
-        tokio::sync::oneshot::Receiver<mew_agent::PlanDecision>,
-    ) {
-        use mew_agent::AgentEvent;
-        let mut app = crate::app::App::new();
-        let (tx, rx) = tokio::sync::oneshot::channel::<mew_agent::PlanDecision>();
-        app.handle_agent_event(AgentEvent::PlanApprovalRequest {
-            call_id: "c1".into(),
-            plan_path: "/repo/PLAN.md".into(),
-            plan_markdown: "# Goal\n\n1. do it".into(),
-            persona: "builder".into(),
-            tx,
-        });
-        (app, rx)
-    }
-
-    #[test]
-    fn plan_approval_feedback_editor_types_letters_and_keeps_selection() {
-        let (mut app, _rx) = plan_app();
-        // "Request changes" then confirm opens the feedback editor.
-        handle_key_event(&mut app, char_key('r'));
-        assert!(app.plan_approval.as_ref().unwrap().editing_feedback);
-        // Shortcut letters (a/r/s/n/...) type into the feedback instead of
-        // dispatching: verification that 'n' and friends are not captured.
-        for c in ['a', 'r', 's', 'n', 'j', 'y'] {
-            handle_key_event(&mut app, char_key(c));
-        }
-        let pa = app.plan_approval.as_ref().unwrap();
-        assert_eq!(pa.feedback, "arsnjy");
-        assert_eq!(pa.selected, 1, "selection must not drift while editing");
-
-        // Tab/Left/Right must not cycle the selection mid-edit (a cycle to
-        // Approve would submit the plan and drop the typed feedback).
-        handle_key_event(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        handle_key_event(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
-        handle_key_event(&mut app, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-        let pa = app.plan_approval.as_ref().unwrap();
-        assert_eq!(pa.selected, 1);
-        assert_eq!(pa.feedback, "arsnjy");
-
-        // Esc leaves the editor; letters no longer append.
-        handle_key_event(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(!app.plan_approval.as_ref().unwrap().editing_feedback);
-        handle_key_event(&mut app, char_key('x'));
-        assert_eq!(app.plan_approval.as_ref().unwrap().feedback, "arsnjy");
     }
 }

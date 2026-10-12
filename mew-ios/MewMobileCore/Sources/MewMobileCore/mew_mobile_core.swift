@@ -860,6 +860,11 @@ public protocol MobileCoreProtocol: AnyObject, Sendable {
     func cancel(id: DaemonId) 
     
     /**
+     * Close a question without cancelling the parent turn.
+     */
+    func cancelAskUser(id: DaemonId, requestId: String) 
+    
+    /**
      * Connect to a daemon. Connection progress is reported via events.
      */
     func connect(id: DaemonId) 
@@ -923,9 +928,10 @@ public protocol MobileCoreProtocol: AnyObject, Sendable {
     func pinSession(id: DaemonId, sessionId: String, pinned: Bool) 
     
     /**
-     * Send a prompt to the attached session on a daemon.
+     * Queue a prompt only after the requested session is confirmed.
+     * False leaves the caller's composer and transcript unchanged.
      */
-    func prompt(id: DaemonId, text: String) 
+    func prompt(id: DaemonId, text: String)  -> Bool
     
     /**
      * Remove a daemon from the registry and disconnect.
@@ -946,12 +952,6 @@ public protocol MobileCoreProtocol: AnyObject, Sendable {
      * Respond to a permission request.
      */
     func respondPermission(id: DaemonId, requestId: String, decision: Decision) 
-    
-    /**
-     * Respond to a plan-approval request. `approved = false` with optional
-     * `feedback` requests changes.
-     */
-    func respondPlanApproval(id: DaemonId, requestId: String, approved: Bool, feedback: String?) 
     
     /**
      * Respond to a goal proposal from the agent (`propose_goal`).
@@ -987,7 +987,7 @@ public protocol MobileCoreProtocol: AnyObject, Sendable {
     /**
      * Send a slash command to the daemon. Response comes as SlashResult event.
      */
-    func slashCommand(id: DaemonId, command: String) 
+    func slashCommand(id: DaemonId, command: String)  -> Bool
     
     /**
      * Get a full snapshot of a daemon's state.
@@ -1154,6 +1154,19 @@ open func cancel(id: DaemonId)  {try! rustCall() {
 }
     
     /**
+     * Close a question without cancelling the parent turn.
+     */
+open func cancelAskUser(id: DaemonId, requestId: String)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_mew_mobile_core_fn_method_mobilecore_cancel_ask_user(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeDaemonId_lower(id),
+        FfiConverterString.lower(requestId),uniffiCallStatus
+    )
+}
+}
+    
+    /**
      * Connect to a daemon. Connection progress is reported via events.
      */
 open func connect(id: DaemonId)  {try! rustCall() {
@@ -1307,16 +1320,18 @@ open func pinSession(id: DaemonId, sessionId: String, pinned: Bool)  {try! rustC
 }
     
     /**
-     * Send a prompt to the attached session on a daemon.
+     * Queue a prompt only after the requested session is confirmed.
+     * False leaves the caller's composer and transcript unchanged.
      */
-open func prompt(id: DaemonId, text: String)  {try! rustCall() {
+open func prompt(id: DaemonId, text: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
         uniffiCallStatus in
     uniffi_mew_mobile_core_fn_method_mobilecore_prompt(
             self.uniffiCloneHandle(),
         FfiConverterTypeDaemonId_lower(id),
         FfiConverterString.lower(text),uniffiCallStatus
     )
-}
+})
 }
     
     /**
@@ -1369,22 +1384,6 @@ open func respondPermission(id: DaemonId, requestId: String, decision: Decision)
         FfiConverterTypeDaemonId_lower(id),
         FfiConverterString.lower(requestId),
         FfiConverterTypeDecision_lower(decision),uniffiCallStatus
-    )
-}
-}
-    
-    /**
-     * Respond to a plan-approval request. `approved = false` with optional
-     * `feedback` requests changes.
-     */
-open func respondPlanApproval(id: DaemonId, requestId: String, approved: Bool, feedback: String?)  {try! rustCall() {
-        uniffiCallStatus in
-    uniffi_mew_mobile_core_fn_method_mobilecore_respond_plan_approval(
-            self.uniffiCloneHandle(),
-        FfiConverterTypeDaemonId_lower(id),
-        FfiConverterString.lower(requestId),
-        FfiConverterBool.lower(approved),
-        FfiConverterOptionString.lower(feedback),uniffiCallStatus
     )
 }
 }
@@ -1471,14 +1470,15 @@ open func setThinkingVariant(id: DaemonId, variant: String)  {try! rustCall() {
     /**
      * Send a slash command to the daemon. Response comes as SlashResult event.
      */
-open func slashCommand(id: DaemonId, command: String)  {try! rustCall() {
+open func slashCommand(id: DaemonId, command: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
         uniffiCallStatus in
     uniffi_mew_mobile_core_fn_method_mobilecore_slash_command(
             self.uniffiCloneHandle(),
         FfiConverterTypeDaemonId_lower(id),
         FfiConverterString.lower(command),uniffiCallStatus
     )
-}
+})
 }
     
     /**
@@ -2503,6 +2503,8 @@ public func FfiConverterTypeModelSummary_lower(_ value: ModelSummary) -> RustBuf
  * A pending ask-user request.
  */
 public struct PendingAskUser: Equatable, Hashable {
+    public var subagent: SubagentQuestionSource?
+    public var daemon: String
     public var requestId: String
     public var sessionId: String
     public var callId: String
@@ -2510,7 +2512,9 @@ public struct PendingAskUser: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(requestId: String, sessionId: String, callId: String, questions: [String]) {
+    public init(subagent: SubagentQuestionSource?, daemon: String, requestId: String, sessionId: String, callId: String, questions: [String]) {
+        self.subagent = subagent
+        self.daemon = daemon
         self.requestId = requestId
         self.sessionId = sessionId
         self.callId = callId
@@ -2533,6 +2537,8 @@ public struct FfiConverterTypePendingAskUser: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PendingAskUser {
         return
             try PendingAskUser(
+                subagent: FfiConverterOptionTypeSubagentQuestionSource.read(from: &buf), 
+                daemon: FfiConverterString.read(from: &buf), 
                 requestId: FfiConverterString.read(from: &buf), 
                 sessionId: FfiConverterString.read(from: &buf), 
                 callId: FfiConverterString.read(from: &buf), 
@@ -2541,6 +2547,8 @@ public struct FfiConverterTypePendingAskUser: FfiConverterRustBuffer {
     }
 
     public static func write(_ value: PendingAskUser, into buf: inout [UInt8]) {
+        FfiConverterOptionTypeSubagentQuestionSource.write(value.subagent, into: &buf)
+        FfiConverterString.write(value.daemon, into: &buf)
         FfiConverterString.write(value.requestId, into: &buf)
         FfiConverterString.write(value.sessionId, into: &buf)
         FfiConverterString.write(value.callId, into: &buf)
@@ -2568,6 +2576,7 @@ public func FfiConverterTypePendingAskUser_lower(_ value: PendingAskUser) -> Rus
  * A pending permission request.
  */
 public struct PendingPermission: Equatable, Hashable {
+    public var daemon: String
     public var requestId: String
     public var sessionId: String
     public var toolName: String
@@ -2575,7 +2584,8 @@ public struct PendingPermission: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(requestId: String, sessionId: String, toolName: String, input: String) {
+    public init(daemon: String, requestId: String, sessionId: String, toolName: String, input: String) {
+        self.daemon = daemon
         self.requestId = requestId
         self.sessionId = sessionId
         self.toolName = toolName
@@ -2598,6 +2608,7 @@ public struct FfiConverterTypePendingPermission: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PendingPermission {
         return
             try PendingPermission(
+                daemon: FfiConverterString.read(from: &buf), 
                 requestId: FfiConverterString.read(from: &buf), 
                 sessionId: FfiConverterString.read(from: &buf), 
                 toolName: FfiConverterString.read(from: &buf), 
@@ -2606,6 +2617,7 @@ public struct FfiConverterTypePendingPermission: FfiConverterRustBuffer {
     }
 
     public static func write(_ value: PendingPermission, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.daemon, into: &buf)
         FfiConverterString.write(value.requestId, into: &buf)
         FfiConverterString.write(value.sessionId, into: &buf)
         FfiConverterString.write(value.toolName, into: &buf)
@@ -2983,6 +2995,68 @@ public func FfiConverterTypeSessionSummary_lower(_ value: SessionSummary) -> Rus
 }
 
 
+public struct SubagentQuestionSource: Equatable, Hashable {
+    public var parentCallId: String
+    public var childSessionId: String
+    public var name: String
+    public var displayName: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(parentCallId: String, childSessionId: String, name: String, displayName: String?) {
+        self.parentCallId = parentCallId
+        self.childSessionId = childSessionId
+        self.name = name
+        self.displayName = displayName
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SubagentQuestionSource: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSubagentQuestionSource: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SubagentQuestionSource {
+        return
+            try SubagentQuestionSource(
+                parentCallId: FfiConverterString.read(from: &buf), 
+                childSessionId: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                displayName: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SubagentQuestionSource, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.parentCallId, into: &buf)
+        FfiConverterString.write(value.childSessionId, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterOptionString.write(value.displayName, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSubagentQuestionSource_lift(_ buf: RustBuffer) throws -> SubagentQuestionSource {
+    return try FfiConverterTypeSubagentQuestionSource.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSubagentQuestionSource_lower(_ value: SubagentQuestionSource) -> RustBuffer {
+    return FfiConverterTypeSubagentQuestionSource.lower(value)
+}
+
+
 /**
  * A todo item from the agent's todo list.
  * Uses u64 for id/depends_on to match the protocol's `usize` without narrowing.
@@ -3190,7 +3264,12 @@ public enum CoreEvent: Equatable, Hashable {
     case dirListing(daemon: String, sessionId: String, path: String, entries: [DirEntry]
     )
     /**
-     * A session was reloaded after reconnect. Swift should pull `snapshot()`.
+     * An attachment was acknowledged; discard cached required actions before replay.
+     */
+    case sessionReady(daemon: String, sessionId: String
+    )
+    /**
+     * Session history was loaded. Swift should pull `snapshot()`.
      */
     case sessionReloaded(daemon: String, sessionId: String
     )
@@ -3205,9 +3284,14 @@ public enum CoreEvent: Equatable, Hashable {
     case partUpdated(daemon: String, sessionId: String, partId: String, partKind: String, state: String?
     )
     /**
-     * A turn ended (MessageEnd received).
+     * The daemon's activity state for a session changed.
      */
-    case turnEnded(daemon: String, sessionId: String, inputTokens: UInt64, outputTokens: UInt64, cost: Double, failed: Bool, manifest: MobileTurnManifest?
+    case sessionActivityChanged(daemon: String, sessionId: String, running: Bool
+    )
+    /**
+     * One provider message ended; tools or further messages may still follow.
+     */
+    case providerMessageEnded(daemon: String, sessionId: String, inputTokens: UInt64, outputTokens: UInt64, cost: Double, failed: Bool, manifest: MobileTurnManifest?
     )
     /**
      * A subagent finished executing. Carries manifests from the child
@@ -3223,12 +3307,7 @@ public enum CoreEvent: Equatable, Hashable {
     /**
      * An ask-user request from the agent.
      */
-    case askUserRequested(daemon: String, sessionId: String, requestId: String, callId: String, questions: [String]
-    )
-    /**
-     * A plan-approval request from the agent (`handoff_plan`).
-     */
-    case planApprovalRequested(daemon: String, sessionId: String, requestId: String, callId: String, planPath: String, planMarkdown: String, persona: String
+    case askUserRequested(subagent: SubagentQuestionSource?, daemon: String, sessionId: String, requestId: String, callId: String, questions: [String]
     )
     /**
      * A goal proposal from the agent (`propose_goal`). The UI should present
@@ -3329,67 +3408,70 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
         case 4: return .dirListing(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), path: try FfiConverterString.read(from: &buf), entries: try FfiConverterSequenceTypeDirEntry.read(from: &buf)
         )
         
-        case 5: return .sessionReloaded(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf)
+        case 5: return .sessionReady(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf)
         )
         
-        case 6: return .textDelta(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), partId: try FfiConverterString.read(from: &buf), delta: try FfiConverterString.read(from: &buf)
+        case 6: return .sessionReloaded(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf)
         )
         
-        case 7: return .partUpdated(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), partId: try FfiConverterString.read(from: &buf), partKind: try FfiConverterString.read(from: &buf), state: try FfiConverterOptionString.read(from: &buf)
+        case 7: return .textDelta(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), partId: try FfiConverterString.read(from: &buf), delta: try FfiConverterString.read(from: &buf)
         )
         
-        case 8: return .turnEnded(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), inputTokens: try FfiConverterUInt64.read(from: &buf), outputTokens: try FfiConverterUInt64.read(from: &buf), cost: try FfiConverterDouble.read(from: &buf), failed: try FfiConverterBool.read(from: &buf), manifest: try FfiConverterOptionTypeMobileTurnManifest.read(from: &buf)
+        case 8: return .partUpdated(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), partId: try FfiConverterString.read(from: &buf), partKind: try FfiConverterString.read(from: &buf), state: try FfiConverterOptionString.read(from: &buf)
         )
         
-        case 9: return .subagentEnd(daemon: try FfiConverterString.read(from: &buf), parentCallId: try FfiConverterString.read(from: &buf), childSessionId: try FfiConverterString.read(from: &buf), outcome: try FfiConverterString.read(from: &buf), manifests: try FfiConverterSequenceTypeMobileTurnManifest.read(from: &buf)
+        case 9: return .sessionActivityChanged(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), running: try FfiConverterBool.read(from: &buf)
         )
         
-        case 10: return .permissionRequested(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), toolName: try FfiConverterString.read(from: &buf), input: try FfiConverterString.read(from: &buf)
+        case 10: return .providerMessageEnded(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), inputTokens: try FfiConverterUInt64.read(from: &buf), outputTokens: try FfiConverterUInt64.read(from: &buf), cost: try FfiConverterDouble.read(from: &buf), failed: try FfiConverterBool.read(from: &buf), manifest: try FfiConverterOptionTypeMobileTurnManifest.read(from: &buf)
         )
         
-        case 11: return .askUserRequested(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), callId: try FfiConverterString.read(from: &buf), questions: try FfiConverterSequenceString.read(from: &buf)
+        case 11: return .subagentEnd(daemon: try FfiConverterString.read(from: &buf), parentCallId: try FfiConverterString.read(from: &buf), childSessionId: try FfiConverterString.read(from: &buf), outcome: try FfiConverterString.read(from: &buf), manifests: try FfiConverterSequenceTypeMobileTurnManifest.read(from: &buf)
         )
         
-        case 12: return .planApprovalRequested(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), callId: try FfiConverterString.read(from: &buf), planPath: try FfiConverterString.read(from: &buf), planMarkdown: try FfiConverterString.read(from: &buf), persona: try FfiConverterString.read(from: &buf)
+        case 12: return .permissionRequested(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), toolName: try FfiConverterString.read(from: &buf), input: try FfiConverterString.read(from: &buf)
         )
         
-        case 13: return .goalProposed(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), callId: try FfiConverterString.read(from: &buf), objective: try FfiConverterString.read(from: &buf)
+        case 13: return .askUserRequested(subagent: try FfiConverterOptionTypeSubagentQuestionSource.read(from: &buf), daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), callId: try FfiConverterString.read(from: &buf), questions: try FfiConverterSequenceString.read(from: &buf)
         )
         
-        case 14: return .requestResolved(daemon: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf)
+        case 14: return .goalProposed(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), callId: try FfiConverterString.read(from: &buf), objective: try FfiConverterString.read(from: &buf)
         )
         
-        case 15: return .alert(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), kind: try FfiConverterString.read(from: &buf), title: try FfiConverterString.read(from: &buf), detail: try FfiConverterOptionString.read(from: &buf)
+        case 15: return .requestResolved(daemon: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf)
         )
         
-        case 16: return .attentionChanged(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), pendingPermissions: try FfiConverterUInt32.read(from: &buf), pendingQuestions: try FfiConverterUInt32.read(from: &buf)
+        case 16: return .alert(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), kind: try FfiConverterString.read(from: &buf), title: try FfiConverterString.read(from: &buf), detail: try FfiConverterOptionString.read(from: &buf)
         )
         
-        case 17: return .todosUpdated(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), todos: try FfiConverterSequenceTypeTodoItem.read(from: &buf)
+        case 17: return .attentionChanged(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), pendingPermissions: try FfiConverterUInt32.read(from: &buf), pendingQuestions: try FfiConverterUInt32.read(from: &buf)
         )
         
-        case 18: return .permissionModeChanged(daemon: try FfiConverterString.read(from: &buf), mode: try FfiConverterString.read(from: &buf)
+        case 18: return .todosUpdated(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), todos: try FfiConverterSequenceTypeTodoItem.read(from: &buf)
         )
         
-        case 19: return .modelSwitched(daemon: try FfiConverterString.read(from: &buf), provider: try FfiConverterString.read(from: &buf), model: try FfiConverterString.read(from: &buf)
+        case 19: return .permissionModeChanged(daemon: try FfiConverterString.read(from: &buf), mode: try FfiConverterString.read(from: &buf)
         )
         
-        case 20: return .thinkingVariantChanged(daemon: try FfiConverterString.read(from: &buf), variant: try FfiConverterOptionString.read(from: &buf)
+        case 20: return .modelSwitched(daemon: try FfiConverterString.read(from: &buf), provider: try FfiConverterString.read(from: &buf), model: try FfiConverterString.read(from: &buf)
         )
         
-        case 21: return .modelList(daemon: try FfiConverterString.read(from: &buf), models: try FfiConverterSequenceTypeModelSummary.read(from: &buf)
+        case 21: return .thinkingVariantChanged(daemon: try FfiConverterString.read(from: &buf), variant: try FfiConverterOptionString.read(from: &buf)
         )
         
-        case 22: return .slashResult(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), text: try FfiConverterString.read(from: &buf)
+        case 22: return .modelList(daemon: try FfiConverterString.read(from: &buf), models: try FfiConverterSequenceTypeModelSummary.read(from: &buf)
         )
         
-        case 23: return .daemonVersion(daemon: try FfiConverterString.read(from: &buf), version: try FfiConverterString.read(from: &buf)
+        case 23: return .slashResult(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), text: try FfiConverterString.read(from: &buf)
         )
         
-        case 24: return .personaList(daemon: try FfiConverterString.read(from: &buf), personas: try FfiConverterSequenceTypePersonaInfo.read(from: &buf)
+        case 24: return .daemonVersion(daemon: try FfiConverterString.read(from: &buf), version: try FfiConverterString.read(from: &buf)
         )
         
-        case 25: return .personaSwitched(daemon: try FfiConverterString.read(from: &buf), name: try FfiConverterString.read(from: &buf)
+        case 25: return .personaList(daemon: try FfiConverterString.read(from: &buf), personas: try FfiConverterSequenceTypePersonaInfo.read(from: &buf)
+        )
+        
+        case 26: return .personaSwitched(daemon: try FfiConverterString.read(from: &buf), name: try FfiConverterString.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -3426,14 +3508,20 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             FfiConverterSequenceTypeDirEntry.write(entries, into: &buf)
             
         
-        case let .sessionReloaded(daemon,sessionId):
+        case let .sessionReady(daemon,sessionId):
             writeInt(&buf, Int32(5))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             
         
-        case let .textDelta(daemon,sessionId,partId,delta):
+        case let .sessionReloaded(daemon,sessionId):
             writeInt(&buf, Int32(6))
+            FfiConverterString.write(daemon, into: &buf)
+            FfiConverterString.write(sessionId, into: &buf)
+            
+        
+        case let .textDelta(daemon,sessionId,partId,delta):
+            writeInt(&buf, Int32(7))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterString.write(partId, into: &buf)
@@ -3441,7 +3529,7 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             
         
         case let .partUpdated(daemon,sessionId,partId,partKind,state):
-            writeInt(&buf, Int32(7))
+            writeInt(&buf, Int32(8))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterString.write(partId, into: &buf)
@@ -3449,8 +3537,15 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             FfiConverterOptionString.write(state, into: &buf)
             
         
-        case let .turnEnded(daemon,sessionId,inputTokens,outputTokens,cost,failed,manifest):
-            writeInt(&buf, Int32(8))
+        case let .sessionActivityChanged(daemon,sessionId,running):
+            writeInt(&buf, Int32(9))
+            FfiConverterString.write(daemon, into: &buf)
+            FfiConverterString.write(sessionId, into: &buf)
+            FfiConverterBool.write(running, into: &buf)
+            
+        
+        case let .providerMessageEnded(daemon,sessionId,inputTokens,outputTokens,cost,failed,manifest):
+            writeInt(&buf, Int32(10))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterUInt64.write(inputTokens, into: &buf)
@@ -3461,7 +3556,7 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             
         
         case let .subagentEnd(daemon,parentCallId,childSessionId,outcome,manifests):
-            writeInt(&buf, Int32(9))
+            writeInt(&buf, Int32(11))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(parentCallId, into: &buf)
             FfiConverterString.write(childSessionId, into: &buf)
@@ -3470,7 +3565,7 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             
         
         case let .permissionRequested(daemon,sessionId,requestId,toolName,input):
-            writeInt(&buf, Int32(10))
+            writeInt(&buf, Int32(12))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterString.write(requestId, into: &buf)
@@ -3478,8 +3573,9 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             FfiConverterString.write(input, into: &buf)
             
         
-        case let .askUserRequested(daemon,sessionId,requestId,callId,questions):
-            writeInt(&buf, Int32(11))
+        case let .askUserRequested(subagent,daemon,sessionId,requestId,callId,questions):
+            writeInt(&buf, Int32(13))
+            FfiConverterOptionTypeSubagentQuestionSource.write(subagent, into: &buf)
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterString.write(requestId, into: &buf)
@@ -3487,19 +3583,8 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             FfiConverterSequenceString.write(questions, into: &buf)
             
         
-        case let .planApprovalRequested(daemon,sessionId,requestId,callId,planPath,planMarkdown,persona):
-            writeInt(&buf, Int32(12))
-            FfiConverterString.write(daemon, into: &buf)
-            FfiConverterString.write(sessionId, into: &buf)
-            FfiConverterString.write(requestId, into: &buf)
-            FfiConverterString.write(callId, into: &buf)
-            FfiConverterString.write(planPath, into: &buf)
-            FfiConverterString.write(planMarkdown, into: &buf)
-            FfiConverterString.write(persona, into: &buf)
-            
-        
         case let .goalProposed(daemon,sessionId,requestId,callId,objective):
-            writeInt(&buf, Int32(13))
+            writeInt(&buf, Int32(14))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterString.write(requestId, into: &buf)
@@ -3508,13 +3593,13 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             
         
         case let .requestResolved(daemon,requestId):
-            writeInt(&buf, Int32(14))
+            writeInt(&buf, Int32(15))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(requestId, into: &buf)
             
         
         case let .alert(daemon,sessionId,kind,title,detail):
-            writeInt(&buf, Int32(15))
+            writeInt(&buf, Int32(16))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterString.write(kind, into: &buf)
@@ -3523,7 +3608,7 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             
         
         case let .attentionChanged(daemon,sessionId,pendingPermissions,pendingQuestions):
-            writeInt(&buf, Int32(16))
+            writeInt(&buf, Int32(17))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterUInt32.write(pendingPermissions, into: &buf)
@@ -3531,58 +3616,58 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             
         
         case let .todosUpdated(daemon,sessionId,todos):
-            writeInt(&buf, Int32(17))
+            writeInt(&buf, Int32(18))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterSequenceTypeTodoItem.write(todos, into: &buf)
             
         
         case let .permissionModeChanged(daemon,mode):
-            writeInt(&buf, Int32(18))
+            writeInt(&buf, Int32(19))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(mode, into: &buf)
             
         
         case let .modelSwitched(daemon,provider,model):
-            writeInt(&buf, Int32(19))
+            writeInt(&buf, Int32(20))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(provider, into: &buf)
             FfiConverterString.write(model, into: &buf)
             
         
         case let .thinkingVariantChanged(daemon,variant):
-            writeInt(&buf, Int32(20))
+            writeInt(&buf, Int32(21))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterOptionString.write(variant, into: &buf)
             
         
         case let .modelList(daemon,models):
-            writeInt(&buf, Int32(21))
+            writeInt(&buf, Int32(22))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterSequenceTypeModelSummary.write(models, into: &buf)
             
         
         case let .slashResult(daemon,sessionId,text):
-            writeInt(&buf, Int32(22))
+            writeInt(&buf, Int32(23))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterString.write(text, into: &buf)
             
         
         case let .daemonVersion(daemon,version):
-            writeInt(&buf, Int32(23))
+            writeInt(&buf, Int32(24))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(version, into: &buf)
             
         
         case let .personaList(daemon,personas):
-            writeInt(&buf, Int32(24))
+            writeInt(&buf, Int32(25))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterSequenceTypePersonaInfo.write(personas, into: &buf)
             
         
         case let .personaSwitched(daemon,name):
-            writeInt(&buf, Int32(25))
+            writeInt(&buf, Int32(26))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(name, into: &buf)
             
@@ -4144,6 +4229,30 @@ fileprivate struct FfiConverterOptionTypeMobileTurnManifest: FfiConverterRustBuf
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeSubagentQuestionSource: FfiConverterRustBuffer {
+    typealias SwiftType = SubagentQuestionSource?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeSubagentQuestionSource.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeSubagentQuestionSource.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceUInt64: FfiConverterRustBuffer {
     typealias SwiftType = [UInt64]
 
@@ -4659,6 +4768,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_cancel() != 47197) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_mew_mobile_core_checksum_method_mobilecore_cancel_ask_user() != 21542) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_connect() != 24074) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -4695,7 +4807,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_pin_session() != 39853) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_mew_mobile_core_checksum_method_mobilecore_prompt() != 40469) {
+    if (uniffi_mew_mobile_core_checksum_method_mobilecore_prompt() != 57596) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_remove_daemon() != 48368) {
@@ -4708,9 +4820,6 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_respond_permission() != 29311) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_mew_mobile_core_checksum_method_mobilecore_respond_plan_approval() != 12621) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_respond_to_goal() != 11714) {
@@ -4731,7 +4840,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_set_thinking_variant() != 62301) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_mew_mobile_core_checksum_method_mobilecore_slash_command() != 9123) {
+    if (uniffi_mew_mobile_core_checksum_method_mobilecore_slash_command() != 49599) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_snapshot() != 7085) {

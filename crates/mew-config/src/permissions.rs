@@ -145,24 +145,25 @@ impl PermissionEngine {
     ///
     /// Precedence:
     /// 1. `input["cwd"]` for `shell_background` / `shell_monitor` if present
-    ///    and a string (those tools expose per-call `cwd`).
+    ///    and a string (those tools expose per-call `cwd`). Relative values
+    ///    resolve against the caller-supplied cwd or the engine default.
     /// 2. The caller-supplied `cwd` argument to `check()`.
     /// 3. `self.default_cwd` (set via `with_workspace_roots`).
     /// 4. `Path::new(".")` (last-resort fallback matching the agent's
     ///    behavior).
     fn resolve_effective_cwd(&self, input: &Value, cwd: &Path) -> PathBuf {
-        if let Some(s) = input.get("cwd").and_then(|v| v.as_str()) {
-            if !s.is_empty() {
-                return PathBuf::from(s);
-            }
-        }
-        if !cwd.as_os_str().is_empty() {
-            return cwd.to_path_buf();
-        }
-        if !self.default_cwd.as_os_str().is_empty() {
-            return self.default_cwd.clone();
-        }
-        PathBuf::from(".")
+        let base = if !cwd.as_os_str().is_empty() {
+            cwd
+        } else if !self.default_cwd.as_os_str().is_empty() {
+            &self.default_cwd
+        } else {
+            Path::new(".")
+        };
+        input
+            .get("cwd")
+            .and_then(Value::as_str)
+            .filter(|path| !path.is_empty())
+            .map_or_else(|| base.to_path_buf(), |path| base.join(path))
     }
 
     /// Evaluate rules for a tool call and return the runtime decision.
@@ -619,19 +620,9 @@ fn token_escapes(token: &str, cwd: &Path, workspace_roots: &[PathBuf]) -> bool {
     // lexical form.
     match absolute.canonicalize() {
         Ok(canonical) => {
-            // File exists on disk. The canonicalized form is the true
-            // resolved path. If it's not inside any root, it's an escape
-            // — regardless of whether the token had `..` or not.
-            if is_inside_any_root(&canonical, workspace_roots) {
-                return false;
-            }
-            // Also check the un-normalized absolute form in case the
-            // roots themselves aren't canonicalized.
-            if is_inside_any_root(&absolute, workspace_roots) {
-                return false;
-            }
-            // Exists and resolves outside all roots → escape.
-            true
+            // Existing paths are judged by their actual destination, including
+            // symlinks. The root check canonicalizes configured roots too.
+            !is_inside_any_root(&canonical, workspace_roots)
         }
         Err(_) => {
             // File doesn't exist on disk. Fall back to lexical
@@ -1704,6 +1695,103 @@ mod tests {
             mew_hooks::PermissionDecision::Prompt,
             "without input['cwd'], caller-supplied cwd wins"
         );
+    }
+
+    #[tokio::test]
+    async fn relative_shell_cwd_is_resolved_from_the_session_project() {
+        let directory = tempfile::tempdir().unwrap();
+        let directory_path = directory.path().canonicalize().unwrap();
+        let project = directory_path.join("project");
+        let process = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.join("nested")).unwrap();
+        std::fs::write(project.join("nested/file.txt"), "project").unwrap();
+        std::fs::write(directory_path.join("file.txt"), "outside").unwrap();
+        let engine = PermissionEngine::new(vec![PermissionRule {
+            tool: "*".into(),
+            decision: RuleDecision::Allow,
+            r#match: MatchConditions::default(),
+        }])
+        .with_workspace_roots(vec![project.clone()], process.path().to_path_buf());
+
+        for tool in ["shell_background", "shell_monitor"] {
+            for command in ["cat ./file.txt", "cat ./file.txt && cat ./file.txt"] {
+                assert_eq!(
+                    engine
+                        .check(
+                            tool,
+                            &serde_json::json!({"command":command,"cwd":"nested"}),
+                            mew_tools::Sensitivity::Dangerous,
+                            &project
+                        )
+                        .await,
+                    mew_hooks::PermissionDecision::AllowOnce,
+                    "relative shell cwd must stay inside the session project"
+                );
+            }
+            assert_eq!(
+                engine
+                    .check(
+                        tool,
+                        &serde_json::json!({"command":"cat ./file.txt","cwd":"../"}),
+                        mew_tools::Sensitivity::Dangerous,
+                        &project
+                    )
+                    .await,
+                mew_hooks::PermissionDecision::Prompt,
+                "relative parent cwd must still trigger the configured escape tier"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn existing_shell_paths_follow_symlinks_before_checking_workspace_roots() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let directory_path = directory.path().canonicalize().unwrap();
+        let project = directory_path.join("project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(project.join("inside.txt"), "inside").unwrap();
+        std::fs::write(directory_path.join("outside.txt"), "outside").unwrap();
+        symlink(project.join("inside.txt"), project.join("inside-link.txt")).unwrap();
+        symlink(
+            directory_path.join("outside.txt"),
+            project.join("outside-link.txt"),
+        )
+        .unwrap();
+        let alias = directory_path.join("project-alias");
+        symlink(&project, &alias).unwrap();
+
+        for root in [&project, &alias] {
+            let engine = PermissionEngine::new(vec![PermissionRule {
+                tool: "*".into(),
+                decision: RuleDecision::Allow,
+                r#match: MatchConditions::default(),
+            }])
+            .with_workspace_roots(vec![root.clone()], project.clone());
+            for tool in ["bash", "shell_background", "shell_monitor"] {
+                for (file, expected) in [
+                    ("inside.txt", mew_hooks::PermissionDecision::AllowOnce),
+                    ("inside-link.txt", mew_hooks::PermissionDecision::AllowOnce),
+                    ("outside-link.txt", mew_hooks::PermissionDecision::Prompt),
+                ] {
+                    assert_eq!(
+                        engine
+                            .check(
+                                tool,
+                                &serde_json::json!({"command":format!("cat ./{file}")}),
+                                mew_tools::Sensitivity::Dangerous,
+                                root
+                            )
+                            .await,
+                        expected,
+                        "{tool} {file} through root {}",
+                        root.display()
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]

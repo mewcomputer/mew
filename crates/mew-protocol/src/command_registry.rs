@@ -40,8 +40,33 @@ pub static BUILTIN_COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "/todo",
-        description: "show the session todo list",
+        description: "view and edit session todos",
         locus: CommandLocus::Either,
+    },
+    CommandDef {
+        name: "/agents",
+        description: "view session subagents",
+        locus: CommandLocus::Client,
+    },
+    CommandDef {
+        name: "/jobs",
+        description: "view background jobs",
+        locus: CommandLocus::Client,
+    },
+    CommandDef {
+        name: "/tools",
+        description: "inspect tool arguments and results",
+        locus: CommandLocus::Client,
+    },
+    CommandDef {
+        name: "/review",
+        description: "review workspace changes",
+        locus: CommandLocus::Client,
+    },
+    CommandDef {
+        name: "/diff",
+        description: "alias for /review",
+        locus: CommandLocus::Client,
     },
     CommandDef {
         name: "/cost",
@@ -138,4 +163,18 @@ pub fn lookup(name: &str) -> Option<&'static CommandDef> {
 /// Check if a command name is known to the registry.
 pub fn is_known(name: &str) -> bool {
     lookup(name).is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_and_review_commands_are_client_owned() {
+        for name in ["/tools", "/review", "/diff"] {
+            let command = lookup(name).expect("viewer commands must be registered");
+            assert_eq!(command.locus, CommandLocus::Client);
+            assert!(!command.description.is_empty());
+        }
+    }
 }

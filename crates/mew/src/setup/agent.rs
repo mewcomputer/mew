@@ -17,26 +17,26 @@ use mew_ext_broker::{
 };
 use mew_hooks::Dispatcher;
 
-/// Apply catalog pricing for `model_id` onto `agent`.
-///
-/// Sets catalog-derived pricing and prompt-cache retention on the agent. An
-/// absent catalog entry resets retention to `Unknown` while leaving pricing
-/// unchanged, preserving the existing pricing fallback behavior.
+/// Apply catalog pricing and prompt-cache retention for the active model.
 pub(crate) fn apply_catalog_pricing(agent: &mut Agent, cat: Option<&Catalog>, model_id: &str) {
-    let retention = cat
-        .and_then(|catalog| catalog.lookup(model_id))
-        .and_then(|model| model.prompt_cache_retention_secs);
+    let model = cat.and_then(|catalog| catalog.lookup(model_id));
+    let retention = model.and_then(|model| model.prompt_cache_retention_secs);
     agent.set_prompt_cache_retention(PromptCacheRetention::from_secs(retention));
+    let pricing = model.map(|model| &model.pricing);
+    agent.input_price = pricing.map_or(0.0, |pricing| pricing.input);
+    agent.output_price = pricing.map_or(0.0, |pricing| pricing.output);
+    agent.cache_read_price = pricing.map_or(0.0, |pricing| pricing.cache_read);
+    agent.cache_write_price = pricing.map_or(0.0, |pricing| pricing.cache_write);
+    agent.reasoning_price = pricing.map_or(0.0, |pricing| pricing.reasoning);
+}
 
-    if let Some(c) = cat {
-        if let Some(m) = c.lookup(model_id) {
-            agent.input_price = m.pricing.input;
-            agent.output_price = m.pricing.output;
-            agent.cache_read_price = m.pricing.cache_read;
-            agent.cache_write_price = m.pricing.cache_write;
-            agent.reasoning_price = m.pricing.reasoning;
-        }
-    }
+fn apply_model_metadata(agent: &mut Agent, cat: Option<&Catalog>, model_id: &str) {
+    agent.supports_vision = cat.is_none_or(|catalog| catalog.supports_vision(model_id));
+    agent.context_window = cat.map_or(0, |catalog| catalog.context_window(model_id).max(0) as u32);
+    agent.default_max_output_tokens = cat
+        .and_then(|catalog| catalog.max_output(model_id))
+        .map_or(0, |max| max.min(32_768));
+    apply_catalog_pricing(agent, cat, model_id);
 }
 use mew_message::SessionId;
 use mew_session::Writer as SessionWriter;
@@ -51,12 +51,10 @@ use mew_tools::tools::flag_important::{FlagImportant, FlaggedFile};
 use mew_tools::tools::glob::Glob;
 use mew_tools::tools::goal::{BlockGoal, CompleteGoal, ProposeGoal};
 use mew_tools::tools::grep::Grep;
-use mew_tools::tools::handoff_plan::HandoffPlan;
 use mew_tools::tools::jobs::{JobBlock, JobCancel, JobStatus, ShellBackground, ShellMonitor};
 use mew_tools::tools::progress_update::ProgressUpdate;
 use mew_tools::tools::read::Read;
 use mew_tools::tools::skill::Skill;
-use mew_tools::tools::switch_persona::SwitchPersona as SwitchPersonaTool;
 use mew_tools::tools::todo::{TodoComplete, TodoCreate, TodoDelete, TodoListTool, TodoUpdate};
 use mew_tools::tools::web_fetch::WebFetch;
 use mew_tools::tools::write::Write;
@@ -72,9 +70,6 @@ pub(crate) fn build_tools(
     skills: Arc<Vec<mew_skills::Skill>>,
     skill_filter: Arc<tokio::sync::RwLock<Option<std::collections::HashSet<String>>>>,
     template_ctx: Arc<tokio::sync::RwLock<Option<mew_prompts::template::TemplateContext>>>,
-    personas: Arc<Vec<mew_personas::Persona>>,
-    pending_persona_switch: Arc<tokio::sync::Mutex<Option<String>>>,
-    current_persona_name: Arc<tokio::sync::RwLock<Option<String>>>,
     hashline_enabled: bool,
     plan_path: String,
 ) -> Vec<Arc<dyn mew_tools::Tool>> {
@@ -104,7 +99,6 @@ pub(crate) fn build_tools(
         // planner-only use — persona allowlists gate access when set.
         Arc::new(WritePlan::new(plan_path.clone())),
         Arc::new(EditPlan::new(plan_path)),
-        Arc::new(HandoffPlan),
         Arc::new(ProposeGoal),
         Arc::new(CompleteGoal),
         Arc::new(BlockGoal),
@@ -115,22 +109,13 @@ pub(crate) fn build_tools(
     if !skills.is_empty() {
         tools.push(Arc::new(Skill::new(skills, skill_filter, template_ctx)));
     }
-    // The switch_persona tool is only useful when there's at least one
-    // persona to switch to. With zero discovered personas the tool would
-    // be a permanent dead-end for the model.
-    if !personas.is_empty() {
-        tools.push(Arc::new(SwitchPersonaTool::new(
-            personas,
-            pending_persona_switch,
-            current_persona_name,
-        )));
-    }
     tools
 }
 
 pub(crate) fn build_permission_engine(
     cfg: &Config,
     mode: mew_hooks::PermissionMode,
+    cwd: &std::path::Path,
 ) -> Arc<mew_config::permissions::PermissionEngine> {
     let secret_globs: Vec<String> = cfg
         .secrets
@@ -138,15 +123,11 @@ pub(crate) fn build_permission_engine(
         .iter()
         .flat_map(|f| f.paths.iter().cloned())
         .collect();
-    // Default cwd for the escape tier: the process's current directory.
-    // The 4 call sites all hand the same `cfg` to this helper, so the
-    // escape tier gets the same default cwd everywhere.
-    let default_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     Arc::new(
         mew_config::permissions::PermissionEngine::new(cfg.permissions.rules.clone())
             .with_secret_files(secret_globs)
             .with_mode(mode)
-            .with_workspace_roots(cfg.workspace.roots.clone(), default_cwd),
+            .with_workspace_roots(cfg.workspace.roots.clone(), cwd.to_path_buf()),
     )
 }
 
@@ -386,12 +367,11 @@ pub(crate) fn render_templated_context_files(
     let mut tool_names: Vec<String> = agent.tools.keys().cloned().collect();
     tool_names.sort_unstable();
     let ctx = mew_prompts::template::TemplateContext {
+        supports_vision: agent.supports_vision,
         model_id: agent.model_id.clone(),
         provider_id: agent.provider_id.clone(),
         session_id: agent.session_id.to_string(),
-        cwd: std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default(),
+        cwd: agent.cwd.to_string_lossy().into_owned(),
         current_date: mew_prompts::template::TemplateContext::today(),
         tools: tool_names,
         available_skills: mew_prompts::template::SkillInfo::from_skills(&agent.skills),
@@ -428,7 +408,7 @@ pub(crate) fn wire_subagents(
     dispatcher: Arc<dyn Dispatcher>,
     discovered_extensions: &[mew_ext_broker::DiscoveredExtension],
 ) {
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = agent.cwd.clone();
     let subagents_extra: Vec<std::path::PathBuf> = discovered_extensions
         .iter()
         .filter_map(|ext| ext.provides_subagents())
@@ -464,30 +444,74 @@ pub(crate) fn wire_subagents(
             "subagent_wait".into(),
             Arc::new(mew_tools::tools::subagent_wait::SubagentWait::new()),
         );
-        let runner = mew_agent::runner::SimpleRunner::new(
+        let mut runner = mew_agent::runner::SimpleRunner::new(
             agent.provider.clone(),
             agent.tools.values().cloned().collect(),
             dispatcher,
         )
         .with_model_resolver(resolver)
+        .with_workspace(
+            agent.cwd.clone(),
+            agent.workspace_roots.clone(),
+            agent.permission_engine.clone(),
+        )
+        .with_classifier(
+            agent.classifier_provider.clone(),
+            agent.classifier_model.clone(),
+        )
         .with_spawn_policy(
             subagent_defs.to_vec(),
             cfg.orchestration.max_subagent_depth,
             cfg.orchestration.max_concurrent_subagents,
             cfg.orchestration.default_max_duration_secs,
         );
+        if let Some(root) = agent.session.as_ref().and_then(|session| {
+            let writer = session.try_lock().ok()?;
+            writer
+                .path()
+                .parent()?
+                .parent()
+                .map(std::path::Path::to_path_buf)
+        }) {
+            runner = runner.with_session_root(root);
+        }
         agent.subagent_runner = Some(Arc::new(runner));
         agent.subagent_defs = subagent_defs.to_vec();
     }
 }
 
-/// Build a full agent for a session. Used by `run_daemon` (and the TUI's
-/// `--connect` daemon-client mode goes through the daemon side). Sets up
-/// the provider, tools, MCP, personas, skills, subagents, context files,
-/// and pricing.
-///
-/// `writer` / `session_id` come from the daemon's `SessionManager`, which
-/// owns the session directory. The agent is wired to append to that writer.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn switch_session_model(
+    agent: &mut Agent,
+    cfg: &Config,
+    cat: Option<&Catalog>,
+    provider: Arc<dyn mew_provider::Provider>,
+    provider_id: &str,
+    model_id: &str,
+    raw: bool,
+) {
+    agent.provider = provider;
+    agent.set_model_info(model_id, provider_id);
+    apply_model_metadata(agent, cat, model_id);
+    let dispatcher = agent.dispatcher.clone();
+    wire_subagents(agent, cfg, cat, provider_id, raw, dispatcher, &[]);
+    agent.project_vars = mew_context::load_project_vars(&agent.cwd);
+    if let Some(persona) = agent
+        .personas
+        .iter()
+        .find(|persona| Some(persona.name.as_str()) == agent.persona_name.as_deref())
+        .cloned()
+    {
+        agent.apply_persona(&persona);
+    }
+    let context = mew_context::Loader::new(&agent.cwd)
+        .load()
+        .unwrap_or_default();
+    rebuild_session_system(agent, &context);
+}
+
+/// Build a full agent for a session. Used by the daemon builder.
+/// The session manager supplies its writer, identity, and project directory.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_session_agent(
     cfg: &Config,
@@ -500,7 +524,6 @@ pub(crate) fn build_session_agent(
     writer: Option<SessionWriter>,
     session_id: Option<SessionId>,
     session_cwd: Option<std::path::PathBuf>,
-    browser_enabled: bool,
     dispatcher: Arc<dyn Dispatcher>,
     todos_path: Option<std::path::PathBuf>,
     discovered_extensions: &[mew_ext_broker::DiscoveredExtension],
@@ -530,17 +553,12 @@ pub(crate) fn build_session_agent(
         mew_personas::Loader::with_extra_dirs(cwd.clone(), personas_extra)
     };
     let personas_arc = Arc::new(persona_loader.load().unwrap_or_default());
-    let pending_persona_switch = Arc::new(tokio::sync::Mutex::new(None));
-    let current_persona_name = Arc::new(tokio::sync::RwLock::new(None));
     let template_ctx: Arc<tokio::sync::RwLock<Option<mew_prompts::template::TemplateContext>>> =
         Arc::new(tokio::sync::RwLock::new(None));
     let mut tools = build_tools(
         skills.clone(),
         skill_filter.clone(),
         template_ctx.clone(),
-        personas_arc.clone(),
-        pending_persona_switch.clone(),
-        current_persona_name.clone(),
         crate::commands::config::hashline_enabled_for(cfg, provider_id),
         cfg.plan_path.clone(),
     );
@@ -551,15 +569,16 @@ pub(crate) fn build_session_agent(
     let mut tools = tools;
     tools.push(Arc::new(FlagImportant::new(flagged_files.clone())));
 
-    let permission_engine = build_permission_engine(cfg, mode);
+    let permission_engine = build_permission_engine(cfg, mode, &cwd);
 
     let subagent_registry_path = writer
         .as_ref()
         .and_then(|w| w.path().parent().map(|p| p.join("subagent_tasks.json")));
     let mut agent = Agent::new(provider, dispatcher.clone(), writer, tools, session_id);
+    agent.cwd = cwd.clone();
     agent.subagent_registry_path = subagent_registry_path;
-    agent.set_browser_enabled(browser_enabled);
     agent.set_model_info(model_id, provider_id);
+    apply_model_metadata(&mut agent, cat, model_id);
     agent.template_ctx = template_ctx;
     agent.flagged_files = flagged_files;
     agent.secrets = build_secret_set(cfg);
@@ -572,14 +591,10 @@ pub(crate) fn build_session_agent(
     maybe_set_classifier_provider(&mut agent, cfg, cat, raw, provider_id, model_id);
     agent.set_plan_path(&cfg.plan_path);
     agent.set_personas((*personas_arc).clone());
-    agent.set_pending_persona_switch(pending_persona_switch.clone());
-    agent.set_current_persona_name(current_persona_name.clone());
 
     // Enable a persistent shell session so `cd`, `export`, and other
     // state survive across bash tool calls.
-    let shell_session = mew_tools::tools::shell_session::shared_session(
-        std::env::current_dir().unwrap_or_default(),
-    );
+    let shell_session = mew_tools::tools::shell_session::shared_session(cwd.clone());
     agent.set_shell_session(shell_session);
 
     // Wire the fallback-model provider builder.
@@ -595,13 +610,6 @@ pub(crate) fn build_session_agent(
     // the call is safe. When a real dispatcher is wired, this will need to
     // become async — at which point the AgentBuilder type should change.
     // agent.register_plugin_tools().await;
-    // Apply the default persona on startup (non-interactive path — no TUI app).
-    if cfg.default_persona != "none" && cfg.default_persona != "default" {
-        if let Some(persona) = personas_arc.iter().find(|p| p.name == cfg.default_persona) {
-            agent.apply_persona(persona);
-            tracing::info!(persona = %persona.name, "applied default persona on startup");
-        }
-    }
     if cfg.workspace.roots.is_empty() {
         agent.workspace_roots = vec![cwd.clone()];
     } else {
@@ -625,6 +633,24 @@ pub(crate) fn build_session_agent(
     let project_vars = mew_context::load_project_vars(&cwd);
     agent.project_vars = project_vars;
 
+    if !skills.is_empty() {
+        agent.set_skills((*skills).clone());
+    }
+    if cfg.default_persona != "none" && cfg.default_persona != "default" {
+        if let Some(persona) = personas_arc
+            .iter()
+            .find(|persona| persona.name == cfg.default_persona)
+        {
+            agent.apply_persona(persona);
+            tracing::info!(persona = %persona.name, "applied default persona on startup");
+        }
+    }
+    rebuild_session_system(&mut agent, &ctx_files);
+
+    Ok(agent)
+}
+
+fn rebuild_session_system(agent: &mut Agent, ctx_files: &[mew_context::File]) {
     // Build the stable system scaffold by rendering base.md through minijinja.
     // Runtime capability names and schemas are carried by the provider request
     // instead of being repeated in this cacheable instruction block.
@@ -632,7 +658,7 @@ pub(crate) fn build_session_agent(
         let mut tool_names: Vec<String> = agent
             .tools
             .keys()
-            .filter(|name| browser_enabled || !name.starts_with("browser_"))
+            .filter(|name| agent.browser_access.is_available() || !name.starts_with("browser_"))
             .cloned()
             .collect();
         tool_names.sort_unstable();
@@ -668,9 +694,7 @@ pub(crate) fn build_session_agent(
             model_id: agent.model_id.clone(),
             provider_id: agent.provider_id.clone(),
             session_id: agent.session_id.to_string(),
-            cwd: std::env::current_dir()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default(),
+            cwd: agent.cwd.to_string_lossy().into_owned(),
             current_date: mew_prompts::template::TemplateContext::today(),
             tools: tool_names,
             available_skills: mew_prompts::template::SkillInfo::from_skills(&agent.skills),
@@ -686,29 +710,10 @@ pub(crate) fn build_session_agent(
     // Assemble: base prompt → context files → (skills added by rebuild_system)
     let mut system = base_prompt;
     if !ctx_files.is_empty() {
-        let rendered_ctx = render_templated_context_files(&ctx_files, &agent);
+        let rendered_ctx = render_templated_context_files(ctx_files, agent);
         system.push_str(&mew_context::build_system_prompt(&rendered_ctx));
     }
     agent.set_system(system);
-    if !skills.is_empty() {
-        agent.set_skills((*skills).clone());
-    }
-
-    if let Some(c) = cat {
-        agent.supports_vision = c.supports_vision(model_id);
-        agent.context_window = c.context_window(model_id).max(0) as u32;
-        // Default `max_output_tokens` from the catalog, capped at 32K so
-        // models with very large total context (e.g. GPT-5-Codex at 400K
-        // with 128K max output) leave more room for input. 0 means
-        // "unknown" — the agent keeps its existing default of 0 (no
-        // override) so the provider's own default applies.
-        if let Some(raw_max_output) = c.max_output(model_id) {
-            agent.default_max_output_tokens = raw_max_output.min(32_768);
-        }
-        apply_catalog_pricing(&mut agent, cat, model_id);
-    }
-
-    Ok(agent)
 }
 
 /// Assemble the system prompt for a fresh session rooted at `cwd` without
@@ -743,7 +748,6 @@ pub(crate) fn build_system_prompt_snapshot(
             None,
             None,
             Some(cwd.to_path_buf()),
-            false,
             Arc::new(mew_hooks::NopDispatcher),
             None,
             &discovered,
@@ -752,6 +756,10 @@ pub(crate) fn build_system_prompt_snapshot(
     let agent = agent?;
     Ok((agent.system, vfs))
 }
+
+#[cfg(test)]
+#[path = "agent_cwd_tests.rs"]
+mod cwd_tests;
 
 #[cfg(test)]
 mod tests {
@@ -763,6 +771,22 @@ mod tests {
         let provider = Arc::new(FakeProvider::new(vec![]));
         let dispatcher: Arc<dyn mew_hooks::Dispatcher> = Arc::new(mew_hooks::NopDispatcher);
         mew_agent::Agent::new(provider, dispatcher, None, vec![], None)
+    }
+
+    #[test]
+    fn planning_tools_do_not_offer_automatic_persona_transitions() {
+        let tools = build_tools(
+            Arc::new(Vec::new()),
+            Arc::new(tokio::sync::RwLock::new(None)),
+            Arc::new(tokio::sync::RwLock::new(None)),
+            false,
+            "PLAN.md".into(),
+        );
+        let names: Vec<_> = tools.iter().map(|tool| tool.name()).collect();
+        assert!(names.contains(&"write_plan"));
+        assert!(names.contains(&"edit_plan"));
+        assert!(!names.contains(&"handoff_plan"));
+        assert!(!names.contains(&"switch_persona"));
     }
 
     #[test]

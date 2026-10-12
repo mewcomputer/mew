@@ -37,6 +37,8 @@ export type ClientMessage =
   | { type: "new_session"; cwd: string | null; client_kind: string }
   | { type: "attach_session"; session_id: string; client_kind: string }
   | { type: "load_session_history"; session_id: string; before: number; limit?: number }
+  | { type: "read_job_output"; session_id: string; job_id: string; request_id: string; offset: number }
+  | { type: "read_subagent_history"; session_id: string; child_session_id: string; request_id: string }
   | { type: "list_sessions" }
   | { type: "delete_session"; session_id: string }
   | { type: "rename_session"; session_id: string; title: string }
@@ -50,13 +52,8 @@ export type ClientMessage =
       request_id: string;
       decision: PermissionDecision;
     }
-  | { type: "ask_user_response"; request_id: string; answers: string[] }
-  | {
-      type: "plan_approval_response";
-      request_id: string;
-      approved: boolean;
-      feedback?: string;
-    }
+  | { type: "ask_user_response"; request_id: string; answers: string[]; cancelled?: boolean }
+  | { type: "goal_response"; request_id: string; accepted: boolean }
   | { type: "slash_command"; command: string }
   | { type: "list_models" }
   | { type: "switch_model"; provider: string; model: string }
@@ -90,6 +87,7 @@ export type ClientMessage =
       path: string;
       max_bytes?: number;
     }
+  | ({ type: "update_todo"; session_id: string; request_id: string } & TodoEdit)
   | { type: "git_status"; session_id: string }
   | { type: "watch_workspace"; session_id: string; enabled: boolean }
   | { type: "open_path"; session_id: string; path: string }
@@ -205,6 +203,52 @@ export interface MessageError {
   message: string;
 }
 
+export interface SubagentQuestionSource {
+  parent_call_id: string;
+  child_session_id: string;
+  name: string;
+  display_name: string | null;
+}
+
+export interface SubagentActivity {
+  task_id: string;
+  child_session_id: string | null;
+  name: string;
+  display_name: string | null;
+  status: string;
+  tool_name: string | null;
+}
+
+export interface JobActivity {
+  job_id: string;
+  command: string;
+  state: string;
+}
+
+export interface JobOutput {
+  session_id: string;
+  job_id: string;
+  request_id: string;
+  offset: number;
+  next_offset: number;
+  output: string;
+  done: boolean;
+  incomplete: boolean;
+}
+
+export interface JobOutputError {
+  session_id: string;
+  job_id: string;
+  request_id: string;
+  message: string;
+}
+
+export interface SessionActivitySnapshot {
+  session_id: string;
+  subagents: SubagentActivity[];
+  jobs: JobActivity[];
+}
+
 export interface QuestionOption {
   label: string;
   description: string;
@@ -213,6 +257,14 @@ export interface QuestionOption {
 export interface Question {
   prompt: string;
   options: QuestionOption[];
+}
+
+export interface TodoEdit {
+  todo_id: number;
+  expected_content: string;
+  expected_status: string;
+  content: string;
+  status: string;
 }
 
 export interface Todo {
@@ -438,7 +490,7 @@ export type ServerMessage =
   | { type: "session_ready"; session_id: string; cwd?: string; model?: string; provider?: string; permission_mode?: string }
   | { type: "error"; message: string }
   | { type: "provider"; event: ProviderEventWire }
-  | { type: "user_message"; text: string }
+  | { type: "user_message"; text: string; request_id?: string }
   | { type: "tool_start"; call_id: string }
   | { type: "tool_end"; call_id: string; success: boolean }
   | { type: "part_updated"; part_id: string; part: Part }
@@ -453,18 +505,12 @@ export type ServerMessage =
   | { type: "workspace_permission_request"; request_id: string; path: string }
   | {
       type: "ask_user_request";
+      subagent?: SubagentQuestionSource;
       request_id: string;
       call_id: string;
       questions: Question[];
     }
-  | {
-      type: "plan_approval_request";
-      request_id: string;
-      call_id: string;
-      plan_path: string;
-      plan_markdown: string;
-      persona: string;
-    }
+  | { type: "goal_proposed"; request_id: string; call_id: string; objective: string }
   | {
       type: "subagent_start";
       parent_call_id: string;
@@ -493,13 +539,18 @@ export type ServerMessage =
       input: Record<string, unknown>;
     }
   | { type: "todos_updated"; todos: Todo[] }
-  | { type: "persona_switch_requested"; name: string }
+  | { type: "todo_updated"; session_id: string; request_id: string; todos: Todo[] }
+  | { type: "todo_update_error"; session_id: string; request_id: string; message: string }
   | { type: "job_update"; job_id: string; command: string; state: string }
+  | ({ type: "session_activity_snapshot" } & SessionActivitySnapshot)
   | { type: "slash_result"; text: string }
   | { type: "request_resolved"; request_id: string }
   | { type: "session_cleared" }
   | { type: "session_list"; sessions: SessionInfo[] }
   | { type: "session_history"; messages: Message[] }
+  | ({ type: "job_output" } & JobOutput)
+  | ({ type: "job_output_error" } & JobOutputError)
+  | { type: "subagent_history"; session_id: string; child_session_id: string; request_id: string; messages: Message[]; error: string | null }
   | {
       type: "session_history_page";
       session_id: string;
@@ -538,7 +589,7 @@ export type ServerMessage =
       language?: string;
     }
   | { type: "git_status_result"; entries: GitEntry[] }
-  | { type: "fs_changed"; paths: string[] }
+  | { type: "fs_changed"; session_id?: string; paths: string[] }
   | {
       type: "session_usage_changed";
       session_id: string;
@@ -566,7 +617,7 @@ export type ServerMessage =
       pending_permissions: number;
       pending_questions: number;
     }
-  | { type: "pong"; version: string }
+  | { type: "pong"; version: string; protocol_version?: number }
   | { type: "project_list"; projects: ProjectInfo[] }
   | { type: "browser_snapshot"; snapshot: string; url: string; title: string; tab_id?: string }
   | { type: "browser_screenshot"; data: string; url: string; tab_id?: string }
@@ -644,18 +695,12 @@ export interface MewClientEvents {
     respond: (decision: PermissionDecision) => void,
   ) => void;
   "ask-user-request": (data: {
+    subagent?: SubagentQuestionSource;
     request_id: string;
     call_id: string;
     questions: Question[];
   }) => void;
-
-  "plan-approval-request": (data: {
-    request_id: string;
-    call_id: string;
-    plan_path: string;
-    plan_markdown: string;
-    persona: string;
-  }) => void;
+  "goal-proposed": (data: { request_id: string; call_id: string; objective: string }) => void;
 
   "subagent-start": (data: {
     parent_call_id: string;
@@ -674,18 +719,23 @@ export interface MewClientEvents {
     outcome: SubagentOutcome;
     manifests?: TurnManifest[];
   }) => void;
+  "todo-updated": (data: { session_id: string; request_id: string; todos: Todo[] }) => void;
+  "todo-update-error": (data: { session_id: string; request_id: string; message: string }) => void;
   "todos-updated": (data: { todos: Todo[] }) => void;
-  "persona-switch-requested": (data: { name: string }) => void;
   "job-update": (data: {
     job_id: string;
     command: string;
     state: string;
   }) => void;
+  "session-activity-snapshot": (data: SessionActivitySnapshot) => void;
   "slash-result": (data: { text: string }) => void;
   "request-resolved": (data: { request_id: string }) => void;
   "session-cleared": () => void;
   "session-list": (data: { sessions: SessionInfo[] }) => void;
   "session-history": (data: { messages: Message[] }) => void;
+  "job-output": (data: JobOutput) => void;
+  "job-output-error": (data: JobOutputError) => void;
+  "subagent-history": (data: { session_id: string; child_session_id: string; request_id: string; messages: Message[]; error: string | null }) => void;
   "model-list": (data: { models: ModelInfo[] }) => void;
   "model-switched": (data: { provider: string; model: string }) => void;
   "persona-list": (data: { personas: PersonaInfo[] }) => void;
@@ -742,7 +792,7 @@ export interface MewClientEvents {
 
   errorMessage: (data: { message: string }) => void;
   errorEvent: (data: { message: string }) => void;
-  pong: (data: { version: string }) => void;
+  pong: (data: { version: string; protocol_version: number }) => void;
   "project-list": (data: { projects: ProjectInfo[] }) => void;
   "browser-snapshot": (data: { snapshot: string; url: string; title: string; tabId?: string }) => void;
   "browser-screenshot": (data: { data: string; url: string; tabId?: string }) => void;
@@ -922,6 +972,46 @@ export class MewClient {
     this.send({ type: "prompt", text, attachments });
   }
 
+  /** Compare and save one todo; resolve only after the daemon confirms it. */
+  updateTodo(sessionId: string, edit: TodoEdit): Promise<Todo[]> {
+    const requestId = crypto.randomUUID();
+    return new Promise<Todo[]>((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timer);
+        this.off("todo-updated", onSaved);
+        this.off("todo-update-error", onError);
+        this.off("close", onClose);
+      };
+      const onSaved = (data: { session_id: string; request_id: string; todos: Todo[] }) => {
+        if (data.session_id !== sessionId || data.request_id !== requestId) return;
+        cleanup();
+        resolve(data.todos);
+      };
+      const onError = (data: { session_id: string; request_id: string; message: string }) => {
+        if (data.session_id !== sessionId || data.request_id !== requestId) return;
+        cleanup();
+        reject(new Error(data.message));
+      };
+      const onClose = () => {
+        cleanup();
+        reject(new Error("daemon disconnected before confirming todo save"));
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error("todo save was not confirmed; update or reconnect the daemon before retrying"));
+      }, 3000);
+      this.on("todo-updated", onSaved);
+      this.on("todo-update-error", onError);
+      this.on("close", onClose);
+      try {
+        this.send({ type: "update_todo", session_id: sessionId, request_id: requestId, ...edit });
+      } catch (error) {
+        cleanup();
+        reject(error);
+      }
+    });
+  }
+
   /** Send `cancel` to abort the current turn. */
   cancel(): void {
     this.send({ type: "cancel" });
@@ -965,14 +1055,14 @@ export class MewClient {
     this.send({ type: "ask_user_response", request_id, answers });
   }
 
-  /** Respond to a `plan_approval_request`. `approved = false` with optional
-   *  `feedback` requests changes to the plan. */
-  respondToPlanApproval(
-    request_id: string,
-    approved: boolean,
-    feedback?: string,
-  ): void {
-    this.send({ type: "plan_approval_response", request_id, approved, feedback });
+  /** Close one question while leaving the parent turn and other questions active. */
+  cancelAskUser(request_id: string): void {
+    this.send({ type: "ask_user_response", request_id, answers: [], cancelled: true });
+  }
+
+  /** Accept or reject a proposed goal using its original request ID. */
+  respondToGoal(request_id: string, accepted: boolean): void {
+    this.send({ type: "goal_response", request_id, accepted });
   }
 
   /** Attach to an existing session (active or idle). If the session is idle,
@@ -1005,6 +1095,16 @@ export class MewClient {
    *  previous history page. */
   loadSessionHistory(session_id: string, before: number, limit?: number): void {
     this.send({ type: "load_session_history", session_id, before, limit });
+  }
+
+  /** Read the next bounded UTF-8 chunk from a session-owned job. */
+  readJobOutput(session_id: string, job_id: string, request_id: string, offset: number): void {
+    this.send({ type: "read_job_output", session_id, job_id, request_id, offset });
+  }
+
+  /** Request a recorded child transcript without changing the attached session. */
+  readSubagentHistory(session_id: string, child_session_id: string, request_id: string): void {
+    this.send({ type: "read_subagent_history", session_id, child_session_id, request_id });
   }
 
   /** List all sessions known to the daemon (active + persisted idle).
@@ -1308,18 +1408,17 @@ export class MewClient {
         break;
       case "ask_user_request":
         this.emit("ask-user-request", {
+          ...(msg.subagent ? { subagent: msg.subagent } : {}),
           request_id: msg.request_id,
           call_id: msg.call_id,
           questions: msg.questions,
         });
         break;
-      case "plan_approval_request":
-        this.emit("plan-approval-request", {
+      case "goal_proposed":
+        this.emit("goal-proposed", {
           request_id: msg.request_id,
           call_id: msg.call_id,
-          plan_path: msg.plan_path,
-          plan_markdown: msg.plan_markdown,
-          persona: msg.persona,
+          objective: msg.objective,
         });
         break;
       case "subagent_permission_request":
@@ -1356,17 +1455,27 @@ export class MewClient {
           manifests: msg.manifests ?? [],
         });
         break;
+      case "todo_updated":
+        this.emit("todo-updated", msg);
+        break;
+      case "todo_update_error":
+        this.emit("todo-update-error", msg);
+        break;
       case "todos_updated":
         this.emit("todos-updated", { todos: msg.todos });
-        break;
-      case "persona_switch_requested":
-        this.emit("persona-switch-requested", { name: msg.name });
         break;
       case "job_update":
         this.emit("job-update", {
           job_id: msg.job_id,
           command: msg.command,
           state: msg.state,
+        });
+        break;
+      case "session_activity_snapshot":
+        this.emit("session-activity-snapshot", {
+          session_id: msg.session_id,
+          subagents: msg.subagents,
+          jobs: msg.jobs,
         });
         break;
       case "slash_result":
@@ -1384,6 +1493,15 @@ export class MewClient {
       case "session_history":
         this.sessionHistoryMessages = msg.messages;
         this.emit("session-history", { messages: msg.messages });
+        break;
+      case "job_output":
+        this.emit("job-output", { session_id: msg.session_id, job_id: msg.job_id, request_id: msg.request_id, offset: msg.offset, next_offset: msg.next_offset, output: msg.output, done: msg.done, incomplete: msg.incomplete });
+        break;
+      case "job_output_error":
+        this.emit("job-output-error", { session_id: msg.session_id, job_id: msg.job_id, request_id: msg.request_id, message: msg.message });
+        break;
+      case "subagent_history":
+        this.emit("subagent-history", { session_id: msg.session_id, child_session_id: msg.child_session_id, request_id: msg.request_id, messages: msg.messages, error: msg.error });
         break;
       case "session_history_page": {
         const messages = msg.replace
@@ -1523,7 +1641,7 @@ export class MewClient {
         this.emit("errorEvent", { message: msg.message });
         break;
       case "pong":
-        this.emit("pong", { version: msg.version });
+        this.emit("pong", { version: msg.version, protocol_version: msg.protocol_version ?? 0 });
         break;
       case "project_list":
         this.emit("project-list", { projects: msg.projects });

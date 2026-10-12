@@ -11,7 +11,9 @@ import type {
   SessionInfo,
   Message,
   Question,
+  SubagentQuestionSource,
   SubagentOutcome,
+  SessionActivitySnapshot,
   TurnManifest,
   Todo as WireTodo,
   GroupInfo,
@@ -126,17 +128,16 @@ export interface SubagentInfo {
 }
 
 export interface PendingAskUser {
+  subagent?: SubagentQuestionSource;
   requestId: string;
   callId: string;
   questions: Question[];
 }
 
-export interface PendingPlanApproval {
+export interface PendingGoal {
   requestId: string;
   callId: string;
-  planPath: string;
-  planMarkdown: string;
-  persona: string;
+  objective: string;
 }
 
 export interface TodoItem {
@@ -240,9 +241,8 @@ interface SessionState {
 
   // Ask-user requests
   pendingAskUser: PendingAskUser[];
+  pendingGoals: PendingGoal[];
 
-  // Plan-approval requests (handoff_plan)
-  pendingPlanApprovals: PendingPlanApproval[];
 
   // Todo list
   todos: TodoItem[];
@@ -323,24 +323,17 @@ interface SessionState {
   onSubagentEnd: (data: { parent_call_id: string; child_session_id: string; outcome: SubagentOutcome; manifests?: TurnManifest[] }) => void;
 
   // Ask-user actions
-  onAskUserRequest: (data: { request_id: string; call_id: string; questions: Question[] }) => void;
+  onAskUserRequest: (data: { request_id: string; call_id: string; questions: Question[]; subagent?: SubagentQuestionSource }) => void;
   resolveAskUser: (requestId: string) => void;
-
-  // Plan-approval actions
-  onPlanApprovalRequest: (data: {
-    request_id: string;
-    call_id: string;
-    plan_path: string;
-    plan_markdown: string;
-    persona: string;
-  }) => void;
-  resolvePlanApproval: (requestId: string) => void;
+  onGoalProposed: (data: { request_id: string; call_id: string; objective: string }) => void;
+  resolveGoal: (requestId: string) => void;
 
   // Todo actions
   onTodosUpdated: (todos: WireTodo[]) => void;
 
   // Job actions
   onJobUpdate: (data: { jobId: string; command: string; state: string }) => void;
+  onSessionActivitySnapshot: (data: SessionActivitySnapshot) => void;
 
   // Daemon version
   setDaemonVersion: (version: string) => void;
@@ -397,7 +390,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   flaggedFiles: [],
   subagents: new Map(),
   pendingAskUser: [],
-  pendingPlanApprovals: [],
+  pendingGoals: [],
   todos: [],
   jobs: new Map(),
   daemonVersion: null,
@@ -783,7 +776,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   onPermissionRequest: (req) =>
-    set((s) => ({ pendingPermissions: [...s.pendingPermissions, req] })),
+    set((s) => ({
+      pendingPermissions: [...s.pendingPermissions.filter((p) => p.requestId !== req.requestId), req],
+    })),
 
   resolvePermission: (requestId) =>
     set((s) => ({
@@ -1009,7 +1004,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       streamingReasoningText: "",
       toolStates: new Map(),
       toolOutputs: new Map(),
-      pendingPermissions: [],
     }),
 
   onSessionCleared: () =>
@@ -1023,7 +1017,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       toolOutputs: new Map(),
       pendingPermissions: [],
       pendingAskUser: [],
-      pendingPlanApprovals: [],
+      pendingGoals: [],
       subagents: new Map(),
       todos: [],
       jobs: new Map(),
@@ -1082,11 +1076,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   onAskUserRequest: (data) =>
     set((s) => ({
       pendingAskUser: [
-        ...s.pendingAskUser,
+        ...s.pendingAskUser.filter((a) => a.requestId !== data.request_id),
         {
           requestId: data.request_id,
           callId: data.call_id,
           questions: data.questions,
+          subagent: data.subagent,
         },
       ],
     })),
@@ -1096,26 +1091,16 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       pendingAskUser: s.pendingAskUser.filter((a) => a.requestId !== requestId),
     })),
 
-  onPlanApprovalRequest: (data) =>
+  onGoalProposed: (data) =>
     set((s) => ({
-      pendingPlanApprovals: [
-        ...s.pendingPlanApprovals,
-        {
-          requestId: data.request_id,
-          callId: data.call_id,
-          planPath: data.plan_path,
-          planMarkdown: data.plan_markdown,
-          persona: data.persona,
-        },
+      pendingGoals: [
+        ...s.pendingGoals.filter((goal) => goal.requestId !== data.request_id),
+        { requestId: data.request_id, callId: data.call_id, objective: data.objective },
       ],
     })),
 
-  resolvePlanApproval: (requestId) =>
-    set((s) => ({
-      pendingPlanApprovals: s.pendingPlanApprovals.filter(
-        (a) => a.requestId !== requestId,
-      ),
-    })),
+  resolveGoal: (requestId) =>
+    set((s) => ({ pendingGoals: s.pendingGoals.filter((goal) => goal.requestId !== requestId) })),
 
   onTodosUpdated: (wireTodos) =>
     set({
@@ -1148,6 +1133,30 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       return { jobs };
     }),
 
+  onSessionActivitySnapshot: (data) =>
+    set((state) => {
+      if (data.session_id !== state.sessionId) return {};
+      const subagents = new Map<string, SubagentInfo>();
+      for (const task of data.subagents) {
+        const previous = state.subagents.get(task.task_id);
+        const sameChild = previous?.childSessionId === task.child_session_id;
+        subagents.set(task.task_id, {
+          parentCallId: task.task_id,
+          childSessionId: task.child_session_id ?? "",
+          name: task.name,
+          displayName: task.display_name,
+          status: task.status as SubagentInfo["status"],
+          lastProgress: task.tool_name ?? (sameChild ? previous.lastProgress : null),
+          outcome: sameChild ? previous.outcome : null,
+          manifests: sameChild ? previous.manifests : [],
+        });
+      }
+      const jobs = new Map(data.jobs.map((job) => [job.job_id, {
+        jobId: job.job_id, command: job.command, state: job.state,
+      }]));
+      return { subagents, jobs };
+    }),
+
   setDaemonVersion: (version) => set({ daemonVersion: version }),
 
   onProjectList: (projects) => set({ projects, projectsLoading: false }),
@@ -1173,7 +1182,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       toolOutputs: new Map(),
       pendingPermissions: [],
       pendingAskUser: [],
-      pendingPlanApprovals: [],
+      pendingGoals: [],
       subagents: new Map(),
       todos: [],
       jobs: new Map(),
@@ -1214,7 +1223,14 @@ export function bridgeClientToStore(client: MewClient) {
 
   client.on("session-ready", (data) => {
     store.getState().setSessionId(data.session_id);
-    useSessionStore.setState({ sessionCwd: data.cwd ?? null });
+    useSessionStore.setState({
+      sessionCwd: data.cwd ?? null,
+      pendingPermissions: [],
+      pendingAskUser: [],
+      pendingGoals: [],
+    });
+    permissionResponders.clear();
+    askUserResponders.clear();
     if (data.model && data.provider) {
       store.getState().setCurrentModel(data.provider, data.model);
     }
@@ -1267,16 +1283,14 @@ export function bridgeClientToStore(client: MewClient) {
   client.on("slash-result", (data) => store.getState().onSlashResult(data.text));
 
   client.on("subagent-start", (data) => store.getState().onSubagentStart(data));
+  client.on("session-activity-snapshot", (data) => store.getState().onSessionActivitySnapshot(data));
   client.on("subagent-status", (data) => store.getState().onSubagentStatus(data));
   client.on("subagent-end", (data) => store.getState().onSubagentEnd(data));
 
   client.on("ask-user-request", (data) => {
     store.getState().onAskUserRequest(data);
   });
-
-  client.on("plan-approval-request", (data) => {
-    store.getState().onPlanApprovalRequest(data);
-  });
+  client.on("goal-proposed", (data) => store.getState().onGoalProposed(data));
 
   client.on("todos-updated", (data) => store.getState().onTodosUpdated(data.todos));
 
@@ -1310,9 +1324,6 @@ export function bridgeClientToStore(client: MewClient) {
   );
   client.on("control-yielded", (data) =>
     store.getState().onControlYielded(data.client_id),
-  );
-  client.on("persona-switch-requested", (data) =>
-    store.getState().setCurrentPersona(data.name),
   );
   client.on("persona-list", (data) =>
     store.getState().setAvailablePersonas(data.personas),
@@ -1410,6 +1421,10 @@ export function bridgeClientToStore(client: MewClient) {
   client.on("session-cleared", () => store.getState().onSessionCleared());
   client.on("request-resolved", (data) => {
     store.getState().resolvePermission(data.request_id);
+    store.getState().resolveAskUser(data.request_id);
+    store.getState().resolveGoal(data.request_id);
+    permissionResponders.delete(data.request_id);
+    askUserResponders.delete(data.request_id);
   });
 
   const handleDaemonError = (data: { message: string }) => {

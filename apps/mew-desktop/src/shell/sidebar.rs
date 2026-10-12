@@ -1,6 +1,70 @@
 use super::*;
 
 impl DesktopShell {
+    fn render_sidebar_filters(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        div()
+            .flex()
+            .gap(px(3.))
+            .flex_wrap()
+            .children(
+                [
+                    (SidebarFilter::All, "all", "All"),
+                    (SidebarFilter::Running, "running", "Running"),
+                    (SidebarFilter::Attention, "attention", "Attention"),
+                ]
+                .into_iter()
+                .map(|(filter, id, label)| {
+                    let selected = self.sidebar_filter == filter;
+                    let title = if filter == SidebarFilter::All {
+                        label.to_owned()
+                    } else {
+                        let count = self
+                            .model
+                            .ui
+                            .conversations
+                            .iter()
+                            .filter(|conversation| filter.matches(conversation))
+                            .count();
+                        format!("{label} {count}")
+                    };
+                    div()
+                        .id(format!("sidebar-filter-{id}"))
+                        .flex_none()
+                        .px(px(5.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .h(px(28.))
+                        .rounded(px(5.))
+                        .text_xs()
+                        .text_color(theme_rgb(
+                            &self.theme,
+                            if selected { "text.body" } else { "text.muted" },
+                        ))
+                        .when(selected, |element| {
+                            element.bg(theme_rgb(&self.theme, "muted"))
+                        })
+                        .cursor_pointer()
+                        .role(Role::Button)
+                        .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+                        .aria_selected(selected)
+                        .aria_label(SharedString::from(title.clone()))
+                        .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
+                        .on_click(cx.listener(move |shell, _, _, cx| {
+                            shell.sidebar_filter = filter;
+                            shell.sidebar_keyboard_session = None;
+                            shell.session_menu_session = None;
+                            shell.workspace_open_menu = None;
+                            shell.rebuild_sidebar_rows();
+                            shell.sidebar_list.reset(shell.sidebar_rows.len());
+                            cx.notify();
+                        }))
+                        .child(SharedString::from(title))
+                }),
+            )
+            .into_any_element()
+    }
+
     pub(super) fn sidebar_key_down(
         &mut self,
         event: &gpui::KeyDownEvent,
@@ -178,6 +242,7 @@ impl DesktopShell {
                     pinned,
                     count,
                     collapsed,
+                    collapsible,
                 } => {
                     let workspace_id = if path.is_empty() {
                         "other".to_owned()
@@ -211,28 +276,31 @@ impl DesktopShell {
                                     .flex_1()
                                     .min_w_0()
                                     .h_full()
-                                    .cursor_pointer()
-                                    .role(Role::Button)
-                                    .aria_expanded(!collapsed)
-                                    .aria_label(SharedString::from(format!(
-                                        "{} workspace, {} tasks, {}",
-                                        name,
-                                        count,
-                                        if collapsed { "collapsed" } else { "expanded" }
-                                    )))
-                                    .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                                    .on_click(cx.listener(move |shell, _, _, cx| {
-                                        shell.toggle_group(toggle_path.clone(), cx);
-                                    }))
-                                    .child(tabler_icon(
-                                        if collapsed {
-                                            TablerIcon::ChevronRight
-                                        } else {
-                                            TablerIcon::ChevronDown
-                                        },
-                                        theme_rgb(&self.theme, "text.muted"),
-                                        px(13.),
-                                    ))
+                                    .when(collapsible, |element| {
+                                        element
+                                            .cursor_pointer()
+                                            .role(Role::Button)
+                                            .aria_expanded(!collapsed)
+                                            .aria_label(SharedString::from(format!(
+                                                "{} workspace, {} tasks, {}",
+                                                name,
+                                                count,
+                                                if collapsed { "collapsed" } else { "expanded" }
+                                            )))
+                                            .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+                                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                                shell.toggle_group(toggle_path.clone(), cx);
+                                            }))
+                                            .child(tabler_icon(
+                                                if collapsed {
+                                                    TablerIcon::ChevronRight
+                                                } else {
+                                                    TablerIcon::ChevronDown
+                                                },
+                                                theme_rgb(&self.theme, "text.muted"),
+                                                px(13.),
+                                            ))
+                                    })
                                     .child(tabler_icon(
                                         TablerIcon::Folder,
                                         theme_rgb(&self.theme, "text.muted"),
@@ -667,6 +735,8 @@ impl DesktopShell {
                         theme_rgb(&self.theme, "yellow.fg")
                     } else if conversation.last_turn_failed {
                         theme_rgb(&self.theme, "red.fg")
+                    } else if conversation.unread_completion {
+                        theme_rgb(&self.theme, "green.fg")
                     } else if selected {
                         theme_rgb(&self.theme, "text.body")
                     } else {
@@ -678,6 +748,8 @@ impl DesktopShell {
                         Some("running")
                     } else if conversation.last_turn_failed {
                         Some("failed")
+                    } else if conversation.unread_completion {
+                        Some("completed")
                     } else {
                         None
                     };
@@ -1417,6 +1489,7 @@ impl DesktopShell {
                 .gap(px(10.))
                 .p(px(16.))
                 .child(self.render_sidebar_search(cx))
+                .child(self.render_sidebar_filters(cx))
                 .child(
                     div()
                         .flex()
@@ -1446,7 +1519,8 @@ impl DesktopShell {
                                 ),
                         )
                         .when(
-                            !self.sidebar_search.trim().is_empty()
+                            (!self.sidebar_search.trim().is_empty()
+                                || self.sidebar_filter != SidebarFilter::All)
                                 && !self
                                     .sidebar_rows
                                     .iter()
@@ -1458,7 +1532,13 @@ impl DesktopShell {
                                         .pb(px(8.))
                                         .text_xs()
                                         .text_color(theme_rgb(&self.theme, "text.muted"))
-                                        .child("No matching sessions"),
+                                        .child(if !self.sidebar_search.trim().is_empty() {
+                                            "No matching sessions"
+                                        } else if self.sidebar_filter == SidebarFilter::Running {
+                                            "No running tasks"
+                                        } else {
+                                            "No tasks need attention"
+                                        }),
                                 )
                             },
                         ),

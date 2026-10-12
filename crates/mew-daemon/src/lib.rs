@@ -24,19 +24,20 @@
 //! with that ID, and when the frontend responds with the same ID the
 //! daemon retrieves the `oneshot` and sends the decision back.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
-use mew_agent::{Agent, AgentEvent, GoalDecision, PlanDecision};
+use mew_agent::{Agent, AgentEvent, GoalDecision};
 use mew_protocol::{
     ClientKind, ClientMessage, Question, QuestionOption, RemoteScope, ServerMessage, SessionState,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, UnixListener};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio_tungstenite::accept_async;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -44,7 +45,15 @@ use tungstenite::Message;
 
 const HISTORY_PAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
 
+struct BrowserRegistration {
+    page_instance: String,
+    session: Arc<session::Session>,
+}
+
+mod activity;
 pub mod browser;
+#[cfg(test)]
+mod browser_tests;
 pub mod client;
 pub mod files;
 pub mod groups;
@@ -71,7 +80,8 @@ pub struct AgentBuildParams {
     pub session_id: String,
     pub writer: mew_session::Writer,
     pub cwd: Option<std::path::PathBuf>,
-    pub browser_enabled: bool,
+    /// Complete saved runtime choices; None uses startup defaults for legacy sessions.
+    pub policy: Option<mew_session::SessionPolicy>,
 }
 
 /// Type alias for the agent-builder closure. The daemon calls this once
@@ -366,10 +376,10 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
                 | ClientMessage::SetAutoTitle { .. }
                 | ClientMessage::SetAutoSummary { .. }
                 | ClientMessage::Prompt { .. }
+                | ClientMessage::SubmitPrompt { .. }
                 | ClientMessage::Cancel
                 | ClientMessage::PermissionResponse { .. }
                 | ClientMessage::AskUserResponse { .. }
-                | ClientMessage::PlanApprovalResponse { .. }
                 | ClientMessage::GoalResponse { .. }
                 | ClientMessage::SlashCommand { .. }
                 | ClientMessage::ListModels
@@ -387,6 +397,11 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
                 | ClientMessage::ListFilesystemDir { .. }
                 | ClientMessage::ReadFilePreview { .. }
                 | ClientMessage::GitStatus { .. }
+                | ClientMessage::ReadSessionDiff { .. }
+                | ClientMessage::ReadSubagentHistory { .. }
+                | ClientMessage::ReadJobOutput { .. }
+                | ClientMessage::ReadPromptReceipt { .. }
+                | ClientMessage::UpdateTodo { .. }
                 | ClientMessage::WatchWorkspace { .. }
                 | ClientMessage::OpenPath { .. }
                 | ClientMessage::UnflagFile { .. }
@@ -423,6 +438,10 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
             | ClientMessage::ListFilesystemDir { .. }
             | ClientMessage::ReadFilePreview { .. }
             | ClientMessage::GitStatus { .. }
+            | ClientMessage::ReadSessionDiff { .. }
+            | ClientMessage::ReadSubagentHistory { .. }
+            | ClientMessage::ReadJobOutput { .. }
+            | ClientMessage::ReadPromptReceipt { .. }
             | ClientMessage::WatchWorkspace { .. }
     );
     if observe {
@@ -433,10 +452,10 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
         && matches!(
             message,
             ClientMessage::Prompt { .. }
+                | ClientMessage::SubmitPrompt { .. }
                 | ClientMessage::Cancel
                 | ClientMessage::PermissionResponse { .. }
                 | ClientMessage::AskUserResponse { .. }
-                | ClientMessage::PlanApprovalResponse { .. }
                 | ClientMessage::YieldControl { .. }
         )
 }
@@ -477,16 +496,17 @@ async fn detach_connection_client(
         return;
     }
 
-    let session_id = session.id.clone();
-    let session_clone = session.clone();
+    let session = Arc::downgrade(&session);
     let manager = session_manager.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-        if session_clone.client_count().await == 0 {
-            if session_clone.current_turn_cancel.lock().await.is_some() {
-                session_clone.cancel_turn().await;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            let Some(session) = session.upgrade() else {
+                break;
+            };
+            if manager.unload_detached(&session).await {
+                break;
             }
-            manager.remove(&session_id).await;
         }
     });
 }
@@ -517,16 +537,45 @@ async fn watch_workspace(session: Arc<Session>, root: PathBuf, cancel: Cancellat
                 let changed = changed_workspace_paths(&previous, &next);
                 previous = next;
                 if !changed.is_empty() {
-                    session.broadcast(ServerMessage::FsChanged { paths: changed }).await;
+                    session.broadcast(ServerMessage::FsChanged { session_id: session.id.clone(), paths: changed }).await;
                 }
             }
         }
     }
 }
 
-fn workspace_snapshot(
-    root: &std::path::Path,
-) -> std::collections::HashMap<String, (u64, u32, u64)> {
+struct ReviewResponseBudget(usize);
+
+impl std::io::Write for ReviewResponseBudget {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.0 {
+            return Err(std::io::Error::other("review response exceeds size limit"));
+        }
+        self.0 -= bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(PartialEq, Eq)]
+enum WorkspaceStamp {
+    File(u64, u32, u64),
+    Head(Vec<u8>),
+}
+
+fn workspace_file_stamp(metadata: &std::fs::Metadata) -> WorkspaceStamp {
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .unwrap_or_default();
+    WorkspaceStamp::File(modified.as_secs(), modified.subsec_nanos(), metadata.len())
+}
+
+fn workspace_snapshot(root: &std::path::Path) -> std::collections::HashMap<String, WorkspaceStamp> {
     let mut snapshot = std::collections::HashMap::new();
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
@@ -536,38 +585,58 @@ fn workspace_snapshot(
         for entry in entries.flatten() {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
-            if path.is_dir() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
                 if matches!(name.as_str(), ".git" | "target" | "node_modules" | ".venv") {
                     continue;
                 }
                 pending.push(path);
                 continue;
             }
-            let Ok(metadata) = entry.metadata() else {
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
                 continue;
             };
-            let modified = metadata
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                .unwrap_or_default();
             let relative = path
                 .strip_prefix(root)
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .into_owned();
-            snapshot.insert(
-                relative,
-                (modified.as_secs(), modified.subsec_nanos(), metadata.len()),
-            );
+            snapshot.insert(relative, workspace_file_stamp(&metadata));
+        }
+    }
+    // Git resolves symbolic/packed refs and linked worktrees without walking
+    // repository objects. A commit can change review's base without rewriting
+    // any workspace file; index-only operations also need to invalidate review.
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+        .current_dir(root)
+        .output()
+    {
+        if output.status.success() {
+            snapshot.insert(".git/HEAD".into(), WorkspaceStamp::Head(output.stdout));
+        }
+    }
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--git-path", "index"])
+        .current_dir(root)
+        .output()
+    {
+        if output.status.success() {
+            if let Ok(path) = std::str::from_utf8(&output.stdout) {
+                if let Ok(metadata) = std::fs::metadata(path.strip_suffix('\n').unwrap_or(path)) {
+                    snapshot.insert(".git/index".into(), workspace_file_stamp(&metadata));
+                }
+            }
         }
     }
     snapshot
 }
 
 fn changed_workspace_paths(
-    previous: &std::collections::HashMap<String, (u64, u32, u64)>,
-    next: &std::collections::HashMap<String, (u64, u32, u64)>,
+    previous: &std::collections::HashMap<String, WorkspaceStamp>,
+    next: &std::collections::HashMap<String, WorkspaceStamp>,
 ) -> Vec<String> {
     let mut changed = previous
         .keys()
@@ -670,6 +739,12 @@ where
         mpsc::UnboundedReceiver<ServerMessage>,
     ) = mpsc::unbounded_channel();
     let mut attached_session: Option<Arc<Session>> = None;
+    let browser_owner = ulid::Ulid::new().to_string();
+    let connection_lifetime = CancellationToken::new();
+    let mut confirmed_desktop_sessions = std::collections::HashSet::new();
+    let browser_pages = Arc::new(std::sync::Mutex::new(
+        HashMap::<String, BrowserRegistration>::new(),
+    ));
     let mut client_id: Option<u64> = None;
     let mut terminal: Option<terminal::TerminalHandle> = None;
     let mut workspace_watch: Option<CancellationToken> = None;
@@ -720,6 +795,25 @@ where
             }
         };
 
+        if remote_scope.is_some() || remote_authorizer.is_some() || legacy_iroh {
+            if let ClientMessage::RegisterBrowserPage {
+                session_id,
+                page_instance,
+                ..
+            }
+            | ClientMessage::UnregisterBrowserPage {
+                session_id,
+                page_instance,
+            } = &client_msg
+            {
+                reply(ServerMessage::BrowserPageRegistration {
+                    session_id: session_id.clone(),
+                    page_instance: page_instance.clone(),
+                    error: Some("remote connections cannot register a local browser page".into()),
+                });
+                continue;
+            }
+        }
         if remote_scope.is_some() || remote_authorizer.is_some() {
             if !remote_ready {
                 match &client_msg {
@@ -812,6 +906,11 @@ where
         };
 
         match client_msg {
+            ClientMessage::RemoteHello { .. } if legacy_iroh => {
+                reply(ServerMessage::RemoteReady {
+                    scope: RemoteScope::Control,
+                });
+            }
             ClientMessage::RemoteHello { .. } => {
                 reply(ServerMessage::Error {
                     message: "remote authentication is only available over iroh".into(),
@@ -853,7 +952,7 @@ where
                         continue;
                     }
                 }
-                match session_manager.create(cwd.clone(), client_kind).await {
+                match session_manager.create(cwd.clone()).await {
                     Ok(session) => {
                         if let Some(group_id) = requested_group_id.as_deref() {
                             let dir = session_manager.session_dir.clone();
@@ -887,10 +986,7 @@ where
                         if let Some(previous_terminal) = terminal.take() {
                             previous_terminal.close();
                         }
-                        let (cid, was_first, _) =
-                            session.attach_client(client_tx.clone(), client_kind).await;
-                        client_id = Some(cid);
-                        attached_session = Some(session.clone());
+                        let actions = session.pending_action_lock.lock().await;
                         let session_id = session.id.clone();
                         let (model, provider, permission_mode) = {
                             let agent = session.agent.lock().await;
@@ -916,18 +1012,46 @@ where
                                     .await;
                             }
                         }
-                        reply(ServerMessage::SessionReady {
+                        let (cid, was_first) = session
+                            .attach_client_ready(
+                                client_tx.clone(),
+                                client_kind,
+                                ServerMessage::SessionReady {
+                                    session_id: session_id.clone(),
+                                    cwd: cwd.map(|path| path.to_string_lossy().into_owned()),
+                                    model,
+                                    provider,
+                                    permission_mode,
+                                },
+                            )
+                            .await;
+                        client_id = Some(cid);
+                        attached_session = Some(session.clone());
+                        if client_kind == ClientKind::Desktop
+                            && !legacy_iroh
+                            && remote_scope.is_none()
+                            && remote_authorizer.is_none()
+                        {
+                            confirmed_desktop_sessions.insert(session.id.clone());
+                        }
+                        let running = session.is_running.lock().await;
+                        reply(ServerMessage::SessionActivityChanged {
                             session_id,
-                            cwd: cwd.map(|path| path.to_string_lossy().into_owned()),
-                            model,
-                            provider,
-                            permission_mode,
+                            activity: if *running {
+                                SessionState::Running
+                            } else {
+                                SessionState::Idle
+                            },
                         });
+                        drop(running);
+                        session.send_activity(&client_tx).await;
+                        session.send_todos(&client_tx).await;
                         // Report the new session's active thinking variant so
                         // the frontend renders the pill immediately.
                         reply(ServerMessage::ThinkingVariantChanged {
                             variant: thinking_variant,
                         });
+                        drop(actions);
                         // Notify other clients that a new client joined.
                         if !was_first {
                             session
@@ -969,11 +1093,7 @@ where
                         if let Some(previous_terminal) = terminal.take() {
                             previous_terminal.close();
                         }
-                        let (cid, was_first, _) =
-                            session.attach_client(client_tx.clone(), client_kind).await;
-                        let existing_clients = session.client_presence_except(cid).await;
-                        client_id = Some(cid);
-                        attached_session = Some(session.clone());
+                        let actions = session.pending_action_lock.lock().await;
 
                         let (model, provider, permission_mode) = {
                             let agent = session.agent.lock().await;
@@ -991,13 +1111,41 @@ where
                             .session_cwd(&session_id)
                             .await
                             .map(|path| path.to_string_lossy().into_owned());
-                        reply(ServerMessage::SessionReady {
+                        let (cid, was_first) = session
+                            .attach_client_ready(
+                                client_tx.clone(),
+                                client_kind,
+                                ServerMessage::SessionReady {
+                                    session_id: session_id.clone(),
+                                    cwd,
+                                    model,
+                                    provider,
+                                    permission_mode,
+                                },
+                            )
+                            .await;
+                        let existing_clients = session.client_presence_except(cid).await;
+                        client_id = Some(cid);
+                        attached_session = Some(session.clone());
+                        if client_kind == ClientKind::Desktop
+                            && !legacy_iroh
+                            && remote_scope.is_none()
+                            && remote_authorizer.is_none()
+                        {
+                            confirmed_desktop_sessions.insert(session.id.clone());
+                        }
+                        let running = session.is_running.lock().await;
+                        reply(ServerMessage::SessionActivityChanged {
                             session_id: session_id.clone(),
-                            cwd,
-                            model,
-                            provider,
-                            permission_mode,
+                            activity: if *running {
+                                SessionState::Running
+                            } else {
+                                SessionState::Idle
+                            },
                         });
+                        drop(running);
+                        session.send_activity(&client_tx).await;
+                        session.send_todos(&client_tx).await;
                         // Report the session's current thinking variant so the
                         // frontend renders the pill immediately on attach instead
                         // of showing "no thinking" until the user toggles it.
@@ -1005,25 +1153,39 @@ where
                             variant: thinking_variant,
                         });
 
-                        // Send only the newest history page on attach. Older
-                        // pages are requested by the desktop as the user
-                        // scrolls toward the top of the transcript.
-                        let messages = {
-                            let agent = session.agent.lock().await;
-                            let msgs = agent.messages.lock().await.clone();
-                            msgs
-                        };
-                        let (messages, next_cursor) = history_page(
-                            &messages,
-                            messages.len(),
-                            mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT,
-                        );
-                        reply(ServerMessage::SessionHistoryPage {
-                            session_id: session_id.clone(),
-                            messages,
-                            next_cursor,
-                            replace: true,
-                        });
+                        // The TUI receives the whole transcript in bounded frames.
+                        // Other clients request older pages through the cursor.
+                        match session.history().await {
+                            Ok(messages) => {
+                                let mut before = messages.len();
+                                let mut replace = true;
+                                loop {
+                                    let (page, next_cursor) = history_page(
+                                        &messages,
+                                        before,
+                                        mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT,
+                                    );
+                                    reply(ServerMessage::SessionHistoryPage {
+                                        session_id: session_id.clone(),
+                                        messages: page,
+                                        next_cursor,
+                                        replace,
+                                    });
+                                    match next_cursor {
+                                        Some(cursor) if client_kind == ClientKind::Tui => {
+                                            before = cursor;
+                                            replace = false;
+                                        }
+                                        _ => break,
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                reply(ServerMessage::Error {
+                                    message: format!("failed to load session history: {error:#}"),
+                                });
+                            }
+                        }
 
                         // Replay current flagged-files set so the UI has it
                         // immediately after attach.
@@ -1051,6 +1213,29 @@ where
                             }
                         }
 
+                        let mut permissions = session.pending_permissions.lock().await;
+                        let mut questions = session.pending_ask_user.lock().await;
+                        let mut goals = session.pending_goal_proposals.lock().await;
+                        permissions.retain(|_, request| !request.sender.is_closed());
+                        questions.retain(|_, request| !request.sender.is_closed());
+                        goals.retain(|_, request| !request.sender.is_closed());
+                        for message in permissions
+                            .values()
+                            .map(|request| &request.message)
+                            .chain(questions.values().map(|request| &request.message))
+                            .chain(goals.values().map(|request| &request.message))
+                        {
+                            reply(message.clone());
+                        }
+                        reply(ServerMessage::SessionAttentionChanged {
+                            session_id: session.id.clone(),
+                            pending_permissions: permissions.len() as u32,
+                            pending_questions: (questions.len() + goals.len()) as u32,
+                        });
+                        drop(goals);
+                        drop(questions);
+                        drop(permissions);
+
                         for (existing_id, existing_kind) in existing_clients {
                             reply(ServerMessage::ClientAttached {
                                 client_id: existing_id,
@@ -1058,6 +1243,7 @@ where
                             });
                         }
 
+                        drop(actions);
                         // Notify other clients that a new client joined.
                         if !was_first {
                             session
@@ -1103,10 +1289,14 @@ where
                     });
                     continue;
                 }
-                let messages = {
-                    let agent = session.agent.lock().await;
-                    let messages = agent.messages.lock().await.clone();
-                    messages
+                let messages = match session.history().await {
+                    Ok(messages) => messages,
+                    Err(error) => {
+                        reply(ServerMessage::Error {
+                            message: format!("failed to load session history: {error:#}"),
+                        });
+                        continue;
+                    }
                 };
                 let (messages, next_cursor) = history_page(
                     &messages,
@@ -1120,6 +1310,71 @@ where
                     replace: false,
                 });
             }
+            ClientMessage::ReadJobOutput {
+                session_id,
+                job_id,
+                request_id,
+                offset,
+            } => {
+                let result = match attached_session
+                    .as_ref()
+                    .filter(|session| session.id == session_id)
+                {
+                    Some(session) => {
+                        session
+                            .agent
+                            .lock()
+                            .await
+                            .shell_job_output(&job_id, offset)
+                            .await
+                    }
+                    None => Err("output requires the attached session".to_string()),
+                };
+                reply(match result {
+                    Ok(chunk) => ServerMessage::JobOutput {
+                        session_id,
+                        job_id,
+                        request_id,
+                        offset,
+                        next_offset: chunk.next_offset,
+                        output: chunk.output,
+                        done: chunk.done,
+                        incomplete: chunk.incomplete,
+                    },
+                    Err(message) => ServerMessage::JobOutputError {
+                        session_id,
+                        job_id,
+                        request_id,
+                        message,
+                    },
+                });
+            }
+            ClientMessage::ReadSubagentHistory {
+                session_id,
+                child_session_id,
+                request_id,
+            } => {
+                let result = match attached_session
+                    .as_ref()
+                    .filter(|parent| parent.id == session_id)
+                {
+                    Some(parent) => parent.subagent_history(&child_session_id).await,
+                    None => Err(anyhow::anyhow!(
+                        "history requires the attached parent session"
+                    )),
+                };
+                let (messages, error) = match result {
+                    Ok(messages) => (messages, None),
+                    Err(error) => (Vec::new(), Some(format!("{error:#}"))),
+                };
+                reply(ServerMessage::SubagentHistory {
+                    session_id,
+                    child_session_id,
+                    request_id,
+                    messages,
+                    error,
+                });
+            }
             ClientMessage::ListSessions => {
                 let sessions = session_manager.list().await;
                 reply(ServerMessage::SessionList { sessions });
@@ -1127,6 +1382,11 @@ where
                 reply(ServerMessage::GroupList { groups });
             }
             ClientMessage::DeleteSession { session_id } => {
+                confirmed_desktop_sessions.remove(&session_id);
+                browser_pages
+                    .lock()
+                    .expect("browser registrations lock")
+                    .remove(&session_id);
                 // Remove from active sessions if present.
                 session_manager.remove(&session_id).await;
                 // Delete from disk.
@@ -1222,6 +1482,125 @@ where
                 auto_summary_enabled.store(enabled, std::sync::atomic::Ordering::Relaxed);
                 tracing::info!(auto_summary = enabled, "auto-summary setting changed");
             }
+            ClientMessage::ReadPromptReceipt {
+                session_id,
+                request_id,
+            } => {
+                let session = session_manager
+                    .active
+                    .lock()
+                    .await
+                    .get(&session_id)
+                    .cloned();
+                let receipt = match session {
+                    Some(session) => session
+                        .prompt_receipts
+                        .lock()
+                        .await
+                        .get(&request_id)
+                        .cloned(),
+                    None => None,
+                };
+                let (status, message) = receipt.unwrap_or((mew_protocol::PromptStatus::Unknown, Some("submission could not be confirmed; inspect the conversation before retrying".into())));
+                reply(ServerMessage::PromptReceipt {
+                    session_id,
+                    request_id,
+                    status,
+                    message,
+                });
+            }
+            ClientMessage::SubmitPrompt {
+                session_id,
+                request_id,
+                text,
+                attachments,
+            } => {
+                let Some(session) = attached_session
+                    .clone()
+                    .filter(|session| session.id == session_id)
+                else {
+                    reply(ServerMessage::PromptReceipt {
+                        session_id,
+                        request_id,
+                        status: mew_protocol::PromptStatus::Rejected,
+                        message: Some("the requested conversation is not attached".into()),
+                    });
+                    continue;
+                };
+                let client_tx = client_tx.clone();
+                let session_mgr = session_manager.clone();
+                tokio::spawn(async move {
+                    let mut receipts = session.prompt_receipts.lock().await;
+                    if let Some((status, message)) = receipts.get(&request_id) {
+                        let _ = client_tx.send(ServerMessage::PromptReceipt {
+                            session_id,
+                            request_id,
+                            status: *status,
+                            message: message.clone(),
+                        });
+                        return;
+                    }
+                    let guard = match session.turn_lock.try_lock() {
+                        Ok(guard) => Ok(guard),
+                        Err(error) if *session.is_running.lock().await => Err(error),
+                        Err(_) => Ok(session.turn_lock.lock().await),
+                    };
+                    let error = if text.trim().is_empty() {
+                        Some("the prompt is empty")
+                    } else if request_id.is_empty() || request_id.len() > 128 {
+                        Some("invalid submission request ID")
+                    } else if guard.is_err() {
+                        Some("a turn is already running; your draft is preserved")
+                    } else {
+                        None
+                    };
+                    if let Some(error) = error {
+                        let message = Some(error.to_owned());
+                        if !request_id.is_empty() && request_id.len() <= 128 {
+                            receipts.insert(
+                                request_id.clone(),
+                                (mew_protocol::PromptStatus::Rejected, message.clone()),
+                            );
+                        }
+                        let _ = client_tx.send(ServerMessage::PromptReceipt {
+                            session_id,
+                            request_id,
+                            status: mew_protocol::PromptStatus::Rejected,
+                            message,
+                        });
+                        return;
+                    }
+                    let _guard = guard.expect("validated turn lock");
+                    let token = register_turn(&session).await;
+                    receipts.insert(
+                        request_id.clone(),
+                        (mew_protocol::PromptStatus::Accepted, None),
+                    );
+                    drop(receipts);
+                    let _ = client_tx.send(ServerMessage::PromptReceipt {
+                        session_id,
+                        request_id: request_id.clone(),
+                        status: mew_protocol::PromptStatus::Accepted,
+                        message: None,
+                    });
+                    session
+                        .broadcast(ServerMessage::UserMessage {
+                            text: text.clone(),
+                            request_id: Some(request_id),
+                        })
+                        .await;
+                    finish_prompt_turn(
+                        &session,
+                        &session_mgr,
+                        text,
+                        attachments,
+                        auto_title_enabled,
+                        _guard,
+                        token,
+                    )
+                    .await;
+                });
+            }
             ClientMessage::Prompt { text, attachments } => {
                 let Some(session) = attached_session.clone() else {
                     reply(ServerMessage::Error {
@@ -1232,7 +1611,10 @@ where
                 // Broadcast the user message to all attached clients.
                 // The sending client deduplicates by matching text content.
                 session
-                    .broadcast(ServerMessage::UserMessage { text: text.clone() })
+                    .broadcast(ServerMessage::UserMessage {
+                        text: text.clone(),
+                        request_id: None,
+                    })
                     .await;
                 let client_tx = client_tx.clone();
                 let session_mgr = session_manager.clone();
@@ -1245,43 +1627,24 @@ where
                         });
                         return;
                     }
-                    let agent = session.agent.lock().await.clone();
-                    let prompt_text = text.clone();
-                    let auto_title = auto_title_enabled;
-                    let had_error =
-                        run_turn(&session, &session_mgr, &agent, text, attachments).await;
-
-                    // Generate a session title from the first user message
-                    // if we haven't already. Uses a lightweight LLM call;
-                    // falls back to text truncation on error. Skipped if the
-                    // user has disabled auto-title generation.
-                    if auto_title && !had_error {
-                        let has_existing_title = agent
-                            .session_meta()
-                            .await
-                            .and_then(|meta| meta.custom_title)
-                            .is_some();
-                        let mut generated = session.title_generated.lock().await;
-                        if !*generated && !has_existing_title {
-                            *generated = true;
-                            drop(generated);
-
-                            let title = generate_session_title(&agent, &prompt_text).await;
-                            if let Ok(Some(mut meta)) =
-                                mew_session::Meta::read(&session.session_dir, &session.id).await
-                            {
-                                let _ = meta
-                                    .set_custom_title(&session.session_dir, title.clone())
-                                    .await;
-                            }
-                            session_mgr.broadcast_title(&session.id, title).await;
-                        }
-                    }
+                    let token = register_turn(&session).await;
+                    finish_prompt_turn(
+                        &session,
+                        &session_mgr,
+                        text,
+                        attachments,
+                        auto_title_enabled,
+                        _guard,
+                        token,
+                    )
+                    .await;
                 });
             }
             ClientMessage::Cancel => {
                 if let Some(session) = &attached_session {
                     session.cancel_turn().await;
+                    let _actions = session.pending_action_lock.lock().await;
+                    broadcast_attention(session, &session_manager).await;
                 }
             }
             ClientMessage::Guide { text } => {
@@ -1302,7 +1665,12 @@ where
                 agent.enqueue_guidance(text.clone()).await;
                 drop(agent);
                 // Broadcast so all attached clients render the guidance.
-                session.broadcast(ServerMessage::UserMessage { text }).await;
+                session
+                    .broadcast(ServerMessage::UserMessage {
+                        text,
+                        request_id: None,
+                    })
+                    .await;
             }
             ClientMessage::TerminalOpen { rows, cols } => {
                 let Some(session) = attached_session.clone() else {
@@ -1431,6 +1799,7 @@ where
             ClientMessage::Ping => {
                 reply(ServerMessage::Pong {
                     version: env!("CARGO_PKG_VERSION").to_string(),
+                    protocol_version: mew_protocol::PROTOCOL_VERSION,
                 });
             }
             ClientMessage::ListProjects => {
@@ -1472,81 +1841,34 @@ where
                 decision,
             } => {
                 if let Some(session) = &attached_session {
-                    let tx = session.pending_permissions.lock().await.remove(&request_id);
-                    if let Some(tx) = tx {
-                        let _ = tx.send(decision.into());
+                    let _actions = session.pending_action_lock.lock().await;
+                    let request = session.pending_permissions.lock().await.remove(&request_id);
+                    if let Some(request) = request {
+                        let _ = request.sender.send(decision.into());
+                        session
+                            .broadcast(ServerMessage::RequestResolved { request_id })
+                            .await;
+                        broadcast_attention(session, &session_manager).await;
                     }
-                    session
-                        .broadcast(ServerMessage::RequestResolved { request_id })
-                        .await;
-                    // Broadcast updated attention count.
-                    let perm_count = session.pending_permissions.lock().await.len() as u32;
-                    let q_count = session.pending_questions_count().await;
-                    session_manager
-                        .broadcast_all(ServerMessage::SessionAttentionChanged {
-                            session_id: session.id.clone(),
-                            pending_permissions: perm_count,
-                            pending_questions: q_count,
-                        })
-                        .await;
                 }
             }
             ClientMessage::AskUserResponse {
                 request_id,
                 answers,
+                cancelled,
             } => {
                 if let Some(session) = &attached_session {
-                    let tx = session.pending_ask_user.lock().await.remove(&request_id);
-                    if let Some(tx) = tx {
-                        let _ = tx.send(answers);
+                    let _actions = session.pending_action_lock.lock().await;
+                    let request = session.pending_ask_user.lock().await.remove(&request_id);
+                    if let Some(request) = request {
+                        if !cancelled {
+                            let _ = request.sender.send(answers);
+                        }
+                        session
+                            .broadcast(ServerMessage::RequestResolved { request_id })
+                            .await;
+                        broadcast_attention(session, &session_manager).await;
                     }
-                    session
-                        .broadcast(ServerMessage::RequestResolved { request_id })
-                        .await;
-                    // Broadcast updated attention count.
-                    let perm_count = session.pending_permissions.lock().await.len() as u32;
-                    let q_count = session.pending_questions_count().await;
-                    session_manager
-                        .broadcast_all(ServerMessage::SessionAttentionChanged {
-                            session_id: session.id.clone(),
-                            pending_permissions: perm_count,
-                            pending_questions: q_count,
-                        })
-                        .await;
-                }
-            }
-            ClientMessage::PlanApprovalResponse {
-                request_id,
-                approved,
-                feedback,
-            } => {
-                if let Some(session) = &attached_session {
-                    let tx = session
-                        .pending_plan_approvals
-                        .lock()
-                        .await
-                        .remove(&request_id);
-                    if let Some(tx) = tx {
-                        let decision = if approved {
-                            PlanDecision::Approved
-                        } else {
-                            PlanDecision::ChangesRequested(feedback.unwrap_or_default())
-                        };
-                        let _ = tx.send(decision);
-                    }
-                    session
-                        .broadcast(ServerMessage::RequestResolved { request_id })
-                        .await;
-                    // Broadcast updated attention count.
-                    let perm_count = session.pending_permissions.lock().await.len() as u32;
-                    let q_count = session.pending_questions_count().await;
-                    session_manager
-                        .broadcast_all(ServerMessage::SessionAttentionChanged {
-                            session_id: session.id.clone(),
-                            pending_permissions: perm_count,
-                            pending_questions: q_count,
-                        })
-                        .await;
                 }
             }
             ClientMessage::GoalResponse {
@@ -1554,31 +1876,24 @@ where
                 accepted,
             } => {
                 if let Some(session) = &attached_session {
-                    let tx = session
+                    let _actions = session.pending_action_lock.lock().await;
+                    let request = session
                         .pending_goal_proposals
                         .lock()
                         .await
                         .remove(&request_id);
-                    if let Some(tx) = tx {
+                    if let Some(request) = request {
                         let decision = if accepted {
                             GoalDecision::Accepted
                         } else {
                             GoalDecision::Rejected
                         };
-                        let _ = tx.send(decision);
+                        let _ = request.sender.send(decision);
+                        session
+                            .broadcast(ServerMessage::RequestResolved { request_id })
+                            .await;
+                        broadcast_attention(session, &session_manager).await;
                     }
-                    session
-                        .broadcast(ServerMessage::RequestResolved { request_id })
-                        .await;
-                    let perm_count = session.pending_permissions.lock().await.len() as u32;
-                    let q_count = session.pending_questions_count().await;
-                    session_manager
-                        .broadcast_all(ServerMessage::SessionAttentionChanged {
-                            session_id: session.id.clone(),
-                            pending_permissions: perm_count,
-                            pending_questions: q_count,
-                        })
-                        .await;
                 }
             }
             ClientMessage::SlashCommand { command } => {
@@ -1592,12 +1907,17 @@ where
                 let session_manager_clone = session_manager.clone();
                 tokio::spawn(async move {
                     let _guard = session.turn_lock.lock().await;
+                    let (cmd, _arg) = match command.split_once(' ') {
+                        Some((c, a)) => (c, Some(a)),
+                        None => (command.as_str(), None),
+                    };
+                    let token = if cmd == "/wiki" {
+                        Some(register_turn(&session).await)
+                    } else {
+                        None
+                    };
                     let result = {
                         let agent = session.agent.lock().await;
-                        let (cmd, _arg) = match command.split_once(' ') {
-                            Some((c, a)) => (c, Some(a)),
-                            None => (command.as_str(), None),
-                        };
                         match cmd {
                             "/clear" => {
                                 agent.clear_context().await;
@@ -1685,15 +2005,19 @@ where
                                     Keep it concise (under 200 lines). Use the write tool to create .mew/wiki.md.";
                                 drop(agent);
                                 let wiki_agent = session.agent.lock().await.clone();
+                                let token = token.expect("wiki turn registered");
                                 let had_error = run_turn(
                                     &session,
                                     &session_manager_clone,
                                     &wiki_agent,
                                     wiki_prompt.to_string(),
                                     vec![],
+                                    token.clone(),
                                 )
                                 .await;
-                                if had_error {
+                                if token.is_cancelled() {
+                                    Some("wiki generation cancelled".to_string())
+                                } else if had_error {
                                     Some("wiki generation failed".to_string())
                                 } else {
                                     Some("wiki generated at .mew/wiki.md".to_string())
@@ -1737,19 +2061,16 @@ where
                     let result = match &switcher {
                         Some(switcher) => {
                             let mut agent = session.agent.lock().await;
-                            let switched = switcher(&mut agent, &provider, &model);
-                            // Capture the switched-to model's active thinking
-                            // variant before the agent guard drops.
-                            let variant = agent.active_thinking_variant().map(str::to_owned);
-                            switched.map(|(p, m)| (p, m, variant))
+                            change_session_model(
+                                &session, &mut agent, switcher, &provider, &model, None,
+                            )
+                            .await
                         }
                         None => Err(anyhow::anyhow!("model switching not available")),
                     };
                     match result {
                         Ok((new_provider, new_model, variant)) => {
                             info!(provider = %new_provider, model = %new_model, "model switched");
-                            *session.provider.lock().await = Some(new_provider.clone());
-                            *session.model.lock().await = Some(new_model.clone());
                             session
                                 .broadcast(ServerMessage::ModelSwitched {
                                     provider: new_provider,
@@ -1785,14 +2106,33 @@ where
                         Some(setter) => {
                             let model = session.model.lock().await.clone().unwrap_or_default();
                             let mut agent = session.agent.lock().await;
-                            setter(&mut agent, &model, &variant)
+                            let previous_reasoning = agent.reasoning.clone();
+                            let previous_variant = agent.active_thinking_variant.clone();
+                            let result = match setter(&mut agent, &model, &variant) {
+                                Ok(resolved) => {
+                                    agent.set_active_thinking_variant(resolved.clone());
+                                    session
+                                        .save_policy(&session.policy(&agent).await)
+                                        .await
+                                        .map(|()| resolved)
+                                }
+                                Err(error) => Err(error),
+                            };
+                            if result.is_err() {
+                                agent.set_reasoning(previous_reasoning);
+                                agent.set_active_thinking_variant(previous_variant);
+                            }
+                            result
                         }
                         None => Err(anyhow::anyhow!("thinking variant switching not available")),
                     };
                     match result {
                         Ok(resolved) => {
-                            let _ = client_tx
-                                .send(ServerMessage::ThinkingVariantChanged { variant: resolved });
+                            session
+                                .broadcast(ServerMessage::ThinkingVariantChanged {
+                                    variant: resolved,
+                                })
+                                .await;
                         }
                         Err(e) => {
                             let _ = client_tx.send(ServerMessage::Error {
@@ -1816,10 +2156,18 @@ where
                     let parsed = mew_hooks::PermissionMode::from_id(&mode);
                     match parsed {
                         Some(m) => {
-                            {
-                                let agent = session.agent.lock().await;
-                                agent.set_permission_mode(m);
+                            let agent = session.agent.lock().await;
+                            let mut policy = session.policy(&agent).await;
+                            policy.permission_mode = m.id().to_owned();
+                            if let Err(error) = session.save_policy(&policy).await {
+                                session
+                                    .broadcast(ServerMessage::Error {
+                                        message: format!("failed to set permission mode: {error}"),
+                                    })
+                                    .await;
+                                return;
                             }
+                            agent.set_permission_mode(m);
                             // Broadcast to all attached clients.
                             session
                                 .broadcast(ServerMessage::PermissionModeChanged {
@@ -2037,6 +2385,79 @@ where
                     }),
                 }
             }
+            ClientMessage::UpdateTodo {
+                session_id,
+                request_id,
+                edit,
+            } => {
+                let result = match attached_session
+                    .as_ref()
+                    .filter(|session| session.id == session_id)
+                {
+                    Some(session) => session.update_todo(edit).await,
+                    None => Err(anyhow::anyhow!("todo edits require the attached session")),
+                };
+                reply(match result {
+                    Ok(todos) => ServerMessage::TodoUpdated {
+                        session_id,
+                        request_id,
+                        todos,
+                    },
+                    Err(error) => ServerMessage::TodoUpdateError {
+                        session_id,
+                        request_id,
+                        message: format!("{error:#}"),
+                    },
+                });
+            }
+            ClientMessage::ReadSessionDiff {
+                session_id,
+                request_id,
+            } => {
+                let Some(root) = session_manager.session_cwd(&session_id).await else {
+                    reply(ServerMessage::SessionDiffError {
+                        session_id,
+                        request_id,
+                        message: "session has no workspace".into(),
+                    });
+                    continue;
+                };
+                let client_tx = client_tx.clone();
+                tokio::spawn(async move {
+                    let result =
+                        tokio::task::spawn_blocking(move || mew_diff::load_session_diffs(&root))
+                            .await;
+                    let message = match result {
+                        Ok(Ok(files)) => ServerMessage::SessionDiff {
+                            session_id,
+                            request_id,
+                            files,
+                        },
+                        Ok(Err(error)) => ServerMessage::SessionDiffError {
+                            session_id,
+                            request_id,
+                            message: error.to_string(),
+                        },
+                        Err(error) => ServerMessage::SessionDiffError {
+                            session_id,
+                            request_id,
+                            message: format!("could not load review: {error}"),
+                        },
+                    };
+                    let message = match &message {
+                        ServerMessage::SessionDiff { session_id, request_id, .. }
+                            if serde_json::to_writer(&mut ReviewResponseBudget(HISTORY_PAGE_MAX_BYTES), &message).is_err() => {
+                            ServerMessage::SessionDiffError {
+                                session_id: session_id.clone(),
+                                request_id: request_id.clone(),
+                                message: "workspace changes exceed the review response size limit (8 MiB)".into(),
+                            }
+                        }
+                        _ => message,
+                    };
+                    let _ = client_tx.send(message);
+                });
+            }
             ClientMessage::WatchWorkspace {
                 session_id,
                 enabled,
@@ -2069,202 +2490,135 @@ where
             }
 
             // -- Browser --
-            ClientMessage::BrowserOpen { url, tab_id } => {
-                let Some(session) = attached_session.as_ref() else {
-                    reply(ServerMessage::BrowserError {
-                        message: "attach a session before opening a browser".into(),
-                        tab_id,
-                    });
-                    continue;
-                };
-                if !session.browser_enabled().await {
-                    reply(ServerMessage::BrowserError {
-                        message: "in-app browser is available only in the mew desktop app".into(),
-                        tab_id,
-                    });
-                    continue;
-                }
-                match crate::browser::open(&session.id, &url).await {
-                    Ok((url, title, _)) => reply(ServerMessage::BrowserState {
-                        open: true,
-                        url: Some(url),
-                        title: Some(title),
-                        tab_id,
-                    }),
-                    Err(e) => reply(ServerMessage::BrowserError {
-                        message: format!("browser open: {e}"),
-                        tab_id,
-                    }),
-                }
-            }
-            ClientMessage::BrowserSnapshot { tab_id } => {
-                let Some(session) = attached_session.as_ref() else {
-                    reply(ServerMessage::BrowserError {
-                        message: "attach a session before using the browser".into(),
-                        tab_id,
-                    });
-                    continue;
-                };
-                if !session.browser_enabled().await {
-                    reply(ServerMessage::BrowserError {
-                        message: "in-app browser is available only in the mew desktop app".into(),
-                        tab_id,
-                    });
-                    continue;
-                }
-                match crate::browser::snapshot(&session.id).await {
-                    Ok((snapshot, url, title)) => reply(ServerMessage::BrowserSnapshot {
-                        snapshot,
-                        url,
-                        title,
-                        tab_id,
-                    }),
-                    Err(e) => reply(ServerMessage::BrowserError {
-                        message: format!("browser snapshot: {e}"),
-                        tab_id,
-                    }),
-                }
-            }
-            ClientMessage::BrowserScreenshot { annotate, tab_id } => {
-                let Some(session) = attached_session.as_ref() else {
-                    reply(ServerMessage::BrowserError {
-                        message: "attach a session before using the browser".into(),
-                        tab_id,
-                    });
-                    continue;
-                };
-                if !session.browser_enabled().await {
-                    reply(ServerMessage::BrowserError {
-                        message: "in-app browser is available only in the mew desktop app".into(),
-                        tab_id,
-                    });
-                    continue;
-                }
-                match crate::browser::screenshot(&session.id, annotate).await {
-                    Ok((data, url)) => {
-                        reply(ServerMessage::BrowserScreenshot { data, url, tab_id })
-                    }
-                    Err(e) => reply(ServerMessage::BrowserError {
-                        message: format!("browser screenshot: {e}"),
-                        tab_id,
-                    }),
-                }
-            }
-            ClientMessage::BrowserClick { selector, tab_id } => {
-                let Some(session) = attached_session.as_ref() else {
-                    reply(ServerMessage::BrowserError {
-                        message: "attach a session before using the browser".into(),
-                        tab_id,
-                    });
-                    continue;
-                };
-                if !session.browser_enabled().await {
-                    reply(ServerMessage::BrowserError {
-                        message: "in-app browser is available only in the mew desktop app".into(),
-                        tab_id,
-                    });
-                    continue;
-                }
-                match crate::browser::click(&session.id, &selector).await {
-                    Ok((url, title, _)) => reply(ServerMessage::BrowserState {
-                        open: true,
-                        url: Some(url),
-                        title: Some(title),
-                        tab_id,
-                    }),
-                    Err(e) => reply(ServerMessage::BrowserError {
-                        message: format!("browser click: {e}"),
-                        tab_id,
-                    }),
-                }
-            }
-            ClientMessage::BrowserFill {
-                selector,
-                text,
-                tab_id,
+            ClientMessage::RegisterBrowserPage {
+                session_id,
+                page_instance,
+                cdp_endpoint,
+                target_id,
             } => {
-                let Some(session) = attached_session.as_ref() else {
-                    reply(ServerMessage::BrowserError {
-                        message: "attach a session before using the browser".into(),
-                        tab_id,
+                if !confirmed_desktop_sessions.contains(&session_id)
+                    || legacy_iroh
+                    || remote_scope.is_some()
+                    || remote_authorizer.is_some()
+                {
+                    reply(ServerMessage::BrowserPageRegistration {
+                        session_id,
+                        page_instance,
+                        error: Some(
+                            "browser registration requires a confirmed local desktop session"
+                                .into(),
+                        ),
                     });
                     continue;
+                }
+                let session = match session_manager.attach(&session_id).await {
+                    Ok(session) => session,
+                    Err(error) => {
+                        confirmed_desktop_sessions.remove(&session_id);
+                        browser_pages
+                            .lock()
+                            .expect("browser registrations lock")
+                            .remove(&session_id);
+                        reply(ServerMessage::BrowserPageRegistration {
+                            session_id,
+                            page_instance,
+                            error: Some(format!("browser session is unavailable: {error}")),
+                        });
+                        continue;
+                    }
                 };
-                if !session.browser_enabled().await {
-                    reply(ServerMessage::BrowserError {
-                        message: "in-app browser is available only in the mew desktop app".into(),
-                        tab_id,
+                let preparation = session.browser_access.register(
+                    &browser_owner,
+                    mew_tools::browser::BrowserTarget {
+                        page_instance: page_instance.clone(),
+                        cdp_endpoint,
+                        target_id,
+                    },
+                );
+                if session
+                    .browser_access
+                    .is_registered(&browser_owner, &page_instance)
+                {
+                    browser_pages
+                        .lock()
+                        .expect("browser registrations lock")
+                        .insert(
+                            session_id.clone(),
+                            BrowserRegistration {
+                                page_instance: page_instance.clone(),
+                                session: session.clone(),
+                            },
+                        );
+                }
+                let lifetime = connection_lifetime.clone();
+                let client_tx = client_tx.clone();
+                let pages = browser_pages.clone();
+                let access = session.browser_access.clone();
+                let owner = browser_owner.clone();
+                tokio::spawn(async move {
+                    let result = tokio::select! {
+                        biased;
+                        _ = lifetime.cancelled() => Err("desktop connection closed".to_owned()),
+                        result = preparation => result,
+                    };
+                    if result.is_err() {
+                        let mut pages = pages.lock().expect("browser registrations lock");
+                        if pages
+                            .get(&session_id)
+                            .is_some_and(|registered| registered.page_instance == page_instance)
+                            && !access.is_registered(&owner, &page_instance)
+                        {
+                            pages.remove(&session_id);
+                        }
+                    }
+                    let _ = client_tx.send(ServerMessage::BrowserPageRegistration {
+                        session_id,
+                        page_instance,
+                        error: result.err(),
                     });
-                    continue;
-                }
-                match crate::browser::fill(&session.id, &selector, &text).await {
-                    Ok((url, title, _)) => reply(ServerMessage::BrowserState {
-                        open: true,
-                        url: Some(url),
-                        title: Some(title),
-                        tab_id,
-                    }),
-                    Err(e) => reply(ServerMessage::BrowserError {
-                        message: format!("browser fill: {e}"),
-                        tab_id,
-                    }),
-                }
+                });
             }
-            ClientMessage::BrowserPress { key, tab_id } => {
-                let Some(session) = attached_session.as_ref() else {
-                    reply(ServerMessage::BrowserError {
-                        message: "attach a session before using the browser".into(),
-                        tab_id,
-                    });
-                    continue;
-                };
-                if !session.browser_enabled().await {
-                    reply(ServerMessage::BrowserError {
-                        message: "in-app browser is available only in the mew desktop app".into(),
-                        tab_id,
-                    });
-                    continue;
+            ClientMessage::UnregisterBrowserPage {
+                session_id,
+                page_instance,
+            } => {
+                let mut pages = browser_pages.lock().expect("browser registrations lock");
+                let removed = pages
+                    .get(&session_id)
+                    .is_some_and(|registered| registered.page_instance == page_instance);
+                if removed {
+                    let registered = pages
+                        .remove(&session_id)
+                        .expect("matching browser registration");
+                    registered
+                        .session
+                        .browser_access
+                        .revoke(&browser_owner, &page_instance);
                 }
-                match crate::browser::press(&session.id, &key).await {
-                    Ok((url, title, _)) => reply(ServerMessage::BrowserState {
-                        open: true,
-                        url: Some(url),
-                        title: Some(title),
-                        tab_id,
-                    }),
-                    Err(e) => reply(ServerMessage::BrowserError {
-                        message: format!("browser press: {e}"),
-                        tab_id,
-                    }),
-                }
+                reply(ServerMessage::BrowserPageRegistration {
+                    session_id,
+                    page_instance,
+                    error: (!removed)
+                        .then(|| "browser page generation is no longer registered".into()),
+                });
             }
-            ClientMessage::BrowserClose { tab_id } => {
-                let Some(session) = attached_session.as_ref() else {
-                    reply(ServerMessage::BrowserError {
-                        message: "attach a session before using the browser".into(),
-                        tab_id,
-                    });
-                    continue;
-                };
-                if !session.browser_enabled().await {
-                    reply(ServerMessage::BrowserError {
-                        message: "in-app browser is available only in the mew desktop app".into(),
-                        tab_id,
-                    });
-                    continue;
-                }
-                match crate::browser::close(&session.id).await {
-                    Ok(()) => reply(ServerMessage::BrowserState {
-                        open: false,
-                        url: None,
-                        title: None,
-                        tab_id,
-                    }),
-                    Err(e) => reply(ServerMessage::BrowserError {
-                        message: format!("browser close: {e}"),
-                        tab_id,
-                    }),
-                }
+            request @ (ClientMessage::BrowserOpen { .. }
+            | ClientMessage::BrowserSnapshot { .. }
+            | ClientMessage::BrowserScreenshot { .. }
+            | ClientMessage::BrowserClick { .. }
+            | ClientMessage::BrowserFill { .. }
+            | ClientMessage::BrowserPress { .. }
+            | ClientMessage::BrowserClose { .. }) => {
+                let access = attached_session
+                    .as_ref()
+                    .map(|session| session.browser_access.clone())
+                    .unwrap_or_default();
+                let client_tx = client_tx.clone();
+                let lifetime = connection_lifetime.clone();
+                let response = crate::browser::respond(&access, request, &lifetime);
+                tokio::spawn(async move {
+                    let _ = client_tx.send(response.await);
+                });
             }
             ClientMessage::OpenPath { session_id, path } => {
                 match crate::files::handle_open_path(&session_manager, &session_id, &path).await {
@@ -2342,38 +2696,84 @@ where
                     let _guard = session.turn_lock.lock().await;
                     let mut agent = session.agent.lock().await;
                     let persona = agent.personas.iter().find(|p| p.name == name).cloned();
+                    if persona.is_none() && matches!(name.as_str(), "default" | "none") {
+                        let mut policy = session.policy(&agent).await;
+                        policy.persona = None;
+                        if let Err(error) = session.save_policy(&policy).await {
+                            let _ = client_tx.send(ServerMessage::Error {
+                                message: format!("failed to clear persona: {error}"),
+                            });
+                            return;
+                        }
+                        agent.clear_persona();
+                        let personas = agent
+                            .personas
+                            .iter()
+                            .map(|persona| mew_protocol::PersonaInfo {
+                                name: persona.name.clone(),
+                                description: persona.description.clone(),
+                                color: persona.config.color.clone(),
+                                active: false,
+                            })
+                            .collect();
+                        session
+                            .broadcast(ServerMessage::PersonaList { personas })
+                            .await;
+                        return;
+                    }
                     match persona {
                         Some(p) => {
-                            // apply_persona returns a pinned model if the
-                            // persona config specifies one.
-                            let pinned_model = agent.apply_persona(&p);
-                            let persona_name = p.name.clone();
-                            let _ = client_tx.send(ServerMessage::PersonaSwitched {
-                                name: persona_name.clone(),
-                            });
-                            // If the persona pinned a model, apply it via
-                            // the switcher (same path as SwitchModel).
-                            if let Some(model_str) = pinned_model {
-                                if let Some(switcher) = &switcher {
-                                    if let Some((provider, model)) = model_str.split_once('/') {
-                                        if let Ok((new_provider, new_model)) =
-                                            switcher(&mut agent, provider, model)
-                                        {
-                                            *session.provider.lock().await =
-                                                Some(new_provider.clone());
-                                            *session.model.lock().await = Some(new_model.clone());
-                                            session
-                                                .broadcast(ServerMessage::ModelSwitched {
-                                                    provider: new_provider,
-                                                    model: new_model,
-                                                })
-                                                .await;
-                                        }
+                            let result = if let Some(pinned) = &p.config.model {
+                                let inherited_provider =
+                                    session.provider.lock().await.clone().unwrap_or_default();
+                                let (provider, model) = pinned
+                                    .split_once('/')
+                                    .unwrap_or((&inherited_provider, pinned));
+                                match &switcher {
+                                    Some(switcher) if !provider.is_empty() && !model.is_empty() => {
+                                        change_session_model(
+                                            &session,
+                                            &mut agent,
+                                            switcher,
+                                            provider,
+                                            model,
+                                            Some(&p.name),
+                                        )
+                                        .await
+                                        .map(Some)
                                     }
+                                    _ if provider.is_empty() || model.is_empty() => {
+                                        Err(anyhow::anyhow!(
+                                            "persona model must be provider/model: {pinned}"
+                                        ))
+                                    }
+                                    _ => Err(anyhow::anyhow!("model switching not available")),
                                 }
+                            } else {
+                                let mut policy = session.policy(&agent).await;
+                                policy.persona = Some(p.name.clone());
+                                session.save_policy(&policy).await.map(|()| None)
+                            };
+                            let switched = match result {
+                                Ok(switched) => switched,
+                                Err(error) => {
+                                    let _ = client_tx.send(ServerMessage::Error {
+                                        message: format!("failed to switch persona: {error}"),
+                                    });
+                                    return;
+                                }
+                            };
+                            agent.apply_persona(&p);
+                            if let Some((provider, model, variant)) = switched {
+                                session
+                                    .broadcast(ServerMessage::ModelSwitched { provider, model })
+                                    .await;
+                                session
+                                    .broadcast(ServerMessage::ThinkingVariantChanged { variant })
+                                    .await;
                             }
                             session
-                                .broadcast(ServerMessage::PersonaSwitched { name: persona_name })
+                                .broadcast(ServerMessage::PersonaSwitched { name: p.name })
                                 .await;
                         }
                         None => {
@@ -2385,6 +2785,15 @@ where
                 });
             }
         }
+    }
+    connection_lifetime.cancel();
+    for registered in browser_pages
+        .lock()
+        .expect("browser registrations lock")
+        .drain()
+        .map(|(_, registered)| registered)
+    {
+        registered.session.browser_access.disconnect(&browser_owner);
     }
     if let Some(watch) = workspace_watch.take() {
         watch.cancel();
@@ -2407,25 +2816,78 @@ where
 
 type WsSink<S> = futures::stream::SplitSink<tokio_tungstenite::WebSocketStream<S>, Message>;
 
-/// Read AgentEvents from the receiver and broadcast them to every client
-/// attached to the session. This consumes events until the receiver is drained
-/// (i.e. the agent turn has ended).
-/// Run an agent turn with full turn management: cancel token, is_running,
-/// activity broadcasts, forward_events, meta updates, usage broadcast, and
-/// session alert. Returns `had_error`.
-///
-/// Does NOT do: user message broadcast, title generation — those are
-/// Prompt-handler-specific.
+/// Register cancellation before accepting work or waiting for the agent lock.
+async fn register_turn(session: &Session) -> CancellationToken {
+    let token = session
+        .current_turn_cancel
+        .lock()
+        .await
+        .get_or_insert_with(CancellationToken::new)
+        .clone();
+    *session.is_running.lock().await = true;
+    token
+}
+
+/// Complete the serialized turn before generating its optional title.
+async fn finish_prompt_turn(
+    session: &Arc<Session>,
+    session_mgr: &Arc<SessionManager>,
+    text: String,
+    attachments: Vec<mew_protocol::Attachment>,
+    auto_title: bool,
+    guard: tokio::sync::MutexGuard<'_, ()>,
+    token: CancellationToken,
+) {
+    let agent = session.agent.lock().await.clone();
+    let prompt_text = text.clone();
+    let had_error = run_turn(
+        session,
+        session_mgr,
+        &agent,
+        text,
+        attachments,
+        token.clone(),
+    )
+    .await;
+    drop(guard);
+
+    // Generate a session title from the first user message
+    // if we haven't already. Uses a lightweight LLM call;
+    // falls back to text truncation on error. Skipped if the
+    // user has disabled auto-title generation.
+    if auto_title && !had_error && !token.is_cancelled() {
+        let has_existing_title = agent
+            .session_meta()
+            .await
+            .and_then(|meta| meta.custom_title)
+            .is_some();
+        let mut generated = session.title_generated.lock().await;
+        if !*generated && !has_existing_title {
+            *generated = true;
+            drop(generated);
+
+            let title = generate_session_title(&agent, &prompt_text).await;
+            if let Ok(Some(mut meta)) =
+                mew_session::Meta::read(&session.session_dir, &session.id).await
+            {
+                let _ = meta
+                    .set_custom_title(&session.session_dir, title.clone())
+                    .await;
+            }
+            session_mgr.broadcast_title(&session.id, title).await;
+        }
+    }
+}
+
+/// Run and persist a turn, then publish its idle state and outcome.
 async fn run_turn(
     session: &Arc<Session>,
     session_mgr: &Arc<SessionManager>,
     agent: &Agent,
     prompt_text: String,
     attachments: Vec<mew_protocol::Attachment>,
+    token: CancellationToken,
 ) -> bool {
-    let token = CancellationToken::new();
-    *session.current_turn_cancel.lock().await = Some(token.clone());
-    *session.is_running.lock().await = true;
     session_mgr
         .broadcast_activity(&session.id, SessionState::Running)
         .await;
@@ -2928,13 +3390,145 @@ async fn generate_session_summary(agent: &Agent) -> Option<String> {
     }
 }
 
+async fn change_session_model(
+    session: &Session,
+    agent: &mut Agent,
+    switcher: &ModelSwitcher,
+    provider: &str,
+    model: &str,
+    persona: Option<&str>,
+) -> Result<(String, String, Option<String>)> {
+    // Skill tools share these locks with the agent. A failed save must restore
+    // their contents as well as the provider and other owned agent fields.
+    let previous_template = agent.template_ctx.read().await.clone();
+    let previous_filter = agent.skill_filter.read().await.clone();
+    let previous = agent.clone();
+    let result = async {
+        let (provider, model) = switcher(agent, provider, model)?;
+        let variant = agent.active_thinking_variant().map(str::to_owned);
+        let mut policy = session.policy(agent).await;
+        policy.provider = Some(provider.clone());
+        policy.model = Some(model.clone());
+        policy.thinking_variant = variant.clone();
+        if let Some(persona) = persona {
+            policy.persona = Some(persona.to_owned());
+        }
+        session.save_policy(&policy).await?;
+        *session.provider.lock().await = Some(provider.clone());
+        *session.model.lock().await = Some(model.clone());
+        Ok((provider, model, variant))
+    }
+    .await;
+    if result.is_err() {
+        *agent = previous;
+        *agent.template_ctx.write().await = previous_template;
+        *agent.skill_filter.write().await = previous_filter;
+    }
+    result
+}
+
+async fn broadcast_attention(session: &Session, manager: &SessionManager) {
+    let pending_permissions = session.pending_permissions.lock().await.len() as u32;
+    let pending_questions = session.pending_questions_count().await;
+    manager
+        .broadcast_all(ServerMessage::SessionAttentionChanged {
+            session_id: session.id.clone(),
+            pending_permissions,
+            pending_questions,
+        })
+        .await;
+}
+
+async fn publish_pending_request<T>(
+    session: &Session,
+    manager: &SessionManager,
+    pending: &Mutex<HashMap<String, session::PendingRequest<T>>>,
+    sender: oneshot::Sender<T>,
+    message: ServerMessage,
+) -> Vec<ServerMessage> {
+    let _actions = session.pending_action_lock.lock().await;
+    if sender.is_closed()
+        || session
+            .current_turn_cancel
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+    {
+        return Vec::new();
+    }
+    let (request_id, kind, detail) = match &message {
+        ServerMessage::PermissionRequest {
+            request_id,
+            tool_name,
+            ..
+        }
+        | ServerMessage::SubagentPermissionRequest {
+            request_id,
+            tool_name,
+            ..
+        } => (
+            request_id.clone(),
+            mew_protocol::AlertKind::PermissionNeeded,
+            Some(tool_name.clone()),
+        ),
+        ServerMessage::WorkspacePermissionRequest { request_id, path } => (
+            request_id.clone(),
+            mew_protocol::AlertKind::PermissionNeeded,
+            Some(path.clone()),
+        ),
+        ServerMessage::AskUserRequest { request_id, .. }
+        | ServerMessage::GoalProposed { request_id, .. } => (
+            request_id.clone(),
+            mew_protocol::AlertKind::InputNeeded,
+            None,
+        ),
+        _ => unreachable!("only required actions are published as pending requests"),
+    };
+    pending.lock().await.insert(
+        request_id,
+        session::PendingRequest {
+            sender,
+            message: message.clone(),
+        },
+    );
+    session.broadcast(message).await;
+    manager
+        .broadcast_all(ServerMessage::SessionAlert {
+            session_id: session.id.clone(),
+            title: session.display_title().await,
+            kind,
+            detail,
+        })
+        .await;
+    broadcast_attention(session, manager).await;
+    Vec::new()
+}
+
+fn wire_questions(questions: Vec<mew_agent::AskUserQuestion>) -> Vec<Question> {
+    questions
+        .into_iter()
+        .map(|question| Question {
+            prompt: question.prompt,
+            options: question
+                .options
+                .into_iter()
+                .map(|option| QuestionOption {
+                    label: option.label,
+                    description: option.description,
+                })
+                .collect(),
+        })
+        .collect()
+}
+
 /// Translate a single `AgentEvent` (owned) into zero or more `ServerMessage`s.
 /// Channel-bearing events are converted to wire requests with fresh IDs;
 /// the `oneshot::Sender` is stashed in the `Session` for later response.
 async fn translate_event(
     event: AgentEvent,
-    session: &Session,
-    _session_mgr: &SessionManager,
+    session: &Arc<Session>,
+    session_mgr: &SessionManager,
 ) -> Vec<ServerMessage> {
     match event {
         AgentEvent::Provider(pe) => {
@@ -3018,117 +3612,62 @@ async fn translate_event(
             vec![ServerMessage::ErrorEvent { message: msg }]
         }
         AgentEvent::PermissionRequest { call, tx } => {
-            let id = session.next_request_id();
-            session
-                .pending_permissions
-                .lock()
-                .await
-                .insert(id.clone(), tx);
-            let title = session.display_title().await;
-            let alert = ServerMessage::SessionAlert {
-                session_id: session.id.clone(),
-                title,
-                kind: mew_protocol::AlertKind::PermissionNeeded,
-                detail: Some(call.tool_name.clone()),
+            let request = ServerMessage::PermissionRequest {
+                request_id: session.next_request_id(),
+                tool_name: call.tool_name,
+                input: call.input,
             };
-            vec![
-                ServerMessage::PermissionRequest {
-                    request_id: id,
-                    tool_name: call.tool_name,
-                    input: call.input,
-                },
-                alert,
-                ServerMessage::SessionAttentionChanged {
-                    session_id: session.id.clone(),
-                    pending_permissions: session.pending_permissions.lock().await.len() as u32,
-                    pending_questions: session.pending_questions_count().await,
-                },
-            ]
+            publish_pending_request(
+                session,
+                session_mgr,
+                &session.pending_permissions,
+                tx,
+                request,
+            )
+            .await
         }
         AgentEvent::WorkspacePermissionRequest { path, tx } => {
-            let id = session.next_request_id();
-            session
-                .pending_permissions
-                .lock()
-                .await
-                .insert(id.clone(), tx);
-            vec![ServerMessage::WorkspacePermissionRequest {
-                request_id: id,
+            let request = ServerMessage::WorkspacePermissionRequest {
+                request_id: session.next_request_id(),
                 path: path.display().to_string(),
-            }]
+            };
+            publish_pending_request(
+                session,
+                session_mgr,
+                &session.pending_permissions,
+                tx,
+                request,
+            )
+            .await
+        }
+        AgentEvent::SubagentAskUser {
+            source,
+            call_id,
+            questions,
+            tx,
+        } => {
+            let request = ServerMessage::AskUserRequest {
+                request_id: session.next_request_id(),
+                subagent: Some(source),
+                call_id,
+                questions: wire_questions(questions),
+            };
+            publish_pending_request(session, session_mgr, &session.pending_ask_user, tx, request)
+                .await
         }
         AgentEvent::AskUser {
             call_id,
             questions,
             tx,
         } => {
-            let id = session.next_request_id();
-            session.pending_ask_user.lock().await.insert(id.clone(), tx);
-            vec![
-                ServerMessage::AskUserRequest {
-                    request_id: id,
-                    call_id,
-                    questions: questions
-                        .into_iter()
-                        .map(|q| Question {
-                            prompt: q.prompt,
-                            options: q
-                                .options
-                                .into_iter()
-                                .map(|o| QuestionOption {
-                                    label: o.label,
-                                    description: o.description,
-                                })
-                                .collect(),
-                        })
-                        .collect(),
-                },
-                ServerMessage::SessionAlert {
-                    session_id: session.id.clone(),
-                    title: session.display_title().await,
-                    kind: mew_protocol::AlertKind::InputNeeded,
-                    detail: None,
-                },
-                ServerMessage::SessionAttentionChanged {
-                    session_id: session.id.clone(),
-                    pending_permissions: session.pending_permissions.lock().await.len() as u32,
-                    pending_questions: session.pending_questions_count().await,
-                },
-            ]
-        }
-        AgentEvent::PlanApprovalRequest {
-            call_id,
-            plan_path,
-            plan_markdown,
-            persona,
-            tx,
-        } => {
-            let id = session.next_request_id();
-            session
-                .pending_plan_approvals
-                .lock()
+            let request = ServerMessage::AskUserRequest {
+                subagent: None,
+                request_id: session.next_request_id(),
+                call_id,
+                questions: wire_questions(questions),
+            };
+            publish_pending_request(session, session_mgr, &session.pending_ask_user, tx, request)
                 .await
-                .insert(id.clone(), tx);
-            vec![
-                ServerMessage::PlanApprovalRequest {
-                    request_id: id,
-                    call_id,
-                    plan_path,
-                    plan_markdown,
-                    persona,
-                },
-                ServerMessage::SessionAlert {
-                    session_id: session.id.clone(),
-                    title: session.display_title().await,
-                    kind: mew_protocol::AlertKind::InputNeeded,
-                    detail: None,
-                },
-                ServerMessage::SessionAttentionChanged {
-                    session_id: session.id.clone(),
-                    pending_permissions: session.pending_permissions.lock().await.len() as u32,
-                    pending_questions: session.pending_questions_count().await,
-                },
-            ]
         }
         AgentEvent::SubagentStart {
             parent_call_id,
@@ -3160,6 +3699,30 @@ async fn translate_event(
             outcome,
             manifests,
         } => {
+            let _actions = session.pending_action_lock.lock().await;
+            let mut pending = session.pending_ask_user.lock().await;
+            let mut resolved = Vec::new();
+            pending.retain(|request_id, request| {
+                let belongs_to_task = matches!(&request.message,
+                    ServerMessage::AskUserRequest { subagent: Some(source), .. }
+                        if source.parent_call_id == parent_call_id
+                );
+                if belongs_to_task && request.sender.is_closed() {
+                    resolved.push(request_id.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            drop(pending);
+            if !resolved.is_empty() {
+                for request_id in resolved {
+                    session
+                        .broadcast(ServerMessage::RequestResolved { request_id })
+                        .await;
+                }
+                broadcast_attention(session, session_mgr).await;
+            }
             vec![ServerMessage::SubagentEnd {
                 parent_call_id,
                 child_session_id,
@@ -3172,18 +3735,20 @@ async fn translate_event(
             call,
             tx,
         } => {
-            let id = session.next_request_id();
-            session
-                .pending_permissions
-                .lock()
-                .await
-                .insert(id.clone(), tx);
-            vec![ServerMessage::SubagentPermissionRequest {
-                request_id: id,
+            let request = ServerMessage::SubagentPermissionRequest {
+                request_id: session.next_request_id(),
                 parent_call_id,
                 tool_name: call.tool_name,
                 input: call.input,
-            }]
+            };
+            publish_pending_request(
+                session,
+                session_mgr,
+                &session.pending_permissions,
+                tx,
+                request,
+            )
+            .await
         }
         AgentEvent::SubagentProgress { .. } => {
             // Recurse into the child event. The boxed child event is
@@ -3192,32 +3757,17 @@ async fn translate_event(
             // is rare and can be handled later.
             Vec::new()
         }
-        AgentEvent::TodosUpdated { todos } => {
-            vec![ServerMessage::TodosUpdated {
-                todos: todos
-                    .into_iter()
-                    .map(|t| mew_protocol::Todo {
-                        id: t.id,
-                        content: t.content,
-                        status: t.status.as_str().to_string(),
-                        depends_on: t.depends_on,
-                    })
-                    .collect(),
-            }]
-        }
-        AgentEvent::PersonaSwitchRequested { name } => {
-            vec![ServerMessage::PersonaSwitchRequested { name }]
+        AgentEvent::TodosUpdated { .. } => {
+            session.broadcast_todos().await;
+            Vec::new()
         }
         AgentEvent::JobUpdate {
             job_id,
             command,
             state,
         } => {
-            vec![ServerMessage::JobUpdate {
-                job_id,
-                command,
-                state,
-            }]
+            session.publish_job_update(job_id, command, state).await;
+            Vec::new()
         }
         AgentEvent::FileDelta {
             path,
@@ -3265,30 +3815,19 @@ async fn translate_event(
             objective,
             tx,
         } => {
-            let id = session.next_request_id();
-            session
-                .pending_goal_proposals
-                .lock()
-                .await
-                .insert(id.clone(), tx);
-            vec![
-                ServerMessage::GoalProposed {
-                    request_id: id,
-                    call_id,
-                    objective,
-                },
-                ServerMessage::SessionAlert {
-                    session_id: session.id.clone(),
-                    title: session.display_title().await,
-                    kind: mew_protocol::AlertKind::InputNeeded,
-                    detail: None,
-                },
-                ServerMessage::SessionAttentionChanged {
-                    session_id: session.id.clone(),
-                    pending_permissions: session.pending_permissions.lock().await.len() as u32,
-                    pending_questions: session.pending_questions_count().await,
-                },
-            ]
+            let request = ServerMessage::GoalProposed {
+                request_id: session.next_request_id(),
+                call_id,
+                objective,
+            };
+            publish_pending_request(
+                session,
+                session_mgr,
+                &session.pending_goal_proposals,
+                tx,
+                request,
+            )
+            .await
         }
     }
 }
@@ -3305,6 +3844,15 @@ async fn send_msg<S: AsyncRead + AsyncWrite + Unpin + Send>(
     ws_tx.send(Message::Text(json)).await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod request_tests;
+
+#[cfg(test)]
+mod review_tests;
+
+#[cfg(test)]
+mod policy_tests;
 
 #[cfg(test)]
 mod tests {
@@ -3377,6 +3925,34 @@ mod tests {
 
         let result = check_socket_liveness(socket_path.to_str().unwrap());
         assert!(result.is_ok(), "missing socket should be fine: {result:?}");
+    }
+
+    #[test]
+    fn todo_edits_require_remote_control_scope() {
+        let message = ClientMessage::UpdateTodo {
+            session_id: "session".into(),
+            request_id: "edit".into(),
+            edit: mew_protocol::TodoEdit::default(),
+        };
+        assert!(!remote_message_allowed(RemoteScope::Observe, &message));
+        assert!(!remote_message_allowed(RemoteScope::Collaborate, &message));
+        assert!(remote_message_allowed(RemoteScope::Control, &message));
+    }
+
+    #[test]
+    fn child_history_is_available_to_each_remote_read_scope() {
+        let message = ClientMessage::ReadSubagentHistory {
+            session_id: "parent".into(),
+            child_session_id: "child".into(),
+            request_id: "history".into(),
+        };
+        for scope in [
+            RemoteScope::Observe,
+            RemoteScope::Collaborate,
+            RemoteScope::Control,
+        ] {
+            assert!(remote_message_allowed(scope, &message));
+        }
     }
 
     #[test]
@@ -3464,6 +4040,34 @@ mod tests {
                 accepted: true,
             }
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_snapshot_tracks_symlinks_without_reading_their_targets() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("external-directory");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("outside.txt"), "private").unwrap();
+        let link = workspace.path().join("linked-directory");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let previous = workspace_snapshot(workspace.path());
+        assert!(previous.contains_key("linked-directory"));
+        assert!(!previous.contains_key("linked-directory/outside.txt"));
+
+        std::fs::write(target.join("outside.txt"), "changed outside").unwrap();
+        assert!(
+            changed_workspace_paths(&previous, &workspace_snapshot(workspace.path())).is_empty()
+        );
+
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        assert_eq!(
+            changed_workspace_paths(&previous, &workspace_snapshot(workspace.path())),
+            vec!["linked-directory"]
+        );
     }
 
     #[test]

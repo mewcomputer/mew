@@ -55,6 +55,7 @@ pub(super) struct DesktopShell {
     pub(super) workspace_open_destinations: Vec<WorkspaceOpenDestination>,
     pub(super) remembered_editor: Option<String>,
     pub(super) sidebar_search: String,
+    pub(super) sidebar_filter: SidebarFilter,
     pub(super) sidebar_search_focus_handle: FocusHandle,
     pub(super) sidebar_focus_handle: FocusHandle,
     pub(super) sidebar_keyboard_session: Option<String>,
@@ -114,7 +115,7 @@ pub(super) struct DesktopShell {
     pub(super) review_lines: Vec<DiffLine>,
     pub(super) review_selected_file: Option<usize>,
     pub(super) review_line_list: gpui::ListState,
-    pub(super) review_signature: Option<String>,
+    pub(super) review_requests: review::ReviewRequests,
     pub(super) review_loading: bool,
     pub(super) review_error: Option<String>,
     pub(super) input_animation_id: u64,
@@ -143,19 +144,17 @@ pub(super) struct DesktopShell {
     pub(super) file_tree_pending: BTreeSet<String>,
     pub(super) watching_workspace_session: Option<String>,
     pub(super) prompt_history: PromptHistory,
-    pub(super) plan_feedback_request: Option<String>,
     pub(super) composer_cursor_visible: bool,
     pub(super) composer_blink_epoch: usize,
     pub(super) streaming_render_scheduled: bool,
     pub(super) expanded_chat_parts: BTreeSet<String>,
-    pub(super) pending_prompt: Option<String>,
-    pub(super) pending_attachments: Vec<Attachment>,
+    pub(super) task_drafts: TaskDrafts,
+    pub(super) initial_auto_attach: bool,
     pub(super) attachments: Vec<Attachment>,
     pub(super) attachment_error: Option<String>,
     pub(super) pending_model: Option<(String, String)>,
     pub(super) awaiting_model_switch: Option<(String, String)>,
-    pub(super) pending_session_request: bool,
-    pub(super) pending_session_target: Option<String>,
+    pub(super) session_requests: SessionRequests,
     pub(super) model_picker_open: bool,
     pub(super) persona_picker_open: bool,
     pub(super) permission_picker_open: bool,
@@ -166,11 +165,12 @@ pub(super) struct DesktopShell {
     pub(super) terminal_status: String,
     pub(super) browser_portal: Option<BrowserPortal>,
     pub(super) browser_panel_open: bool,
-    pub(super) browser_initialization_pending: bool,
+    pub(super) browser_initialization_pending: Option<BrowserPage>,
     pub(super) browser_url: String,
     pub(super) browser_title: String,
     pub(super) browser_error: Option<String>,
-    pub(super) browser_pump_epoch: u64,
+    pub(super) browser_confirmed_sessions: BTreeSet<String>,
+    pub(super) browser_registration_attempts: BTreeMap<BrowserOwner, String>,
     pub(super) browser_pump: Option<Entity<BrowserPumpView>>,
     pub(super) settings_open: bool,
     pub(super) settings_page: SettingsPage,
@@ -383,7 +383,7 @@ impl BrowserPumpView {
                     return false;
                 };
                 shell.update(cx, |shell, cx| {
-                    if !shell.browser_panel_open || shell.browser_portal.is_none() {
+                    if !browser_pump_is_needed(shell.browser_portal.is_some(), shell.quitting) {
                         return false;
                     }
                     if let Some(portal) = shell.browser_portal.as_ref() {
@@ -541,6 +541,28 @@ pub(super) struct TranscriptTextEntry {
     pub(super) layout: gpui::TextLayout,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum SidebarFilter {
+    #[default]
+    All,
+    Running,
+    Attention,
+}
+
+impl SidebarFilter {
+    pub(super) fn matches(self, conversation: &ConversationItem) -> bool {
+        let running = conversation.state == mew_protocol::SessionState::Running;
+        match self {
+            Self::All => true,
+            Self::Running => running && !conversation.needs_attention,
+            Self::Attention => {
+                conversation.needs_attention
+                    || !running && (conversation.last_turn_failed || conversation.unread_completion)
+            }
+        }
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum SidebarRow {
@@ -551,6 +573,7 @@ pub(super) enum SidebarRow {
         pinned: bool,
         count: usize,
         collapsed: bool,
+        collapsible: bool,
     },
     ShowMore {
         workspace_path: String,
@@ -676,6 +699,22 @@ pub(super) struct ShellLayoutState {
 }
 
 impl ShellLayoutState {
+    pub(super) fn reveal_workbench(&mut self, window_width: f32, sidebar_width: f32) -> bool {
+        let width = if self.sidebar_collapsed {
+            SIDEBAR_COLLAPSED_WIDTH
+        } else {
+            sidebar_width
+        };
+        if !workbench_fits_window(window_width, width) {
+            if !workbench_fits_window(window_width, SIDEBAR_COLLAPSED_WIDTH) {
+                return false;
+            }
+            self.sidebar_collapsed = true;
+        }
+        self.workbench_collapsed = false;
+        true
+    }
+
     pub(super) fn from_state(state: &mew_config::State) -> Self {
         let collapsed = |key: &str| state.sidebar_collapsed.get(key).copied().unwrap_or(false);
         Self {
@@ -816,16 +855,18 @@ pub(super) struct PromptHistory {
 }
 
 impl PromptHistory {
-    pub(super) fn record(&mut self, text: &str) {
-        let text = text.trim();
+    pub(super) fn record(&mut self, mut text: String) {
+        text.truncate(text.trim_end().len());
+        let prefix = text.len() - text.trim_start().len();
+        text.drain(..prefix);
         self.reset_recall();
         if text.is_empty() {
             return;
         }
-        if self.entries.last().is_some_and(|last| last == text) {
+        if self.entries.last().is_some_and(|last| last == &text) {
             return;
         }
-        self.entries.push(text.to_owned());
+        self.entries.push(text);
         if self.entries.len() > PROMPT_HISTORY_LIMIT {
             let overflow = self.entries.len() - PROMPT_HISTORY_LIMIT;
             self.entries.drain(..overflow);
@@ -897,7 +938,6 @@ pub(super) const TERMINAL_EXPANDED_ROWS: u16 = 7;
 pub(super) const TERMINAL_COLS: u16 = 80;
 pub(super) const TERMINAL_EXPANDED_HEIGHT: f32 = 190.;
 pub(super) const MAX_ATTACHMENT_BYTES: u64 = 10 * 1024 * 1024;
-pub(super) const BROWSER_OWNER: &str = "native-browser";
 pub(super) const DEFAULT_BROWSER_URL: &str = "about:blank";
 pub(super) const TERMINAL_FONT_CHOICES: &[(&str, &str)] = &[
     (DEFAULT_FONT_FAMILY, "Bundled mono"),

@@ -5,7 +5,7 @@ use ratatui::{
 
 use crate::{
     highlight::Highlighter, inline::parse_inline, pending::PendingPolicy, theme::Theme,
-    wrap::wrap_styled,
+    wrap::wrap_styled_with_metadata, LineMetadata, RenderedLines,
 };
 
 /// Renders a committed `mdstream::Block` into styled ratatui lines.
@@ -15,6 +15,16 @@ pub fn render_block(
     theme: &Theme,
     highlighter: &mut dyn Highlighter,
 ) -> Vec<Line<'static>> {
+    render_block_with_metadata(block, width, theme, highlighter).lines
+}
+
+/// Render a block with copyable byte bounds and soft-wrap information.
+pub fn render_block_with_metadata(
+    block: &mdstream::Block,
+    width: u16,
+    theme: &Theme,
+    highlighter: &mut dyn Highlighter,
+) -> RenderedLines {
     let text = block.display_or_raw();
 
     match block.kind {
@@ -23,8 +33,10 @@ pub fn render_block(
         mdstream::BlockKind::List => render_list(text, width, theme),
         mdstream::BlockKind::BlockQuote => render_block_quote(text, width, theme),
         mdstream::BlockKind::CodeFence => render_code_fence(text, width, theme, highlighter),
-        mdstream::BlockKind::ThematicBreak => render_thematic_break(width, theme),
-        mdstream::BlockKind::Table => render_table(text, width, theme),
+        mdstream::BlockKind::ThematicBreak => {
+            RenderedLines::from_lines(render_thematic_break(width, theme))
+        }
+        mdstream::BlockKind::Table => RenderedLines::from_lines(render_table(text, width, theme)),
         mdstream::BlockKind::HtmlBlock => render_raw(text, width, theme, "[html]"),
         mdstream::BlockKind::MathBlock => render_raw(text, width, theme, "[math]"),
         mdstream::BlockKind::FootnoteDefinition => render_paragraph(text, width, theme),
@@ -40,7 +52,18 @@ pub fn render_pending(
     highlighter: &mut dyn Highlighter,
     policy: &dyn PendingPolicy,
 ) -> Vec<Line<'static>> {
-    policy.render(
+    render_pending_with_metadata(block, width, theme, highlighter, policy).lines
+}
+
+/// Render a pending block with the same copy semantics as committed blocks.
+pub fn render_pending_with_metadata(
+    block: &mdstream::PendingBlockRef<'_>,
+    width: u16,
+    theme: &Theme,
+    highlighter: &mut dyn Highlighter,
+    policy: &dyn PendingPolicy,
+) -> RenderedLines {
+    policy.render_with_metadata(
         block.kind,
         block.display_or_raw(),
         width,
@@ -49,7 +72,22 @@ pub fn render_pending(
     )
 }
 
-fn render_heading(text: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
+fn wrapped_lines(runs: &[crate::inline::StyledRun], width: u16, style: Style) -> RenderedLines {
+    let mut lines = RenderedLines::default();
+    for row in wrap_styled_with_metadata(runs, width) {
+        let end = row.spans.iter().map(|span| span.content.len()).sum();
+        lines.push(
+            Line::from(row.spans).style(style),
+            LineMetadata {
+                content: 0..end,
+                continues_previous: row.continues_previous,
+            },
+        );
+    }
+    lines
+}
+
+fn render_heading(text: &str, width: u16, theme: &Theme) -> RenderedLines {
     let mut level = 0usize;
     let trimmed = text.trim_start();
     for ch in trimmed.chars() {
@@ -63,26 +101,20 @@ fn render_heading(text: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
     let content = trimmed.trim_start_matches('#').trim_start();
 
     let runs = parse_inline(content, theme);
-    let wrapped = wrap_styled(&runs, width);
-
-    wrapped
-        .into_iter()
-        .map(|spans| Line::from(spans).style(theme.heading[level].add_modifier(Modifier::BOLD)))
-        .collect()
+    wrapped_lines(
+        &runs,
+        width,
+        theme.heading[level].add_modifier(Modifier::BOLD),
+    )
 }
 
-fn render_paragraph(text: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
+fn render_paragraph(text: &str, width: u16, theme: &Theme) -> RenderedLines {
     let runs = parse_inline(text.trim(), theme);
-    let wrapped = wrap_styled(&runs, width);
-
-    wrapped
-        .into_iter()
-        .map(|spans| Line::from(spans).style(theme.paragraph))
-        .collect()
+    wrapped_lines(&runs, width, theme.paragraph)
 }
 
-fn render_list(text: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
+fn render_list(text: &str, width: u16, theme: &Theme) -> RenderedLines {
+    let mut lines = RenderedLines::default();
     let mut continuation_indent = 2usize;
     for line in text.lines() {
         let trimmed = line.trim_start();
@@ -112,34 +144,63 @@ fn render_list(text: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
 
         let item_width = width.saturating_sub(prefix_width.min(u16::MAX as usize) as u16);
         let runs = parse_inline(content, theme);
-        let wrapped = wrap_styled(&runs, item_width);
+        let wrapped = wrap_styled_with_metadata(&runs, item_width);
 
-        for (i, spans) in wrapped.into_iter().enumerate() {
+        for (i, row) in wrapped.into_iter().enumerate() {
             let prefix = if i == 0 && !marker.is_empty() {
                 Span::styled(format!("{}{marker}", " ".repeat(indent)), theme.list_bullet)
             } else {
                 Span::styled(" ".repeat(prefix_width), Style::default())
             };
+            let start = if i == 0 && !marker.is_empty() {
+                0
+            } else {
+                prefix.content.len()
+            };
+            let end = prefix.content.len()
+                + row
+                    .spans
+                    .iter()
+                    .map(|span| span.content.len())
+                    .sum::<usize>();
             let mut line_spans = vec![prefix];
-            line_spans.extend(spans);
-            lines.push(Line::from(line_spans).style(theme.paragraph));
+            line_spans.extend(row.spans);
+            lines.push(
+                Line::from(line_spans).style(theme.paragraph),
+                LineMetadata {
+                    content: start..end,
+                    continues_previous: row.continues_previous,
+                },
+            );
         }
     }
     lines
 }
 
-fn render_block_quote(text: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
+fn render_block_quote(text: &str, width: u16, theme: &Theme) -> RenderedLines {
+    let mut lines = RenderedLines::default();
     for line in text.lines() {
         let content = line.trim_start_matches('>').trim_start();
         let item_width = width.saturating_sub(2);
         let runs = parse_inline(content, theme);
-        let wrapped = wrap_styled(&runs, item_width);
+        let wrapped = wrap_styled_with_metadata(&runs, item_width);
 
-        for spans in wrapped {
+        for row in wrapped {
+            let start = if row.continues_previous { 2 } else { 0 };
+            let end = 2 + row
+                .spans
+                .iter()
+                .map(|span| span.content.len())
+                .sum::<usize>();
             let mut line_spans = vec![Span::styled("> ", theme.block_quote)];
-            line_spans.extend(spans);
-            lines.push(Line::from(line_spans).style(theme.block_quote));
+            line_spans.extend(row.spans);
+            lines.push(
+                Line::from(line_spans).style(theme.block_quote),
+                LineMetadata {
+                    content: start..end,
+                    continues_previous: row.continues_previous,
+                },
+            );
         }
     }
     lines
@@ -150,8 +211,8 @@ fn render_code_fence(
     width: u16,
     theme: &Theme,
     highlighter: &mut dyn Highlighter,
-) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
+) -> RenderedLines {
+    let mut lines = RenderedLines::default();
     let mut all_lines: Vec<&str> = text.lines().collect();
 
     // Extract language from first line if it's a fence opener.
@@ -183,6 +244,7 @@ fn render_code_fence(
             .map(|(text, style)| Span::styled(text, style))
             .collect();
 
+        let content_end = spans.iter().map(|span| span.content.len()).sum();
         // Pad to width with background color.
         let used = spans.iter().map(|s| s.width()).sum::<usize>() as u16;
         if used < width {
@@ -192,7 +254,13 @@ fn render_code_fence(
             ));
         }
 
-        lines.push(Line::from(spans).style(theme.code_fence_default));
+        lines.push(
+            Line::from(spans).style(theme.code_fence_default),
+            LineMetadata {
+                content: 0..content_end,
+                continues_previous: false,
+            },
+        );
     }
 
     highlighter.end_block();
@@ -213,15 +281,12 @@ fn render_table(text: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
     crate::table::compose_table(&parsed, width, theme)
 }
 
-fn render_raw(text: &str, width: u16, theme: &Theme, prefix: &str) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
+fn render_raw(text: &str, width: u16, theme: &Theme, prefix: &str) -> RenderedLines {
+    let mut lines = RenderedLines::default();
     for line in text.lines() {
         let content = format!("{prefix} {line}");
         let runs = vec![(content, theme.paragraph)];
-        let wrapped = wrap_styled(&runs, width);
-        for spans in wrapped {
-            lines.push(Line::from(spans));
-        }
+        lines.append(wrapped_lines(&runs, width, Style::default()));
     }
     lines
 }
@@ -260,7 +325,7 @@ mod tests {
     #[test]
     fn unordered_list_items_get_bullet_glyphs() {
         let theme = bullet_theme();
-        let lines = render_list("- one\n* two\n+ three", 40, &theme);
+        let lines = render_list("- one\n* two\n+ three", 40, &theme).lines;
 
         assert_eq!(lines.len(), 3);
         assert_eq!(line_text(&lines[0]), "• one");
@@ -272,7 +337,7 @@ mod tests {
     #[test]
     fn ordered_list_items_keep_their_numbers() {
         let theme = bullet_theme();
-        let lines = render_list("1. one\n2. two", 40, &theme);
+        let lines = render_list("1. one\n2. two", 40, &theme).lines;
 
         assert_eq!(lines.len(), 2);
         assert_eq!(line_text(&lines[0]), "1. one");
@@ -282,7 +347,7 @@ mod tests {
     #[test]
     fn wrapped_list_continuations_align_with_item_text() {
         let theme = bullet_theme();
-        let lines = render_list("10. alpha beta gamma", 12, &theme);
+        let lines = render_list("10. alpha beta gamma", 12, &theme).lines;
 
         assert!(lines.len() > 1);
         assert!(line_text(&lines[0]).starts_with("10. alpha"));
@@ -294,7 +359,7 @@ mod tests {
     #[test]
     fn nested_list_items_keep_their_indentation() {
         let theme = bullet_theme();
-        let lines = render_list("- parent\n  - child", 40, &theme);
+        let lines = render_list("- parent\n  - child", 40, &theme).lines;
 
         assert_eq!(lines.len(), 2);
         assert_eq!(line_text(&lines[0]), "• parent");

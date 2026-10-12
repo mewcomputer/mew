@@ -17,6 +17,28 @@ use mew_tools::{Sensitivity, Tool, ToolCtx};
 use crate::Agent;
 use crate::AgentEvent;
 
+#[test]
+fn agent_clones_share_pending_browser_registration_and_revocation() {
+    let agent = Agent::new(
+        Arc::new(FakeProvider::new(Vec::new())),
+        Arc::new(NopDispatcher),
+        None,
+        Vec::new(),
+        None,
+    );
+    let preparation = agent.browser_access.register(
+        "desktop",
+        mew_tools::browser::BrowserTarget {
+            page_instance: "page-a".into(),
+            cdp_endpoint: "http://127.0.0.1:9223".into(),
+            target_id: "0123456789ABCDEF0123456789ABCDEF".into(),
+        },
+    );
+    assert!(agent.clone().browser_access.revoke("desktop", "page-a"));
+    assert!(!agent.browser_access.is_available());
+    drop(preparation);
+}
+
 // ------------------------------------------------------------------
 // Fakes
 // ------------------------------------------------------------------
@@ -84,6 +106,92 @@ impl Provider for CapturingProvider {
         };
         Ok(Box::pin(futures::stream::iter(script)))
     }
+}
+
+#[tokio::test]
+async fn pre_cancelled_turn_persists_input_without_requesting_provider() {
+    let directory = tempfile::tempdir().unwrap();
+    let session_id = mew_message::SessionId::new();
+    let writer = mew_session::Writer::open_at(directory.path(), &session_id.to_string())
+        .await
+        .unwrap();
+    let provider = Arc::new(CapturingProvider::new(vec![FakeProvider::text_response(
+        "next turn succeeds",
+    )]));
+    let agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        Some(writer),
+        vec![],
+        Some(session_id),
+    );
+    let token = tokio_util::sync::CancellationToken::new();
+    token.cancel();
+    let mut events = agent.run_with_parts("accepted input".into(), vec![], Some(token));
+    let mut aborted = false;
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while let Some(event) = events.recv().await {
+            if matches!(event, AgentEvent::Error(message) if message == "aborted") {
+                aborted = true;
+            }
+        }
+    })
+    .await
+    .expect("cancelled turn must finish");
+
+    assert!(aborted, "cancelled turn must report its terminal outcome");
+    assert!(provider.captured.lock().unwrap().is_empty());
+    let history = mew_session::Reader::load_from(directory.path(), &session_id.to_string())
+        .await
+        .unwrap();
+    assert_eq!(history, *agent.messages.lock().await);
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].role, Role::User);
+    assert!(matches!(&history[0].parts[0], Part::Text(part) if part.text == "accepted input"));
+
+    let mut events = agent.run("follow up".into());
+    while events.recv().await.is_some() {}
+    assert_eq!(provider.captured.lock().unwrap().len(), 1);
+    assert!(agent.messages.lock().await.iter().any(|message| {
+        message.role == Role::Assistant
+            && message
+                .parts
+                .iter()
+                .any(|part| matches!(part, Part::Text(part) if part.text == "next turn succeeds"))
+    }));
+}
+
+#[tokio::test]
+async fn model_changes_refresh_the_request_prompt_without_mutating_saved_agent_state() {
+    let provider = Arc::new(CapturingProvider::new(vec![
+        FakeProvider::text_response("first"),
+        FakeProvider::text_response("second"),
+        FakeProvider::text_response("restored"),
+    ]));
+    let mut agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    agent.set_model_info("first", "fixture");
+    agent.set_prompt_cache_retention(crate::PromptCacheRetention::from_secs(Some(3600)));
+    agent.set_system("first model scaffold".into());
+    let mut events = agent.run("hello".into());
+    while events.recv().await.is_some() {}
+    let saved = agent.clone();
+
+    agent.set_model_info("second", "fixture");
+    agent.set_system("second model scaffold".into());
+    let mut events = agent.run("continue".into());
+    while events.recv().await.is_some() {}
+    let mut events = saved.run("restore".into());
+    while events.recv().await.is_some() {}
+
+    let requests = provider.captured.lock().unwrap();
+    assert!(requests[1].system.contains("second model scaffold"));
+    assert!(requests[2].system.contains("first model scaffold"));
 }
 
 struct EchoTool {
@@ -1023,13 +1131,18 @@ async fn test_cancelled_tool_turn_appends_tool_results() {
     // append a tool result message for every tool call so the next request to
     // the provider is not rejected for missing tool responses.
     let script = FakeProvider::tool_call("echo", "c1", serde_json::json!({"input": "hi"}));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let session_id = mew_message::SessionId::new();
+    let writer = mew_session::Writer::open_at(tmp.path(), &session_id.to_string())
+        .await
+        .unwrap();
     let provider = std::sync::Arc::new(StatefulFakeProvider::new(vec![script]));
     let agent = Agent::new(
         provider,
         std::sync::Arc::new(NopDispatcher),
-        None,
+        Some(writer),
         vec![std::sync::Arc::new(EchoTool::mutating())],
-        None,
+        Some(session_id),
     );
 
     let cancel = tokio_util::sync::CancellationToken::new();
@@ -1060,207 +1173,211 @@ async fn test_cancelled_tool_turn_appends_tool_results() {
         matches!(&msgs[2].parts[0], Part::ToolResult(ref tr) if tr.call_id == "c1"),
         "tool result should reference the call_id"
     );
+    let expected = msgs.clone();
+    drop(msgs);
+    let persisted = mew_session::Reader::load_from(tmp.path(), &session_id.to_string())
+        .await
+        .unwrap();
+    assert_eq!(
+        persisted, expected,
+        "aborted tool states must survive reload"
+    );
 }
 
-/// Build an agent wired for handoff_plan tests: the real `HandoffPlan` tool,
-/// builtin personas (so "builder" resolves), and a two-script provider
-/// (handoff call, then a text response to close the turn).
-fn handoff_agent(plan_path: std::path::PathBuf, handoff_input: serde_json::Value) -> Agent {
-    let script1 = FakeProvider::tool_call("handoff_plan", "c1", handoff_input);
-    let script2 = FakeProvider::text_response("done");
-    let provider = std::sync::Arc::new(StatefulFakeProvider::new(vec![script1, script2]));
+#[tokio::test]
+async fn test_retired_persona_tools_return_errors_without_blocking() {
+    for tool_name in ["handoff_plan", "switch_persona"] {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = dir.path().join("PLAN.md");
+        tokio::fs::write(&plan, "# Plan\n\nKeep planning explicit.")
+            .await
+            .unwrap();
+        let provider = Arc::new(CapturingProvider::new(vec![
+            FakeProvider::tool_call(tool_name, "retired-call", serde_json::json!({})),
+            FakeProvider::text_response("The plan is ready."),
+        ]));
+        let mut agent = Agent::new(
+            provider.clone(),
+            Arc::new(NopDispatcher),
+            None,
+            vec![],
+            None,
+        );
+        agent.set_plan_path(plan.clone());
+        agent.set_personas(mew_personas::builtin_defaults());
+        let personas = mew_personas::builtin_defaults();
+        agent.apply_persona(personas.iter().find(|p| p.name == "planner").unwrap());
+
+        let mut rx = agent.run("finish planning".into());
+        let mut tool_success = None;
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while let Some(event) = rx.recv().await {
+                match event {
+                    AgentEvent::ToolEnd { call_id, success } if call_id == "retired-call" => {
+                        tool_success = Some(success);
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("retired tools must not block the turn");
+
+        assert_eq!(tool_success, Some(false));
+        assert_eq!(agent.persona_name.as_deref(), Some("planner"));
+        assert_eq!(
+            tokio::fs::read_to_string(plan).await.unwrap(),
+            "# Plan\n\nKeep planning explicit."
+        );
+        let messages = agent.messages.lock().await;
+        assert!(messages.iter().flat_map(|m| &m.parts).any(|part| {
+            matches!(part, Part::ToolCall(tc) if tc.tool_name == tool_name && matches!(tc.state, ToolState::Error(_)))
+        }));
+        assert!(messages
+            .iter()
+            .flat_map(|m| &m.parts)
+            .any(|part| { matches!(part, Part::Text(text) if text.text == "The plan is ready.") }));
+        assert_eq!(provider.captured.lock().unwrap().len(), 2);
+    }
+}
+
+#[tokio::test]
+async fn test_planner_writes_plan_and_finishes_without_changing_persona() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = dir.path().join("PLAN.md");
+    let content = "# Goal\n\n1. make a focused change\n2. verify the behavior";
+    let provider = Arc::new(CapturingProvider::new(vec![
+        FakeProvider::tool_call(
+            "write_plan",
+            "plan-call",
+            serde_json::json!({"content": content}),
+        ),
+        FakeProvider::text_response("The plan is ready for review."),
+    ]));
     let mut agent = Agent::new(
-        provider,
-        std::sync::Arc::new(NopDispatcher),
+        provider.clone(),
+        Arc::new(NopDispatcher),
         None,
-        vec![std::sync::Arc::new(
-            mew_tools::tools::handoff_plan::HandoffPlan,
-        )],
+        vec![Arc::new(mew_tools::tools::write_plan::WritePlan::new(
+            plan.display().to_string(),
+        ))],
         None,
     );
-    agent.set_plan_path(plan_path);
-    agent.set_personas(mew_personas::builtin_defaults());
-    agent
+    agent.set_plan_path(plan.clone());
+    let personas = mew_personas::builtin_defaults();
+    agent.apply_persona(personas.iter().find(|p| p.name == "planner").unwrap());
+
+    let mut rx = agent.run("plan the change".into());
+    while let Some(event) = rx.recv().await {
+        assert!(
+            !matches!(event, AgentEvent::Error(_)),
+            "planning failed: {event:?}"
+        );
+    }
+
+    assert_eq!(tokio::fs::read_to_string(plan).await.unwrap(), content);
+    assert_eq!(agent.persona_name.as_deref(), Some("planner"));
+    let requests = provider.captured.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    for request in requests.iter() {
+        assert!(!request.system.contains("handoff_plan"));
+        assert!(!request.system.contains("switch_persona"));
+    }
+    drop(requests);
+    agent.apply_persona(personas.iter().find(|p| p.name == "builder").unwrap());
+    assert_eq!(agent.persona_name.as_deref(), Some("builder"));
+    agent.clear_persona();
+    assert!(agent.persona_name.is_none());
 }
 
 #[tokio::test]
-async fn test_handoff_plan_approved() {
-    let dir = tempfile::tempdir().unwrap();
-    let plan = dir.path().join("PLAN.md");
-    tokio::fs::write(&plan, "# Goal\n\n1. do the thing")
-        .await
-        .unwrap();
-
-    let agent = handoff_agent(plan, serde_json::json!({}));
-    let mut rx = agent.run("handoff".into());
-
-    let mut got_event = false;
-    let mut got_switch = false;
-    let mut tool_success = None;
-    while let Some(ev) = rx.recv().await {
-        match ev {
-            AgentEvent::PlanApprovalRequest {
-                plan_markdown,
-                persona,
-                tx,
-                ..
-            } => {
-                got_event = true;
-                assert!(plan_markdown.contains("do the thing"));
-                assert_eq!(persona, "builder");
-                let _ = tx.send(crate::PlanDecision::Approved);
-            }
-            AgentEvent::ToolEnd { call_id, success } if call_id == "c1" => {
-                tool_success = Some(success);
-            }
-            AgentEvent::PersonaSwitchRequested { name } => {
-                assert_eq!(name, "builder");
-                got_switch = true;
-            }
-            _ => {}
-        }
-    }
-
-    assert!(got_event, "PlanApprovalRequest not emitted");
-    assert_eq!(tool_success, Some(true), "tool should report success");
-    assert!(
-        got_switch,
-        "PersonaSwitchRequested should fire at end of turn"
+async fn test_saved_retired_tool_history_can_resume() {
+    let provider = Arc::new(CapturingProvider::new(vec![FakeProvider::text_response(
+        "resumed",
+    )]));
+    let agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
     );
-
-    // The pending slot was drained by the end-of-turn machinery.
-    assert!(agent.pending_persona_switch.lock().await.is_none());
-    // A tool result was recorded (user, assistant tool-call, tool result, ...).
-    let msgs = agent.messages.lock().await;
-    assert!(msgs
-        .iter()
-        .any(|m| m.parts.iter().any(|p| matches!(p, Part::ToolResult(_)))));
-}
-
-#[tokio::test]
-async fn test_handoff_plan_changes_requested() {
-    let dir = tempfile::tempdir().unwrap();
-    let plan = dir.path().join("PLAN.md");
-    tokio::fs::write(&plan, "# Goal\n\n1. do the thing")
-        .await
-        .unwrap();
-
-    let agent = handoff_agent(plan, serde_json::json!({}));
-    let mut rx = agent.run("handoff".into());
-
-    let mut tool_success = None;
-    let mut got_switch = false;
-    while let Some(ev) = rx.recv().await {
-        match ev {
-            AgentEvent::PlanApprovalRequest { tx, .. } => {
-                let _ = tx.send(crate::PlanDecision::ChangesRequested("add tests".into()));
-            }
-            AgentEvent::ToolEnd { call_id, success } if call_id == "c1" => {
-                tool_success = Some(success);
-            }
-            AgentEvent::PersonaSwitchRequested { .. } => got_switch = true,
-            _ => {}
-        }
-    }
-
-    // A change request is a *successful* tool result (the model revises), not
-    // an error, and no persona switch is queued.
-    assert_eq!(tool_success, Some(true));
-    assert!(!got_switch, "no switch on change request");
-    assert!(agent.pending_persona_switch.lock().await.is_none());
-
-    // The feedback must be in the tool call's completed output.
-    let msgs = agent.messages.lock().await;
-    let output = msgs
-        .iter()
-        .flat_map(|m| &m.parts)
-        .find_map(|p| match p {
-            Part::ToolCall(tc) => tc.state.output(),
-            _ => None,
-        })
-        .expect("tool call output");
-    assert!(output.contains("add tests"), "feedback missing: {output}");
-    assert!(output.contains("edit_plan"));
-}
-
-#[tokio::test]
-async fn test_handoff_plan_missing_plan() {
-    let dir = tempfile::tempdir().unwrap();
-    // Plan path points at a file that doesn't exist.
-    let plan = dir.path().join("PLAN.md");
-
-    let agent = handoff_agent(plan, serde_json::json!({}));
-    let mut rx = agent.run("handoff".into());
-
-    let mut got_event = false;
-    let mut tool_success = None;
-    while let Some(ev) = rx.recv().await {
-        match ev {
-            AgentEvent::PlanApprovalRequest { tx, .. } => {
-                got_event = true;
-                let _ = tx.send(crate::PlanDecision::Approved);
-            }
-            AgentEvent::ToolEnd { call_id, success } if call_id == "c1" => {
-                tool_success = Some(success);
-            }
-            _ => {}
-        }
-    }
-
-    assert!(
-        !got_event,
-        "no approval prompt when the plan file is missing"
-    );
-    assert_eq!(tool_success, Some(false), "tool should error");
-    // The tool call state should be an error.
-    let msgs = agent.messages.lock().await;
-    let is_error = msgs
-        .iter()
-        .flat_map(|m| &m.parts)
-        .any(|p| matches!(p, Part::ToolCall(tc) if matches!(tc.state, ToolState::Error(_))));
-    assert!(is_error);
-}
-
-#[tokio::test]
-async fn test_handoff_plan_unknown_persona() {
-    let dir = tempfile::tempdir().unwrap();
-    let plan = dir.path().join("PLAN.md");
-    tokio::fs::write(&plan, "# Goal").await.unwrap();
-
-    let agent = handoff_agent(plan, serde_json::json!({"persona": "ghost"}));
-    let mut rx = agent.run("handoff".into());
-
-    let mut got_event = false;
-    let mut tool_success = None;
-    while let Some(ev) = rx.recv().await {
-        match ev {
-            AgentEvent::PlanApprovalRequest { .. } => got_event = true,
-            AgentEvent::ToolEnd { call_id, success } if call_id == "c1" => {
-                tool_success = Some(success);
-            }
-            _ => {}
-        }
-    }
-
-    assert!(!got_event, "no approval prompt for an unknown persona");
-    assert_eq!(tool_success, Some(false));
-    let msgs = agent.messages.lock().await;
-    let err_text = msgs
-        .iter()
-        .flat_map(|m| &m.parts)
-        .find_map(|p| match p {
-            Part::ToolCall(tc) => match &tc.state {
-                ToolState::Error(e) => Some(e.error.clone()),
-                _ => None,
+    let message_id = ulid::Ulid::new();
+    let result_message_id = ulid::Ulid::new();
+    let mut calls = Vec::new();
+    let mut results = Vec::new();
+    for tool_name in ["handoff_plan", "switch_persona"] {
+        let base = PartBase {
+            id: ulid::Ulid::new(),
+            message_id,
+            session_id: agent.session_id,
+        };
+        calls.push(Part::ToolCall(ToolCallPart {
+            base,
+            tool_name: tool_name.into(),
+            call_id: tool_name.into(),
+            state: ToolState::Completed(ToolStateCompleted {
+                input: serde_json::json!({"persona": "builder"}),
+                output: "Plan approved. Queued switch to 'builder' at end of turn.".into(),
+                metadata: None,
+                diff: None,
+                images: vec![],
+                time: ToolTime {
+                    start: 1,
+                    end: Some(2),
+                },
+            }),
+            raw_input: String::new(),
+        }));
+        results.push(Part::ToolResult(ToolResultPart {
+            base: PartBase {
+                id: ulid::Ulid::new(),
+                message_id: result_message_id,
+                session_id: agent.session_id,
             },
-            _ => None,
-        })
-        .expect("error output");
-    assert!(err_text.contains("ghost"));
-    assert!(
-        err_text.contains("builder"),
-        "should list available personas"
-    );
+            call_id: tool_name.into(),
+        }));
+    }
+    let saved = vec![
+        Message {
+            id: message_id,
+            session_id: agent.session_id,
+            role: Role::Assistant,
+            parts: calls,
+            time: Time {
+                created: 1,
+                completed: Some(2),
+            },
+            assistant: None,
+        },
+        Message {
+            id: result_message_id,
+            session_id: agent.session_id,
+            role: Role::User,
+            parts: results,
+            time: Time {
+                created: 2,
+                completed: Some(2),
+            },
+            assistant: None,
+        },
+    ];
+    let encoded = serde_json::to_string(&saved).unwrap();
+    let history: Vec<Message> = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(history, saved);
+    agent.load_messages(history).await;
+
+    let mut rx = agent.run("continue the conversation".into());
+    while let Some(event) = rx.recv().await {
+        assert!(
+            !matches!(event, AgentEvent::Error(_)),
+            "resume failed: {event:?}"
+        );
+    }
+
+    let requests = provider.captured.lock().unwrap();
+    assert_eq!(&requests[0].messages[..2], saved.as_slice());
+    assert!(agent.persona_name.is_none());
 }
 
 #[tokio::test]
@@ -3611,6 +3728,454 @@ async fn test_no_fallback_models_means_fatal_error() {
 // Subagent batch-wait tests
 // ------------------------------------------------------------------
 
+fn subagent_with_real_runner(
+    root: &std::path::Path,
+    scripts: Vec<Vec<ProviderEvent>>,
+    tools: Vec<Arc<dyn Tool>>,
+    cwd: std::path::PathBuf,
+    workspace_roots: Vec<std::path::PathBuf>,
+) -> (Agent, Arc<CapturingProvider>) {
+    let provider = Arc::new(CapturingProvider::new(scripts));
+    let mut agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    agent.subagent_defs = vec![mew_subagents::SubagentDef {
+        name: "worker".into(),
+        description: "worker".into(),
+        model: None,
+        tools: None,
+        max_turns: Some(10),
+        max_duration_secs: Some(60),
+        body: String::new(),
+        path: std::path::PathBuf::new(),
+        template: false,
+        can_spawn: false,
+        output_schema: None,
+    }];
+    agent.subagent_runner = Some(Arc::new(
+        crate::runner::SimpleRunner::new(provider.clone(), tools, Arc::new(NopDispatcher))
+            .with_session_root(root.to_path_buf())
+            .with_workspace(cwd, workspace_roots, None),
+    ));
+    (agent, provider)
+}
+
+#[tokio::test]
+async fn subagent_start_preserves_child_progress_text_and_tool_events() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (agent, _provider) = subagent_with_real_runner(
+        tmp.path(),
+        vec![
+            FakeProvider::tool_call(
+                "progress_update",
+                "child-progress",
+                serde_json::json!({"message":"checking session state"}),
+            ),
+            FakeProvider::text_response("child final answer"),
+        ],
+        vec![Arc::new(mew_tools::tools::progress_update::ProgressUpdate)],
+        tmp.path().to_path_buf(),
+        vec![],
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let task = agent
+        .start_subagent("worker", "inspect", None, None, &tx)
+        .await
+        .unwrap();
+    let mut status = None;
+    let mut tool_started = false;
+    let mut tool_completed = false;
+    let mut text = String::new();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(event) = rx.recv().await {
+            match event {
+                AgentEvent::SubagentStatus {
+                    parent_call_id,
+                    tool_name,
+                    message,
+                } => {
+                    assert_eq!(parent_call_id, task);
+                    assert_eq!(tool_name, "progress_update");
+                    status = Some(message);
+                }
+                AgentEvent::SubagentProgress {
+                    parent_call_id,
+                    child_event,
+                } => {
+                    assert_eq!(parent_call_id, task);
+                    match *child_event {
+                        AgentEvent::ToolStart { call_id } => {
+                            assert_eq!(call_id, "child-progress");
+                            tool_started = true;
+                        }
+                        AgentEvent::ToolEnd { call_id, success } => {
+                            assert_eq!(call_id, "child-progress");
+                            tool_completed = success;
+                        }
+                        AgentEvent::Provider(ProviderEvent::PartDelta {
+                            field: "text",
+                            delta,
+                            ..
+                        }) => text.push_str(&delta),
+                        _ => {}
+                    }
+                }
+                AgentEvent::SubagentEnd { parent_call_id, .. } => {
+                    assert_eq!(parent_call_id, task);
+                    break;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("child did not finish");
+    assert_eq!(status.as_deref(), Some("checking session state"));
+    assert!(tool_started && tool_completed);
+    assert_eq!(text, "child final answer");
+    assert!(
+        matches!(agent.wait_subagent(&task).await.unwrap().0, mew_subagents::SubagentResult::Complete { text, .. } if text == "child final answer")
+    );
+}
+
+#[tokio::test]
+async fn subagent_question_reaches_parent_and_preserves_answer_in_child_history() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (agent, _) = subagent_with_real_runner(
+        tmp.path(),
+        vec![
+            FakeProvider::tool_call(
+                "ask_user_question",
+                "child-question",
+                serde_json::json!({
+                    "questions": [{"prompt": "which file?", "options": [
+                        {"label": "source", "description": "implementation file"},
+                        {"label": "test", "description": "regression file"}
+                    ]}]
+                }),
+            ),
+            FakeProvider::text_response("finished"),
+        ],
+        vec![],
+        tmp.path().to_path_buf(),
+        vec![],
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let task = agent
+        .start_subagent("worker", "ask before editing", None, None, &tx)
+        .await
+        .unwrap();
+    let mut child_id = None;
+    let mut asked = false;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(event) = rx.recv().await {
+            match event {
+                AgentEvent::SubagentStart {
+                    child_session_id, ..
+                } => child_id = Some(child_session_id),
+                AgentEvent::SubagentAskUser {
+                    source,
+                    call_id,
+                    questions,
+                    tx,
+                } => {
+                    assert_eq!(source.parent_call_id, task);
+                    assert_eq!(source.child_session_id, *child_id.as_ref().unwrap());
+                    assert_eq!(source.name, "worker");
+                    assert!(source.display_name.is_some());
+                    assert_eq!(call_id, "child-question");
+                    assert_eq!(questions[0].options[1].description, "regression file");
+                    assert_eq!(questions[0].prompt, "which file?");
+                    asked = true;
+                    tx.send(vec!["test".into()]).unwrap();
+                }
+                AgentEvent::SubagentEnd { parent_call_id, .. } => {
+                    assert_eq!(parent_call_id, task);
+                    break;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        asked,
+        "child question was dropped before reaching the parent"
+    );
+    let messages = mew_session::Reader::load_subagent_from(
+        tmp.path(),
+        &agent.session_id.to_string(),
+        &child_id.unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(messages.iter().flat_map(|message| &message.parts).any(|part| matches!(
+        part, mew_message::Part::ToolCall(call) if matches!(
+            &call.state, mew_message::ToolState::Completed(state) if state.output.contains("A (selected): test")
+        )
+    )), "answer did not reach the real child tool");
+}
+
+#[tokio::test]
+async fn subagent_start_permission_reply_controls_real_child_file_write() {
+    for decision in [
+        mew_hooks::PermissionDecision::AllowOnce,
+        mew_hooks::PermissionDecision::Deny,
+    ] {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let input = serde_json::json!({"path":"child.txt","content":"approved child output"});
+        let (agent, _provider) = subagent_with_real_runner(
+            tmp.path(),
+            vec![
+                FakeProvider::tool_call("write", "child-write", input.clone()),
+                FakeProvider::text_response("finished"),
+            ],
+            vec![Arc::new(mew_tools::tools::write::Write)],
+            tmp.path().to_path_buf(),
+            vec![tmp.path().to_path_buf()],
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let task = agent
+            .start_subagent("worker", "write the file", None, None, &tx)
+            .await
+            .unwrap();
+        let mut prompted = false;
+        let mut success = None;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(event) = rx.recv().await {
+                match event {
+                    AgentEvent::SubagentPermissionRequest {
+                        parent_call_id,
+                        call,
+                        tx,
+                    } => {
+                        assert_eq!(parent_call_id, task);
+                        assert_eq!(call.call_id, "child-write");
+                        assert_eq!(call.tool_name, "write");
+                        assert_eq!(call.input, input);
+                        prompted = true;
+                        tx.send(decision).unwrap();
+                    }
+                    AgentEvent::SubagentProgress { child_event, .. } => {
+                        if let AgentEvent::ToolEnd {
+                            call_id,
+                            success: completed,
+                        } = *child_event
+                        {
+                            assert_eq!(call_id, "child-write");
+                            success = Some(completed);
+                        }
+                    }
+                    AgentEvent::SubagentEnd { .. } => break,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("permission reply did not reach the child");
+        assert!(prompted, "child permission was silently dropped");
+        let allowed = decision == mew_hooks::PermissionDecision::AllowOnce;
+        assert_eq!(success, Some(allowed));
+        if allowed {
+            assert_eq!(
+                tokio::fs::read_to_string(tmp.path().join("child.txt"))
+                    .await
+                    .unwrap(),
+                "approved child output"
+            );
+        } else {
+            assert!(!tmp.path().join("child.txt").exists());
+        }
+        agent.wait_subagent(&task).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn subagent_start_workspace_reply_reaches_real_child_reader() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let workspace = tmp.path().join("workspace");
+    let outside = tmp.path().join("outside");
+    tokio::fs::create_dir_all(&workspace).await.unwrap();
+    tokio::fs::create_dir_all(&outside).await.unwrap();
+    let path = outside.join("child.txt");
+    tokio::fs::write(&path, "outside workspace sentinel")
+        .await
+        .unwrap();
+    let (agent, provider) = subagent_with_real_runner(
+        tmp.path(),
+        vec![
+            FakeProvider::tool_call("read", "child-read", serde_json::json!({"path":path})),
+            FakeProvider::text_response("finished"),
+        ],
+        vec![Arc::new(mew_tools::tools::read::Read)],
+        workspace.clone(),
+        vec![workspace],
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let task = agent
+        .start_subagent("worker", "read the file", None, None, &tx)
+        .await
+        .unwrap();
+    let mut prompted = false;
+    let mut child_id = None;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(event) = rx.recv().await {
+            match event {
+                AgentEvent::WorkspacePermissionRequest { path, tx } => {
+                    assert_eq!(path, outside);
+                    prompted = true;
+                    tx.send(mew_hooks::PermissionDecision::AllowOnce).unwrap();
+                }
+                AgentEvent::SubagentEnd {
+                    child_session_id, ..
+                } => {
+                    child_id = Some(child_session_id);
+                    break;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("workspace reply did not reach the child");
+    assert!(prompted, "child workspace permission was silently dropped");
+    agent.wait_subagent(&task).await.unwrap();
+    let messages = mew_session::Reader::load_subagent_from(
+        tmp.path(),
+        &agent.session_id.to_string(),
+        &child_id.unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(messages
+        .iter()
+        .flat_map(|message| &message.parts)
+        .any(|part| matches!(part, Part::ToolCall(call) if call.call_id == "child-read")));
+    assert!(messages.iter().flat_map(|message| &message.parts).any(|part| matches!(part, Part::ToolCall(call) if matches!(&call.state, ToolState::Completed(completed) if completed.output.contains("outside workspace sentinel")))));
+    assert_eq!(
+        messages.len(),
+        4,
+        "child revisions must not duplicate messages"
+    );
+    let requests = provider.captured.lock().unwrap();
+    assert!(requests.last().unwrap().messages.iter().flat_map(|message| &message.parts).any(|part| matches!(part, Part::ToolCall(call) if matches!(&call.state, ToolState::Completed(completed) if completed.output.contains("outside workspace sentinel")))));
+}
+
+#[tokio::test]
+async fn terminal_tool_states_survive_top_level_reload_without_duplicate_messages() {
+    for decision in [
+        mew_hooks::PermissionDecision::AllowOnce,
+        mew_hooks::PermissionDecision::Deny,
+    ] {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let session_id = mew_message::SessionId::new();
+        let writer = mew_session::Writer::open_at(tmp.path(), &session_id.to_string())
+            .await
+            .unwrap();
+        let input = serde_json::json!({"path":"output.txt","content":"persisted output"});
+        let provider = Arc::new(StatefulFakeProvider::new(vec![
+            FakeProvider::tool_call("write", "persisted-write", input),
+            FakeProvider::text_response("finished"),
+        ]));
+        let mut agent = Agent::new(
+            provider,
+            Arc::new(NopDispatcher),
+            Some(writer),
+            vec![Arc::new(mew_tools::tools::write::Write)],
+            Some(session_id),
+        );
+        agent.cwd = tmp.path().to_path_buf();
+        agent.workspace_roots = vec![tmp.path().to_path_buf()];
+        let mut rx = agent.run("write output".into());
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(event) = rx.recv().await {
+                if let AgentEvent::PermissionRequest { tx, .. } = event {
+                    tx.send(decision).unwrap();
+                }
+            }
+        })
+        .await
+        .expect("tool did not finish");
+        let expected = agent.messages.lock().await.clone();
+        let history = mew_session::Reader::load_from(tmp.path(), &session_id.to_string())
+            .await
+            .unwrap();
+        assert_eq!(
+            history, expected,
+            "completed/error tool input and output must survive reload"
+        );
+        assert_eq!(history.len(), 4);
+        let resumed = Agent::new(
+            Arc::new(FakeProvider::new(vec![])),
+            Arc::new(NopDispatcher),
+            None,
+            vec![],
+            Some(session_id),
+        );
+        resumed.load_messages(history).await;
+        assert_eq!(*resumed.messages.lock().await, expected);
+    }
+}
+
+#[tokio::test]
+async fn subagent_exit_tool_records_its_final_output_before_reporting_completion() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (agent, provider) = subagent_with_real_runner(
+        tmp.path(),
+        vec![FakeProvider::tool_call(
+            "exit_tool",
+            "child-exit",
+            serde_json::json!({"final_answer":"complete deliverable"}),
+        )],
+        vec![Arc::new(mew_tools::tools::exit_tool::ExitTool)],
+        tmp.path().to_path_buf(),
+        vec![],
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let task = agent
+        .start_subagent("worker", "finish the task", None, None, &tx)
+        .await
+        .unwrap();
+    let mut tool_completed = false;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(event) = rx.recv().await {
+            match event {
+                AgentEvent::SubagentProgress { child_event, .. } => {
+                    if let AgentEvent::ToolEnd { call_id, success } = *child_event {
+                        assert_eq!(call_id, "child-exit");
+                        tool_completed = success;
+                    }
+                }
+                AgentEvent::SubagentEnd { child_session_id, .. } => {
+                    let history = mew_session::Reader::load_subagent_from(tmp.path(), &agent.session_id.to_string(), &child_session_id).await.unwrap();
+                    assert!(history.iter().flat_map(|message| &message.parts).any(|part| matches!(part, Part::ToolCall(call) if matches!(&call.state, ToolState::Completed(completed) if completed.output == "complete deliverable"))), "terminal child trace must contain the exit output");
+                    assert_eq!(history.len(), 3, "completed exit must include its tool result");
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }).await.expect("exit did not finish the child");
+    assert!(
+        tool_completed,
+        "terminal child tool event must precede SubagentEnd"
+    );
+    let result = agent.wait_subagent(&task).await.unwrap().0;
+    assert!(
+        matches!(result, mew_subagents::SubagentResult::Complete { text, .. } if text == "complete deliverable")
+    );
+    assert_eq!(
+        provider.captured.lock().unwrap().len(),
+        1,
+        "exit must prevent another provider request"
+    );
+}
+
 /// A stub runner that fails on prompts containing "fail" and completes
 /// otherwise. Reports Started so the task registry gets a child session id.
 struct StubRunner;
@@ -4057,4 +4622,312 @@ async fn test_collected_task_removed_from_registry_file() {
         .unwrap();
     assert_eq!(records.len(), 1);
     assert_ne!(records[0].task_id, id_a);
+}
+
+#[tokio::test]
+async fn cancelling_a_child_waiting_for_input_closes_the_question_and_persists_cancellation() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut script = FakeProvider::tool_call(
+        "ask_user_question",
+        "cancelled-ask",
+        serde_json::json!({"questions":[{"prompt":"continue?","options":[]}]}),
+    );
+    script.pop();
+    script.extend(FakeProvider::tool_call(
+        "write",
+        "after-question",
+        serde_json::json!({"path":"should-not-exist.txt","content":"unexpected"}),
+    ));
+    let (agent, _) = subagent_with_real_runner(
+        tmp.path(),
+        vec![script],
+        vec![Arc::new(mew_tools::tools::write::Write)],
+        tmp.path().to_path_buf(),
+        vec![tmp.path().to_path_buf()],
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let task = agent
+        .start_subagent("worker", "ask", None, None, &tx)
+        .await
+        .unwrap();
+    let (source, question_tx) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let AgentEvent::SubagentAskUser { source, tx, .. } = rx.recv().await.unwrap() {
+                break (source, tx);
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(agent.cancel_subagent(&task).await);
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while let Some(event) = rx.recv().await {
+            if let AgentEvent::SubagentEnd { outcome, .. } = event {
+                assert!(matches!(outcome, mew_subagents::SubagentOutcome::Cancelled));
+                break;
+            }
+        }
+    })
+    .await
+    .expect("pending child question ignored task cancellation");
+    assert!(
+        question_tx.is_closed(),
+        "cancelled child still waits for an answer"
+    );
+    assert!(!tmp.path().join("should-not-exist.txt").exists());
+    let messages = mew_session::Reader::load_subagent_from(
+        tmp.path(),
+        &agent.session_id.to_string(),
+        &source.child_session_id,
+    )
+    .await
+    .unwrap();
+    assert!(messages.iter().flat_map(|message| &message.parts).any(|part| matches!(
+        part, mew_message::Part::ToolCall(call) if matches!(&call.state, mew_message::ToolState::Error(state) if state.error.contains("cancelled"))
+    )), "cancelled tool state must be durable before the child finishes");
+}
+
+#[tokio::test]
+async fn ask_user_question_preserves_option_descriptions_and_answer_types() {
+    let input = serde_json::json!({"questions": [
+        {"prompt": "which file?", "options": [
+            {"label": "source", "description": "implementation\n日本語"},
+            {"label": "test", "description": "regression file"}
+        ]},
+        {"prompt": "anything else?", "options": [{"label": "nothing"}]}
+    ]});
+    let provider = Arc::new(CapturingProvider::new(vec![
+        FakeProvider::tool_call("ask_user_question", "question", input.clone()),
+        FakeProvider::text_response("done"),
+    ]));
+    let agent = Agent::new(provider, Arc::new(NopDispatcher), None, vec![], None);
+    let mut events = agent.run("ask before editing".into());
+    let mut asked = false;
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while let Some(event) = events.recv().await {
+            if let AgentEvent::AskUser {
+                call_id,
+                questions,
+                tx,
+            } = event
+            {
+                assert_eq!(call_id, "question");
+                assert_eq!(questions[0].prompt, "which file?");
+                assert_eq!(questions[0].options[0].label, "source");
+                assert_eq!(
+                    questions[0].options[0].description,
+                    "implementation\n日本語"
+                );
+                assert_eq!(questions[0].options[1].description, "regression file");
+                assert_eq!(questions[1].options[0].description, "");
+                tx.send(vec!["test".into(), "free form 日本語".into()])
+                    .unwrap();
+                asked = true;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(asked);
+    let messages = agent.messages.lock().await;
+    let call = messages
+        .iter()
+        .flat_map(|message| &message.parts)
+        .find_map(|part| match part {
+            Part::ToolCall(call) if call.call_id == "question" => Some(call),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(call.state.input(), &input);
+    let output = call.state.output().unwrap();
+    assert!(output.contains("A (selected): test"), "{output}");
+    assert!(
+        output.contains("A (freeform): free form 日本語"),
+        "{output}"
+    );
+}
+
+#[tokio::test]
+async fn shell_job_does_not_finish_before_its_buffered_tail_is_collected() {
+    let agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let cwd = tempfile::tempdir().unwrap();
+    let id = agent
+        .start_shell_job("printf 'last-line\\n'", cwd.path())
+        .await;
+    let (output, state) = {
+        let jobs = agent.shell_jobs.lock().await;
+        let job = &jobs[&id];
+        (job.output.clone(), job.state.clone())
+    };
+    let buffer_guard = output.lock().await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !state.lock().await.is_terminal(),
+        "terminal state was published before the pending output reader drained"
+    );
+    drop(buffer_guard);
+    let (state, output) = agent.shell_job_block(&id, 3).await.unwrap();
+    assert!(state.is_terminal());
+    assert_eq!(output, "last-line\n");
+}
+
+#[tokio::test]
+async fn shell_job_output_chunks_preserve_unicode_and_validate_offsets() {
+    let agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let cwd = tempfile::tempdir().unwrap();
+    let id = agent.start_shell_job("i=0; while [ $i -lt 6000 ]; do printf '日本語🐱\\n'; i=$((i+1)); done; printf 'tail\\n'", cwd.path()).await;
+    let (state, full) = agent.shell_job_block(&id, 5).await.unwrap();
+    assert!(state.is_terminal());
+    assert!(full.ends_with("tail\n"));
+    assert!(full.len() > 65_536);
+    let mut offset = 0;
+    let mut collected = String::new();
+    loop {
+        let chunk = agent.shell_job_output(&id, offset).await.unwrap();
+        assert!(chunk.output.len() <= 65_536);
+        assert!(!chunk.incomplete);
+        assert_eq!(chunk.next_offset, offset + chunk.output.len() as u64);
+        collected.push_str(&chunk.output);
+        offset = chunk.next_offset;
+        if chunk.done {
+            break;
+        }
+        assert!(!chunk.output.is_empty());
+    }
+    assert_eq!(collected, full);
+    assert!(agent.shell_job_output(&id, 1).await.is_err());
+    assert!(agent.shell_job_output(&id, u64::MAX).await.is_err());
+    assert!(agent.shell_job_output("missing", 0).await.is_err());
+    let end = agent.shell_job_output(&id, offset).await.unwrap();
+    assert!(end.done);
+    assert!(end.output.is_empty());
+}
+
+#[tokio::test]
+async fn shell_job_bounds_inherited_pipe_drain_and_reports_incomplete_output() {
+    let agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let cwd = tempfile::tempdir().unwrap();
+    let id = agent
+        .start_shell_job("sleep 5 & printf 'head\\n'", cwd.path())
+        .await;
+    let (state, output) = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        agent.shell_job_block(&id, 3),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(state.is_terminal());
+    assert!(output.starts_with("head\n"));
+    assert!(output.contains("output incomplete"), "{output}");
+    let chunk = agent.shell_job_output(&id, 0).await.unwrap();
+    assert_eq!(chunk.output, "head\n");
+    assert!(chunk.done && chunk.incomplete);
+}
+
+#[tokio::test]
+async fn cancelled_shell_job_bounds_inherited_pipe_drain() {
+    let agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let cwd = tempfile::tempdir().unwrap();
+    let id = agent
+        .start_shell_job("sleep 5 & printf 'ready\\n'; wait", cwd.path())
+        .await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if agent
+                .shell_job_status(&id)
+                .await
+                .unwrap()
+                .1
+                .contains("ready")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(agent.cancel_shell_job(&id).await);
+    let (state, output) = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        agent.shell_job_block(&id, 3),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(state, crate::agent::ShellJobState::Cancelled));
+    assert!(output.contains("output incomplete"));
+    assert!(agent.shell_job_output(&id, 0).await.unwrap().incomplete);
+    assert!(!agent.cancel_shell_job(&id).await);
+}
+
+#[tokio::test]
+async fn shell_job_block_returns_immediately_for_an_already_finished_job() {
+    let agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let cwd = tempfile::tempdir().unwrap();
+    let id = agent.start_shell_job("printf 'done\\n'", cwd.path()).await;
+    assert!(agent.shell_job_block(&id, 3).await.unwrap().0.is_terminal());
+    let (_, output) = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        agent.shell_job_block(&id, 3),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(output, "done\n");
+}
+
+#[tokio::test]
+async fn shell_job_preserves_unicode_split_across_pipe_writes() {
+    let agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let cwd = tempfile::tempdir().unwrap();
+    let id = agent
+        .start_shell_job(
+            "printf '\\346'; sleep 0.02; printf '\\227'; sleep 0.02; printf '\\245\\n'",
+            cwd.path(),
+        )
+        .await;
+    let (state, output) = agent.shell_job_block(&id, 3).await.unwrap();
+    assert!(state.is_terminal());
+    assert_eq!(output, "日\n");
+    let chunk = agent.shell_job_output(&id, 0).await.unwrap();
+    assert_eq!(chunk.output, "日\n");
+    assert!(chunk.done && !chunk.incomplete);
 }

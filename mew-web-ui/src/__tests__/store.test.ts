@@ -1,11 +1,97 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { bridgeClientToStore, useSessionStore } from "../stores/session";
+import { askUserResponders, bridgeClientToStore, permissionResponders, useSessionStore } from "../stores/session";
 import type { MewClient } from "@mew/web-client";
 
 // Helper to get fresh store state.
 function store() {
   return useSessionStore.getState();
 }
+
+describe("pending input recovery", () => {
+  let handlers: Map<string, (...args: any[]) => void>;
+
+  beforeEach(() => {
+    store().reset();
+    permissionResponders.clear();
+    askUserResponders.clear();
+    handlers = new Map();
+    bridgeClientToStore({
+      on: (event: string, handler: (...args: any[]) => void) => handlers.set(event, handler),
+      listModels: () => Promise.resolve([]),
+      listPersonas: () => Promise.resolve([]),
+    } as unknown as MewClient);
+  });
+
+  it("deduplicates replayed permission, question, and goal requests", () => {
+    for (let replay = 0; replay < 2; replay++) {
+      handlers.get("permission-request")?.({ request_id: "p", tool_name: "bash", input: {} }, () => {});
+      handlers.get("ask-user-request")?.({ request_id: "q", call_id: "call-q", questions: [] });
+      handlers.get("goal-proposed")?.({ request_id: "g", call_id: "call-g", objective: "finish the task" });
+    }
+
+    expect(store().pendingPermissions).toHaveLength(1);
+    expect(store().pendingAskUser).toHaveLength(1);
+    expect(store().pendingGoals).toHaveLength(1);
+  });
+
+  it("retains child question identity across replay and resolves only that request", () => {
+    const subagent = { parent_call_id: "task", child_session_id: "child", name: "worker", display_name: "Curie" };
+    handlers.get("ask-user-request")?.({ request_id: "parent-q", call_id: "parent-ask", questions: [] });
+    for (let replay = 0; replay < 2; replay++) {
+      handlers.get("ask-user-request")?.({ request_id: "child-q", call_id: "child-ask", questions: [], subagent });
+    }
+    expect(store().pendingAskUser).toHaveLength(2);
+    expect(store().pendingAskUser.find((request) => request.requestId === "child-q")?.subagent).toEqual(subagent);
+    handlers.get("request-resolved")?.({ request_id: "child-q" });
+    expect(store().pendingAskUser.map((request) => request.requestId)).toEqual(["parent-q"]);
+  });
+
+  it("clears resolved cards and response callbacks across all input kinds", () => {
+    handlers.get("permission-request")?.({ request_id: "p", tool_name: "bash", input: {} }, () => {});
+    handlers.get("ask-user-request")?.({ request_id: "q", call_id: "call-q", questions: [] });
+    handlers.get("goal-proposed")?.({ request_id: "g", call_id: "call-g", objective: "finish the task" });
+    askUserResponders.set("q", () => {});
+
+    for (const request_id of ["p", "q", "g", "unknown"]) {
+      handlers.get("request-resolved")?.({ request_id });
+    }
+
+    expect(store().pendingPermissions).toEqual([]);
+    expect(store().pendingAskUser).toEqual([]);
+    expect(store().pendingGoals).toEqual([]);
+    expect(permissionResponders.size).toBe(0);
+    expect(askUserResponders.size).toBe(0);
+  });
+
+  it("clears stale input on session-ready before replay, including reconnect to the same session", () => {
+    for (const session_id of ["s1", "s2", "s2"]) {
+      handlers.get("permission-request")?.({ request_id: "p", tool_name: "bash", input: {} }, () => {});
+      handlers.get("ask-user-request")?.({ request_id: "q", call_id: "call-q", questions: [] });
+      handlers.get("goal-proposed")?.({ request_id: "g", call_id: "call-g", objective: "finish the task" });
+      askUserResponders.set("q", () => {});
+
+      handlers.get("session-ready")?.({ session_id });
+
+      expect(store().pendingPermissions).toEqual([]);
+      expect(store().pendingAskUser).toEqual([]);
+      expect(store().pendingGoals).toEqual([]);
+      expect(permissionResponders.size).toBe(0);
+      expect(askUserResponders.size).toBe(0);
+    }
+  });
+
+  it("keeps live pending inputs when another history page arrives", () => {
+    handlers.get("permission-request")?.({ request_id: "p", tool_name: "bash", input: {} }, () => {});
+    handlers.get("ask-user-request")?.({ request_id: "q", call_id: "call-q", questions: [] });
+    handlers.get("goal-proposed")?.({ request_id: "g", call_id: "call-g", objective: "finish the task" });
+
+    handlers.get("session-history")?.({ messages: [] });
+
+    expect(store().pendingPermissions).toHaveLength(1);
+    expect(store().pendingAskUser).toHaveLength(1);
+    expect(store().pendingGoals).toHaveLength(1);
+  });
+});
 
 describe("connection recovery", () => {
   beforeEach(() => {
@@ -32,6 +118,23 @@ describe("connection recovery", () => {
 });
 
 describe("session-ready bridge", () => {
+  it("changes persona only after the daemon confirms an explicit switch", () => {
+    const handlers = new Map<string, (data: any) => void>();
+    const client = {
+      on: (event: string, handler: (data: any) => void) => handlers.set(event, handler),
+      off: vi.fn(),
+    } as unknown as MewClient;
+
+    useSessionStore.setState({ currentPersona: "planner" });
+    bridgeClientToStore(client);
+
+    handlers.get("persona-switch-requested")?.({ name: "builder" });
+    expect(useSessionStore.getState().currentPersona).toBe("planner");
+
+    handlers.get("persona-switched")?.({ name: "builder" });
+    expect(useSessionStore.getState().currentPersona).toBe("builder");
+  });
+
   it("refreshes session metadata only after a session is ready", () => {
     const handlers = new Map<string, (data: any) => void>();
     const client = {
@@ -151,60 +254,6 @@ describe("flagged files lifecycle", () => {
     store().onFlaggedFilesChanged([{ path: "test.rs" }]);
     store().reset();
     expect(useSessionStore.getState().flaggedFiles).toHaveLength(0);
-  });
-});
-
-describe("plan approval lifecycle", () => {
-  beforeEach(() => {
-    store().reset();
-  });
-
-  it("onPlanApprovalRequest pushes a pending approval", () => {
-    store().onPlanApprovalRequest({
-      request_id: "r1",
-      call_id: "c1",
-      plan_path: "/repo/PLAN.md",
-      plan_markdown: "# Goal\n\n1. do it",
-      persona: "builder",
-    });
-    const pending = useSessionStore.getState().pendingPlanApprovals;
-    expect(pending).toHaveLength(1);
-    expect(pending[0]!.requestId).toBe("r1");
-    expect(pending[0]!.persona).toBe("builder");
-    expect(pending[0]!.planMarkdown).toContain("do it");
-  });
-
-  it("resolvePlanApproval removes the matching entry", () => {
-    store().onPlanApprovalRequest({
-      request_id: "r1",
-      call_id: "c1",
-      plan_path: "/repo/PLAN.md",
-      plan_markdown: "plan",
-      persona: "builder",
-    });
-    store().onPlanApprovalRequest({
-      request_id: "r2",
-      call_id: "c2",
-      plan_path: "/repo/PLAN.md",
-      plan_markdown: "plan2",
-      persona: "builder",
-    });
-    store().resolvePlanApproval("r1");
-    const pending = useSessionStore.getState().pendingPlanApprovals;
-    expect(pending).toHaveLength(1);
-    expect(pending[0]!.requestId).toBe("r2");
-  });
-
-  it("reset clears pending plan approvals", () => {
-    store().onPlanApprovalRequest({
-      request_id: "r1",
-      call_id: "c1",
-      plan_path: "/repo/PLAN.md",
-      plan_markdown: "plan",
-      persona: "builder",
-    });
-    store().reset();
-    expect(useSessionStore.getState().pendingPlanApprovals).toHaveLength(0);
   });
 });
 
@@ -547,5 +596,30 @@ describe("assistant metadata preservation", () => {
     expect(messages).toHaveLength(1);
     expect(messages[0]!.assistantMeta).toBeDefined();
     expect(messages[0]!.assistantMeta!.manifest).toBeDefined();
+  });
+});
+
+describe("authoritative activity recovery", () => {
+  beforeEach(() => store().reset());
+
+  it("replaces stale activity only for the confirmed session", () => {
+    store().setSessionId("active");
+    store().onSubagentStart({ parent_call_id: "stale", child_session_id: "old-child", name: "worker", display_name: null });
+    store().onJobUpdate({ jobId: "stale-job", command: "old", state: "running" });
+    const snapshot = {
+      session_id: "active",
+      subagents: [{ task_id: "task", child_session_id: "child", name: "worker", display_name: "Curie", status: "running", tool_name: "read" }],
+      jobs: [{ job_id: "job", command: "cargo test", state: "running" }],
+    };
+    store().onSessionActivitySnapshot({ ...snapshot, session_id: "other" });
+    expect([...store().subagents.keys()]).toEqual(["stale"]);
+    expect([...store().jobs.keys()]).toEqual(["stale-job"]);
+    store().onSessionActivitySnapshot(snapshot);
+    expect([...store().subagents.keys()]).toEqual(["task"]);
+    expect(store().subagents.get("task")).toMatchObject({ childSessionId: "child", displayName: "Curie", status: "running" });
+    expect([...store().jobs.values()]).toEqual([{ jobId: "job", command: "cargo test", state: "running" }]);
+    store().onSessionActivitySnapshot({ session_id: "active", subagents: [], jobs: [] });
+    expect(store().subagents.size).toBe(0);
+    expect(store().jobs.size).toBe(0);
   });
 });

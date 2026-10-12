@@ -325,7 +325,7 @@ mod hook_outcome_tests {
 ///
 /// - **Standard** — default. Mutating/Dangerous tools prompt; deny rules,
 ///   ask rules, secret-file guards, and bash decomposition all fire.
-/// - **Permissive** — Mutating tools (write/edit/switch_persona/job_cancel)
+/// - **Permissive** — Mutating tools (write/edit/job_cancel)
 ///   auto-allow; Dangerous tools (bash/shell_background/shell_monitor) still
 ///   prompt; user-configured deny rules, ask rules, secret-file guards, and
 ///   bash decomposition all still fire. "I trust the agent with file edits,

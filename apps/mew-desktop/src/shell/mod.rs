@@ -12,13 +12,13 @@ use gpui::{
     Window, WindowAppearance, WindowBounds, WindowOptions, WrappedLine,
 };
 use gpui_platform::application;
-use mew_browser_host::{BrowserEvent, BrowserPortal, BrowserRect, PumpTrigger};
+use mew_browser_host::{BrowserEvent, BrowserOwner, BrowserPage, BrowserPortal, BrowserRect};
 use mew_client_core::{
     ActionKind, ClientEngine, ClientEvent, ClientState, ClientTransport, PendingAction,
 };
 use mew_client_iroh::IrohTransport;
 use mew_client_local::LocalWebSocketTransport;
-use mew_desktop_supervisor::{DaemonEndpoint, DaemonMode, DesktopSupervisor, SupervisorConfig};
+use mew_desktop_supervisor::{DaemonEndpoint, DesktopSupervisor, SupervisorConfig};
 use mew_diff::{DiffLine, FileDiff, FileStatus};
 use mew_protocol::{Attachment, ClientMessage, DirEntry, PermissionDecision};
 use mew_tui::theme::Theme;
@@ -27,7 +27,6 @@ use mew_ui_model::{
     TranscriptRole, UsageSummary,
 };
 use ratatui::style::Color;
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{
     borrow::Cow,
     cell::RefCell,
@@ -50,16 +49,20 @@ use crate::{
     terminal::{TerminalEvent, TerminalView, DEFAULT_FONT_FAMILY},
 };
 
+mod browser;
 mod chat;
 mod chat_render;
 mod composer;
+mod drafts;
 mod helpers;
 mod lifecycle;
 mod platform;
 mod preferences;
 mod render;
+mod review;
 mod session;
 mod session_data;
+mod session_requests;
 mod settings;
 mod sidebar;
 mod tests;
@@ -68,8 +71,10 @@ mod types;
 mod workbench;
 
 use composer::{ComposerElement, TextInputTarget};
+use drafts::{DraftOwner, PromptDraft, TaskDrafts};
 use helpers::*;
 pub(crate) use platform::run;
+use session_requests::SessionRequests;
 use types::*;
 
 actions!(

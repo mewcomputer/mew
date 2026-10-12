@@ -75,7 +75,7 @@ struct ChatView: View {
                 if !isEmpty { isLoadingSession = false }
             }
             .sheet(item: Binding(
-                get: { store.pendingPermissions.first { $0.sessionId == sessionId }.map { PermissionSheetItem(permission: $0) } },
+                get: { store.pendingPermissions.first { $0.daemon == daemonNodeId && $0.sessionId == sessionId }.map { PermissionSheetItem(permission: $0) } },
                 set: { _ in }
             )) { item in
                 PermissionSheet(permission: item.permission) { decision in
@@ -85,11 +85,23 @@ struct ChatView: View {
                 .interactiveDismissDisabled()
             }
             .sheet(item: Binding(
-                get: { store.pendingAskUser.first { $0.sessionId == sessionId }.map { AskUserSheetItem(ask: $0) } },
+                get: { store.pendingAskUser.first { $0.daemon == daemonNodeId && $0.sessionId == sessionId }.map { AskUserSheetItem(ask: $0) } },
                 set: { _ in }
             )) { item in
-                AskUserSheet(ask: item.ask) { answers in
+                AskUserSheet(ask: item.ask, onRespond: { answers in
                     store.respondAskUser(requestId: item.ask.requestId, answers: answers)
+                }, onCancel: {
+                    store.cancelAskUser(requestId: item.ask.requestId)
+                })
+                .presentationDetents([.medium, .large])
+                .interactiveDismissDisabled()
+            }
+            .sheet(item: Binding(
+                get: { store.pendingGoals.first { $0.daemon == daemonNodeId && $0.sessionId == sessionId } },
+                set: { _ in }
+            )) { goal in
+                GoalProposalSheet(objective: goal.objective) { accepted in
+                    store.respondToGoal(requestId: goal.requestId, accepted: accepted)
                 }
                 .presentationDetents([.medium, .large])
                 .interactiveDismissDisabled()
@@ -113,22 +125,27 @@ struct ChatView: View {
                 )
                 .presentationDetents([.large])
             }
-            .onChange(of: store.availableModels) { models in
-                if currentModel == nil { currentModel = models.first }
-            }
-            .onChange(of: store.currentModel) { currentModels in
-                if let daemonId = store.selectedDaemonId?.nodeId,
-                   let modelName = currentModels[daemonId] {
-                    if let m = store.availableModels.first(where: { $0.model == modelName }) {
-                        currentModel = m
-                    }
-                }
-            }
-            .onChange(of: store.visibleMessages) { _ in
+            .onChange(of: store.availableModels) { initializeModelSelection() }
+            .onChange(of: store.currentModel) { updateModelSelection() }
+            .onChange(of: store.visibleMessages) {
                 if !store.visibleMessages.isEmpty {
                     isLoadingSession = false
                 }
             }
+    }
+
+    private func initializeModelSelection() {
+        if currentModel == nil {
+            currentModel = store.availableModels.first
+        }
+    }
+
+    private func updateModelSelection() {
+        if let daemonId = store.selectedDaemonId?.nodeId,
+           let modelName = store.currentModel[daemonId],
+           let model = store.availableModels.first(where: { $0.model == modelName }) {
+            currentModel = model
+        }
     }
 
     @ViewBuilder
@@ -210,12 +227,12 @@ struct ChatView: View {
                 // Auto-scroll on any content change (new messages, streaming
                 // deltas, and growing reasoning/tool output within a message),
                 // not just when the message count changes.
-                .onChange(of: store.visibleMessages) { _ in
+                .onChange(of: store.visibleMessages) {
                     scrollToBottom(proxy: proxy)
                 }
                 // Streaming deltas arrive rapidly; scroll without animation so
                 // the growing text and an animated scroll don't fight (jitter).
-                .onChange(of: store.streamingText) { _ in
+                .onChange(of: store.streamingText) {
                     scrollToBottom(proxy: proxy, animated: false)
                 }
             }
@@ -226,7 +243,7 @@ struct ChatView: View {
             GeometryReader { geo in
                 Color.clear
                     .onAppear { containerHeight = geo.size.height }
-                    .onChange(of: geo.size.height) { containerHeight = $0 }
+                    .onChange(of: geo.size.height) { containerHeight = geo.size.height }
             }
         )
     }
@@ -247,7 +264,7 @@ struct ChatView: View {
     /// session was attached fresh after a failure (no Swift-side prompt
     /// captured), the button is disabled.
     private var canRetry: Bool {
-        (store.lastPrompt[sessionId]?.isEmpty == false)
+        store.canSendPrompt && (store.lastPrompt[sessionId]?.isEmpty == false)
     }
 
     @ViewBuilder
@@ -377,17 +394,17 @@ struct ChatView: View {
     }
 
     private var canSend: Bool {
-        !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !store.isStreaming
+        !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && store.canSendPrompt
     }
 
     private func send() {
         let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, !store.isStreaming else { return }
+        guard !trimmed.isEmpty, store.canSendPrompt else { return }
         if trimmed.hasPrefix("/") {
             // Slash commands go to the daemon's slash handler, not the LLM.
-            store.sendSlashCommand(trimmed)
+            guard store.sendSlashCommand(trimmed) else { return }
         } else {
-            store.sendPrompt(trimmed)
+            guard store.sendPrompt(trimmed) else { return }
         }
         inputText = ""
     }
@@ -507,6 +524,31 @@ private struct PermissionSheet: View {
     }
 }
 
+private struct GoalProposalSheet: View {
+    let objective: String
+    let onRespond: (Bool) -> Void
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                Text(objective)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(20)
+            }
+            .navigationTitle("Proposed goal")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Reject", role: .destructive) { onRespond(false) }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Accept") { onRespond(true) }
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Ask-user sheet
 
 private struct AskUserSheetItem: Identifiable {
@@ -517,6 +559,7 @@ private struct AskUserSheetItem: Identifiable {
 private struct AskUserSheet: View {
     let ask: PendingAskUser
     let onRespond: ([String]) -> Void
+    let onCancel: () -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var answers: [String] = []
@@ -525,7 +568,7 @@ private struct AskUserSheet: View {
         NavigationStack {
             Form {
                 Section {
-                    Text("The agent needs a few answers to continue.")
+                    Text(ask.subagent.map { "\($0.displayName ?? $0.name) (\($0.name)) needs your input." } ?? "The agent needs a few answers to continue.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -543,7 +586,10 @@ private struct AskUserSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button(ask.subagent == nil ? "Cancel" : "Close question") {
+                        if ask.subagent != nil { onCancel() }
+                        dismiss()
+                    }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Submit") { submit() }

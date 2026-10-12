@@ -42,6 +42,8 @@ export class MewClient {
     openPromise = null;
     /** Session id returned by `newSession`. */
     sessionId = null;
+    /** Messages currently projected from the most recent history pages. */
+    sessionHistoryMessages = [];
     /** Session lifecycle requests share uncorrelated daemon errors. */
     sessionCommandTail = Promise.resolve();
     constructor(url, opts = {}) {
@@ -150,6 +152,7 @@ export class MewClient {
             return new Promise((resolve, reject) => {
                 const onReady = (data) => {
                     this.sessionId = data.session_id;
+                    this.sessionHistoryMessages = [];
                     this.off("session-ready", onReady);
                     resolve(data.session_id);
                 };
@@ -167,6 +170,48 @@ export class MewClient {
     /** Send `prompt`. Streaming events are emitted via the registered handlers. */
     prompt(text, attachments = []) {
         this.send({ type: "prompt", text, attachments });
+    }
+    /** Compare and save one todo; resolve only after the daemon confirms it. */
+    updateTodo(sessionId, edit) {
+        const requestId = crypto.randomUUID();
+        return new Promise((resolve, reject) => {
+            const cleanup = () => {
+                clearTimeout(timer);
+                this.off("todo-updated", onSaved);
+                this.off("todo-update-error", onError);
+                this.off("close", onClose);
+            };
+            const onSaved = (data) => {
+                if (data.session_id !== sessionId || data.request_id !== requestId)
+                    return;
+                cleanup();
+                resolve(data.todos);
+            };
+            const onError = (data) => {
+                if (data.session_id !== sessionId || data.request_id !== requestId)
+                    return;
+                cleanup();
+                reject(new Error(data.message));
+            };
+            const onClose = () => {
+                cleanup();
+                reject(new Error("daemon disconnected before confirming todo save"));
+            };
+            const timer = setTimeout(() => {
+                cleanup();
+                reject(new Error("todo save was not confirmed; update or reconnect the daemon before retrying"));
+            }, 3000);
+            this.on("todo-updated", onSaved);
+            this.on("todo-update-error", onError);
+            this.on("close", onClose);
+            try {
+                this.send({ type: "update_todo", session_id: sessionId, request_id: requestId, ...edit });
+            }
+            catch (error) {
+                cleanup();
+                reject(error);
+            }
+        });
     }
     /** Send `cancel` to abort the current turn. */
     cancel() {
@@ -206,10 +251,13 @@ export class MewClient {
     respondToAskUser(request_id, answers) {
         this.send({ type: "ask_user_response", request_id, answers });
     }
-    /** Respond to a `plan_approval_request`. `approved = false` with optional
-     *  `feedback` requests changes to the plan. */
-    respondToPlanApproval(request_id, approved, feedback) {
-        this.send({ type: "plan_approval_response", request_id, approved, feedback });
+    /** Close one question while leaving the parent turn and other questions active. */
+    cancelAskUser(request_id) {
+        this.send({ type: "ask_user_response", request_id, answers: [], cancelled: true });
+    }
+    /** Accept or reject a proposed goal using its original request ID. */
+    respondToGoal(request_id, accepted) {
+        this.send({ type: "goal_response", request_id, accepted });
     }
     /** Attach to an existing session (active or idle). If the session is idle,
      *  the daemon loads its persisted history from disk and sends a
@@ -220,6 +268,7 @@ export class MewClient {
             return new Promise((resolve, reject) => {
                 const onReady = (data) => {
                     this.sessionId = data.session_id;
+                    this.sessionHistoryMessages = [];
                     this.off("session-ready", onReady);
                     this.off("errorMessage", onError);
                     resolve(data.session_id);
@@ -234,6 +283,19 @@ export class MewClient {
                 this.send({ type: "attach_session", session_id, client_kind: this.clientKind });
             });
         });
+    }
+    /** Request older messages for the attached session using the cursor from a
+     *  previous history page. */
+    loadSessionHistory(session_id, before, limit) {
+        this.send({ type: "load_session_history", session_id, before, limit });
+    }
+    /** Read the next bounded UTF-8 chunk from a session-owned job. */
+    readJobOutput(session_id, job_id, request_id, offset) {
+        this.send({ type: "read_job_output", session_id, job_id, request_id, offset });
+    }
+    /** Request a recorded child transcript without changing the attached session. */
+    readSubagentHistory(session_id, child_session_id, request_id) {
+        this.send({ type: "read_subagent_history", session_id, child_session_id, request_id });
     }
     /** List all sessions known to the daemon (active + persisted idle).
      *  The daemon responds with a `session-list` event. */
@@ -494,18 +556,17 @@ export class MewClient {
                 break;
             case "ask_user_request":
                 this.emit("ask-user-request", {
+                    ...(msg.subagent ? { subagent: msg.subagent } : {}),
                     request_id: msg.request_id,
                     call_id: msg.call_id,
                     questions: msg.questions,
                 });
                 break;
-            case "plan_approval_request":
-                this.emit("plan-approval-request", {
+            case "goal_proposed":
+                this.emit("goal-proposed", {
                     request_id: msg.request_id,
                     call_id: msg.call_id,
-                    plan_path: msg.plan_path,
-                    plan_markdown: msg.plan_markdown,
-                    persona: msg.persona,
+                    objective: msg.objective,
                 });
                 break;
             case "subagent_permission_request":
@@ -538,17 +599,27 @@ export class MewClient {
                     manifests: msg.manifests ?? [],
                 });
                 break;
+            case "todo_updated":
+                this.emit("todo-updated", msg);
+                break;
+            case "todo_update_error":
+                this.emit("todo-update-error", msg);
+                break;
             case "todos_updated":
                 this.emit("todos-updated", { todos: msg.todos });
-                break;
-            case "persona_switch_requested":
-                this.emit("persona-switch-requested", { name: msg.name });
                 break;
             case "job_update":
                 this.emit("job-update", {
                     job_id: msg.job_id,
                     command: msg.command,
                     state: msg.state,
+                });
+                break;
+            case "session_activity_snapshot":
+                this.emit("session-activity-snapshot", {
+                    session_id: msg.session_id,
+                    subagents: msg.subagents,
+                    jobs: msg.jobs,
                 });
                 break;
             case "slash_result":
@@ -564,8 +635,26 @@ export class MewClient {
                 this.emit("session-list", { sessions: msg.sessions });
                 break;
             case "session_history":
+                this.sessionHistoryMessages = msg.messages;
                 this.emit("session-history", { messages: msg.messages });
                 break;
+            case "job_output":
+                this.emit("job-output", { session_id: msg.session_id, job_id: msg.job_id, request_id: msg.request_id, offset: msg.offset, next_offset: msg.next_offset, output: msg.output, done: msg.done, incomplete: msg.incomplete });
+                break;
+            case "job_output_error":
+                this.emit("job-output-error", { session_id: msg.session_id, job_id: msg.job_id, request_id: msg.request_id, message: msg.message });
+                break;
+            case "subagent_history":
+                this.emit("subagent-history", { session_id: msg.session_id, child_session_id: msg.child_session_id, request_id: msg.request_id, messages: msg.messages, error: msg.error });
+                break;
+            case "session_history_page": {
+                const messages = msg.replace
+                    ? msg.messages
+                    : [...msg.messages, ...this.sessionHistoryMessages];
+                this.sessionHistoryMessages = messages;
+                this.emit("session-history", { messages });
+                break;
+            }
             case "model_list":
                 this.emit("model-list", { models: msg.models });
                 break;
@@ -696,7 +785,7 @@ export class MewClient {
                 this.emit("errorEvent", { message: msg.message });
                 break;
             case "pong":
-                this.emit("pong", { version: msg.version });
+                this.emit("pong", { version: msg.version, protocol_version: msg.protocol_version ?? 0 });
                 break;
             case "project_list":
                 this.emit("project-list", { projects: msg.projects });

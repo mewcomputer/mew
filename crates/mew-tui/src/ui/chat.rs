@@ -7,6 +7,7 @@ use ratatui::{
     widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
     Frame,
 };
+use ratatui_mdstream::{LineMetadata, RenderedLines};
 use std::rc::Rc;
 
 use super::display_width;
@@ -21,6 +22,7 @@ use mew_message::{Part, Role, ToolState};
 struct ChatLineCtx<'t> {
     lines: &'t mut Vec<Line<'static>>,
     chat_rows: &'t mut Vec<String>,
+    copy_metadata: &'t mut Vec<LineMetadata>,
     visual_row: usize,
     has_sel: bool,
     anchor_row: usize,
@@ -29,44 +31,140 @@ struct ChatLineCtx<'t> {
     end_col: usize,
     sel_fg: Color,
     sel_bg: Color,
-    chat_bg: Color,
+    surface_bg: Color,
     chat_width: u16,
 }
 
 impl<'t> ChatLineCtx<'t> {
     fn push_line(&mut self, line: Line<'static>) {
+        let mut end: usize = line.spans.iter().map(|span| span.content.len()).sum();
+        for span in line.spans.iter().rev() {
+            let trimmed = span.content.trim_end();
+            end -= span.content.len() - trimmed.len();
+            if !trimmed.is_empty() {
+                break;
+            }
+        }
+        let margin = line
+            .spans
+            .first()
+            .map(|span| {
+                if span.content.chars().all(|ch| ch == ' ') {
+                    span.content.len()
+                } else if span.content.starts_with("  ") {
+                    2
+                } else {
+                    0
+                }
+            })
+            .unwrap_or(0);
+        let start = margin.min(end);
+        self.push_copy_line(
+            line,
+            LineMetadata {
+                content: start..end,
+                continues_previous: false,
+            },
+        );
+    }
+
+    fn push_copy_line(&mut self, line: Line<'static>, metadata: LineMetadata) {
+        // Wrap before indexing selection rows, carrying source bounds across
+        // each visual continuation instead of turning it into a hard break.
+        if self.chat_width > 0 && line.width() > self.chat_width as usize {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            let mut used = 0;
+            let mut byte_start = 0;
+            let mut byte_end = 0;
+            let mut continuation = metadata.continues_previous;
+            for grapheme in line.styled_graphemes(line.style) {
+                let width = display_width(grapheme.symbol);
+                if used + width > self.chat_width as usize && !spans.is_empty() {
+                    let start = metadata.content.start.clamp(byte_start, byte_end) - byte_start;
+                    let end = metadata.content.end.clamp(byte_start, byte_end) - byte_start;
+                    self.push_copy_line(
+                        Line::from(std::mem::take(&mut spans)),
+                        LineMetadata {
+                            content: start..end,
+                            continues_previous: continuation,
+                        },
+                    );
+                    continuation = true;
+                    byte_start = byte_end;
+                    used = 0;
+                }
+                let symbol = if width > self.chat_width as usize {
+                    "�"
+                } else {
+                    grapheme.symbol
+                };
+                byte_end += symbol.len();
+                used += display_width(symbol);
+                if let Some(last) = spans.last_mut().filter(|span| span.style == grapheme.style) {
+                    last.content.to_mut().push_str(symbol);
+                } else {
+                    spans.push(Span::styled(symbol.to_string(), grapheme.style));
+                }
+            }
+            if !spans.is_empty() {
+                let start = metadata.content.start.clamp(byte_start, byte_end) - byte_start;
+                let end = metadata.content.end.clamp(byte_start, byte_end) - byte_start;
+                self.push_copy_line(
+                    Line::from(spans),
+                    LineMetadata {
+                        content: start..end,
+                        continues_previous: continuation,
+                    },
+                );
+            }
+            return;
+        }
         let mut line = if self.has_sel {
             self.apply_selection(line)
         } else {
             line
         };
-        // Fill bg-less spans with the chat surface background so that
+        // Fill bg-less spans with the message surface background so that
         // wrapped continuation rows (and trailing cells on any row)
-        // carry the chat bg rather than relying on ratatui's
+        // carry their surface rather than relying on ratatui's
         // Paragraph/Block to propagate it — which it does
         // inconsistently past the second wrapped line.
         //
         // Spans that already carry an explicit bg (tool blocks, code
-        // fences, selection, tool edges with Color::Reset) are left
+        // fences, selection) are left
         // untouched.
         for span in &mut line.spans {
             if span.style.bg.is_none() {
-                span.style = span.style.bg(self.chat_bg);
+                span.style = span.style.bg(self.surface_bg);
             }
         }
-        // Pad to full chat width with the chat surface bg so every
+        // Pad to full chat width with the message surface so every
         // visual row fills the entire width.
         let used = line.width() as u16;
         if used < self.chat_width {
             line.spans.push(Span::styled(
                 " ".repeat((self.chat_width - used) as usize),
-                Style::default().bg(self.chat_bg),
+                Style::default().bg(self.surface_bg),
             ));
         }
         let plain: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         self.chat_rows.push(plain);
+        self.copy_metadata.push(metadata);
         self.lines.push(line);
         self.visual_row += 1;
+    }
+
+    fn push_tool_output(
+        &mut self,
+        width: u16,
+        line: Line<'static>,
+        indent: &str,
+        background: Color,
+    ) {
+        let rendered = wrap_tool_line_with_metadata(width, line, indent, background);
+        for (line, metadata) in rendered.lines.into_iter().zip(rendered.metadata) {
+            self.push_copy_line(line, metadata);
+        }
     }
 
     fn sel_range(&self) -> Option<(usize, usize)> {
@@ -176,6 +274,11 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
         width: area.width.saturating_sub(scrollbar_area.width),
         height: area.height,
     };
+    if chat_inner.width <= 2 || chat_inner.height == 0 {
+        app.chat_content_area = Rect::default();
+        return;
+    }
+    app.chat_content_area = chat_inner;
     // The chat indents every text part by 2 spaces ("  ") for a left
     // margin. The markdown renderer produces lines that, after prepending
     // that indent, are exactly `chat_inner.width` wide. User/reasoning text
@@ -203,6 +306,7 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
         app.scroll = max_scroll;
     }
     let scroll_offset = app.scroll.min(max_scroll) as usize;
+    app.chat_rendered_scroll = scroll_offset;
 
     // Visible window: each cached line is already ≤ chat_inner.width wide
     // (pre-wrapped), so without `Wrap` each line is exactly one visual row.
@@ -222,11 +326,29 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
     // time, `WordWrapper` returns immediately per line (1 iteration), so this
     // stays O(visible). The visible-window slice already eliminated ratatui's
     // O(scroll.y) skip — `scroll` is 0 here.
+    let visible_rows = visible.len() as u16;
     let paragraph = Paragraph::new(Text::from(visible))
         .wrap(Wrap { trim: false })
         .scroll((0, 0));
 
     f.render_widget(paragraph, chat_inner);
+    // Paragraph styles the leading cell of wide glyphs. Paint covered cells
+    // too so background surfaces and selections fill the rendered frame.
+    for y in chat_inner.y..chat_inner.y + visible_rows {
+        let mut x = chat_inner.x;
+        while x < chat_inner.right() {
+            let cell = &f.buffer_mut()[(x, y)];
+            let width = display_width(cell.symbol()).max(1) as u16;
+            if width > 1 {
+                let style = cell.style();
+                f.buffer_mut().set_style(
+                    Rect::new(x + 1, y, (width - 1).min(chat_inner.right() - x - 1), 1),
+                    style,
+                );
+            }
+            x += width;
+        }
+    }
 
     if total_lines > chat_inner.height {
         // ratatui's ScrollbarState only puts the thumb at the track end when
@@ -242,6 +364,7 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
             .track_symbol(Some("│"))
             .thumb_symbol("█");
         f.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+        app.chat_scrollbar = super::mouse_scrollbar(f, scrollbar_area, max_scroll as usize);
     }
 
     if app.scroll > 0 {
@@ -275,6 +398,7 @@ pub(crate) fn build_chat_lines(
 ) -> crate::app::BuiltChat {
     let mut lines: Vec<ratatui::text::Line<'static>> = Vec::new();
     let mut chat_rows: Vec<String> = Vec::new();
+    let mut copy_metadata = Vec::new();
     let tool_bg = app.theme.resolve("tool.background");
     let tool_bg_style = Style::default().bg(tool_bg);
     let msg_count = app.messages.len();
@@ -302,6 +426,7 @@ pub(crate) fn build_chat_lines(
     let mut sel_ctx = ChatLineCtx {
         lines: &mut lines,
         chat_rows: &mut chat_rows,
+        copy_metadata: &mut copy_metadata,
         visual_row: 0,
         has_sel: app.sel_anchor_row.is_some() && app.sel_end_row.is_some(),
         anchor_row: app.sel_anchor_row.unwrap_or(0),
@@ -310,7 +435,7 @@ pub(crate) fn build_chat_lines(
         end_col: app.sel_end_col.unwrap_or(0),
         sel_fg: app.theme.resolve("selection.foreground"),
         sel_bg: app.theme.resolve("selection.background"),
-        chat_bg: app.theme.resolve("chat.surface.background"),
+        surface_bg: app.theme.resolve("chat.surface.background"),
         chat_width,
     };
 
@@ -322,8 +447,12 @@ pub(crate) fn build_chat_lines(
         }
         let is_last = msg_idx + 1 == msg_count;
         let is_streaming = app.streaming && is_last;
-        // A guided user message (steering the current turn) renders with a
-        // distinct arrow prefix instead of the normal ">" prompt marker.
+        sel_ctx.surface_bg = app.theme.resolve(if msg.role == Role::User {
+            "chat.user.background"
+        } else {
+            "chat.surface.background"
+        });
+        // Guidance keeps an arrow to distinguish steering the active turn.
         let is_guidance = msg.role == Role::User
             && msg.parts.iter().any(|p| {
                 matches!(
@@ -343,7 +472,7 @@ pub(crate) fn build_chat_lines(
         } else {
             match msg.role {
                 Role::User => (
-                    ">",
+                    " ",
                     app.theme.resolve("text.accent"),
                     Style::default().fg(app.theme.resolve("foreground")),
                 ),
@@ -564,7 +693,7 @@ pub(crate) fn build_chat_lines(
                     if prefix.is_empty() {
                         let use_streaming = is_streaming && Some(part_idx) == last_text_part_idx;
                         let md_theme = app.theme.md_theme();
-                        let md_lines: Vec<ratatui::text::Line<'static>> = if use_streaming {
+                        let md_lines: RenderedLines = if use_streaming {
                             // Use incremental RenderCache: cache committed blocks,
                             // only render the pending block each frame.
                             let mut highlighter =
@@ -575,7 +704,7 @@ pub(crate) fn build_chat_lines(
                                 &md_theme,
                                 &mut highlighter,
                             );
-                            let mut lines = app.md_render_cache.collect_lines();
+                            let mut lines = app.md_render_cache.collect_with_metadata();
                             // Render only the pending block incrementally.
                             if let Some(pending) = app.md_state.pending() {
                                 let pending_ref = mdstream::PendingBlockRef {
@@ -584,17 +713,27 @@ pub(crate) fn build_chat_lines(
                                     raw: &pending.raw,
                                     display: pending.display.as_deref(),
                                 };
-                                let pending_lines = ratatui_mdstream::render::render_pending(
-                                    &pending_ref,
-                                    md_width,
-                                    &md_theme,
-                                    &mut highlighter,
-                                    &ratatui_mdstream::pending::FullPending,
-                                );
-                                if !lines.is_empty() && !pending_lines.is_empty() {
-                                    lines.push(ratatui::text::Line::from(""));
+                                let pending_lines =
+                                    ratatui_mdstream::render::render_pending_with_metadata(
+                                        &pending_ref,
+                                        md_width,
+                                        &md_theme,
+                                        &mut highlighter,
+                                        &ratatui_mdstream::pending::FullPending,
+                                    );
+                                if !lines.lines.is_empty() && !pending_lines.lines.is_empty() {
+                                    lines.lines.push(Line::from(""));
+                                    let continues_previous = lines
+                                        .metadata
+                                        .last()
+                                        .is_some_and(|row| row.content.is_empty());
+                                    lines.metadata.push(LineMetadata {
+                                        content: 0..0,
+                                        continues_previous,
+                                    });
                                 }
-                                lines.extend(pending_lines);
+                                lines.lines.extend(pending_lines.lines);
+                                lines.metadata.extend(pending_lines.metadata);
                             }
                             lines
                         } else {
@@ -611,7 +750,7 @@ pub(crate) fn build_chat_lines(
                                 } else {
                                     cache.remove(&tp.base.id);
                                     let expanded = tp.text.replace('\u{2014}', "— ");
-                                    let lines = ratatui_mdstream::render_markdown(
+                                    let lines = ratatui_mdstream::render_markdown_with_metadata(
                                         &expanded, md_width, &md_theme,
                                     );
                                     let rc = Rc::new(lines);
@@ -623,7 +762,7 @@ pub(crate) fn build_chat_lines(
                                 }
                             } else {
                                 let expanded = tp.text.replace('\u{2014}', "— ");
-                                let lines = ratatui_mdstream::render_markdown(
+                                let lines = ratatui_mdstream::render_markdown_with_metadata(
                                     &expanded, md_width, &md_theme,
                                 );
                                 let rc = Rc::new(lines);
@@ -634,24 +773,32 @@ pub(crate) fn build_chat_lines(
                                 Rc::unwrap_or_clone(rc)
                             }
                         };
-                        for line in md_lines {
-                            let mut new_line = Line::from(line.spans);
-                            new_line.spans.insert(0, Span::raw("  "));
-                            new_line.style = line.style;
-                            sel_ctx.push_line(new_line);
+                        for (mut line, mut metadata) in
+                            md_lines.lines.into_iter().zip(md_lines.metadata)
+                        {
+                            line.spans.insert(0, Span::raw("  "));
+                            metadata.content.start += 2;
+                            metadata.content.end += 2;
+                            sel_ctx.push_copy_line(line, metadata);
                         }
                     } else {
                         // Pre-wrap user text to `md_width` so every line is
                         // ≤ chat_inner.width and `Wrap` is a no-op (lets us
                         // slice the visible window without ratatui re-wrapping).
-                        // `prefix` is "> " (2 cols), so wrap content to
-                        // `md_width.saturating_sub(prefix_width)`.
+                        // Keep two columns of padding on either side.
                         let prefix_str = format!("{} ", prefix);
                         let prefix_w = display_width(&prefix_str) as u16;
                         let content_w = md_width.saturating_sub(prefix_w);
                         for src_line in tp.text.lines() {
                             let expanded = src_line.replace('\u{2014}', "— ");
-                            for chunk in wrap_text_to_width(&expanded, content_w) {
+                            for (index, chunk) in wrap_text_to_width(&expanded, content_w)
+                                .into_iter()
+                                .enumerate()
+                            {
+                                let metadata = LineMetadata {
+                                    content: prefix_str.len()..prefix_str.len() + chunk.len(),
+                                    continues_previous: index > 0,
+                                };
                                 let spans = vec![
                                     Span::styled(
                                         prefix_str.clone(),
@@ -659,7 +806,7 @@ pub(crate) fn build_chat_lines(
                                     ),
                                     Span::styled(chunk, content_style),
                                 ];
-                                sel_ctx.push_line(Line::from(spans));
+                                sel_ctx.push_copy_line(Line::from(spans), metadata);
                             }
                         }
                     }
@@ -682,7 +829,7 @@ pub(crate) fn build_chat_lines(
                             }
                         });
                         let header = if is_expanded {
-                            "\u{25bc} thinking  [click or Ctrl-T to collapse]".to_string()
+                            "\u{25bc} thinking  [click or Ctrl-Alt-T to collapse]".to_string()
                         } else if let Some(dur) = dur_text {
                             format!(
                                 "\u{25b8} thought for {} \u{00b7} {}",
@@ -707,14 +854,25 @@ pub(crate) fn build_chat_lines(
                             // Pre-wrap reasoning text to `md_width` so each line
                             // is one visual row (same rationale as user text).
                             for src_line in rp.text.lines() {
-                                for chunk in wrap_text_to_width(src_line, md_width) {
-                                    sel_ctx.push_line(Line::from(vec![
-                                        Span::raw("  "),
-                                        Span::styled(
-                                            chunk,
-                                            Style::default().fg(app.theme.resolve("text.muted")),
-                                        ),
-                                    ]));
+                                for (index, chunk) in wrap_text_to_width(src_line, md_width)
+                                    .into_iter()
+                                    .enumerate()
+                                {
+                                    let metadata = LineMetadata {
+                                        content: 2..2 + chunk.len(),
+                                        continues_previous: index > 0,
+                                    };
+                                    sel_ctx.push_copy_line(
+                                        Line::from(vec![
+                                            Span::raw("  "),
+                                            Span::styled(
+                                                chunk,
+                                                Style::default()
+                                                    .fg(app.theme.resolve("text.muted")),
+                                            ),
+                                        ]),
+                                        metadata,
+                                    );
                                 }
                             }
                         }
@@ -748,6 +906,7 @@ pub(crate) fn build_chat_lines(
             part_idx += 1;
         }
 
+        sel_ctx.surface_bg = app.theme.resolve("chat.surface.background");
         if message_had_content {
             sel_ctx.push_line(Line::from(""));
         }
@@ -765,7 +924,11 @@ pub(crate) fn build_chat_lines(
     }
     #[allow(clippy::drop_non_drop)]
     drop(sel_ctx);
-    crate::app::BuiltChat { lines, chat_rows }
+    crate::app::BuiltChat {
+        lines,
+        chat_rows,
+        copy_metadata,
+    }
 }
 
 /// Pluralised label for the number of visible reasoning lines.
@@ -828,9 +991,7 @@ fn render_single_tool_call(
             let lines = parsed.lines;
             let skip = lines.len().saturating_sub(TOOL_LINES_LIVE);
             for line in lines.into_iter().skip(skip) {
-                for wrapped in wrap_tool_line(tool_width, line, "      ", tool_bg) {
-                    sel_ctx.push_line(wrapped);
-                }
+                sel_ctx.push_tool_output(tool_width, line, "      ", tool_bg);
             }
         }
     }
@@ -865,15 +1026,11 @@ fn render_single_tool_call(
                     ));
                 }
                 for line in lines.into_iter().skip(skip) {
-                    for wrapped in wrap_tool_line(tool_width, line, "      ", tool_bg) {
-                        sel_ctx.push_line(wrapped);
-                    }
+                    sel_ctx.push_tool_output(tool_width, line, "      ", tool_bg);
                 }
             } else {
                 for line in lines.into_iter().take(TOOL_LINES_MAX) {
-                    for wrapped in wrap_tool_line(tool_width, line, "      ", tool_bg) {
-                        sel_ctx.push_line(wrapped);
-                    }
+                    sel_ctx.push_tool_output(tool_width, line, "      ", tool_bg);
                 }
                 if line_count > TOOL_LINES_MAX {
                     sel_ctx.push_line(push_tool_line(
@@ -938,9 +1095,7 @@ fn render_single_tool_call(
         if !err.is_empty() {
             let parsed = err.as_str().into_text().unwrap_or_default();
             for line in parsed.lines {
-                for wrapped in wrap_tool_line(tool_width, line, "      ", tool_bg) {
-                    sel_ctx.push_line(wrapped);
-                }
+                sel_ctx.push_tool_output(tool_width, line, "      ", tool_bg);
             }
         }
     }
@@ -1017,11 +1172,12 @@ fn render_compaction_block(
         if let Some(summary) = compaction.summary.as_ref() {
             if !summary.is_empty() {
                 for line in summary.lines() {
-                    let wrapped =
-                        wrap_tool_line(tool_width, Line::from(line.to_string()), "      ", tool_bg);
-                    for w in wrapped {
-                        sel_ctx.push_line(w);
-                    }
+                    sel_ctx.push_tool_output(
+                        tool_width,
+                        Line::from(line.to_string()),
+                        "      ",
+                        tool_bg,
+                    );
                 }
             }
         } else {
@@ -1069,7 +1225,7 @@ fn push_tool_edge(width: u16, is_top: bool, tool_bg: Color) -> Option<Line<'stat
         return None;
     }
     let ch = if is_top { '▄' } else { '▀' };
-    let style = Style::default().fg(tool_bg).bg(Color::Reset);
+    let style = Style::default().fg(tool_bg);
     Some(Line::from(vec![Span::styled(
         ch.to_string().repeat(width as usize),
         style,
@@ -1082,16 +1238,31 @@ fn push_tool_edge(width: u16, is_top: bool, tool_bg: Color) -> Option<Line<'stat
 /// width. Returns one `Line` per visual row, each padded to exactly
 /// `width` so the paragraph never wraps a tool line (which would leak
 /// the chat bg on the continuation row's trailing cells).
-fn wrap_tool_line(
+pub(crate) fn wrap_tool_line(
     width: u16,
     line: Line<'static>,
     indent: &str,
     tool_bg: Color,
 ) -> Vec<Line<'static>> {
+    wrap_tool_line_with_metadata(width, line, indent, tool_bg).lines
+}
+
+fn wrap_tool_line_with_metadata(
+    width: u16,
+    line: Line<'static>,
+    indent: &str,
+    tool_bg: Color,
+) -> RenderedLines {
     let indent_w = display_width(indent) as u16;
     let content_w = width.saturating_sub(indent_w);
     if content_w == 0 {
-        return vec![blank_tool_line(width, indent, tool_bg)];
+        return RenderedLines {
+            lines: vec![blank_tool_line(width, indent, tool_bg)],
+            metadata: vec![LineMetadata {
+                content: indent.len()..indent.len(),
+                continues_previous: false,
+            }],
+        };
     }
 
     // Collect the full text and remember the first span's style (tool
@@ -1106,18 +1277,26 @@ fn wrap_tool_line(
 
     let chunks = wrap_text_to_width(&full, content_w);
     if chunks.is_empty() {
-        return vec![blank_tool_line(width, indent, tool_bg)];
+        return RenderedLines {
+            lines: vec![blank_tool_line(width, indent, tool_bg)],
+            metadata: vec![LineMetadata {
+                content: indent.len()..indent.len(),
+                continues_previous: false,
+            }],
+        };
     }
 
-    chunks
-        .into_iter()
-        .map(|chunk| {
-            // Every row (including wrapped continuations) carries the
-            // indent so wrapped text aligns with the first row's content
-            // rather than flush left.
-            build_tool_row(width, indent, &chunk, base_style, tool_bg)
-        })
-        .collect()
+    let mut rendered = RenderedLines::default();
+    for (index, chunk) in chunks.into_iter().enumerate() {
+        rendered.metadata.push(LineMetadata {
+            content: indent.len()..indent.len() + chunk.len(),
+            continues_previous: index > 0,
+        });
+        rendered
+            .lines
+            .push(build_tool_row(width, indent, &chunk, base_style, tool_bg));
+    }
+    rendered
 }
 
 fn blank_tool_line(width: u16, indent: &str, tool_bg: Color) -> Line<'static> {

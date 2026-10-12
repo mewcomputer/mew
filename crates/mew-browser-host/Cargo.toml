@@ -9,3 +9,4 @@ publish = false
 [dependencies]
 anyhow = { workspace = true }
 mew-cef-host = { path = "../../native/cef-host" }
+ulid = { workspace = true }

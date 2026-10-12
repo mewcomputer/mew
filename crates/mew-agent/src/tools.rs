@@ -179,6 +179,9 @@ impl Agent {
             }
         };
         for tc in pending {
+            if self.cancel_token.is_cancelled() {
+                break;
+            }
             let call_id = tc.call_id.clone();
             let part_id = tc.base.id;
 
@@ -206,12 +209,6 @@ impl Agent {
                 continue;
             }
 
-            if tc.tool_name == "handoff_plan" {
-                self.execute_handoff_plan(tc, assistant_msg, ev_tx, &mut result_parts)
-                    .await;
-                continue;
-            }
-
             if tc.tool_name == "propose_goal" {
                 self.execute_propose_goal(tc, assistant_msg, ev_tx, &mut result_parts)
                     .await;
@@ -232,7 +229,7 @@ impl Agent {
 
             if matches!(
                 tc.tool_name.as_str(),
-                "shell_background" | "job_status" | "job_block" | "job_cancel"
+                "shell_background" | "shell_monitor" | "job_status" | "job_block" | "job_cancel"
             ) {
                 self.execute_job_tool(tc, assistant_msg, ev_tx, &mut result_parts)
                     .await;
@@ -285,25 +282,18 @@ impl Agent {
                 input: tc.input().clone(),
             };
 
-            // Permission check. The escape tier inside the engine reads
-            // the cwd to resolve relative path args. The agent layer's
-            // `ToolCtx` is constructed a few lines below with
-            // `std::env::current_dir()` as its cwd — we mirror that here
-            // so the engine sees the same working directory the tool
-            // itself will see.
+            // Resolve permission paths from the same cwd used by the tool.
             let sensitivity = self
                 .tools
                 .get(&tc.tool_name)
                 .map(|t| t.sensitivity())
                 .unwrap_or(Sensitivity::Dangerous);
-            let engine_cwd =
-                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
             let (decision, deny_reason) = self
                 .resolve_permission_decision(
                     &tc.tool_name,
                     &hook_call,
                     sensitivity,
-                    &engine_cwd,
+                    &self.cwd,
                     ev_tx,
                 )
                 .await;
@@ -563,12 +553,12 @@ impl Agent {
             let ctx = ToolCtx::new(
                 std::sync::Arc::new(mew_tools::ToolCtxShared {
                     session_id: self.session_id,
-                    cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+                    cwd: self.cwd.clone(),
                     dispatcher: Some(self.dispatcher.clone()),
                     secrets: self.secrets.clone(),
                     shell_session: self.shell_session.clone(),
                     snapshot_store: self.snapshot_store.clone(),
-                    browser_enabled: self.browser_enabled,
+                    browser_access: self.browser_access.clone(),
                     supports_vision: self.supports_vision,
                 }),
                 tc.call_id.clone(),
@@ -993,6 +983,27 @@ impl Agent {
                         })
                         .await;
                 }
+                mew_subagents::SubagentEvent::AskUser {
+                    mut source,
+                    call_id: child_call_id,
+                    questions,
+                    tx,
+                } => {
+                    source.parent_call_id = call_id.clone();
+                    let _ = ev_tx_clone
+                        .send(AgentEvent::SubagentAskUser {
+                            source,
+                            call_id: child_call_id,
+                            questions,
+                            tx,
+                        })
+                        .await;
+                }
+                mew_subagents::SubagentEvent::WorkspacePermissionRequest { path, tx } => {
+                    let _ = ev_tx_clone
+                        .send(AgentEvent::WorkspacePermissionRequest { path, tx })
+                        .await;
+                }
                 mew_subagents::SubagentEvent::PermissionRequest {
                     tool_name: req_tool_name,
                     call_id: req_call_id,
@@ -1253,27 +1264,32 @@ impl Agent {
         };
 
         // Parse questions. Each must have a prompt and a 2-4 element options
-        // array. The prompts and option labels are kept here for result
+        // array. The prompts and options are kept here for result
         // formatting; the full AskUserQuestion structs move into the event.
-        let parsed: Vec<(String, Vec<String>)> = input
+        let parsed: Vec<(&str, Vec<(&str, &str)>)> = input
             .get("questions")
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter()
                     .filter_map(|q| {
-                        let prompt = q.get("prompt").and_then(|v| v.as_str())?.to_string();
-                        let labels: Vec<String> = q
+                        let prompt = q.get("prompt").and_then(|v| v.as_str())?;
+                        let options: Vec<(&str, &str)> = q
                             .get("options")
                             .and_then(|v| v.as_array())
                             .map(|opts| {
                                 opts.iter()
                                     .filter_map(|o| {
-                                        o.get("label").and_then(|v| v.as_str()).map(String::from)
+                                        Some((
+                                            o.get("label")?.as_str()?,
+                                            o.get("description")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or(""),
+                                        ))
                                     })
                                     .collect()
                             })
                             .unwrap_or_default();
-                        Some((prompt, labels))
+                        Some((prompt, options))
                     })
                     .collect()
             })
@@ -1284,13 +1300,13 @@ impl Agent {
         } else {
             let questions: Vec<crate::AskUserQuestion> = parsed
                 .iter()
-                .map(|(prompt, labels)| crate::AskUserQuestion {
-                    prompt: prompt.clone(),
-                    options: labels
+                .map(|(prompt, options)| crate::AskUserQuestion {
+                    prompt: (*prompt).to_owned(),
+                    options: options
                         .iter()
-                        .map(|l| crate::QuestionOption {
-                            label: l.clone(),
-                            description: String::new(),
+                        .map(|(label, description)| crate::QuestionOption {
+                            label: (*label).to_owned(),
+                            description: (*description).to_owned(),
                         })
                         .collect(),
                 })
@@ -1303,13 +1319,18 @@ impl Agent {
                     tx,
                 })
                 .await;
-            match rx.await {
-                Ok(answers) => {
+            let answer = tokio::select! {
+                biased;
+                _ = self.cancel_token.cancelled() => None,
+                answer = rx => answer.ok(),
+            };
+            match answer {
+                Some(answers) => {
                     let mut text = String::new();
-                    for (i, (prompt, labels)) in parsed.iter().enumerate() {
+                    for (i, (prompt, options)) in parsed.iter().enumerate() {
                         let answer = answers.get(i).map(|s| s.as_str()).unwrap_or("(no answer)");
                         let picked = match answer {
-                            a if labels.iter().any(|l| l == a) => "selected",
+                            a if options.iter().any(|(label, _)| *label == a) => "selected",
                             "(no answer)" => "no answer",
                             _ => "freeform",
                         };
@@ -1320,163 +1341,8 @@ impl Agent {
                     }
                     (text, true)
                 }
-                Err(_) => (
+                None => (
                     "ask_user_question cancelled (no response received)".to_string(),
-                    false,
-                ),
-            }
-        };
-
-        let final_state = if success {
-            ToolState::Completed(ToolStateCompleted {
-                input: input.clone(),
-                output,
-                metadata: None,
-                diff: None,
-                images: vec![],
-                time: ToolTime {
-                    start: Utc::now().timestamp_millis(),
-                    end: Some(Utc::now().timestamp_millis()),
-                },
-            })
-        } else {
-            ToolState::Error(ToolStateError {
-                input: input.clone(),
-                error: output,
-                time: ToolTime {
-                    start: Utc::now().timestamp_millis(),
-                    end: Some(Utc::now().timestamp_millis()),
-                },
-            })
-        };
-
-        if let Some(ref mut msg) = assistant_msg {
-            self.update_tool_call(msg, part_id, final_state.clone());
-        }
-        let _ = ev_tx
-            .send(AgentEvent::PartUpdated {
-                part_id,
-                part: Part::ToolCall(ToolCallPart {
-                    base: tc.base.clone(),
-                    tool_name: tc.tool_name.clone(),
-                    call_id: tc.call_id.clone(),
-                    state: final_state,
-                    raw_input: tc.raw_input.clone(),
-                }),
-            })
-            .await;
-        let _ = ev_tx
-            .send(AgentEvent::ToolEnd {
-                call_id: call_id.clone(),
-                success,
-            })
-            .await;
-
-        result_parts.push(Part::ToolResult(ToolResultPart {
-            base: PartBase {
-                id: ulid::Ulid::new(),
-                message_id: assistant_id,
-                session_id: self.session_id,
-            },
-            call_id: tc.call_id.clone(),
-        }));
-    }
-
-    /// Intercept a `handoff_plan` tool call: read the configured plan file,
-    /// present it to the user for approval (blocking the tool), and on approval
-    /// queue the target persona switch through `pending_persona_switch` so the
-    /// end-of-turn drain emits `PersonaSwitchRequested`. On a change request the
-    /// user's feedback becomes a successful tool result so the planner can
-    /// revise and resubmit.
-    async fn execute_handoff_plan(
-        &self,
-        tc: &ToolCallPart,
-        assistant_msg: &mut Option<Message>,
-        ev_tx: &mpsc::Sender<AgentEvent>,
-        result_parts: &mut Vec<Part>,
-    ) {
-        let call_id = tc.call_id.clone();
-        let part_id = tc.base.id;
-        let input = tc.input().clone();
-
-        let assistant_id = match assistant_msg {
-            Some(ref msg) => msg.id,
-            None => return,
-        };
-
-        let persona = input
-            .get("persona")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("builder")
-            .to_string();
-
-        let (output, success) = 'result: {
-            // Validate the target persona exists.
-            if !self.personas.iter().any(|p| p.name == persona) {
-                let available: Vec<&str> = self.personas.iter().map(|p| p.name.as_str()).collect();
-                break 'result (
-                    format!(
-                        "unknown persona '{persona}'. Available personas: {}",
-                        if available.is_empty() {
-                            "(none)".to_string()
-                        } else {
-                            available.join(", ")
-                        }
-                    ),
-                    false,
-                );
-            }
-
-            // Resolve and read the plan file.
-            let plan_path = match self.resolved_plan_path() {
-                Some(p) => p,
-                None => break 'result ("no plan_path configured".to_string(), false),
-            };
-            let plan_markdown = match tokio::fs::read_to_string(&plan_path).await {
-                Ok(text) if !text.trim().is_empty() => text,
-                _ => {
-                    break 'result (
-                        format!(
-                            "plan file {} is missing or empty — write it with write_plan first",
-                            plan_path.display()
-                        ),
-                        false,
-                    )
-                }
-            };
-
-            let (tx, rx) = oneshot::channel();
-            let _ = ev_tx
-                .send(AgentEvent::PlanApprovalRequest {
-                    call_id: call_id.clone(),
-                    plan_path: plan_path.display().to_string(),
-                    plan_markdown,
-                    persona: persona.clone(),
-                    tx,
-                })
-                .await;
-
-            match rx.await {
-                Ok(crate::PlanDecision::Approved) => {
-                    *self.pending_persona_switch.lock().await = Some(persona.clone());
-                    (
-                        format!(
-                            "Plan approved. Queued switch to '{persona}' at end of turn — \
-                             wrap up now."
-                        ),
-                        true,
-                    )
-                }
-                Ok(crate::PlanDecision::ChangesRequested(feedback)) => (
-                    format!(
-                        "The user requested changes to the plan:\n\n{feedback}\n\n\
-                         Revise with edit_plan and call handoff_plan again."
-                    ),
-                    true,
-                ),
-                Err(_) => (
-                    "handoff_plan cancelled (no response received)".to_string(),
                     false,
                 ),
             }
@@ -1780,7 +1646,9 @@ impl Agent {
                     let objective = goal.objective.clone();
                     goal.status = GoalStatus::Paused;
                     (
-                        format!("Goal blocked: {objective}\nReason: {reason}\n\nThe user can resume with /goal resume."),
+                        format!(
+                            "Goal blocked: {objective}\nReason: {reason}\n\nThe user can resume with /goal resume."
+                        ),
                         true,
                     )
                 }
@@ -1866,9 +1734,7 @@ impl Agent {
                     ("shell_background: 'command' is required".into(), false)
                 } else {
                     let cwd_str = input.get("cwd").and_then(|v| v.as_str());
-                    let cwd = cwd_str
-                        .map(std::path::PathBuf::from)
-                        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+                    let cwd = cwd_str.map_or_else(|| self.cwd.clone(), |path| self.cwd.join(path));
                     let hook_call = mew_hooks::ToolCall {
                         tool_name: tc.tool_name.clone(),
                         call_id: tc.call_id.clone(),
@@ -1884,7 +1750,7 @@ impl Agent {
                             &tc.tool_name,
                             &hook_call,
                             sensitivity,
-                            &cwd,
+                            &self.cwd,
                             ev_tx,
                         )
                         .await;
@@ -1968,9 +1834,7 @@ impl Agent {
                     ("shell_monitor: 'command' is required".into(), false)
                 } else {
                     let cwd_str = input.get("cwd").and_then(|v| v.as_str());
-                    let cwd = cwd_str
-                        .map(std::path::PathBuf::from)
-                        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+                    let cwd = cwd_str.map_or_else(|| self.cwd.clone(), |path| self.cwd.join(path));
                     let hook_call = mew_hooks::ToolCall {
                         tool_name: tc.tool_name.clone(),
                         call_id: tc.call_id.clone(),
@@ -1986,7 +1850,7 @@ impl Agent {
                             &tc.tool_name,
                             &hook_call,
                             sensitivity,
-                            &cwd,
+                            &self.cwd,
                             ev_tx,
                         )
                         .await;
@@ -2124,7 +1988,7 @@ impl Agent {
             None => return,
         };
 
-        // Mutate under the lock, then render + snapshot for persistence.
+        // Mutation and persistence share the lock with client todo edits.
         // Annotate todos that have a subagent task executing them.
         let subagent_notes: std::collections::HashMap<usize, String> = {
             let tasks = self.subagent_tasks.lock().await;
@@ -2157,16 +2021,17 @@ impl Agent {
                 }
                 Err(e) => (e, false),
             };
+            if success {
+                if let Some(path) = &self.todos_path {
+                    if let Err(e) = snapshot.save(path).await {
+                        tracing::warn!(error = %e, "failed to persist todos");
+                    }
+                }
+            }
             (output, success, snapshot)
         };
 
-        // Persist on success only — failures don't change state.
         if success {
-            if let Some(path) = &self.todos_path {
-                if let Err(e) = snapshot.save(path).await {
-                    tracing::warn!(error = %e, "failed to persist todos");
-                }
-            }
             // Push the new snapshot to the TUI so the sidebar pane updates.
             let _ = ev_tx
                 .send(AgentEvent::TodosUpdated {

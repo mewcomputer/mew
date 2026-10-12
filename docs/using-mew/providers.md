@@ -101,7 +101,7 @@ mew includes a built-in model catalog (from models.dev with 24-hour
 cache) that provides pricing, context windows, capabilities, and thinking
 variant defaults. The catalog is used to:
 
-- Populate the model picker (`Ctrl+P` and select "Switch Model")
+- Populate the model picker (`Ctrl+Space` and select "Switch Model")
 - Resolve thinking variant names to provider-specific params
 - Show pricing in the `/cost` command
 - Set context windows for compaction thresholds
@@ -138,7 +138,7 @@ Set a variant with:
 /thinking high
 ```
 
-Or open `Ctrl+P` and select "Thinking Variant". Press `Ctrl+P` repeatedly
+Or open `Ctrl+Space` and select "Thinking Variant". Press `Ctrl+Alt+P` repeatedly
 to cycle through the available options for the current model.
 
 To disable thinking:

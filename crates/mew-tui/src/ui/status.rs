@@ -175,24 +175,6 @@ fn build_pills(app: &App, theme: &crate::theme::Theme) -> Vec<Pill> {
         });
     }
 
-    // Cross-session attention (daemon mode): show "N need you" in amber
-    // when any non-active session has pending permissions or questions.
-    if app.daemon_mode {
-        let total_attention: u32 = app
-            .session_attention
-            .iter()
-            .filter(|(id, _)| *id != &app.status.session_id)
-            .map(|(_, (p, q))| p + q)
-            .sum();
-        if total_attention > 0 {
-            pills.push(Pill {
-                text: format!("{} need you", total_attention),
-                fg: theme.resolve("pill.attention.fg"),
-                bg: theme.resolve("pill.attention.bg"),
-            });
-        }
-    }
-
     // Session title (daemon mode): show the active session's title
     // next to the model/provider pills so the user can identify which
     // conversation they're in.
@@ -324,6 +306,7 @@ fn segments_window(segs: &[PillSegment], width: usize, offset: usize) -> Line<'s
 }
 
 pub(super) fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
+    app.bell_area = Rect::default();
     let status_bg = app.theme.resolve("status_bar.background");
     let bg = Block::default().style(Style::default().bg(status_bg));
     f.render_widget(bg, area);
@@ -361,7 +344,37 @@ pub(super) fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(0), Constraint::Length(right_width)])
         .split(inner);
-    let left_area = chunks[0];
+    let mut left_area = chunks[0];
+    if app.daemon_mode
+        && app.session_attention_count() > 0
+        && left_area.width >= 2
+        && area.height > 0
+    {
+        let count = app.session_attention_count();
+        let label = format!("🔔 {count} · ^Alt+N");
+        let width = (display_width(&label) as u16).min(left_area.width);
+        let text = if width >= 7 {
+            truncate_pill(&label, width as usize)
+        } else {
+            "🔔".into()
+        };
+        app.bell_area = Rect::new(left_area.x, area.y, width, 1);
+        f.render_widget(
+            Paragraph::new(text).style(
+                Style::default()
+                    .fg(app.theme.resolve(if app.notification_counts().0 > 0 {
+                        "text.warning"
+                    } else {
+                        "text.accent"
+                    }))
+                    .bg(status_bg),
+            ),
+            app.bell_area,
+        );
+        let reserved = width.saturating_add(1).min(left_area.width);
+        left_area.x += reserved;
+        left_area.width -= reserved;
+    }
 
     // Render the right side (tokens/cost), always pinned.
     let right_span = Span::styled(
@@ -375,8 +388,24 @@ pub(super) fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
         chunks[1],
     );
 
-    // Left side: transient status overrides take precedence, then pills.
-    let left_line: Line<'static> = if app.cancelling {
+    let connection_label = match app.connection.as_ref() {
+        Some(mew_client_core::ConnectionStatus::Connecting) => Some("connecting…".into()),
+        Some(mew_client_core::ConnectionStatus::Disconnected) => Some("disconnected".into()),
+        Some(mew_client_core::ConnectionStatus::Backoff { attempt, .. }) => {
+            Some(format!("reconnecting ({attempt})…"))
+        }
+        _ if app.attaching_session => Some("opening conversation…".into()),
+        _ => None,
+    };
+    // Connection state remains visible while transient turn status expires.
+    let left_line: Line<'static> = if let Some(label) = connection_label {
+        Line::from(Span::styled(
+            label,
+            Style::default()
+                .fg(app.theme.resolve("text.warning"))
+                .bg(status_bg),
+        ))
+    } else if app.cancelling {
         Line::from(Span::styled(
             "cancelling…",
             Style::default()

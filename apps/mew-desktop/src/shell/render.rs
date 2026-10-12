@@ -24,10 +24,7 @@ impl Render for DesktopShell {
                 });
             }
         }
-        if let Some(portal) = self.browser_portal.as_ref() {
-            let visible = self.browser_panel_open && !self.layout.workbench_collapsed;
-            let _ = portal.set_visible(BROWSER_OWNER, visible);
-        }
+        self.sync_browser_visibility();
         if self.browser_panel_open && self.browser_url_focus_requested {
             self.browser_url_focus_requested = false;
             let focus_handle = self.browser_url_focus_handle.clone();

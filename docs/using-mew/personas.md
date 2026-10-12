@@ -15,7 +15,7 @@ mew ships with two built-in personas designed for a two-phase workflow:
 | Persona | Tools | Purpose |
 |---------|-------|---------|
 | `builder` | All tools | The default. Reads a plan from `PLAN.md` and executes it step by step. |
-| `planner` | Read-only + write/edit/flag/todos | Investigates the codebase, writes a plan to `PLAN.md`, flags it important, and hands off to the builder. No bash or dangerous tools. |
+| `planner` | Read-only + write/edit/flag/todos | Investigates the codebase, writes a plan to `PLAN.md`, and presents it for review. Select the builder explicitly when ready to implement. No bash or dangerous tools. |
 
 The intended flow:
 

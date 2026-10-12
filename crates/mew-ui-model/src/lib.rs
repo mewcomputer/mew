@@ -2,6 +2,7 @@
 
 use mew_client_core::{
     BrowserState, ClientState, ConnectionStatus, PendingAction, PresenceEntry, SubagentEntry,
+    TurnOutcome,
 };
 use mew_message::{Message, Part, Role, ToolState};
 use mew_protocol::{
@@ -19,6 +20,8 @@ pub struct ConversationItem {
     pub last_message_at: Option<i64>,
     pub state: SessionState,
     pub last_turn_failed: bool,
+    pub failure_detail: Option<String>,
+    pub unread_completion: bool,
     pub needs_attention: bool,
     pub archived: bool,
     pub pinned: bool,
@@ -215,19 +218,8 @@ impl UiModel {
         self.current_persona = state.current_persona.clone();
         self.personas = state.personas.clone();
         self.permission_mode = state.permission_mode.clone();
-        self.running = state
-            .attached_session
-            .as_deref()
-            .and_then(|session_id| state.session(session_id))
-            .is_some_and(|session| session.running);
         self.models = state.models.clone();
         self.projects = state.projects.clone();
-        self.pending_actions = state
-            .attached_session
-            .as_deref()
-            .and_then(|session_id| state.session(session_id))
-            .map(|session| session.pending_actions.clone())
-            .unwrap_or_default();
         self.browser = state.browser.clone();
         self.presence = state.presence.clone();
         self.control_yielded_by = state.control_yielded_by;
@@ -238,11 +230,18 @@ impl UiModel {
             .as_deref()
             .and_then(|session_id| state.session(session_id))
         {
+            self.running = session.running;
+            self.pending_actions = session.pending_actions.clone();
             self.subagents = session.subagents.clone();
             self.todos = session.todos.iter().map(ActivityTodo::from).collect();
             self.usage = state.usage(&session.session_id).map(UsageSummary::from);
             self.flagged_files = session.flagged_files.clone();
-        } else {
+        } else if state.attached_session.is_none()
+            || self.selected_session != state.attached_session
+        {
+            self.running = false;
+            self.pending_actions.clear();
+            self.clear_activity();
             self.flagged_files.clear();
         }
         self.conversations = state
@@ -253,6 +252,17 @@ impl UiModel {
                 if let Some(title) = state.session_titles.get(&session.session_id) {
                     conversation.title = title.clone();
                 }
+                if let Some(outcome) = state.session_turn_outcomes.get(&session.session_id) {
+                    match outcome {
+                        TurnOutcome::Completed => conversation.last_turn_failed = false,
+                        TurnOutcome::Failed { detail } => {
+                            conversation.last_turn_failed = true;
+                            conversation.failure_detail = detail.clone();
+                        }
+                    }
+                }
+                conversation.unread_completion =
+                    state.unread_completions.contains(&session.session_id);
                 conversation
             })
             .collect();
@@ -451,6 +461,8 @@ impl From<&SessionInfo> for ConversationItem {
             last_message_at: session.last_message_at,
             state: session.state,
             last_turn_failed: session.last_turn_failed,
+            failure_detail: None,
+            unread_completion: false,
             needs_attention: session.pending_permissions > 0 || session.pending_questions > 0,
             archived: session.archived,
             pinned: session.pinned,
@@ -976,6 +988,7 @@ mod tests {
         };
         let session = state.session_mut(SESSION_ID);
         session.subagents.push(SubagentEntry {
+            child_session_id: None,
             task_id: "task-1".into(),
             name: "explore".into(),
             display_name: Some("Explore the codebase".into()),
@@ -1036,6 +1049,32 @@ mod tests {
         assert!(model.subagents.is_empty());
         assert!(model.todos.is_empty());
         assert!(model.usage.is_none());
+    }
+
+    #[test]
+    fn metadata_updates_preserve_the_attached_run_and_required_actions() {
+        let mut state = ClientState {
+            attached_session: Some(SESSION_ID.into()),
+            ..ClientState::default()
+        };
+        let session = state.session_mut(SESSION_ID);
+        session.running = true;
+        session.pending_actions.push(PendingAction {
+            request_id: "permission-1".into(),
+            kind: ActionKind::WorkspacePermission {
+                path: "/project".into(),
+            },
+        });
+        let mut model = UiModel::default();
+        model.sync_client_metadata(&state.ui_snapshot());
+        model.sync_client_metadata(&state.ui_metadata_snapshot());
+        assert!(model.running);
+        assert_eq!(model.pending_actions.len(), 1);
+
+        state.attached_session = Some("another-session".into());
+        model.sync_client_metadata(&state.ui_metadata_snapshot());
+        assert!(!model.running);
+        assert!(model.pending_actions.is_empty());
     }
 
     #[test]

@@ -279,6 +279,36 @@ impl DesktopShell {
                         element.child(deferred(self.render_connection_picker(cx)).with_priority(3))
                     }),
             )
+            .when(
+                self.model.session_is_ready()
+                    && !self.session_requests.is_pending()
+                    && matches!(
+                        self.model.connection,
+                        crate::model::ShellConnection::Connected
+                    ),
+                |element| {
+                    element.child(
+                        div()
+                            .id("review-changes")
+                            .flex()
+                            .items_center()
+                            .gap(px(5.))
+                            .h(px(26.))
+                            .px(px(7.))
+                            .rounded(px(6.))
+                            .text_xs()
+                            .text_color(muted)
+                            .cursor_pointer()
+                            .role(Role::Button)
+                            .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+                            .aria_label("Review changes in this conversation")
+                            .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
+                            .on_click(cx.listener(|shell, _, _, cx| shell.open_review(cx)))
+                            .child(tabler_icon(TablerIcon::FileCode, muted, px(13.)))
+                            .child("Review changes"),
+                    )
+                },
+            )
             .child(
                 div()
                     .id("workbench-toggle")

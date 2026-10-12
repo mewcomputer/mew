@@ -40,7 +40,10 @@ pub enum CoreEvent {
         entries: Vec<DirEntry>,
     },
 
-    /// A session was reloaded after reconnect. Swift should pull `snapshot()`.
+    /// An attachment was acknowledged; discard cached required actions before replay.
+    SessionReady { daemon: String, session_id: String },
+
+    /// Session history was loaded. Swift should pull `snapshot()`.
     SessionReloaded { daemon: String, session_id: String },
 
     /// Streaming text delta for a part. Coalesced in Rust before FFI.
@@ -60,8 +63,15 @@ pub enum CoreEvent {
         state: Option<String>,
     },
 
-    /// A turn ended (MessageEnd received).
-    TurnEnded {
+    /// The daemon's activity state for a session changed.
+    SessionActivityChanged {
+        daemon: String,
+        session_id: String,
+        running: bool,
+    },
+
+    /// One provider message ended; tools or further messages may still follow.
+    ProviderMessageEnded {
         daemon: String,
         session_id: String,
         input_tokens: u64,
@@ -92,22 +102,12 @@ pub enum CoreEvent {
 
     /// An ask-user request from the agent.
     AskUserRequested {
+        subagent: Option<crate::state::SubagentQuestionSource>,
         daemon: String,
         session_id: String,
         request_id: String,
         call_id: String,
         questions: Vec<String>,
-    },
-
-    /// A plan-approval request from the agent (`handoff_plan`).
-    PlanApprovalRequested {
-        daemon: String,
-        session_id: String,
-        request_id: String,
-        call_id: String,
-        plan_path: String,
-        plan_markdown: String,
-        persona: String,
     },
 
     /// A goal proposal from the agent (`propose_goal`). The UI should present

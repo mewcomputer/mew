@@ -168,6 +168,10 @@ impl Agent {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut turn_count: u32 = 0;
         loop {
+            if self.cancel_token.is_cancelled() {
+                let _ = ev_tx.send(AgentEvent::Error("aborted".into())).await;
+                return Ok(());
+            }
             if let Some(max) = self.max_turns {
                 if turn_count >= max {
                     tracing::info!(turn_count, max, "max turns reached");
@@ -186,7 +190,8 @@ impl Agent {
                 .values()
                 .filter(|t| {
                     let name = t.name();
-                    let browser_allowed = !name.starts_with("browser_") || self.browser_enabled;
+                    let browser_allowed =
+                        !name.starts_with("browser_") || self.browser_access.is_available();
                     let allowed = self
                         .active_tool_names
                         .as_ref()
@@ -529,24 +534,6 @@ impl Agent {
             })?;
             let pending = self.pending_tool_calls(msg);
             if pending.is_empty() {
-                // End of turn. If the model called `switch_persona` during
-                // this turn, drain the pending slot and emit the event the
-                // main loop uses to apply the change. Done at end of turn
-                // (not mid-turn) so the user sees the full response before
-                // the model swap happens, and so the model can chain
-                // switch_persona with one final text response.
-                if let Some(name) = self.pending_persona_switch.lock().await.take() {
-                    if self.personas.iter().any(|p| p.name == name) {
-                        let _ = ev_tx
-                            .send(AgentEvent::PersonaSwitchRequested { name })
-                            .await;
-                    } else {
-                        tracing::warn!(
-                            name = %name,
-                            "switch_persona queued an unknown persona; dropping"
-                        );
-                    }
-                }
                 let messages = self.messages.lock().await.clone();
                 self.dispatcher.on_turn_end(&messages).await;
 
@@ -733,15 +720,7 @@ impl Agent {
                     // The assistant message was already appended at MessageEnd.
                     // Sync the updated state (aborted meta + terminal tool states)
                     // back into self.messages, then append the result message.
-                    {
-                        let mut messages = self.messages.lock().await;
-                        for m in messages.iter_mut() {
-                            if m.id == msg.id {
-                                *m = msg.clone();
-                                break;
-                            }
-                        }
-                    }
+                    self.update_assistant_message(msg).await;
                     let result_msg = Message {
                         id: Ulid::new(),
                         session_id: self.session_id,
@@ -763,13 +742,7 @@ impl Agent {
             // back into self.messages so the next request has the correct state.
             if let Some(ref msg) = assistant_msg {
                 tracing::debug!(msg_id = %msg.id, "syncing assistant message to store");
-                let mut messages = self.messages.lock().await;
-                for m in messages.iter_mut() {
-                    if m.id == msg.id {
-                        *m = msg.clone();
-                        break;
-                    }
-                }
+                self.update_assistant_message(msg).await;
             }
 
             let result_msg = Message {
@@ -790,6 +763,32 @@ impl Agent {
             tokio::spawn(async move {
                 dispatcher.on_turn_end(&messages).await;
             });
+            if assistant_msg.as_ref().is_some_and(|message| {
+                message.parts.iter().any(|part| {
+                    matches!(part, Part::ToolCall(call) if call.tool_name == "exit_tool"
+                        && matches!(call.state, ToolState::Completed(_)))
+                })
+            }) {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Record terminal tool state as a revision of the assistant message.
+    async fn update_assistant_message(&self, message: &Message) {
+        {
+            let mut messages = self.messages.lock().await;
+            if let Some(existing) = messages
+                .iter_mut()
+                .find(|existing| existing.id == message.id)
+            {
+                *existing = message.clone();
+            }
+        }
+        if let Some(session) = &self.session {
+            if let Err(error) = session.lock().await.write_message(message).await {
+                tracing::error!(%error, "session write failed");
+            }
         }
     }
 
@@ -1476,7 +1475,7 @@ mod tests {
     fn repair_orphaned_tool_calls_collects_multiple_orphans() {
         // Multiple Pending tool calls on the same assistant message should
         // all be repaired in a single user message.
-        let mut messages = make_msg(
+        let messages = make_msg(
             Role::Assistant,
             vec![pending_tool_call("call_a"), pending_tool_call("call_b")],
         );

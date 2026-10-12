@@ -261,7 +261,11 @@ impl DesktopShell {
                     ),
                 ]))
                 .into_any_element(),
-            ActionKind::AskUser { questions, .. } => {
+            ActionKind::AskUser {
+                questions,
+                subagent,
+                ..
+            } => {
                 let question_views = questions
                     .iter()
                     .enumerate()
@@ -289,6 +293,7 @@ impl DesktopShell {
                                     format!("action-{request_id}-option-{index}"),
                                     answer.clone(),
                                     ClientMessage::AskUserResponse {
+                                        cancelled: false,
                                         request_id: request_id.clone(),
                                         answers: vec![answer],
                                     },
@@ -309,7 +314,33 @@ impl DesktopShell {
                     .border_color(theme_rgb(&self.theme, "accent"))
                     .bg(theme_rgb(&self.theme, "panel.background"))
                     .shadow_md()
-                    .child(div().text_sm().child("input needed"))
+                    .child(
+                        div().text_sm().child(SharedString::from(
+                            subagent
+                                .as_ref()
+                                .map(|source| {
+                                    format!(
+                                        "input needed from {} ({})",
+                                        source.display_name.as_deref().unwrap_or(&source.name),
+                                        source.name
+                                    )
+                                })
+                                .unwrap_or_else(|| "input needed".into()),
+                        )),
+                    )
+                    .when(subagent.is_some(), |element| {
+                        element.child(self.render_action_button(
+                            format!("action-{request_id}-close-question"),
+                            "close question",
+                            ClientMessage::AskUserResponse {
+                                request_id: request_id.clone(),
+                                answers: vec![],
+                                cancelled: true,
+                            },
+                            ActionButtonTone::Secondary,
+                            cx,
+                        ))
+                    })
                     .children(question_views)
                     .when_some(option_views, |element, options| element.child(options))
                     .child(
@@ -318,112 +349,6 @@ impl DesktopShell {
                             .text_color(theme_rgb(&self.theme, "text.muted"))
                             .child("answer each question on a new line, then press Enter"),
                     )
-                    .into_any_element()
-            }
-            ActionKind::PlanApproval {
-                plan_path,
-                plan_markdown,
-                persona,
-                ..
-            } => {
-                let feedback_active =
-                    self.plan_feedback_request.as_deref() == Some(request_id.as_str());
-                let preview = plan_markdown
-                    .lines()
-                    .take(8)
-                    .enumerate()
-                    .map(|(index, line)| {
-                        div()
-                            .id(format!("action-{request_id}-plan-line-{index}"))
-                            .text_xs()
-                            .text_color(theme_rgb(&self.theme, "text.muted"))
-                            .child(SharedString::from(line.to_owned()))
-                            .into_any_element()
-                    })
-                    .collect::<Vec<_>>();
-                div()
-                    .id(format!("required-action-{request_id}"))
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.))
-                    .p(px(12.))
-                    .rounded(px(12.))
-                    .border_1()
-                    .border_color(theme_rgb(&self.theme, "accent"))
-                    .bg(theme_rgb(&self.theme, "panel.background"))
-                    .shadow_md()
-                    .child(div().text_sm().child("plan approval"))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme_rgb(&self.theme, "text.muted"))
-                            .child(SharedString::from(format!("{persona} · {plan_path}"))),
-                    )
-                    .children(preview)
-                    .child(div().flex().items_center().gap(px(6.)).children([
-                        self.render_action_button(
-                            format!("action-{request_id}-approve"),
-                            "approve",
-                            ClientMessage::PlanApprovalResponse {
-                                request_id: request_id.clone(),
-                                approved: true,
-                                feedback: None,
-                            },
-                            ActionButtonTone::Primary,
-                            cx,
-                        ),
-                        if feedback_active {
-                            div()
-                                .id(format!("action-{request_id}-cancel-feedback"))
-                                .px(px(10.))
-                                .py(px(6.))
-                                .rounded(px(7.))
-                                .cursor_pointer()
-                                .bg(theme_rgb(&self.theme, "card"))
-                                .text_xs()
-                                .role(Role::Button)
-                                .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                                .aria_label("Cancel plan feedback")
-                                .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
-                                .on_click(cx.listener(|shell, _, _, cx| {
-                                    shell.plan_feedback_request = None;
-                                    cx.notify();
-                                }))
-                                .child("cancel")
-                                .into_any_element()
-                        } else {
-                            let feedback_request_id = request_id.clone();
-                            div()
-                                .id(format!("action-{request_id}-reject"))
-                                .px(px(10.))
-                                .py(px(6.))
-                                .rounded(px(7.))
-                                .cursor_pointer()
-                                .bg(theme_rgb(&self.theme, "card"))
-                                .text_xs()
-                                .role(Role::Button)
-                                .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                                .aria_label("Request plan changes")
-                                .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
-                                .on_click(cx.listener(move |shell, _, window, cx| {
-                                    shell.begin_plan_feedback(
-                                        feedback_request_id.clone(),
-                                        window,
-                                        cx,
-                                    );
-                                }))
-                                .child("request changes")
-                                .into_any_element()
-                        },
-                    ]))
-                    .when(feedback_active, |element| {
-                        element.child(
-                            div()
-                                .text_xs()
-                                .text_color(theme_rgb(&self.theme, "text.muted"))
-                                .child("type feedback in the composer, then press Enter to send · Esc to cancel"),
-                        )
-                    })
                     .into_any_element()
             }
             ActionKind::GoalApproval { objective, .. } => div()
@@ -1336,19 +1261,22 @@ impl DesktopShell {
             self.transcript_text_registry.borrow_mut().clear();
         }
         let selected_session = self.model.ui.selected_session.is_some();
-        let last_turn_failed = self
-            .model
-            .ui
-            .selected_session
-            .as_deref()
-            .and_then(|selected| {
-                self.model
-                    .ui
-                    .conversations
-                    .iter()
-                    .find(|conversation| conversation.session_id == selected)
-            })
-            .is_some_and(|conversation| conversation.last_turn_failed);
+        let selected_conversation =
+            self.model
+                .ui
+                .selected_session
+                .as_deref()
+                .and_then(|selected| {
+                    self.model
+                        .ui
+                        .conversations
+                        .iter()
+                        .find(|conversation| conversation.session_id == selected)
+                });
+        let last_turn_failed =
+            selected_conversation.is_some_and(|conversation| conversation.last_turn_failed);
+        let failure_detail =
+            selected_conversation.and_then(|conversation| conversation.failure_detail.clone());
         let last_message_is_user = self
             .model
             .ui
@@ -1426,7 +1354,7 @@ impl DesktopShell {
                             .child(self.render_transcript_attention(
                                 attention,
                                 if matches!(attention, TranscriptAttention::Failed) {
-                                    last_error.as_deref()
+                                    failure_detail.as_deref()
                                 } else {
                                     None
                                 },
@@ -1619,6 +1547,26 @@ impl DesktopShell {
                                         }))
                                         .child("retry")
                                         .into_any_element()
+                                } else if self.session_requests.needs_reconnect()
+                                    || self.command_tx.as_ref().is_some_and(UnboundedSender::is_closed)
+                                {
+                                    div()
+                                        .id("reconnect-task-client")
+                                        .px(px(7.))
+                                        .py(px(4.))
+                                        .rounded(px(5.))
+                                        .bg(theme_rgb(&self.theme, "card"))
+                                        .text_xs()
+                                        .text_color(theme_rgb(&self.theme, "text.body"))
+                                        .cursor_pointer()
+                                        .role(Role::Button)
+                                        .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+                                        .aria_label("Reconnect client to confirm task attachment")
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.retry_connection(cx);
+                                        }))
+                                        .child("reconnect")
+                                        .into_any_element()
                                 } else {
                                     div()
                                         .id("dismiss-composer-error")
@@ -1740,11 +1688,7 @@ impl DesktopShell {
                                     .role(Role::TextInput)
                                     .aria_label("Message composer")
                                     .aria_value(composer_value.clone())
-                                    .aria_placeholder(if self.plan_feedback_request.is_some() {
-                                        "Plan feedback…"
-                                    } else {
-                                        "Do anything…"
-                                    })
+                                    .aria_placeholder("Do anything…")
                                     .aria_description("Type a message, then press Enter to send.")
                                     .cursor(gpui::CursorStyle::IBeam)
                                     .on_click(cx.listener(|shell, _, window, cx| {
