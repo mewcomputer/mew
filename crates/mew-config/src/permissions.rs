@@ -620,19 +620,9 @@ fn token_escapes(token: &str, cwd: &Path, workspace_roots: &[PathBuf]) -> bool {
     // lexical form.
     match absolute.canonicalize() {
         Ok(canonical) => {
-            // File exists on disk. The canonicalized form is the true
-            // resolved path. If it's not inside any root, it's an escape
-            // — regardless of whether the token had `..` or not.
-            if is_inside_any_root(&canonical, workspace_roots) {
-                return false;
-            }
-            // Also check the un-normalized absolute form in case the
-            // roots themselves aren't canonicalized.
-            if is_inside_any_root(&absolute, workspace_roots) {
-                return false;
-            }
-            // Exists and resolves outside all roots → escape.
-            true
+            // Existing paths are judged by their actual destination, including
+            // symlinks. The root check canonicalizes configured roots too.
+            !is_inside_any_root(&canonical, workspace_roots)
         }
         Err(_) => {
             // File doesn't exist on disk. Fall back to lexical
@@ -1710,11 +1700,12 @@ mod tests {
     #[tokio::test]
     async fn relative_shell_cwd_is_resolved_from_the_session_project() {
         let directory = tempfile::tempdir().unwrap();
-        let project = directory.path().join("project");
+        let directory_path = directory.path().canonicalize().unwrap();
+        let project = directory_path.join("project");
         let process = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(project.join("nested")).unwrap();
         std::fs::write(project.join("nested/file.txt"), "project").unwrap();
-        std::fs::write(directory.path().join("file.txt"), "outside").unwrap();
+        std::fs::write(directory_path.join("file.txt"), "outside").unwrap();
         let engine = PermissionEngine::new(vec![PermissionRule {
             tool: "*".into(),
             decision: RuleDecision::Allow,
@@ -1749,6 +1740,57 @@ mod tests {
                 mew_hooks::PermissionDecision::Prompt,
                 "relative parent cwd must still trigger the configured escape tier"
             );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn existing_shell_paths_follow_symlinks_before_checking_workspace_roots() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let directory_path = directory.path().canonicalize().unwrap();
+        let project = directory_path.join("project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(project.join("inside.txt"), "inside").unwrap();
+        std::fs::write(directory_path.join("outside.txt"), "outside").unwrap();
+        symlink(project.join("inside.txt"), project.join("inside-link.txt")).unwrap();
+        symlink(
+            directory_path.join("outside.txt"),
+            project.join("outside-link.txt"),
+        )
+        .unwrap();
+        let alias = directory_path.join("project-alias");
+        symlink(&project, &alias).unwrap();
+
+        for root in [&project, &alias] {
+            let engine = PermissionEngine::new(vec![PermissionRule {
+                tool: "*".into(),
+                decision: RuleDecision::Allow,
+                r#match: MatchConditions::default(),
+            }])
+            .with_workspace_roots(vec![root.clone()], project.clone());
+            for tool in ["bash", "shell_background", "shell_monitor"] {
+                for (file, expected) in [
+                    ("inside.txt", mew_hooks::PermissionDecision::AllowOnce),
+                    ("inside-link.txt", mew_hooks::PermissionDecision::AllowOnce),
+                    ("outside-link.txt", mew_hooks::PermissionDecision::Prompt),
+                ] {
+                    assert_eq!(
+                        engine
+                            .check(
+                                tool,
+                                &serde_json::json!({"command":format!("cat ./{file}")}),
+                                mew_tools::Sensitivity::Dangerous,
+                                root
+                            )
+                            .await,
+                        expected,
+                        "{tool} {file} through root {}",
+                        root.display()
+                    );
+                }
+            }
         }
     }
 

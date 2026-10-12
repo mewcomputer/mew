@@ -2252,3 +2252,21 @@ external Zig cache environment. Its ignored lockfile was backed up and now uses
 2.24 for reproducible local checks against this CI failure. Source changes do not
 alter the repository's dependency-locking policy. The preceding remote run passed
 Clippy on both Rust platforms; the updated formatter will be checked after push.
+
+### 2026-10-11: check existing shell paths by their canonical destination
+
+Ubuntu CI exposed an unsafe lexical fallback in shell workspace checks. After an
+existing path resolved outside the configured roots, the original path could
+still be accepted because its prefix began inside a root. Removed that fallback;
+existing paths and roots are compared by their canonical destinations.
+
+Both parent-directory and outside-target symlink regressions failed locally
+before the fix after canonicalizing their temporary fixture roots. All 130
+configuration tests and all-targets strict Clippy passed. Coverage includes bash,
+background and monitor commands, aliased workspace roots, and legitimate direct
+files and in-workspace symlinks that must remain allowed. Missing-path policy is
+unchanged.
+
+Separate follow-up: the existing configuration backup test writes an unused
+state.toml.test-original file beside the user's config. It does not change
+state.toml, but its fixture should use isolated storage in a separate pass.
