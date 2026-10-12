@@ -488,11 +488,12 @@ mod shell_tests {
 
     #[test]
     fn selected_session_path_uses_the_session_cwd() {
+        let home = PathBuf::from(std::env::var_os("HOME").expect("session path test needs HOME"));
         let conversations = [ConversationItem {
             session_id: "session-1".into(),
             title: "A session".into(),
-            cwd: Some("/Users/natalie/code/mew".into()),
-            workspace_path: Some("/Users/natalie/code/mew".into()),
+            cwd: Some(home.join("code/mew").to_string_lossy().into_owned()),
+            workspace_path: Some(home.join("code/other").to_string_lossy().into_owned()),
             last_message_at: None,
             state: mew_protocol::SessionState::Idle,
             last_turn_failed: false,

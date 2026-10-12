@@ -2270,3 +2270,16 @@ unchanged.
 Separate follow-up: the existing configuration backup test writes an unused
 state.toml.test-original file beside the user's config. It does not change
 state.toml, but its fixture should use isolated storage in a separate pass.
+
+### 2026-10-11: make the desktop home-path fixture portable
+
+macOS CI correctly displayed an absolute session path belonging to another user,
+exposing a fixture that assumed HOME was /Users/natalie. The fixture now reads the
+same HOME value as the path renderer and uses different session and workspace
+paths, preserving the exact ~/code/mew assertion and proving cwd takes precedence.
+
+The focused fixture and all 154 desktop tests passed. The complete just ci gate
+passed with both path fixes: 2,472 Rust test executions, 30 web-client tests,
+strict Clippy, formatting, architecture, generated themes, subprocess end-to-end
+checks and the 38-page documentation build. Native checks used the existing
+matching CEF 150.0.14 SDK. The next remote run will verify both platforms.
