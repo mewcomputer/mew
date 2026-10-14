@@ -2299,3 +2299,18 @@ All 779 CLI/TUI test executions passed, including existing visual goldens. The
 full just ci gate also passed, including strict Clippy, architecture, generated
 themes, workspace tests, web builds, the real daemon/bridge subprocess checks
 and the 38-page documentation build. Live terminal interaction is still pending.
+
+### 2026-10-14: rebuild the terminal and native companion for live verification
+
+Built the optimized CLI, GPUI app and CEF helper from merged main plus the theme
+fix in the attached theme-cache-refresh worktree. The shared checkout's unrelated
+plan-path edits were preserved and excluded from this build. The native bundle is
+under that worktree's target/release/bundle/macos/mew.app.
+
+The CLI reports mew 0.2.0; all three fresh executables are ARM64. Bundled daemon,
+desktop and helper hashes match their release binaries. The standalone browser
+helper reports 0.34.0 and matches the workflow's pinned SHA256. CEF reports
+150.0.14.0, its bundled credits match the selected SDK, and all five helper app
+executables and property lists passed verification. Build dependencies stayed in
+task caches; global tools were not replaced. The app was not launched, leaving
+focus, browser ownership and terminal interaction for the requested live pass.
