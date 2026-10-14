@@ -2283,3 +2283,19 @@ passed with both path fixes: 2,472 Rust test executions, 30 web-client tests,
 strict Clippy, formatting, architecture, generated themes, subprocess end-to-end
 checks and the 38-page documentation build. Native checks used the existing
 matching CEF 150.0.14 SDK. The next remote run will verify both platforms.
+
+### 2026-10-14: refresh transcript colors when switching terminal themes
+
+The /theme command now invalidates completed markdown and committed streaming
+blocks and marks the full transcript stale. The next frame uses the selected
+theme at the same terminal width, without waiting for another message. Drafts,
+conversation content and the active markdown parser remain intact.
+
+A real command-dispatch regression failed with cached dark colors before the
+fix, then matched fresh light and dark renders for completed history and active
+streaming. Theme persistence runs in a child process with isolated config storage
+instead of modifying the test process's environment or the user's settings.
+All 779 CLI/TUI test executions passed, including existing visual goldens. The
+full just ci gate also passed, including strict Clippy, architecture, generated
+themes, workspace tests, web builds, the real daemon/bridge subprocess checks
+and the 38-page documentation build. Live terminal interaction is still pending.

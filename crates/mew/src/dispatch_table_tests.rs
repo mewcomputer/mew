@@ -1450,3 +1450,99 @@ async fn tools_and_review_slash_commands_open_details_without_submitting() {
         }
     }
 }
+
+#[tokio::test]
+async fn theme_changes_recolor_cached_history_and_streaming_without_new_output() {
+    // Isolate theme persistence without changing this test process's environment.
+    const CHILD: &str = "MEW_THEME_CACHE_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "dispatch_table_tests::theme_changes_recolor_cached_history_and_streaming_without_new_output",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("MEW_CONFIG_DIR", directory.path())
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated theme regression failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    fn conversation(streaming: bool, theme: &str) -> mew_tui::App {
+        let mut app = mew_tui::App::new();
+        app.theme = mew_tui::theme::Theme::load(theme);
+        app.push_user("user request".into(), vec![]);
+        app.push_synthetic_message("# History\n\nhistory paragraph with `code`".into());
+        if streaming {
+            let part_id = mew_message::PartId::new();
+            app.handle_agent_event(AgentEvent::Provider(
+                mew_provider::ProviderEvent::PartStart {
+                    part: Part::Text(mew_message::TextPart {
+                        base: mew_message::PartBase {
+                            id: part_id,
+                            message_id: mew_message::MessageId::new(),
+                            session_id: mew_message::SessionId::new(),
+                        },
+                        text: String::new(),
+                        synthetic: false,
+                    }),
+                },
+            ));
+            app.handle_agent_event(AgentEvent::Provider(
+                mew_provider::ProviderEvent::PartDelta {
+                    part_id,
+                    field: "text",
+                    delta: "# Streaming\n\ncommitted paragraph\n\npending text".into(),
+                },
+            ));
+            app.streaming = true;
+        }
+        app.input = "keep this draft".into();
+        app.cursor = app.input.len();
+        app
+    }
+
+    for streaming in [false, true] {
+        let mut app = conversation(streaming, "dark");
+        app.ensure_chat_rendered(78, 80, 30);
+        assert!(!app.rendered_md_cache.is_empty());
+        if streaming {
+            assert!(app.md_render_cache.committed_count > 0);
+        }
+        let mut target = RecordingTarget::new();
+        let mut should_break = false;
+        let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
+            active_persona: None,
+        }));
+        let mut cx = runtime::Ctx {
+            app: &mut app,
+            target: &mut target,
+            should_break: &mut should_break,
+            cat: None,
+            loaded_personas: &[],
+            plugin_info: &plugin_info,
+        };
+        for theme in ["light", "dark"] {
+            runtime::handle_action(&mut cx, Action::SlashCommand(format!("/theme {theme}"))).await;
+            cx.app.ensure_chat_rendered(78, 80, 30);
+            let mut expected = conversation(streaming, theme);
+            expected.ensure_chat_rendered(78, 80, 30);
+            assert_eq!(
+                cx.app.rendered_chat.as_ref().unwrap().lines,
+                expected.rendered_chat.as_ref().unwrap().lines,
+                "cached transcript must match a fresh {theme} render, streaming={streaming}"
+            );
+            assert_eq!(cx.app.input, "keep this draft");
+            assert_eq!(cx.app.streaming, streaming);
+        }
+    }
+}

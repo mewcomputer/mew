@@ -573,13 +573,14 @@ async fn handle_slash_command<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: Strin
         }
         SlashResult::SetTheme(name) => {
             cx.app.theme = mew_tui::theme::Theme::load(&name);
+            cx.app.rendered_md_cache.clear();
+            cx.app.md_render_cache.invalidate();
+            cx.app.mark_chat_dirty();
             {
                 let mut save = mew_config::load_state().unwrap_or_default();
                 save.theme = cx.app.theme.name.clone();
                 let _ = mew_config::save_state(&save);
             }
-            // cx.app
-            //     .push_synthetic_message(format!("theme: {}", cx.app.theme.name));
             Flow::Continue
         }
         SlashResult::ToggleMouseCapture => {
