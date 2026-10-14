@@ -2283,3 +2283,34 @@ passed with both path fixes: 2,472 Rust test executions, 30 web-client tests,
 strict Clippy, formatting, architecture, generated themes, subprocess end-to-end
 checks and the 38-page documentation build. Native checks used the existing
 matching CEF 150.0.14 SDK. The next remote run will verify both platforms.
+
+### 2026-10-14: refresh transcript colors when switching terminal themes
+
+The /theme command now invalidates completed markdown and committed streaming
+blocks and marks the full transcript stale. The next frame uses the selected
+theme at the same terminal width, without waiting for another message. Drafts,
+conversation content and the active markdown parser remain intact.
+
+A real command-dispatch regression failed with cached dark colors before the
+fix, then matched fresh light and dark renders for completed history and active
+streaming. Theme persistence runs in a child process with isolated config storage
+instead of modifying the test process's environment or the user's settings.
+All 779 CLI/TUI test executions passed, including existing visual goldens. The
+full just ci gate also passed, including strict Clippy, architecture, generated
+themes, workspace tests, web builds, the real daemon/bridge subprocess checks
+and the 38-page documentation build. Live terminal interaction is still pending.
+
+### 2026-10-14: rebuild the terminal and native companion for live verification
+
+Built the optimized CLI, GPUI app and CEF helper from merged main plus the theme
+fix in the attached theme-cache-refresh worktree. The shared checkout's unrelated
+plan-path edits were preserved and excluded from this build. The native bundle is
+under that worktree's target/release/bundle/macos/mew.app.
+
+The CLI reports mew 0.2.0; all three fresh executables are ARM64. Bundled daemon,
+desktop and helper hashes match their release binaries. The standalone browser
+helper reports 0.34.0 and matches the workflow's pinned SHA256. CEF reports
+150.0.14.0, its bundled credits match the selected SDK, and all five helper app
+executables and property lists passed verification. Build dependencies stayed in
+task caches; global tools were not replaced. The app was not launched, leaving
+focus, browser ownership and terminal interaction for the requested live pass.
