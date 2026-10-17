@@ -38,11 +38,33 @@ gate. It includes the separate subprocess path and the documentation build.
 
 ## Native smoke and frame measurements
 
-Use the native packaged development app from `just desktop-dev` for CEF coverage.
+Build the native desktop and package it with `scripts/package-desktop-native.sh`
+for CEF coverage; `just desktop-dev` also uses the packaged development app.
+The package needs the matching CEF framework and helper apps, plus its daemon
+and standalone browser tool. A bare executable does not exercise packaging.
 Check text entry/IME, keyboard focus, Unicode selection/copy, sidebar/workbench
 transitions, resize, light/dark appearance, idle terminal repaint, browser failure
 feedback, retry and quit. Run against an isolated real daemon for connection
 behavior; the fake-provider option can keep model turns deterministic.
+
+Use a separate bundle identity for a disposable QA app, including its helper
+apps, and launch it with the isolated environment before attaching UI tools.
+Attaching to a stopped app may launch it without those environment variables.
+
+Check Pinyin candidates with physical keyboard input on the first and wrapped or
+second lines, then resize. For CEF, first focus the URL field and then an actual
+page input. Copy/paste, selection and command deletion must edit the page while
+leaving the URL draft unchanged. Check the native Edit menu too. Background UI
+automation can route key equivalents differently or inject control characters;
+confirm suspected native keyboard failures with the app in the foreground.
+
+The opt-in real AppKit responder regression runs without writing the clipboard:
+
+```sh
+MEW_NATIVE_APPKIT_TESTS=1 cargo test -p mew-cef-host --test native_key_equivalents
+```
+
+See the [CEF host guide](../../native/cef-host/README.md) for SDK requirements.
 
 `MEW_DESKTOP_FRAME_TRACE=1` enables the existing frame probe and writes 60-frame
 reports to `mew-desktop-frame-trace.log` in the process temporary directory.

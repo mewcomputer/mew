@@ -862,11 +862,6 @@ impl DesktopShell {
         } else if key == "escape" {
             self.cancel_rename(cx);
             cx.stop_propagation();
-        } else if key == "a" && event.keystroke.modifiers.platform {
-            self.rename_selection = 0..self.rename_draft.len();
-            self.rename_selection_reversed = false;
-            cx.notify();
-            cx.stop_propagation();
         } else if key == "backspace" {
             self.rename_backspace(window, cx);
             cx.stop_propagation();
@@ -901,11 +896,6 @@ impl DesktopShell {
             self.clear_sidebar_search(cx);
             window.focus(&self.composer_focus_handle, cx);
             cx.stop_propagation();
-        } else if key == "a" && event.keystroke.modifiers.platform {
-            self.sidebar_search_selection = 0..self.sidebar_search.len();
-            self.sidebar_search_selection_reversed = false;
-            cx.notify();
-            cx.stop_propagation();
         } else if key == "backspace" {
             self.sidebar_search_backspace(window, cx);
             cx.stop_propagation();
@@ -924,13 +914,6 @@ impl DesktopShell {
                 _ => None,
             }) {
                 self.attach_session(session_id, cx);
-            }
-            cx.stop_propagation();
-        } else if key == "v" && event.keystroke.modifiers.platform {
-            if let Some(item) = cx.read_from_clipboard() {
-                if let Some(text) = item.text() {
-                    self.replace_sidebar_search_text(None, &text, cx);
-                }
             }
             cx.stop_propagation();
         } else if !event.keystroke.modifiers.platform

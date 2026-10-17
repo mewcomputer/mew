@@ -879,9 +879,6 @@ impl DesktopShell {
         if matches!(key, "enter" | "return") && !event.keystroke.modifiers.shift {
             self.navigate_browser_to(cx);
             cx.stop_propagation();
-        } else if key == "a" && event.keystroke.modifiers.platform {
-            self.browser_url_select_all(cx);
-            cx.stop_propagation();
         } else if key == "backspace" {
             self.browser_url_backspace(window, cx);
             cx.stop_propagation();

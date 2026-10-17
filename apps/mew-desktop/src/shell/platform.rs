@@ -1,12 +1,41 @@
 use super::*;
 
 fn set_app_menus(cx: &mut App) {
-    cx.bind_keys([gpui::KeyBinding::new("cmd-q", Quit, None)]);
+    let text_input =
+        Some("Composer || BrowserUrl || RenameSession || SidebarSearch || ModelPickerSearch");
+    cx.bind_keys([
+        gpui::KeyBinding::new("cmd-q", Quit, None),
+        gpui::KeyBinding::new("cmd-n", NewConversation, None),
+        gpui::KeyBinding::new("cmd-w", CloseConversation, None),
+        gpui::KeyBinding::new("cmd-b", ToggleSidebar, None),
+        gpui::KeyBinding::new("cmd-j", ToggleTerminal, None),
+        gpui::KeyBinding::new("cmd-k", FocusSidebarSearch, None),
+        gpui::KeyBinding::new("escape", DismissPopovers, None),
+        gpui::KeyBinding::new("cmd-x", TextCut, text_input),
+        gpui::KeyBinding::new("cmd-c", TextCopy, text_input),
+        gpui::KeyBinding::new("cmd-v", TextPaste, text_input),
+        gpui::KeyBinding::new("cmd-a", TextSelectAll, text_input),
+        gpui::KeyBinding::new("backspace", ComposerBackspace, Some("Composer")),
+        gpui::KeyBinding::new("delete", ComposerDelete, Some("Composer")),
+        gpui::KeyBinding::new("left", ComposerLeft, Some("Composer")),
+        gpui::KeyBinding::new("right", ComposerRight, Some("Composer")),
+        gpui::KeyBinding::new("shift-left", ComposerSelectLeft, Some("Composer")),
+        gpui::KeyBinding::new("shift-right", ComposerSelectRight, Some("Composer")),
+        gpui::KeyBinding::new("home", ComposerHome, Some("Composer")),
+        gpui::KeyBinding::new("end", ComposerEnd, Some("Composer")),
+    ]);
     cx.set_menus([
         Menu::new("mew").items([MenuItem::action("Quit", Quit)]),
         Menu::new("File").items([
             MenuItem::action("New Conversation", NewConversation),
             MenuItem::action("Close Conversation", CloseConversation),
+        ]),
+        Menu::new("Edit").items([
+            MenuItem::os_action("Cut", TextCut, gpui::OsAction::Cut),
+            MenuItem::os_action("Copy", TextCopy, gpui::OsAction::Copy),
+            MenuItem::os_action("Paste", TextPaste, gpui::OsAction::Paste),
+            MenuItem::separator(),
+            MenuItem::os_action("Select All", TextSelectAll, gpui::OsAction::SelectAll),
         ]),
         Menu::new("View").items([
             MenuItem::action("Toggle Sessions Sidebar", ToggleSidebar),
@@ -202,24 +231,6 @@ pub(crate) fn run() {
         .with_quit_mode(QuitMode::LastWindowClosed)
         .run(move |cx: &mut App| {
             set_app_menus(cx);
-            cx.bind_keys([
-                gpui::KeyBinding::new("cmd-n", NewConversation, None),
-                gpui::KeyBinding::new("cmd-w", CloseConversation, None),
-                gpui::KeyBinding::new("cmd-b", ToggleSidebar, None),
-                gpui::KeyBinding::new("cmd-j", ToggleTerminal, None),
-                gpui::KeyBinding::new("cmd-k", FocusSidebarSearch, None),
-                gpui::KeyBinding::new("escape", DismissPopovers, None),
-                gpui::KeyBinding::new("backspace", ComposerBackspace, Some("Composer")),
-                gpui::KeyBinding::new("delete", ComposerDelete, Some("Composer")),
-                gpui::KeyBinding::new("left", ComposerLeft, Some("Composer")),
-                gpui::KeyBinding::new("right", ComposerRight, Some("Composer")),
-                gpui::KeyBinding::new("shift-left", ComposerSelectLeft, Some("Composer")),
-                gpui::KeyBinding::new("shift-right", ComposerSelectRight, Some("Composer")),
-                gpui::KeyBinding::new("cmd-a", ComposerSelectAll, Some("Composer")),
-                gpui::KeyBinding::new("cmd-v", ComposerPaste, Some("Composer")),
-                gpui::KeyBinding::new("home", ComposerHome, Some("Composer")),
-                gpui::KeyBinding::new("end", ComposerEnd, Some("Composer")),
-            ]);
             let (endpoint, startup_error, supervisor) = match startup {
                 Some(Ok((endpoint, supervisor))) => (Some(endpoint), None, Some(supervisor)),
                 Some(Err((error, supervisor))) => (None, Some(error), Some(supervisor)),
@@ -263,6 +274,56 @@ pub(crate) fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn native_edit_menu_exposes_responder_actions_and_shortcuts(cx: &mut gpui::TestAppContext) {
+        cx.update(set_app_menus);
+        let menus = cx.update(|cx| cx.get_menus()).unwrap();
+        let edit = menus.iter().find(|menu| menu.name == "Edit").unwrap();
+        cx.add_empty_window().update(|window, _| {
+            for (name, os_action, shortcut) in [
+                ("Cut", gpui::OsAction::Cut, "cmd-x"),
+                ("Copy", gpui::OsAction::Copy, "cmd-c"),
+                ("Paste", gpui::OsAction::Paste, "cmd-v"),
+                ("Select All", gpui::OsAction::SelectAll, "cmd-a"),
+            ] {
+                let (action, native_action) = edit
+                    .items
+                    .iter()
+                    .find_map(|item| match item {
+                        gpui::OwnedMenuItem::Action {
+                            name: item_name,
+                            action,
+                            os_action,
+                            ..
+                        } if item_name == name => Some((action, os_action)),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert!(*native_action == Some(os_action), "{name}");
+                let key = gpui::Keystroke::parse(shortcut).unwrap();
+                for field in [
+                    "Composer",
+                    "BrowserUrl",
+                    "RenameSession",
+                    "SidebarSearch",
+                    "ModelPickerSearch",
+                ] {
+                    let mut context = gpui::KeyContext::new_with_defaults();
+                    context.add(field);
+                    assert!(
+                        window
+                            .bindings_for_action_in_context(action.as_ref(), context)
+                            .iter()
+                            .any(|binding| {
+                                matches!(binding.keystrokes(), [stroke] if stroke.inner() == &key)
+                            }),
+                        "{name} must have a native menu key equivalent in {field}"
+                    );
+                }
+            }
+        });
+    }
 
     #[gpui::test]
     fn native_quit_menu_exposes_the_standard_shortcut(cx: &mut gpui::TestAppContext) {

@@ -157,11 +157,6 @@ impl DesktopShell {
             window.focus(&self.composer_focus_handle, cx);
             cx.notify();
             cx.stop_propagation();
-        } else if key == "a" && event.keystroke.modifiers.platform {
-            self.model_picker_selection = 0..self.model_picker_query.len();
-            self.model_picker_selection_reversed = false;
-            cx.notify();
-            cx.stop_propagation();
         } else if key == "backspace" {
             self.model_picker_query_backspace(window, cx);
             cx.stop_propagation();
@@ -178,13 +173,6 @@ impl DesktopShell {
             if let Some(index) = self.model_picker_filtered_indices.first().copied() {
                 if let Some(model) = self.model.ui.models.get(index) {
                     self.choose_model(model.provider.clone(), model.model.clone(), window, cx);
-                }
-            }
-            cx.stop_propagation();
-        } else if key == "v" && event.keystroke.modifiers.platform {
-            if let Some(item) = cx.read_from_clipboard() {
-                if let Some(text) = item.text() {
-                    self.replace_model_picker_query_text(None, &text, cx);
                 }
             }
             cx.stop_propagation();
@@ -982,6 +970,10 @@ impl DesktopShell {
                             .h_full()
                             .track_focus(&search_focus_handle)
                             .key_context("ModelPickerSearch")
+                            .on_action(cx.listener(Self::text_copy))
+                            .on_action(cx.listener(Self::text_cut))
+                            .on_action(cx.listener(Self::text_paste))
+                            .on_action(cx.listener(Self::text_select_all))
                             .role(Role::TextInput)
                             .aria_label("Filter models")
                             .cursor(gpui::CursorStyle::IBeam)

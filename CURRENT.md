@@ -2445,3 +2445,29 @@ painted a local fixture, accepted native input/clicks and scrolling, resized wit
 the host window, retained distinct page state across conversations and exited
 cleanly. Clipboard commands additionally require the native Edit menu; that
 application-menu correction is verified separately from the responder bridge.
+
+## 2026-10-17 - Native IME geometry and Edit menu
+
+AppKit can query candidate geometry between a composition callback and GPUI's
+next paint. Shell text changes now reshape the focused field synchronously using
+its painted font, size and wrapping width. Paint invalidates native character
+coordinates when focused geometry, style or selection changes. The physical
+Pinyin check confirmed the popup beside the composer text after this correction.
+Temporary native-coordinate logging was removed and the GPUI dependency cache
+was restored exactly before rebuilding.
+
+The app now exposes native Cut, Copy, Paste and Select All menu items. Bindings
+are registered before menu creation, and typed editing actions live on each
+rendered shell field. Chromium can use AppKit's first responder while GPUI fields
+retain Unicode selection and composer image attachments. Duplicate raw paste
+and select-all paths were removed. Native page paste now works in UI automation;
+the physical clipboard roundtrip and clean-build multiline/resize Pinyin checks
+remain pending in the isolated QA window.
+
+All 194 desktop, 9 browser-host and 8 CEF tests passed, along with the real AppKit
+responder regression. New behavior coverage exercises composition bounds before
+repaint across all five fields, Unicode clipboard roundtrips, hidden-field menu
+availability and actual image attachment bytes. Strict Clippy for all affected
+targets, formatting, architecture and theme checks passed. The final native
+binary built and the complete debug app bundle was refreshed. The maintained
+focus/input and verification guides document these native integration rules.

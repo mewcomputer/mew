@@ -18,15 +18,21 @@ pub(super) struct ComposerElement {
 pub(super) struct ComposerPrepaint {
     text: String,
     lines: Vec<WrappedLine>,
+    font: gpui::Font,
+    font_size: Pixels,
     cursor: Option<Point<Pixels>>,
     line_height: Pixels,
 }
 
 pub(super) struct TextInputLayout {
     target: TextInputTarget,
-    text: String,
+    text: SharedString,
     lines: Vec<WrappedLine>,
+    font: gpui::Font,
+    font_size: Pixels,
     line_height: Pixels,
+    bounds: Bounds<Pixels>,
+    selection: Range<usize>,
 }
 
 impl TextInputLayout {
@@ -37,7 +43,7 @@ impl TextInputLayout {
         range_utf16: Range<usize>,
         bounds: Bounds<Pixels>,
     ) -> Option<Bounds<Pixels>> {
-        if self.target != target || self.text != text {
+        if self.target != target || self.text.as_ref() != text {
             return None;
         }
         if text.is_empty() {
@@ -92,6 +98,41 @@ fn normalized_browser_url_range(text: &str, range: &Range<usize>) -> Range<usize
 }
 
 impl DesktopShell {
+    // Native text services can request candidate bounds before the next paint.
+    fn refresh_text_input_layout(&mut self, target: TextInputTarget, window: &Window) {
+        let text = self.text_input_value(target);
+        let Some(layout) = self.text_input_layout.as_ref() else {
+            return;
+        };
+        if layout.target != target || layout.text.as_ref() == text {
+            return;
+        }
+        let text: SharedString = text.to_owned().into();
+        let Ok(lines) = window.text_system().shape_text(
+            text.clone(),
+            layout.font_size,
+            &[TextRun {
+                len: text.len(),
+                font: layout.font.clone(),
+                color: gpui::black(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }],
+            Some(layout.bounds.size.width),
+            Some(if target == TextInputTarget::Composer {
+                3
+            } else {
+                1
+            }),
+        ) else {
+            return;
+        };
+        let layout = self.text_input_layout.as_mut().unwrap();
+        layout.text = text;
+        layout.lines = lines.into_vec();
+    }
+
     fn text_input_target(&self, window: &Window) -> TextInputTarget {
         if self.model_picker_open && self.model_picker_focus_handle.is_focused(window) {
             TextInputTarget::ModelSearch
@@ -103,6 +144,16 @@ impl DesktopShell {
             TextInputTarget::Rename
         } else {
             TextInputTarget::Composer
+        }
+    }
+
+    fn text_input_focus_handle(&self, target: TextInputTarget) -> &FocusHandle {
+        match target {
+            TextInputTarget::Composer => &self.composer_focus_handle,
+            TextInputTarget::BrowserUrl => &self.browser_url_focus_handle,
+            TextInputTarget::Rename => &self.rename_focus_handle,
+            TextInputTarget::SidebarSearch => &self.sidebar_search_focus_handle,
+            TextInputTarget::ModelSearch => &self.model_picker_focus_handle,
         }
     }
 
@@ -169,6 +220,92 @@ impl DesktopShell {
             TextInputTarget::SidebarSearch => self.sidebar_search_selection = selection,
             TextInputTarget::ModelSearch => self.model_picker_selection = selection,
         }
+    }
+
+    pub(super) fn text_copy(&mut self, _: &TextCopy, window: &mut Window, cx: &mut Context<Self>) {
+        let target = self.text_input_target(window);
+        if !self.text_input_focus_handle(target).is_focused(window) {
+            cx.propagate();
+            return;
+        }
+        let selection = self.text_input_selection(target);
+        if !selection.is_empty() {
+            if let Some(text) = self.text_input_value(target).get(selection) {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.to_owned()));
+            }
+        }
+    }
+
+    pub(super) fn text_cut(&mut self, _: &TextCut, window: &mut Window, cx: &mut Context<Self>) {
+        let target = self.text_input_target(window);
+        if !self.text_input_focus_handle(target).is_focused(window) {
+            cx.propagate();
+            return;
+        }
+        let selection = self.text_input_selection(target);
+        if selection.is_empty() {
+            return;
+        }
+        let text = self.text_input_value(target);
+        let Some(selected_text) = text.get(selection.clone()) else {
+            return;
+        };
+        let range_utf16 = utf16_offset_for_byte(text, selection.start)
+            ..utf16_offset_for_byte(text, selection.end);
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(selected_text.to_owned()));
+        self.replace_text_in_range(Some(range_utf16), "", window, cx);
+        window.notify_text_input_changed(self.text_input_focus_handle(target));
+    }
+
+    pub(super) fn text_paste(
+        &mut self,
+        _: &TextPaste,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = self.text_input_target(window);
+        if !self.text_input_focus_handle(target).is_focused(window) {
+            cx.propagate();
+            return;
+        }
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        if target == TextInputTarget::Composer {
+            for entry in item.entries() {
+                if let gpui::ClipboardEntry::Image(image) = entry {
+                    match save_clipboard_image(image) {
+                        Ok(path) => self.add_attachment(path, cx),
+                        Err(error) => {
+                            self.attachment_error = Some(error);
+                            cx.notify();
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+        if let Some(text) = item.text() {
+            self.replace_text_in_range(None, &text, window, cx);
+            window.notify_text_input_changed(self.text_input_focus_handle(target));
+        }
+    }
+
+    pub(super) fn text_select_all(
+        &mut self,
+        _: &TextSelectAll,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = self.text_input_target(window);
+        if !self.text_input_focus_handle(target).is_focused(window) {
+            cx.propagate();
+            return;
+        }
+        let length = self.text_input_value(target).encode_utf16().count();
+        self.set_selected_text_range(0..length, window, cx);
+        window.notify_text_selection_changed(self.text_input_focus_handle(target));
+        cx.notify();
     }
 
     fn composer_cursor_offset(&self) -> usize {
@@ -292,34 +429,6 @@ impl DesktopShell {
         let end = self.composer_cursor_offset();
         self.mention_menu_index = 0;
         self.replace_composer_byte_range(start..end, &format!("@{path} "), cx);
-    }
-
-    /// Paste into the composer: clipboard image data is written to a temp
-    /// file and attached; text is inserted at the cursor.
-    pub(super) fn composer_paste(
-        &mut self,
-        _: &ComposerPaste,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(item) = cx.read_from_clipboard() else {
-            return;
-        };
-        for entry in item.entries() {
-            if let gpui::ClipboardEntry::Image(image) = entry {
-                match save_clipboard_image(image) {
-                    Ok(path) => self.add_attachment(path, cx),
-                    Err(error) => {
-                        self.attachment_error = Some(error);
-                        cx.notify();
-                    }
-                }
-                return;
-            }
-        }
-        if let Some(text) = item.text() {
-            self.replace_composer_text(None, &text, cx);
-        }
     }
 
     /// Up/Down prompt-history recall. Only engages for a single-line composer
@@ -457,16 +566,6 @@ impl DesktopShell {
         let offset = next_utf8_boundary(&self.model.ui.composer, self.composer_cursor_offset());
         self.select_composer_to(offset, cx);
         self.restart_composer_cursor_blink(cx);
-    }
-
-    pub(super) fn composer_select_all(
-        &mut self,
-        _: &ComposerSelectAll,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.move_composer_to(0, cx);
-        self.select_composer_to(self.model.ui.composer.len(), cx);
     }
 
     pub(super) fn composer_home(
@@ -703,12 +802,6 @@ impl DesktopShell {
             self.browser_url_selection = cursor..end;
         }
         self.replace_browser_url_text(None, "", cx);
-    }
-
-    pub(super) fn browser_url_select_all(&mut self, cx: &mut Context<Self>) {
-        self.browser_url_selection = 0..self.browser_url.len();
-        self.browser_url_selection_reversed = false;
-        cx.notify();
     }
 
     pub(super) fn browser_url_left(&mut self, cx: &mut Context<Self>) {
@@ -1022,6 +1115,8 @@ impl Element for ComposerElement {
         ComposerPrepaint {
             text: content,
             lines: lines.into_vec(),
+            font: style.font(),
+            font_size: style.font_size.to_pixels(window.rem_size()),
             cursor,
             line_height: window.line_height(),
         }
@@ -1037,15 +1132,11 @@ impl Element for ComposerElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let focus_handle = match self.target {
-            TextInputTarget::Composer => self.shell.read(cx).composer_focus_handle.clone(),
-            TextInputTarget::BrowserUrl => self.shell.read(cx).browser_url_focus_handle.clone(),
-            TextInputTarget::Rename => self.shell.read(cx).rename_focus_handle.clone(),
-            TextInputTarget::SidebarSearch => {
-                self.shell.read(cx).sidebar_search_focus_handle.clone()
-            }
-            TextInputTarget::ModelSearch => self.shell.read(cx).model_picker_focus_handle.clone(),
-        };
+        let focus_handle = self
+            .shell
+            .read(cx)
+            .text_input_focus_handle(self.target)
+            .clone();
         let target = self.target;
         self.shell.update(cx, |shell, _| match target {
             TextInputTarget::Composer => shell.composer_bounds = Some(bounds),
@@ -1082,15 +1173,37 @@ impl Element for ComposerElement {
                     theme_rgb(&theme, "foreground"),
                 ));
             }
+            let selection = self.shell.read(cx).text_input_selection(self.target);
+            let geometry_changed =
+                self.shell
+                    .read(cx)
+                    .text_input_layout
+                    .as_ref()
+                    .is_none_or(|layout| {
+                        layout.target != self.target
+                            || layout.text.as_ref() != prepaint.text
+                            || layout.bounds != bounds
+                            || layout.selection != selection
+                            || layout.font != prepaint.font
+                            || layout.font_size != prepaint.font_size
+                            || layout.line_height != prepaint.line_height
+                    });
             let layout = TextInputLayout {
                 target: self.target,
-                text: std::mem::take(&mut prepaint.text),
+                text: std::mem::take(&mut prepaint.text).into(),
                 lines: std::mem::take(&mut prepaint.lines),
+                font: std::mem::take(&mut prepaint.font),
+                font_size: prepaint.font_size,
                 line_height: prepaint.line_height,
+                bounds,
+                selection,
             };
             self.shell.update(cx, |shell, _| {
                 shell.text_input_layout = Some(layout);
             });
+            if geometry_changed {
+                window.invalidate_character_coordinates();
+            }
         }
     }
 }
@@ -1243,7 +1356,8 @@ impl EntityInputHandler for DesktopShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match self.text_input_target(window) {
+        let target = self.text_input_target(window);
+        match target {
             TextInputTarget::Composer => self.replace_composer_text(range_utf16, text, cx),
             TextInputTarget::BrowserUrl => self.replace_browser_url_text(range_utf16, text, cx),
             TextInputTarget::Rename => self.replace_rename_text(range_utf16, text, cx),
@@ -1254,6 +1368,7 @@ impl EntityInputHandler for DesktopShell {
                 self.replace_model_picker_query_text(range_utf16, text, cx)
             }
         }
+        self.refresh_text_input_layout(target, window);
     }
 
     fn replace_and_mark_text_in_range(
@@ -1264,7 +1379,8 @@ impl EntityInputHandler for DesktopShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match self.text_input_target(window) {
+        let target = self.text_input_target(window);
+        match target {
             TextInputTarget::Composer => {
                 self.replace_composer_and_mark(range_utf16, text, new_selected_range_utf16, cx)
             }
@@ -1287,6 +1403,7 @@ impl EntityInputHandler for DesktopShell {
                 cx,
             ),
         }
+        self.refresh_text_input_layout(target, window);
     }
 
     fn bounds_for_range(
@@ -1368,9 +1485,13 @@ mod tests {
         });
         TextInputLayout {
             target: TextInputTarget::Composer,
-            text: text.to_owned(),
+            text: text.to_owned().into(),
             lines,
+            font: gpui::font("Helvetica"),
+            font_size: px(16.),
             line_height: px(24.),
+            bounds: Bounds::new(point(px(0.), px(0.)), gpui::size(px(width), px(96.))),
+            selection: 0..0,
         }
     }
 
@@ -1636,6 +1757,355 @@ mod tests {
                 shell.quitting = true;
             });
         });
+    }
+
+    #[gpui::test]
+    fn auxiliary_fields_paste_clipboard_over_selection(cx: &mut gpui::TestAppContext) {
+        cx.skip_drawing();
+        let cx = cx.add_empty_window();
+        let shell = cx
+            .new_window_entity(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        let pasted = "https://example.test/é🙂";
+        cx.update(|window, cx| {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(pasted.into()));
+            shell.update(cx, |shell, cx| {
+                for target in [
+                    TextInputTarget::BrowserUrl,
+                    TextInputTarget::Rename,
+                    TextInputTarget::SidebarSearch,
+                    TextInputTarget::ModelSearch,
+                ] {
+                    shell.model_picker_open = target == TextInputTarget::ModelSearch;
+                    match target {
+                        TextInputTarget::BrowserUrl => shell.browser_url = "old".into(),
+                        TextInputTarget::Rename => shell.rename_draft = "old".into(),
+                        TextInputTarget::SidebarSearch => shell.sidebar_search = "old".into(),
+                        TextInputTarget::ModelSearch => shell.model_picker_query = "old".into(),
+                        TextInputTarget::Composer => unreachable!(),
+                    }
+                    shell.set_text_input_selection(target, 0..3);
+                    window.focus(shell.text_input_focus_handle(target), cx);
+                    shell.text_paste(&TextPaste, window, cx);
+                    assert_eq!(shell.text_input_value(target), pasted, "{target:?}");
+                    assert_eq!(
+                        shell.text_input_selection(target),
+                        pasted.len()..pasted.len()
+                    );
+                }
+                shell.quitting = true;
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn native_composition_keeps_candidate_geometry_before_repaint(cx: &mut gpui::TestAppContext) {
+        cx.skip_drawing();
+        let cx = cx.add_empty_window();
+        let shell = cx
+            .new_window_entity(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        for target in [
+            TextInputTarget::Composer,
+            TextInputTarget::BrowserUrl,
+            TextInputTarget::Rename,
+            TextInputTarget::SidebarSearch,
+            TextInputTarget::ModelSearch,
+        ] {
+            cx.update(|window, cx| {
+                let focus = shell.update(cx, |shell, _| {
+                    shell.model_picker_open = target == TextInputTarget::ModelSearch;
+                    match target {
+                        TextInputTarget::Composer => shell.composer_focus_handle.clone(),
+                        TextInputTarget::BrowserUrl => shell.browser_url_focus_handle.clone(),
+                        TextInputTarget::Rename => shell.rename_focus_handle.clone(),
+                        TextInputTarget::SidebarSearch => shell.sidebar_search_focus_handle.clone(),
+                        TextInputTarget::ModelSearch => shell.model_picker_focus_handle.clone(),
+                    }
+                });
+                window.focus(&focus, cx);
+            });
+            cx.draw(
+                point(px(80.), px(120.)),
+                gpui::size(px(400.), px(96.)),
+                |_, _| {
+                    div()
+                        .w_full()
+                        .text_size(px(22.))
+                        .line_height(px(30.))
+                        .child(ComposerElement {
+                            shell: shell.clone(),
+                            target,
+                        })
+                },
+            );
+            cx.update(|window, cx| {
+                shell.update(cx, |shell, cx| {
+                    let field = shell.text_input_layout.as_ref().unwrap().bounds;
+                    let before = shell.bounds_for_range(0..0, field, window, cx).unwrap();
+                    shell.replace_and_mark_text_in_range(None, "ni", Some(2..2), window, cx);
+
+                    let during = shell.bounds_for_range(0..2, field, window, cx).unwrap();
+                    assert_eq!(during.origin, before.origin);
+                    assert_eq!(during.size.height, px(30.));
+                    let expected = window.text_system().shape_line(
+                        "ni".into(),
+                        px(22.),
+                        &[TextRun {
+                            len: 2,
+                            font: window.text_style().font(),
+                            color: gpui::black(),
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        }],
+                        None,
+                    );
+                    assert_eq!(during.size.width, expected.width);
+
+                    shell.replace_and_mark_text_in_range(None, "nihao", Some(5..5), window, cx);
+                    let expanded = shell.bounds_for_range(0..5, field, window, cx).unwrap();
+                    assert_eq!(expanded.origin, before.origin);
+                    assert!(expanded.size.width > during.size.width);
+                    shell.replace_text_in_range(None, "你好", window, cx);
+                    let committed = shell.bounds_for_range(0..2, field, window, cx).unwrap();
+                    assert_eq!(committed.origin, before.origin);
+                    assert!(committed.size.width > px(0.));
+                    assert_eq!(shell.text_input_value(target), "你好", "{target:?}");
+                    assert!(shell.marked_text_range(window, cx).is_none());
+                });
+            });
+        }
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn text_actions_copy_cut_and_paste_unicode_in_focused_fields(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        let original = "é🙂中";
+        for target in [
+            TextInputTarget::Composer,
+            TextInputTarget::BrowserUrl,
+            TextInputTarget::Rename,
+            TextInputTarget::SidebarSearch,
+            TextInputTarget::ModelSearch,
+        ] {
+            cx.update(|window, cx| {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string("unchanged".into()));
+                let focus = shell.update(cx, |shell, cx| {
+                    shell.model_picker_open = target == TextInputTarget::ModelSearch;
+                    shell.settings_open = false;
+                    shell.layout.sidebar_collapsed = false;
+                    shell.layout.workbench_collapsed = target != TextInputTarget::BrowserUrl;
+                    shell.browser_panel_open = target == TextInputTarget::BrowserUrl;
+                    shell.auxiliary_view = AuxiliaryView::Browser;
+                    shell.rename_session_id =
+                        (target == TextInputTarget::Rename).then(|| "rename-target".into());
+                    if target == TextInputTarget::Rename {
+                        shell.model.ui.conversations = vec![ConversationItem {
+                            session_id: "rename-target".into(),
+                            title: "Rename target".into(),
+                            cwd: None,
+                            workspace_path: None,
+                            last_message_at: None,
+                            state: mew_protocol::SessionState::Idle,
+                            last_turn_failed: false,
+                            failure_detail: None,
+                            unread_completion: false,
+                            needs_attention: false,
+                            archived: false,
+                            pinned: false,
+                            group_id: None,
+                        }];
+                        shell.rebuild_sidebar_rows();
+                    }
+                    match target {
+                        TextInputTarget::Composer => shell.model.ui.composer = original.into(),
+                        TextInputTarget::BrowserUrl => shell.browser_url = original.into(),
+                        TextInputTarget::Rename => shell.rename_draft = original.into(),
+                        TextInputTarget::SidebarSearch => shell.sidebar_search = original.into(),
+                        TextInputTarget::ModelSearch => shell.model_picker_query = original.into(),
+                    }
+                    shell.set_text_input_selection(target, 2..6);
+                    cx.notify();
+                    match target {
+                        TextInputTarget::Composer => shell.composer_focus_handle.clone(),
+                        TextInputTarget::BrowserUrl => shell.browser_url_focus_handle.clone(),
+                        TextInputTarget::Rename => shell.rename_focus_handle.clone(),
+                        TextInputTarget::SidebarSearch => shell.sidebar_search_focus_handle.clone(),
+                        TextInputTarget::ModelSearch => shell.model_picker_focus_handle.clone(),
+                    }
+                });
+                window.focus(&focus, cx);
+            });
+            cx.run_until_parked();
+
+            cx.dispatch_action(TextCopy);
+            assert_eq!(
+                cx.read_from_clipboard().unwrap().text().as_deref(),
+                Some("🙂"),
+                "{target:?}"
+            );
+            shell.read_with(cx, |shell, _| {
+                assert_eq!(shell.text_input_value(target), original)
+            });
+
+            cx.dispatch_action(TextCut);
+            shell.read_with(cx, |shell, _| {
+                assert_eq!(shell.text_input_value(target), "é中", "{target:?}");
+                assert_eq!(shell.text_input_selection(target), 2..2);
+            });
+            assert_eq!(
+                cx.read_from_clipboard().unwrap().text().as_deref(),
+                Some("🙂")
+            );
+
+            cx.dispatch_action(TextPaste);
+            shell.read_with(cx, |shell, _| {
+                assert_eq!(shell.text_input_value(target), original, "{target:?}");
+                assert_eq!(shell.text_input_selection(target), 6..6);
+            });
+            cx.dispatch_action(TextSelectAll);
+            shell.read_with(cx, |shell, _| {
+                assert_eq!(shell.text_input_selection(target), 0..original.len());
+            });
+            cx.update(|_, cx| {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string("replacement".into()))
+            });
+            cx.dispatch_action(TextPaste);
+            shell.read_with(cx, |shell, _| {
+                assert_eq!(shell.text_input_value(target), "replacement", "{target:?}")
+            });
+        }
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn text_menu_actions_require_a_rendered_focused_field(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|window, cx| {
+            let focus = shell.read(cx).composer_focus_handle.clone();
+            window.focus(&focus, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            for action in [
+                &TextCopy as &dyn gpui::Action,
+                &TextCut,
+                &TextPaste,
+                &TextSelectAll,
+            ] {
+                assert!(window.is_action_available(action, cx));
+            }
+        });
+        shell.update(cx, |shell, cx| {
+            shell.settings_open = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            assert!(shell.read(cx).composer_focus_handle.is_focused(window));
+            for action in [
+                &TextCopy as &dyn gpui::Action,
+                &TextCut,
+                &TextPaste,
+                &TextSelectAll,
+            ] {
+                assert!(!window.is_action_available(action, cx));
+            }
+            let focus = shell.update(cx, |shell, cx| {
+                shell.settings_open = false;
+                shell.layout.workbench_collapsed = false;
+                shell.auxiliary_view = AuxiliaryView::Browser;
+                shell.browser_panel_open = true;
+                cx.notify();
+                shell.browser_url_focus_handle.clone()
+            });
+            window.focus(&focus, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| assert!(window.is_action_available(&TextPaste, cx)));
+        shell.update(cx, |shell, cx| shell.close_browser_panel(cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            assert!(shell.read(cx).browser_url_focus_handle.is_focused(window));
+            assert!(!window.is_action_available(&TextPaste, cx));
+            let focus = shell.read(cx).sidebar_focus_handle.clone();
+            window.focus(&focus, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            for action in [
+                &TextCopy as &dyn gpui::Action,
+                &TextCut,
+                &TextPaste,
+                &TextSelectAll,
+            ] {
+                assert!(!window.is_action_available(action, cx));
+            }
+        });
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn text_actions_leave_empty_selection_and_other_focus_unchanged(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|window, cx| {
+            let focus = shell.update(cx, |shell, cx| {
+                shell.model.ui.composer = "draft".into();
+                shell.composer_selection = 2..2;
+                cx.notify();
+                shell.composer_focus_handle.clone()
+            });
+            window.focus(&focus, cx);
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string("clipboard".into()));
+        });
+        cx.run_until_parked();
+        cx.dispatch_action(TextCopy);
+        cx.dispatch_action(TextCut);
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().as_deref(),
+            Some("clipboard")
+        );
+        cx.update(|window, cx| {
+            let focus = shell.read(cx).popover_focus_handle.clone();
+            window.focus(&focus, cx);
+        });
+        cx.dispatch_action(TextSelectAll);
+        cx.dispatch_action(TextPaste);
+        shell.update(cx, |shell, _| {
+            assert_eq!(shell.model.ui.composer, "draft");
+            assert_eq!(shell.composer_selection, 2..2);
+            shell.quitting = true;
+        });
+    }
+
+    #[gpui::test]
+    fn text_paste_keeps_composer_image_attachments(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        let image_bytes = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../mew-web-ui/public/mew-transparent-closeup.png"),
+        )
+        .unwrap();
+        let image = gpui::Image::from_bytes(gpui::ImageFormat::Png, image_bytes.clone());
+        cx.update(|window, cx| {
+            let focus = shell.read(cx).composer_focus_handle.clone();
+            window.focus(&focus, cx);
+            cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));
+        });
+        cx.dispatch_action(TextPaste);
+        let path = shell.update(cx, |shell, _| {
+            assert_eq!(shell.attachments.len(), 1);
+            assert_eq!(shell.attachments[0].mime.as_deref(), Some("image/png"));
+            assert!(shell.model.ui.composer.is_empty());
+            shell.quitting = true;
+            PathBuf::from(&shell.attachments[0].path)
+        });
+        assert_eq!(std::fs::read(&path).unwrap(), image_bytes);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

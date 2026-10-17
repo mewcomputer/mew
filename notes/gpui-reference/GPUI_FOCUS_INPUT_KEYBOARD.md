@@ -15,14 +15,30 @@ Use the existing `DesktopFocusExt::desktop_focus` for tabbable controls and visi
 keyboard focus. An accessible name does not replace keyboard behavior.
 
 Mew's application actions are registered in `shell/platform.rs` and attached in
-`shell/render.rs`. Field editing/routing lives in `shell/composer.rs` and
-`shell/session.rs`; model-picker editing also lives in `shell/preferences.rs`.
+`shell/render.rs`. Text editing actions belong on the rendered field's container,
+so a hidden field with a retained focus handle cannot enable an Edit menu item.
+Field editing/routing lives in `shell/composer.rs` and `shell/session.rs`;
+model-picker editing also lives in `shell/preferences.rs`.
 Terminal keys use Ghostty's encoder in
 `terminal/key_map.rs` and `terminal/terminal_view.rs`.
 
 A named key such as `up` is not a text character. Preserve modifiers when routing
 named keys to the terminal encoder; control-character shortcuts must only match
 the intended single-character input.
+
+## Native editing commands
+
+Register key bindings before creating menus. GPUI uses those bindings to assign
+native menu key equivalents. Use `MenuItem::os_action` for Cut, Copy, Paste and
+Select All so AppKit can dispatch to the native first responder, with typed GPUI
+actions handling the shell fields. Keep clipboard image attachments in the
+composer's paste path.
+
+GPUI focus and AppKit's first responder can differ while a CEF page is active.
+The native CEF host offers editing key equivalents to its visible focused native
+view before GPUI handles them. Chromium's macOS clipboard commands also depend
+on the application's native Edit menu. Preserve both routes and keep global
+application commands in the existing window handler.
 
 ## Native text input
 
@@ -58,6 +74,13 @@ a caret rectangle for an empty range. Reusing geometry from a different field,
 old text or a different wrapping width can place candidates incorrectly.
 Respect explicit newlines, wrapped rows, surrogate pairs and the document end.
 The macOS backend converts this window-space result to screen coordinates.
+
+AppKit can query geometry immediately after a composition callback, before GPUI
+paints again. Refresh shaped text synchronously with the last painted field's
+font, font size and wrapping width. Reject mismatched field/text geometry rather
+than returning a stale rectangle. After paint, call
+`Window::invalidate_character_coordinates` when the focused field's geometry,
+text style or selection changes; avoid invalidating it on every idle frame.
 
 For application-driven text or selection changes, the pin also exposes
 `Window::notify_text_input_changed` and `notify_text_selection_changed` for native
