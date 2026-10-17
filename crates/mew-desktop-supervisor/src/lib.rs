@@ -7,6 +7,10 @@ use anyhow::{bail, Context, Result};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use std::time::{Duration, Instant};
 use tungstenite::{client, Message};
 
@@ -78,15 +82,42 @@ pub struct DaemonEndpoint {
 pub struct DesktopSupervisor {
     config: SupervisorConfig,
     endpoint: Option<DaemonEndpoint>,
-    child: Option<Child>,
+    child: Arc<Mutex<Option<Child>>>,
+}
+
+#[derive(Clone)]
+pub struct DaemonStartupCancellation {
+    cancelled: Arc<AtomicBool>,
+    child: Arc<Mutex<Option<Child>>>,
+}
+
+impl DaemonStartupCancellation {
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        shutdown_child(&self.child);
+    }
 }
 
 impl DesktopSupervisor {
+    pub fn startup_cancellation(&self) -> DaemonStartupCancellation {
+        DaemonStartupCancellation {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            child: self.child.clone(),
+        }
+    }
+
+    pub fn connect_or_launch_with_cancellation(
+        &mut self,
+        cancellation: &DaemonStartupCancellation,
+    ) -> Result<DaemonEndpoint> {
+        self.connect_or_launch_inner(Some(cancellation))
+    }
+
     pub fn new(config: SupervisorConfig) -> Self {
         Self {
             config,
             endpoint: None,
-            child: None,
+            child: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -131,14 +162,25 @@ impl DesktopSupervisor {
     }
 
     pub fn connect_or_launch(&mut self) -> Result<DaemonEndpoint> {
-        if let Some(child) = self.child.as_mut() {
-            if child
-                .try_wait()
-                .context("could not inspect app-owned daemon")?
-                .is_some()
-            {
-                self.child = None;
-                self.endpoint = None;
+        self.connect_or_launch_inner(None)
+    }
+
+    fn connect_or_launch_inner(
+        &mut self,
+        cancellation: Option<&DaemonStartupCancellation>,
+    ) -> Result<DaemonEndpoint> {
+        check_startup_cancellation(cancellation)?;
+        {
+            let mut owned_child = self.child.lock().unwrap_or_else(|error| error.into_inner());
+            if let Some(child) = owned_child.as_mut() {
+                if child
+                    .try_wait()
+                    .context("could not inspect app-owned daemon")?
+                    .is_some()
+                {
+                    *owned_child = None;
+                    self.endpoint = None;
+                }
             }
         }
         if let Some(endpoint) = &self.endpoint {
@@ -184,14 +226,15 @@ impl DesktopSupervisor {
             self.config.daemon_binary.as_deref().ok_or_else(|| {
                 anyhow::anyhow!("no daemon binary configured for app-owned launch")
             })?;
-        let child = spawn_daemon(
+        spawn_daemon(
             address,
             binary,
             self.config.remote_enabled,
             self.config.log_dir.as_deref(),
             self.config.startup_timeout,
+            &self.child,
+            cancellation,
         )?;
-        self.child = Some(child);
         let endpoint = DaemonEndpoint {
             websocket_url: url,
             mode: DaemonMode::LocalOwned,
@@ -207,12 +250,26 @@ impl DesktopSupervisor {
 
     pub fn shutdown(&mut self) -> Result<()> {
         self.endpoint = None;
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        shutdown_child(&self.child);
         Ok(())
     }
+}
+
+fn shutdown_child(owned_child: &Mutex<Option<Child>>) {
+    let mut owned_child = owned_child
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if let Some(mut child) = owned_child.take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+fn check_startup_cancellation(cancellation: Option<&DaemonStartupCancellation>) -> Result<()> {
+    if cancellation.is_some_and(|cancellation| cancellation.cancelled.load(Ordering::Acquire)) {
+        bail!("daemon startup cancelled");
+    }
+    Ok(())
 }
 
 impl Drop for DesktopSupervisor {
@@ -235,7 +292,9 @@ fn spawn_daemon(
     remote_enabled: bool,
     log_dir: Option<&Path>,
     startup_timeout: Duration,
-) -> Result<Child> {
+    owned_child: &Mutex<Option<Child>>,
+    cancellation: Option<&DaemonStartupCancellation>,
+) -> Result<()> {
     let mut command = Command::new(binary);
     let port_arg = format!("127.0.0.1:{}", address.port());
     command.args(["daemon", "--port", &port_arg]);
@@ -256,14 +315,21 @@ fn spawn_daemon(
         command.stdout(Stdio::null()).stderr(Stdio::null());
     }
     close_inherited_descriptors(&mut command);
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("spawn configured daemon {}", binary.display()))?;
-    match wait_for_daemon(address, startup_timeout) {
-        Ok(()) => Ok(child),
+    {
+        let mut owned_child = owned_child
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        check_startup_cancellation(cancellation)?;
+        *owned_child = Some(
+            command
+                .spawn()
+                .with_context(|| format!("spawn configured daemon {}", binary.display()))?,
+        );
+    }
+    match wait_for_daemon(address, startup_timeout, cancellation) {
+        Ok(()) => Ok(()),
         Err(error) => {
-            let _ = child.kill();
-            let _ = child.wait();
+            shutdown_child(owned_child);
             Err(error.context(format!(
                 "configured daemon {} did not become compatible at {address}; restart or update the daemon",
                 binary.display()
@@ -272,12 +338,17 @@ fn spawn_daemon(
     }
 }
 
-fn wait_for_daemon(address: SocketAddr, timeout: Duration) -> Result<()> {
+fn wait_for_daemon(
+    address: SocketAddr,
+    timeout: Duration,
+    cancellation: Option<&DaemonStartupCancellation>,
+) -> Result<()> {
     let deadline = Instant::now() + timeout;
     let mut last_error = None;
     while Instant::now() < deadline {
+        check_startup_cancellation(cancellation)?;
         match probe_daemon(&websocket_url(address)) {
-            Ok(()) => return Ok(()),
+            Ok(()) => return check_startup_cancellation(cancellation),
             Err(error) => last_error = Some(error),
         }
         std::thread::sleep(POLL_INTERVAL);
@@ -407,7 +478,7 @@ mod tests {
         assert!(format!("{error:#}").contains("protocol"));
         assert!(format!("{error:#}").contains("restart"));
         assert!(supervisor.endpoint().is_none());
-        assert!(supervisor.child.is_none());
+        assert!(supervisor.child.lock().unwrap().is_none());
     }
 
     #[test]
@@ -517,13 +588,18 @@ mod tests {
             mode: DaemonMode::LocalOwned,
         };
         let mut supervisor = DesktopSupervisor::new(SupervisorConfig::default());
-        supervisor.child = Some(child);
+        *supervisor.child.lock().unwrap() = Some(child);
         supervisor.endpoint = Some(endpoint.clone());
 
         assert_eq!(supervisor.connect_or_launch().unwrap(), endpoint);
-        assert_eq!(supervisor.child.as_ref().unwrap().id(), child_pid);
+        assert_eq!(
+            supervisor.child.lock().unwrap().as_ref().unwrap().id(),
+            child_pid
+        );
         assert!(supervisor
             .child
+            .lock()
+            .unwrap()
             .as_mut()
             .unwrap()
             .try_wait()
@@ -556,7 +632,7 @@ mod tests {
             local_port: address.port(),
             ..SupervisorConfig::default()
         });
-        supervisor.child = Some(child);
+        *supervisor.child.lock().unwrap() = Some(child);
         supervisor.endpoint = Some(DaemonEndpoint {
             websocket_url: websocket_url(address),
             mode: DaemonMode::LocalOwned,
@@ -566,7 +642,7 @@ mod tests {
 
         assert_eq!(endpoint.mode, DaemonMode::LocalExisting);
         assert_eq!(endpoint.websocket_url, websocket_url(address));
-        assert!(supervisor.child.is_none());
+        assert!(supervisor.child.lock().unwrap().is_none());
         server.join().unwrap();
     }
 
@@ -580,7 +656,7 @@ mod tests {
             local_port: address.port(),
             ..SupervisorConfig::default()
         });
-        supervisor.child = Some(child);
+        *supervisor.child.lock().unwrap() = Some(child);
         supervisor.endpoint = Some(DaemonEndpoint {
             websocket_url: websocket_url(address),
             mode: DaemonMode::LocalOwned,
@@ -588,7 +664,7 @@ mod tests {
 
         assert!(supervisor.connect_or_launch().is_err());
         assert!(supervisor.endpoint().is_none());
-        assert!(supervisor.child.is_none());
+        assert!(supervisor.child.lock().unwrap().is_none());
 
         let listener = TcpListener::bind(address).unwrap();
         let server = std::thread::spawn(move || {
@@ -621,11 +697,122 @@ mod tests {
             .unwrap();
         let child_pid = child.id();
         let mut supervisor = DesktopSupervisor::new(SupervisorConfig::default());
-        supervisor.child = Some(child);
+        *supervisor.child.lock().unwrap() = Some(child);
 
         supervisor.shutdown().unwrap();
 
-        assert!(supervisor.child.is_none());
+        assert!(supervisor.child.lock().unwrap().is_none());
         assert_ne!(unsafe { libc::kill(child_pid as libc::pid_t, 0) }, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancelling_startup_reaps_the_child_before_the_probe_finishes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = std::env::temp_dir().join(format!(
+            "mew-supervisor-cancel-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let binary = directory.join("daemon");
+        let pid_file = directory.join("pid");
+        std::fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\necho $$ > '{}'\nexec sleep 30\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut supervisor = DesktopSupervisor::new(SupervisorConfig {
+            daemon_binary: Some(binary),
+            startup_timeout: Duration::from_secs(1),
+            ..SupervisorConfig::default()
+        });
+        let cancellation = supervisor.startup_cancellation();
+        let worker_cancellation = cancellation.clone();
+        let worker = std::thread::spawn(move || {
+            supervisor.connect_or_launch_with_cancellation(&worker_cancellation)
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let child_pid = loop {
+            if let Ok(pid) = std::fs::read_to_string(&pid_file) {
+                if let Ok(pid) = pid.trim().parse::<libc::pid_t>() {
+                    break pid;
+                }
+            }
+            if Instant::now() >= deadline {
+                let result = worker.join().unwrap();
+                panic!("daemon subprocess should start: {result:?}");
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+
+        cancellation.cancel();
+        let child_was_reaped = unsafe { libc::kill(child_pid, 0) } != 0;
+        let result = worker.join().unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+
+        assert!(
+            child_was_reaped,
+            "cancellation should synchronously reap the startup child"
+        );
+        assert!(format!("{:#}", result.unwrap_err()).contains("cancelled"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancelling_a_completed_startup_still_reaps_its_owned_child() {
+        let child = Command::new("sh")
+            .args(["-c", "exec sleep 30"])
+            .spawn()
+            .unwrap();
+        let child_pid = child.id();
+        let mut supervisor = DesktopSupervisor::new(SupervisorConfig::default());
+        *supervisor.child.lock().unwrap() = Some(child);
+        supervisor.endpoint = Some(DaemonEndpoint {
+            websocket_url: "ws://127.0.0.1:43210".into(),
+            mode: DaemonMode::LocalOwned,
+        });
+        let cancellation = supervisor.startup_cancellation();
+        supervisor
+            .connect_or_launch_with_cancellation(&cancellation)
+            .unwrap();
+
+        cancellation.cancel();
+
+        assert!(supervisor.child.lock().unwrap().is_none());
+        assert_ne!(unsafe { libc::kill(child_pid as libc::pid_t, 0) }, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancelling_an_attach_only_connection_leaves_the_external_process_running() {
+        let mut child = Command::new("sh")
+            .args(["-c", "exec sleep 30"])
+            .spawn()
+            .unwrap();
+        let mut supervisor = DesktopSupervisor::new(SupervisorConfig {
+            explicit_url: Some("ws://127.0.0.1:43210".into()),
+            ..SupervisorConfig::default()
+        });
+        let cancellation = supervisor.startup_cancellation();
+        let endpoint = supervisor
+            .connect_or_launch_with_cancellation(&cancellation)
+            .unwrap();
+
+        cancellation.cancel();
+        let external_process_running = child.try_wait().unwrap().is_none();
+        child.kill().unwrap();
+        child.wait().unwrap();
+
+        assert_eq!(endpoint.mode, DaemonMode::LocalExisting);
+        assert!(external_process_running);
     }
 }

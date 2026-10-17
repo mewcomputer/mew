@@ -2344,3 +2344,18 @@ All 15 terminal regressions passed, including dirty-state reset, Unicode and
 wide-cell copy, cached-row reuse, real GPUI notification and outside release.
 Native smoke also rendered Unicode PTY output and retained a composer draft
 after dragging a terminal selection into another pane.
+
+
+## 2026-10-17 - Cancellable desktop connection lifecycle
+
+Client shutdown now cancels blocked WebSocket command writes. Supervisor retry
+runs outside the GPUI foreground thread, preserves current drafts, ignores
+obsolete profile/generation completions and prevents duplicate retries. Shared
+child ownership lets quit synchronously kill and reap a daemon during startup
+or before completion reaches the UI. Failed OS worker creation restores the
+supervisor configuration for another attempt.
+
+The 14 supervisor tests and eight desktop lifecycle tests passed with real
+localhost handshakes, socket backpressure, subprocesses and an actual failed
+thread creation followed by a successful retry. Existing daemons remain
+attach-only. Tests explicitly permit external-thread wakeups in GPUI's harness.

@@ -407,6 +407,8 @@ impl DesktopShell {
             _appearance_subscription: appearance_subscription,
             _bounds_subscription: bounds_subscription,
             _supervisor: supervisor,
+            supervisor_retry_pending: false,
+            supervisor_startup_cancel: None,
             frame_probe,
         }
     }
@@ -416,6 +418,9 @@ impl DesktopShell {
             return;
         }
         self.quitting = true;
+        if let Some(cancellation) = self.supervisor_startup_cancel.take() {
+            cancellation.cancel();
+        }
         self.capture_session_view_state();
         self.persist_layout();
         self.close_terminal();
@@ -432,31 +437,85 @@ impl DesktopShell {
     }
 
     pub(super) fn retry_connection(&mut self, cx: &mut Context<Self>) {
-        if self.quitting {
+        if self.quitting || self.supervisor_retry_pending {
             return;
         }
 
         self.stop_client();
-        let mut profile = self.connection_profile.clone();
+        let profile = self.connection_profile.clone();
         if should_refresh_supervisor(profile.as_ref(), self._supervisor.as_ref()) {
-            let Some(supervisor) = self._supervisor.as_mut() else {
+            let Some(supervisor) = self._supervisor.as_ref() else {
                 self.model.fail("no daemon connection is configured");
                 cx.notify();
                 return;
             };
-            let endpoint = supervisor.connect_or_launch();
-            match endpoint {
-                Ok(endpoint) => {
-                    profile = Some(DesktopConnectionProfile::LocalWebSocket {
-                        url: endpoint.websocket_url,
-                    });
-                }
+            let cancellation = supervisor.startup_cancellation();
+            self.supervisor_startup_cancel = Some(cancellation.clone());
+            self.supervisor_retry_pending = true;
+            self.model.connection = crate::model::ShellConnection::Starting;
+            self.model.last_error = None;
+            let generation = self.session_requests.generation();
+            let profile_selection = self.connection_profile_selection.clone();
+            let result_rx = match spawn_supervisor_retry(
+                &mut self._supervisor,
+                cancellation,
+                std::thread::Builder::new().name("mew-desktop-supervisor".into()),
+            ) {
+                Ok(receiver) => receiver,
                 Err(error) => {
-                    self.model.fail(error.to_string());
+                    self.supervisor_startup_cancel.take();
+                    self.supervisor_retry_pending = false;
+                    self.model
+                        .fail(format!("could not start daemon connection worker: {error}"));
                     cx.notify();
                     return;
                 }
-            }
+            };
+
+            cx.spawn(async move |this, cx| {
+                let result = result_rx.await;
+                let _ = this.update(cx, |shell, cx| {
+                    shell.supervisor_retry_pending = false;
+                    shell.supervisor_startup_cancel.take();
+                    if shell.quitting {
+                        return;
+                    }
+                    let is_current = shell.session_requests.accepts_source(generation)
+                        && shell.connection_profile == profile
+                        && shell.connection_profile_selection == profile_selection;
+                    let (supervisor, result) = match result {
+                        Ok(result) => result,
+                        Err(error) => {
+                            if is_current {
+                                shell
+                                    .model
+                                    .fail(format!("daemon connection worker stopped: {error}"));
+                                cx.notify();
+                            }
+                            return;
+                        }
+                    };
+                    shell._supervisor = Some(supervisor);
+                    if !is_current {
+                        return;
+                    }
+                    match result {
+                        Ok(endpoint) => shell.reconnect_with_profile(
+                            DesktopConnectionProfile::LocalWebSocket {
+                                url: endpoint.websocket_url,
+                            },
+                            cx,
+                        ),
+                        Err(error) => {
+                            shell.model.fail(error.to_string());
+                            cx.notify();
+                        }
+                    }
+                });
+            })
+            .detach();
+            cx.notify();
+            return;
         }
 
         let Some(profile) = profile else {
@@ -464,6 +523,14 @@ impl DesktopShell {
             cx.notify();
             return;
         };
+        self.reconnect_with_profile(profile, cx);
+    }
+
+    fn reconnect_with_profile(
+        &mut self,
+        profile: DesktopConnectionProfile,
+        cx: &mut Context<Self>,
+    ) {
         let selected_session = self.model.ui.selected_session.clone();
         self.connection_profile = Some(profile.clone());
         self.switch_draft_owner(selected_session.as_deref());
@@ -671,7 +738,11 @@ impl DesktopShell {
                 _ = &mut stop_rx => return,
                 command = command_rx.recv() => {
                     let Some(command) = command else { return; };
-                    if let Err(error) = engine.send(command).await {
+                    let result = tokio::select! {
+                        result = engine.send(command) => result,
+                        _ = &mut stop_rx => return,
+                    };
+                    if let Err(error) = result {
                         let _ = event_tx.unbounded_send(DesktopClientEvent::Failed(error.to_string()));
                         return;
                     }
@@ -703,6 +774,32 @@ impl DesktopShell {
     }
 }
 
+fn spawn_supervisor_retry(
+    supervisor: &mut Option<DesktopSupervisor>,
+    cancellation: mew_desktop_supervisor::DaemonStartupCancellation,
+    builder: std::thread::Builder,
+) -> std::io::Result<oneshot::Receiver<(DesktopSupervisor, Result<DaemonEndpoint>)>> {
+    let handoff = Arc::new(std::sync::Mutex::new(supervisor.take()));
+    let worker_handoff = handoff.clone();
+    let (result_tx, result_rx) = oneshot::channel();
+    if let Err(error) = builder.spawn(move || {
+        let mut supervisor = worker_handoff
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+            .expect("daemon supervisor is configured");
+        let result = supervisor.connect_or_launch_with_cancellation(&cancellation);
+        let _ = result_tx.send((supervisor, result));
+    }) {
+        *supervisor = handoff
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        return Err(error);
+    }
+    Ok(result_rx)
+}
+
 fn should_refresh_supervisor(
     profile: Option<&DesktopConnectionProfile>,
     supervisor: Option<&DesktopSupervisor>,
@@ -720,6 +817,270 @@ mod lifecycle_tests {
     use super::*;
     use futures::future::pending;
     use mew_client_core::{ClientConnection, TransportError};
+
+    struct SupervisorProbe {
+        supervisor: DesktopSupervisor,
+        ready: std::sync::mpsc::Receiver<()>,
+        response: std::sync::mpsc::Sender<mew_protocol::ServerMessage>,
+        server: std::thread::JoinHandle<()>,
+    }
+
+    fn held_supervisor_probe() -> SupervisorProbe {
+        use tokio_tungstenite::tungstenite::{accept, Message};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (ready_tx, ready) = std::sync::mpsc::channel();
+        let (response, response_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = accept(stream).unwrap();
+            assert!(matches!(
+                mew_protocol::decode_json::<ClientMessage>(
+                    socket.read().unwrap().into_text().unwrap().as_ref()
+                )
+                .unwrap(),
+                ClientMessage::Ping
+            ));
+            ready_tx.send(()).unwrap();
+            if let Ok(response) = response_rx.recv_timeout(Duration::from_secs(3)) {
+                let _ = socket.send(Message::Text(mew_protocol::encode_json(&response).unwrap()));
+            }
+        });
+        SupervisorProbe {
+            supervisor: DesktopSupervisor::new(SupervisorConfig {
+                local_port: port,
+                ..SupervisorConfig::default()
+            }),
+            ready,
+            response,
+            server,
+        }
+    }
+
+    fn retry_test_shell(
+        supervisor: DesktopSupervisor,
+        cx: &mut gpui::TestAppContext,
+    ) -> Entity<DesktopShell> {
+        // Localhost peers and daemon subprocesses wake tasks from real OS threads.
+        cx.background_executor.allow_parking();
+        cx.skip_drawing();
+        let window = cx.add_window(|window, cx| {
+            DesktopShell::new(None, Some(supervisor), None, None, window, cx)
+        });
+        window.root(cx).unwrap()
+    }
+
+    fn finish_supervisor_retry(shell: &Entity<DesktopShell>, cx: &mut gpui::TestAppContext) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while shell.read_with(cx, |shell, _| shell.supervisor_retry_pending) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "supervisor retry should finish"
+            );
+            cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn failed_supervisor_worker_spawn_preserves_the_next_connection_attempt() {
+        use tokio_tungstenite::tungstenite::{accept, Message};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut supervisor = Some(DesktopSupervisor::new(SupervisorConfig {
+            local_port: address.port(),
+            ..SupervisorConfig::default()
+        }));
+        let cancellation = supervisor.as_ref().unwrap().startup_cancellation();
+
+        let failed_spawn = spawn_supervisor_retry(
+            &mut supervisor,
+            cancellation.clone(),
+            std::thread::Builder::new().stack_size(usize::MAX),
+        );
+
+        assert!(
+            failed_spawn.is_err(),
+            "the invalid stack size should fail to spawn"
+        );
+        assert!(
+            supervisor.is_some(),
+            "failed spawn should retain daemon configuration"
+        );
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = accept(stream).unwrap();
+            assert!(matches!(
+                mew_protocol::decode_json::<ClientMessage>(
+                    socket.read().unwrap().into_text().unwrap().as_ref()
+                )
+                .unwrap(),
+                ClientMessage::Ping
+            ));
+            socket
+                .send(Message::Text(
+                    mew_protocol::encode_json(&mew_protocol::ServerMessage::Pong {
+                        version: "test".into(),
+                        protocol_version: mew_protocol::PROTOCOL_VERSION,
+                    })
+                    .unwrap(),
+                ))
+                .unwrap();
+        });
+        let receiver =
+            spawn_supervisor_retry(&mut supervisor, cancellation, std::thread::Builder::new())
+                .unwrap();
+        let (_supervisor, endpoint) = futures::executor::block_on(receiver).unwrap();
+        server.join().unwrap();
+
+        assert_eq!(endpoint.unwrap().websocket_url, format!("ws://{address}"));
+    }
+
+    #[gpui::test]
+    fn failed_supervisor_retry_keeps_foreground_draft_edits(cx: &mut gpui::TestAppContext) {
+        let SupervisorProbe {
+            supervisor,
+            ready,
+            response,
+            server,
+        } = held_supervisor_probe();
+        let shell = retry_test_shell(supervisor, cx);
+        shell.update(cx, |shell, cx| {
+            shell.model.ui.selected_session = Some("selected-session".into());
+            shell.model.ui.composer = "saved draft".into();
+            shell.retry_connection(cx);
+        });
+        ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        cx.run_until_parked();
+        shell.update(cx, |shell, cx| {
+            assert!(shell.supervisor_retry_pending);
+            assert!(shell.model.last_error.is_none());
+            shell.model.ui.composer.push_str(" edited during startup");
+            let generation = shell.session_requests.generation();
+            shell.retry_connection(cx);
+            assert_eq!(shell.session_requests.generation(), generation);
+        });
+        response
+            .send(mew_protocol::ServerMessage::Error {
+                message: "daemon unavailable".into(),
+            })
+            .unwrap();
+        server.join().unwrap();
+        finish_supervisor_retry(&shell, cx);
+        shell.update(cx, |shell, _| {
+            assert!(shell
+                .model
+                .last_error
+                .as_ref()
+                .unwrap()
+                .contains("already in use"));
+            assert_eq!(shell.model.ui.composer, "saved draft edited during startup");
+            assert_eq!(
+                shell.model.ui.selected_session.as_deref(),
+                Some("selected-session")
+            );
+            assert!(shell._supervisor.is_some());
+            assert!(shell.command_tx.is_none());
+            shell.quitting = true;
+        });
+    }
+
+    #[gpui::test]
+    fn supervisor_retry_ignores_completion_after_profile_changes(cx: &mut gpui::TestAppContext) {
+        let SupervisorProbe {
+            supervisor,
+            ready,
+            response,
+            server,
+        } = held_supervisor_probe();
+        let shell = retry_test_shell(supervisor, cx);
+        shell.update(cx, |shell, cx| shell.retry_connection(cx));
+        ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        shell.update(cx, |shell, _| {
+            shell.connection_profile_selection = Some("another-profile".into());
+            shell.model.last_error = Some("profile changed".into());
+        });
+        response
+            .send(mew_protocol::ServerMessage::Pong {
+                version: "test".into(),
+                protocol_version: mew_protocol::PROTOCOL_VERSION,
+            })
+            .unwrap();
+        server.join().unwrap();
+        finish_supervisor_retry(&shell, cx);
+        shell.update(cx, |shell, _| {
+            assert_eq!(shell.model.last_error.as_deref(), Some("profile changed"));
+            assert!(shell._supervisor.is_some());
+            assert!(shell.command_tx.is_none());
+            assert!(shell.connection_profile.is_none());
+            shell.quitting = true;
+        });
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn quitting_during_supervisor_startup_reaps_its_child(cx: &mut gpui::TestAppContext) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory =
+            std::env::temp_dir().join(format!("mew-desktop-startup-cancel-{}", ulid::Ulid::new()));
+        std::fs::create_dir(&directory).unwrap();
+        let binary = directory.join("daemon");
+        let pid_file = binary.with_extension("pid");
+        std::fs::write(
+            &binary,
+            "#!/bin/sh\nprintf '%s\\n' $$ > \"$0.pid\"\nexec sleep 30\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let supervisor = DesktopSupervisor::new(SupervisorConfig {
+            daemon_binary: Some(binary),
+            startup_timeout: Duration::from_secs(5),
+            ..SupervisorConfig::default()
+        });
+        let shell = retry_test_shell(supervisor, cx);
+        shell.update(cx, |shell, cx| shell.retry_connection(cx));
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let child_pid = loop {
+            if let Ok(pid) = std::fs::read_to_string(&pid_file) {
+                if pid.trim().parse::<u32>().is_ok() {
+                    break pid.trim().to_owned();
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "daemon subprocess should start"
+            );
+            cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(1));
+        };
+
+        shell.update(cx, |shell, _| {
+            assert!(shell.supervisor_retry_pending);
+            shell.prepare_for_quit();
+        });
+        let child_was_reaped = !std::process::Command::new("kill")
+            .args(["-0", &child_pid])
+            .output()
+            .unwrap()
+            .status
+            .success();
+        finish_supervisor_retry(&shell, cx);
+        std::fs::remove_dir_all(directory).unwrap();
+
+        assert!(
+            child_was_reaped,
+            "quitting should reap the child before returning"
+        );
+        shell.read_with(cx, |shell, _| {
+            assert!(shell.quitting);
+            assert!(shell._supervisor.is_none());
+            assert!(shell.command_tx.is_none());
+            assert!(shell.supervisor_startup_cancel.is_none());
+        });
+    }
 
     #[test]
     fn supervised_local_retry_is_refreshed_even_after_its_cached_endpoint_is_cleared() {
@@ -825,5 +1186,97 @@ mod lifecycle_tests {
             .unwrap();
         server_stop_tx.send(()).unwrap();
         server.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_stop_cancels_a_blocked_websocket_command_write() {
+        use futures::SinkExt;
+        use mew_protocol::{ServerMessage, PROTOCOL_VERSION};
+        use tokio::io::AsyncReadExt;
+        use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.set_recv_buffer_size(1024).unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = socket.listen(1).unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (writing_tx, writing_rx) = oneshot::channel();
+        let (server_stop_tx, server_stop_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let Message::Text(text) = socket.next().await.unwrap().unwrap() else {
+                panic!("expected daemon handshake ping");
+            };
+            assert!(matches!(
+                mew_protocol::decode_json::<ClientMessage>(text.as_ref()).unwrap(),
+                ClientMessage::Ping
+            ));
+            socket
+                .send(Message::Text(
+                    mew_protocol::encode_json(&ServerMessage::Pong {
+                        version: "test".into(),
+                        protocol_version: PROTOCOL_VERSION,
+                    })
+                    .unwrap(),
+                ))
+                .await
+                .unwrap();
+            for expected in [
+                ClientMessage::Ping,
+                ClientMessage::ListSessions,
+                ClientMessage::ListProjects,
+                ClientMessage::ListModels,
+            ] {
+                let Message::Text(text) = socket.next().await.unwrap().unwrap() else {
+                    panic!("expected client startup command");
+                };
+                let command = mew_protocol::decode_json::<ClientMessage>(text.as_ref()).unwrap();
+                assert_eq!(
+                    std::mem::discriminant(&command),
+                    std::mem::discriminant(&expected)
+                );
+            }
+            ready_tx.send(()).unwrap();
+
+            // Observe the prompt frame beginning, then leave its body unread so the
+            // real WebSocket sender reaches socket backpressure.
+            socket.get_mut().read_exact(&mut [0; 14]).await.unwrap();
+            writing_tx.send(()).unwrap();
+            server_stop_rx.await.unwrap();
+        });
+        let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let (event_tx, _event_rx) = mpsc::unbounded();
+        let mut client = tokio::spawn(async move {
+            DesktopShell::run_client_with_transport(
+                Box::new(LocalWebSocketTransport::new(url)),
+                &mut command_rx,
+                stop_rx,
+                event_tx,
+            )
+            .await;
+        });
+        ready_rx.await.unwrap();
+        command_tx
+            .send(ClientMessage::Prompt {
+                text: "x".repeat(32 * 1024 * 1024),
+                attachments: Vec::new(),
+            })
+            .unwrap();
+        writing_rx.await.unwrap();
+        assert!(!client.is_finished());
+
+        stop_tx.send(()).unwrap();
+        let stopped = tokio::time::timeout(Duration::from_secs(1), &mut client).await;
+        server_stop_tx.send(()).unwrap();
+        server.await.unwrap();
+        if stopped.is_err() {
+            client.await.unwrap();
+        }
+        stopped
+            .expect("client should stop while its command write is blocked")
+            .unwrap();
     }
 }

@@ -189,6 +189,8 @@ pub(super) struct DesktopShell {
     pub(super) _appearance_subscription: Subscription,
     pub(super) _bounds_subscription: Subscription,
     pub(super) _supervisor: Option<DesktopSupervisor>,
+    pub(super) supervisor_retry_pending: bool,
+    pub(super) supervisor_startup_cancel: Option<mew_desktop_supervisor::DaemonStartupCancellation>,
     pub(super) frame_probe: Option<DesktopFrameProbe>,
 }
 
