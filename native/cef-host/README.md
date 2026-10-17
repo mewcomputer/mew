@@ -82,5 +82,15 @@ and requests software rendering by default. `MEW_CEF_ENABLE_GPU=1` opts into
 GPU rendering for experiments. A production sandbox/helper layout is still a
 separate hardening step.
 
+The AppKit shortcut regression uses a hidden native window and real controls:
+
+```sh
+MEW_NATIVE_APPKIT_TESTS=1 cargo test -p mew-cef-host --test native_key_equivalents
+```
+
+It requires a macOS graphical session, leaves the clipboard unchanged, and checks
+native editing ownership and host shortcut fallback. CEF page rendering and
+clipboard behavior still require the packaged app smoke test.
+
 CEF is distributed under its own license. The final app bundle must include
 the CEF license and credits.

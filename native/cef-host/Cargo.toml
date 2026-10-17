@@ -16,6 +16,10 @@ path = "src/helper.rs"
 name = "mew_cef_host"
 path = "src/lib.rs"
 
+[[test]]
+name = "native_key_equivalents"
+harness = false
+
 [features]
 default = ["sandbox"]
 sandbox = ["cef/sandbox"]

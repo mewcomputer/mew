@@ -2,15 +2,128 @@ use cef::application_mac::{CefAppProtocol, CrAppControlProtocol, CrAppProtocol};
 use objc2::{
     ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, extern_methods,
     msg_send,
-    rc::Retained,
+    rc::{Retained, Weak},
     runtime::{AnyObject, Bool, Imp, NSObject, NSObjectProtocol, ProtocolObject, Sel},
     sel,
 };
 use objc2_app_kit::{
-    NSApp, NSApplication, NSApplicationDelegate, NSApplicationTerminateReply, NSEvent,
+    NSApp, NSApplication, NSApplicationDelegate, NSApplicationTerminateReply, NSBackspaceCharacter,
+    NSDeleteCharacter, NSDeleteFunctionKey, NSDownArrowFunctionKey, NSEvent, NSEventModifierFlags,
+    NSLeftArrowFunctionKey, NSRightArrowFunctionKey, NSUpArrowFunctionKey, NSView, NSWindow,
 };
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+#[derive(Default)]
+struct NativeKeyEquivalents {
+    original_handlers: BTreeMap<usize, Imp>,
+    browser_views: Vec<Weak<NSView>>,
+}
+
+thread_local! {
+    static NATIVE_KEY_EQUIVALENTS: RefCell<NativeKeyEquivalents> = RefCell::default();
+}
+
+fn native_key_equivalent_imp() -> Imp {
+    unsafe {
+        std::mem::transmute(native_key_equivalent as unsafe extern "C-unwind" fn(_, _, _) -> _)
+    }
+}
+
+/// Give a focused CEF child its editing shortcuts before the host view.
+#[allow(dead_code)]
+pub fn register_browser_view(view: &NSView) {
+    let Some(window) = view.window() else { return };
+    let class = window.class();
+    let selector = sel!(performKeyEquivalent:);
+    let method = class.instance_method(selector).unwrap();
+    let original = method.implementation();
+    let replacement = native_key_equivalent_imp();
+    NATIVE_KEY_EQUIVALENTS.with_borrow_mut(|state| {
+        if !std::ptr::fn_addr_eq(original, replacement) {
+            state
+                .original_handlers
+                .insert(class as *const _ as usize, original);
+            unsafe {
+                objc2::ffi::class_replaceMethod(
+                    class as *const _ as *mut _,
+                    selector,
+                    replacement,
+                    objc2::ffi::method_getTypeEncoding(method),
+                );
+            }
+        }
+        state.browser_views.retain(|view| view.load().is_some());
+        if !state
+            .browser_views
+            .iter()
+            .filter_map(Weak::load)
+            .any(|known| std::ptr::eq(&*known, view))
+        {
+            state.browser_views.push(Weak::new(view));
+        }
+    });
+}
+
+unsafe extern "C-unwind" fn native_key_equivalent(
+    window: &NSWindow,
+    selector: Sel,
+    event: &NSEvent,
+) -> Bool {
+    let flags = event.modifierFlags();
+    let editing = flags.contains(NSEventModifierFlags::Command)
+        && !flags.contains(NSEventModifierFlags::Control)
+        && event.charactersIgnoringModifiers().is_some_and(|text| {
+            if text.length() != 1 {
+                return false;
+            }
+            let key = text.characterAtIndex(0);
+            [
+                NSUpArrowFunctionKey,
+                NSDownArrowFunctionKey,
+                NSLeftArrowFunctionKey,
+                NSRightArrowFunctionKey,
+                NSBackspaceCharacter,
+                NSDeleteCharacter,
+                NSDeleteFunctionKey,
+            ]
+            .contains(&u32::from(key))
+                || (!flags.contains(NSEventModifierFlags::Function)
+                    && u8::try_from(key).is_ok_and(|key| {
+                        matches!(key.to_ascii_lowercase(), b'a' | b'c' | b'v' | b'x' | b'z')
+                    }))
+        });
+    if editing
+        && let Some(responder) = window.firstResponder()
+        && let Some(view) = responder.downcast_ref::<NSView>()
+        && !view.isHiddenOrHasHiddenAncestor()
+        && NATIVE_KEY_EQUIVALENTS.with_borrow(|state| {
+            state
+                .browser_views
+                .iter()
+                .filter_map(Weak::load)
+                .any(|browser| view.isDescendantOf(&browser))
+        })
+        && responder.performKeyEquivalent(event)
+    {
+        return Bool::YES;
+    }
+
+    let original = NATIVE_KEY_EQUIVALENTS.with_borrow(|state| {
+        let mut class = Some(window.class());
+        while let Some(current) = class {
+            if let Some(handler) = state.original_handlers.get(&(current as *const _ as usize)) {
+                return *handler;
+            }
+            class = current.superclass();
+        }
+        unreachable!("native window handler must retain its original implementation")
+    });
+    let original: unsafe extern "C-unwind" fn(&NSWindow, Sel, &NSEvent) -> Bool =
+        unsafe { std::mem::transmute(original) };
+    unsafe { original(window, selector, event) }
+}
 
 static EXISTING_APPLICATION_HANDLING_SEND_EVENT: AtomicBool = AtomicBool::new(false);
 

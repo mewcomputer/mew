@@ -2424,3 +2424,24 @@ the unavailable-runtime path. Existing dependency/tooling build warnings remain.
 
 Optional follow-ups are to measure settings theme discovery and shell/transcript
 render reuse in a release build before changing their caching boundaries.
+
+## 2026-10-17 - Packaged CEF pump and native editing ownership
+
+The fully bundled macOS app reproduced a SIGTRAP when its first confirmed
+conversation initialized CEF inside GPUI's running AppKit loop. Embedded CEF now
+uses the external message pump, matching the retained GPUI pump and avoiding
+native run-loop observers installed halfway through an iteration.
+
+CEF's visible native first responder now receives editing key equivalents before
+the GPUI host view. Command arrows and deletion follow the same route as the
+clipboard shortcuts, including AppKit's Function flag on navigation events.
+Global mew commands retain their original window handler. Browser roots are weak
+references and only a focused visible descendant can receive the handoff.
+
+The real AppKit regression reproduced host interception before the fix and now
+passes focus, visibility, declined-command, repeated-registration and global
+shortcut cases. All 17 host/browser tests and strict Clippy passed. Packaged CEF
+painted a local fixture, accepted native input/clicks and scrolling, resized with
+the host window, retained distinct page state across conversations and exited
+cleanly. Clipboard commands additionally require the native Edit menu; that
+application-menu correction is verified separately from the responder bridge.

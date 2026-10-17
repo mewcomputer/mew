@@ -221,7 +221,10 @@ mod mac_impl {
                     .unwrap_or_default()
             };
             let settings = Settings {
-                external_message_pump: 0,
+                // GPUI owns the running AppKit loop and periodically calls
+                // do_message_loop_work. CEF's native pump would register loop
+                // observers mid-iteration and see an exit without an entry.
+                external_message_pump: 1,
                 // The native embedding mode does not have a separate sandbox
                 // bootstrap executable yet. Keep the host usable until the
                 // packaged helper/sandbox layout is hardened.
@@ -784,6 +787,7 @@ mod mac_impl {
                     // claim an active workbench tab. Keep the child hidden
                     // until the first visible bounds update arrives.
                     let view = unsafe { &*(handle as *const NSView) };
+                    mac::register_browser_view(view);
                     view.setHidden(true);
                     if let Ok(last_rect) = self.state.last_rect.lock()
                         && let Some(rect) = *last_rect
