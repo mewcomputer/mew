@@ -1,5 +1,10 @@
 # GPUI Native Presentations
 
+> Historical Zedra mobile integration. The native sheet helpers and
+> `platform_bridge` API below are not mew desktop facilities. Upstream iOS
+> backend support at the [verified pin](README.md#source-policy) does not make
+> these application-specific helpers available.
+
 > **Source note:** This guide was originally written for [tanlethanh/zedra](https://github.com/tanlethanh/zedra) and references zedra-specific code paths. The GPUI concepts generalize, but keep the original project context in mind when reading.
 
 Native presentation stays in platform-native UI.

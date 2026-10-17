@@ -1,104 +1,79 @@
-# GPUI Focus, Input, and Keyboard Coordination
+# mew GPUI focus, text input and keyboard
 
-> **Source note:** This guide was originally written for [tanlethanh/zedra](https://github.com/tanlethanh/zedra) and references zedra-specific code paths. The GPUI concepts generalize, but keep the original project context in mind when reading.
+Verified against the [pinned input and dispatch sources](README.md#source-policy).
 
-GPUI treats focus, platform text input, and software-keyboard presentation as
-separate responsibilities. Normal text inputs can use GPUI's default focus and
-keyboard behavior. Elements that need custom tap/focus coordination can opt out
-of defaults and manage focus themselves.
+## Focus and dispatch
 
-## Layers
+Retain a `FocusHandle` for each field or keyboard scope. At this pin,
+`.track_focus(&handle)` registers the focus scope and installs default pointer-down
+focus transfer. `window.prevent_default()` can suppress that transfer.
+`.manual_focus()` is not an API at this revision.
 
-```
-tap / key input
-    -> GPUI Window event dispatch
-    -> FocusHandle state
-    -> window.handle_input(focus_handle, input_handler, cx)
-    -> PlatformInputHandler
-    -> platform backend (e.g. UITextInput on iOS, wgpu on others)
-    -> InputHandler
-    -> application text sink
-```
+Use typed actions and key contexts for application commands. Keep composer,
+model search, sidebar search, rename, browser URL and terminal routing distinct.
+Use the existing `DesktopFocusExt::desktop_focus` for tabbable controls and visible
+keyboard focus. An accessible name does not replace keyboard behavior.
 
-## Core Contract
+Mew's application actions are registered in `shell/platform.rs` and attached in
+`shell/render.rs`. Field editing/routing lives in `shell/composer.rs` and
+`shell/session.rs`; model-picker editing also lives in `shell/preferences.rs`.
+Terminal keys use Ghostty's encoder in
+`terminal/key_map.rs` and `terminal/terminal_view.rs`.
 
-`.track_focus(&focus_handle)` registers the handle in the focus tree, enables
-focused styles and key context, and installs the default pointer-down focus
-transfer. Suppress that default focus transfer with `.manual_focus()` when the
-element owns focus changes itself. A lower-level pointer/mouse-down handler can
-also suppress default focus by calling `Window::prevent_default()` before the
-default focus listener runs.
+A named key such as `up` is not a text character. Preserve modifiers when routing
+named keys to the terminal encoder; control-character shortcuts must only match
+the intended single-character input.
 
-`Window::handle_input(...)` normally registers the currently focused text
-surface. A handler that owns native selection geometry can also be registered
-before focus so the platform can ask whether a native selection gesture should
-begin. `InputHandler::accepts_text_input()` only answers whether platform text
-and IME callbacks should route to that handler.
+## Native text input
 
-`manual_focus()` disables implicit software-keyboard presentation for that
-focused surface. The element can still receive text input
-(`insertText`, `deleteBackward`, marked text) but must explicitly call
-`window.show_soft_keyboard()` / `window.hide_soft_keyboard()` when it wants
-the keyboard.
+The existing shell fields use `ComposerElement` and the shell's
+`EntityInputHandler`. During paint, register
+`ElementInputHandler::new(bounds, entity)` with `Window::handle_input`.
+The pin only activates that registration for the focused handle, and it lasts
+until the next frame.
 
-## Normal Input Flow
+Adding a shell field means extending `TextInputTarget` and its value, selection,
+focus and editing routes together. Retain a field-specific `FocusHandle`.
 
-For normal editable text inputs:
+Key events alone do not cover native text input. Keep committed text,
+marked/composition text, selection, text queries and candidate geometry in the
+native input-handler path. Do not send an in-progress composition as a command.
 
-```
-focused handler accepts text
-    -> handle_input registers PlatformInputHandler
-    -> platform may auto request keyboard on a new handler session
-    -> native editable text interaction can be enabled
-```
+Mew currently uses raw key encoding for its terminal. Native terminal IME
+composition is an existing unsupported capability; the shell fields' IME support
+does not imply terminal support.
 
-## Custom Focus Flow
+## Text ranges and geometry
 
-When an element needs to own its focus/keyboard coordination (e.g. a terminal
-or custom input surface):
+Platform text ranges use UTF-16 code units. Rust string offsets use UTF-8 bytes.
+Convert using the existing `byte_offset_for_utf16` and
+`utf16_offset_for_byte` helpers and clamp to valid boundaries before slicing.
+Use grapheme-aware movement/deletion for user editing. Terminal selection uses
+cell columns, which are a third coordinate system; map columns to row-text ranges
+before copying, including wide and combining characters.
 
-- Use `.track_focus(&focus_handle).manual_focus()`:
-  - `track_focus` keeps focus state, styles, key context, and input registration
-  - `manual_focus` prevents pointer-down from focusing before the tap completes
-- Use GPUI's `on_press` for keyboard/focus toggling
-- The element owns `focus()`, `blur()`, `show_soft_keyboard()`, and
-  `hide_soft_keyboard()` calls
-- Do not add artificial delays to focus/keyboard activation
+`bounds_for_range` supplies native IME candidate positioning. Return window
+logical-pixel geometry from the actual shaped, painted field lines, including
+a caret rectangle for an empty range. Reusing geometry from a different field,
+old text or a different wrapping width can place candidates incorrectly.
+Respect explicit newlines, wrapped rows, surrogate pairs and the document end.
+The macOS backend converts this window-space result to screen coordinates.
 
-## Platform Text Interaction Modes
+For application-driven text or selection changes, the pin also exposes
+`Window::notify_text_input_changed` and `notify_text_selection_changed` for native
+services. These notifications complement GPUI redraw; use them when changing the
+registered input through application commands.
 
-The platform backend maps focus policies to native behavior:
+## Pointer selection
 
-```
-accepts_text_input=true, manual_focus=false
-    -> editable text interaction mode
-    -> implicit keyboard request allowed
+Selection starts, drag motion and release must invalidate the owning view when
+the highlight changes. Handle `on_mouse_up_out` as well as release inside the
+field, and check whether the pointer is still dragging before extending selection.
+Releasing over another panel must not leave a stuck drag.
 
-accepts_text_input=true, manual_focus=true
-    -> editable text interaction mode once focused, or earlier if the handler
-       explicitly owns native selection
-    -> explicit keyboard request controls software-keyboard presentation
-    -> platform text callbacks still route through the handler
+## Verification
 
-selection handler present
-    -> non-editable text interaction mode for read-only surfaces
-```
-
-Non-editable selection must not create keyboard focus or disturb the active
-input handler.
-
-## Logging
-
-Keep these paths quiet in normal builds. The focus/keyboard path runs during
-interaction and draw, so broad frame or text-input logs can mask the actual
-timing issue and add debug-build overhead. If this regresses, add short-lived
-targeted logs with a clear prefix, reproduce once, then remove them after the
-cause is known.
-
-## Key GPUI Source Files
-
-| File | Purpose |
-|------|---------|
-| `crates/gpui/src/elements/div.rs` | `.track_focus` default focus and `.manual_focus()` opt-out |
-| `crates/gpui/src/platform.rs` | `InputHandler` text policy and soft-keyboard auto-request helper |
-| `crates/gpui/src/window.rs` | Focused input-handler registration |
+Exercise each field's focus independently, including switching from CEF back to
+GPUI. Test Unicode conversion and actual shaped range geometry. Native smoke
+checks should cover typing, selection/copy, shortcuts, and IME candidate
+placement. Unit geometry tests do not replace a native IME check.

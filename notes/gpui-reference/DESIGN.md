@@ -1,150 +1,47 @@
-# Design Notes
+# mew native desktop design conventions
 
-> **Source note:** This guide was originally written for [tanlethanh/zedra](https://github.com/tanlethanh/zedra) and references zedra-specific code paths. The design principles generalize, but keep the original project context in mind when reading.
+Follow the existing desktop shell and [theme contract](THEMING.md). These are
+mew product conventions, not GPUI framework requirements.
 
-## Core Taste
+## Existing composition
 
-A serious tool, not a decorative app.
+The shell combines a sessions sidebar, conversation surface, optional terminal
+and workbench. Layout constants live in `shell/types.rs`; width constraints and
+transition math live in `shell/helpers.rs`. Preserve the minimum usable chat
+width when opening auxiliary panels and verify the narrow-window behavior.
 
-- Dark, flat, and quiet
-- Monotone-first, with color reserved for meaning
-- Dense but readable
-- Minimal chrome, minimal borders, minimal interruption
-- Touch-friendly without looking oversized
+Use shared neutral surfaces and semantic accents from the theme manifest in both
+light and dark modes. Existing desktop typography uses the platform UI font for
+chrome and the bundled mono font for terminal/code content; do not apply the
+old Zedra monospace-first rule to every control.
 
-The UI should read like a native code workspace: calm surfaces, compact rows, restrained icons, and subtle separators.
+## Controls and focus
 
-## Color System
+Reuse the existing desktop element patterns, Tabler icons and
+`DesktopFocusExt::desktop_focus`. Give icon-only controls an accessible label.
+Keep selected, disabled, pending and error states visible without relying on
+hover alone. Preserve keyboard actions and field focus when adding pointer
+handlers.
 
-Canonical tokens and wiring live in [THEMING.md](THEMING.md).
+Mew's shell fields share `ComposerElement` and the shell input handler.
+GPUI does not supply a ready-made text input component for this application.
+Keep native composition, selection, range geometry and Unicode handling intact
+when styling or laying out those fields.
 
-New UI must read colors from `theme::palette(cx)` or the `theme::bg_primary(cx)`-style accessors at render time. Do not hardcode hex values in views.
+## Content and errors
 
-| Role | Token (via `theme::`) |
-|------|------------------------|
-| Base background | `bg_primary`, `bg_surface` |
-| Raised surface | `bg_card`, `bg_overlay` |
-| Quiet card fill | `bg_card_dim` |
-| Quiet structure | `border_subtle` |
-| Control edge | `border_default`, `border_active` |
-| Primary text | `text_primary` |
-| Standard text | `text_secondary` |
-| Muted metadata | `text_muted` |
+Keep sessions and review rows easy to scan. Use the existing virtualized
+transcript, review and sidebar structures rather than building an unbounded
+element collection. Preserve per-session draft and scroll state during navigation.
 
-Accent colors are semantic only.
+Display connection and browser failures through the existing stateful surfaces.
+A deferred failure must request a redraw immediately. Use the existing native
+dialog APIs only when the interaction calls for them; Zedra's native mobile
+sheets are not part of mew's desktop architecture.
 
-- Green: healthy / connected / success (`accent_green`)
-- Yellow: connecting / warning (`accent_yellow`)
-- Red: failure / destructive (`accent_red`)
-- Blue: focus and active input state (`accent_blue`)
+## Verification
 
-Do not use accent color as decoration. Light and dark palettes are paired in `ThemePalette::dark()` / `light()`; keep new tokens in sync in both.
-
-## Layout And Spacing
-
-The spacing rhythm is compact and consistent.
-
-- Small: `8`
-- Standard: `12`
-- Large: `16`
-
-Preferred visual behavior:
-
-- Favor fixed, stable proportions over airy layouts
-- Keep headers and action zones compact
-- Use padding for breathing room, not extra framing
-- Let scrollable content stay dense and scan-friendly
-
-## Typography
-
-The default voice is monospace-first.
-
-- Most product UI should use the existing mono system
-- Standard sizes are small and information-dense
-- Prefer weight and color for emphasis over bigger text
-- Use truncation before wrapping in tight panels
-
-One-off branding surfaces can break this rule, but workspace UI should not.
-
-## Borders, Radius, And Effects
-
-- Prefer 1px separators over heavy containers
-- Use radius sparingly, usually `6` or `8`
-- Avoid shadows and depth effects
-- Avoid thick outlines
-- Avoid stacked borders inside already framed layouts
-
-If a component feels busy, remove a line before adding a new one.
-
-## Interaction Language
-
-- Use native alerts for confirmation and failure
-- Use tiny status signals instead of banners when possible
-- Keep primary actions obvious but not loud
-- Prefer icon-only actions when the meaning is clear
-- Keep touch/click targets forgiving via hit slop, not visual bulk
-- Controls must read correctly without hover-only reveals, fills, or tooltips (hover may not exist on all platforms)
-
-## Component Rules
-
-### Panels
-
-- Full-height dark surfaces
-- Header and footer separated with subtle lines
-- No card-within-card feeling unless content truly benefits from grouping
-
-### Cards
-
-- Use `bg_card` from the active palette
-- Use a subtle 1px border
-- Keep padding tight
-- Avoid decorative fills and badges unless they carry state
-
-### Inputs
-
-- Prefer the shared GPUI input component
-- Dark surface, subtle border, blue focus
-- Placeholder should be muted
-- Keep copy short
-
-### Buttons
-
-- Default to chromeless or near-chromeless actions
-- Prefer monochrome icons and muted labels
-- Only increase contrast when the action is ready or focused
-- Avoid heavy filled buttons in workspace views
-- Express button state with pressed, selected, active, disabled, text, icon, and border styling rather than hover styling
-
-## Git View Guidance
-
-For git UI specifically:
-
-- Keep the file list dense and flat
-- Keep git status marks textual or monochrome
-- Put commit controls in a fixed bottom composer
-- Use one shared input plus one compact icon button
-- Commit actions should feel quiet and precise, not promotional
-
-Recommended direction for commit UI:
-
-- One-line message input
-- Small monotone commit icon
-- Subtle top separator for the composer area
-- No extra card frame around the whole git view
-
-## Do
-
-- Use neutral surfaces from the active palette (dark or light)
-- Reuse `theme.rs` tokens; follow [THEMING.md](THEMING.md) for color wiring
-- Reuse existing GPUI controls
-- Prefer subtraction over embellishment
-- Make state visible with text, opacity, and spacing
-
-## Avoid
-
-- Bright accent-heavy layouts
-- Thick borders
-- Large floating buttons
-- Multiple nested containers
-- Decorative gradients, glows, or shadows
-- Mixed visual languages inside one panel
+Check narrow/wide layouts, light/dark themes, long labels, keyboard focus and
+Unicode input. Verify behavior with real view/transport tests and native smoke
+checks. A screenshot demonstrates layout; it cannot establish callback
+ownership, cancellation or render cost.

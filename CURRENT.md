@@ -2393,3 +2393,34 @@ a subprocess without MEW_CONFIG_DIR or XDG_CONFIG_HOME overrides. This preserves
 the default-path assertion while letting full CI isolate desktop settings and
 sessions from the user's data. The prior assertion failed under the isolated
 environment; the focused regression and full isolated CI gate then passed.
+
+
+## 2026-10-17 - Mew-specific GPUI reference and project skill
+
+Refreshed the active guides against GPUI revision
+322cd509dcccaee1f6bc44725d270598ae8171ad and current desktop ownership, APIs and
+verification paths. The gpui-desktop project skill routes to those maintained
+guides, and AGENTS.md directs native desktop work through it. GPUI Community
+Edition is a secondary example source; historical Zedra-only effects, mobile
+presentations and HTTP devtools remain clearly separated from supported APIs.
+
+The skill validator, an independent field/theme use-case check and all local
+reference links passed. The full isolated macOS CI gate passed 2,511 Rust test
+executions, 30 JS tests, strict workspace Clippy, architecture/generated-theme
+checks, subprocess end-to-end checks and the 38-page documentation build. Final
+checks additionally passed all 187 desktop tests, 14 supervisor tests, three
+native ABI tests, strict Clippy across affected test targets and the native
+production build. The external Zig-cache regression rebuilt the real library
+and executed a statically linked FFI probe.
+
+Isolated GUI smoke covered Unicode paste and PTY output, wrapped composer sizing,
+fake-provider streaming, selection release into another pane, retained drafts,
+visible browser unavailability and Cmd-Q from a focused field. Quit exited
+cleanly without stopping the attach-only daemon; the disposable daemon and
+app bundle were then removed. Full packaged CEF rendering and native OS IME
+candidate UI were not exercised. The minimal temporary bundle initially found
+a CEF framework without helper assets; the successful smoke explicitly selected
+the unavailable-runtime path. Existing dependency/tooling build warnings remain.
+
+Optional follow-ups are to measure settings theme discovery and shell/transcript
+render reuse in a release build before changing their caching boundaries.

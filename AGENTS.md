@@ -6,6 +6,7 @@ Project guidance for coding agents working in this repository.
 
 - Preserve unrelated edits in the worktree. Inspect `git status` before editing and keep changes scoped to the request.
 - Follow the surrounding Rust or TypeScript style. Prefer small, reviewable changes and existing helpers over new abstractions.
+- For native GPUI desktop work, read `.mew/skills/gpui-desktop/SKILL.md` and the relevant guides in `notes/gpui-reference` before changing views.
 - Write behavior tests with implementation changes. Run the narrowest relevant tests first, then the broader gate when practical.
 - Update `CURRENT.md` with an append-only dated entry after each meaningful chunk of work. Do this after verification, not as a substitute for it.
 - Do not manually edit generated theme outputs. Change the manifest and run the theme codegen command.
@@ -42,8 +43,8 @@ just build-web
 just lint-all                   # Rust clippy + web-client TypeScript check
 just dev-web                    # Vite UI + bridge; accepts --open and bridge flags
 just dev-ui                     # Vite UI only
-just desktop-dev                # Tauri desktop shell + bundled debug daemon + HMR
-just desktop-build              # release Tauri bundle + architecture-specific daemon sidecar
+just desktop-dev                # native GPUI app with a debug daemon and CEF runtime
+just desktop-build              # release native GPUI app, daemon, and CEF runtime
 just site-dev
 just e2e                        # builds web assets and runs subprocess bridge tests
 just ios-core

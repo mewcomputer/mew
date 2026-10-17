@@ -1,6 +1,64 @@
-# GPUI Devtool
+# mew GPUI verification and tooling
 
-> **Source note:** This guide was originally written for [tanlethanh/zedra](https://github.com/tanlethanh/zedra) and references zedra-specific code paths. The GPUI concepts generalize, but keep the original project context in mind when reading.
+The [pinned source policy](README.md#source-policy) applies to test, inspector and
+profiler APIs as well as production views.
+
+## Current checks
+
+Start with the affected desktop tests, then the desktop suite and strict lint:
+
+```sh
+cargo test -p mew-desktop
+cargo clippy -p mew-desktop --all-targets -- -D warnings
+cargo build -p mew-desktop
+cargo fmt --all -- --check
+just arch-check
+just theme-codegen-check
+```
+
+Use the matching CEF SDK via `CEF_PATH` when already installed, for example the
+local `target/cef-sdk` cache. Metal compilation needs a writable compiler cache.
+Set `MEW_CONFIG_DIR`, `MEW_DATA_DIR`, `MEW_CACHE_DIR` and `MEW_SESSION_DIR` to
+isolated temporary directories for native tests that create a shell or daemon.
+Do not use real settings or sessions as a test fixture.
+
+For entity notification, focus, layout and task lifetimes, use `#[gpui::test]`
+with `TestAppContext` and the actual entity/view. The desktop dev-dependency
+enables `gpui/test-support`; production retains `gpui/profiler`. Drive GPUI timers
+through its test dispatcher. A pure range/state helper test does not establish
+paint, invalidation or transport behavior.
+
+Text shaping uses `window.text_system()` (`WindowTextSystem`), rather than the
+app's shared `TextSystem`. In a GPUI test, obtain it through an empty test window
+with `cx.add_empty_window().update(...)`.
+
+Use real localhost transport and subprocess tests for client/daemon boundaries.
+Run `just ci` when shared dependencies or runtime behavior warrant the broader
+gate. It includes the separate subprocess path and the documentation build.
+
+## Native smoke and frame measurements
+
+Use the native packaged development app from `just desktop-dev` for CEF coverage.
+Check text entry/IME, keyboard focus, Unicode selection/copy, sidebar/workbench
+transitions, resize, light/dark appearance, idle terminal repaint, browser failure
+feedback, retry and quit. Run against an isolated real daemon for connection
+behavior; the fake-provider option can keep model turns deterministic.
+
+`MEW_DESKTOP_FRAME_TRACE=1` enables the existing frame probe and writes 60-frame
+reports to `mew-desktop-frame-trace.log` in the process temporary directory.
+At this pin, enable collection with `gpui::profiler::set_trace_enabled(true)`.
+`FrameTimingCollector::collect_unseen()` returns `FrameEvent::Draw` and
+`FrameEvent::Present`; the desktop draw report counts only draw events and keeps
+its cursor across polls. Compare the same interaction and build profile before
+and after a performance change. Debug timings during compilation are not a
+release performance benchmark.
+
+## Historical Zedra HTTP devtool
+
+The remainder is retained from [Zedra](https://github.com/tanlethanh/zedra).
+Its HTTP endpoints, synthetic tap server and `gpui/src/devtool.rs` are fork
+facilities, absent from our pinned GPUI and mew. They are historical design
+material, not runnable mew instructions. Use the current checks above.
 
 An in-app HTTP server that exposes the latest frame's interactive hitboxes by
 `ElementId` path and accepts synthetic taps. Lets an AI agent or test harness

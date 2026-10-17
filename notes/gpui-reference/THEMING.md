@@ -1,107 +1,59 @@
-# GPUI Theming
+# mew GPUI theming
 
-> **Source note:** This guide was originally written for [tanlethanh/zedra](https://github.com/tanlethanh/zedra) and references zedra-specific code paths. The GPUI concepts generalize, but keep the original project context in mind when reading.
+Mew uses `mew_tui::theme::Theme` in its GPUI desktop. GPUI supplies colors, styles
+and appearance observation; the token names and loading policy are mew's.
 
-Supports **dark** and **light** appearance. New UI must use shared theme tokens so colors stay consistent and update when the user toggles appearance or when the app follows the system theme on launch.
+## Source of truth
 
-## Source Of Truth
+The manifest at
+[theme_manifest.json](../../crates/mew-tui/resources/theme_manifest.json) owns
+the shared tokens. Change that manifest and run `just theme-codegen` when adding
+a shared token; never edit generated theme files by hand.
+See [the shared theme guide](../../docs/using-mew/theming.md).
 
-| Layer | Role |
-|-------|------|
-| App settings + appearance | Loads/saves app settings; a `ThemeState` entity manages `ThemePreference`, builds `ThemeBundle`, emits `ThemeStateEvent::Changed` |
-| Token definitions | `ThemePalette`, `EditorTheme`, `ThemeBundle`, layout constants, `theme::palette(cx)` accessors |
-| User control | Settings UI calls `ThemeState::set_preference` |
+`DesktopShell` retains `theme`, `theme_mode`, `light_theme` and `dark_theme`.
+`desktop_theme_name` selects the configured light/dark name from the preference
+and `WindowAppearance`. `reload_theme` in `shell/lifecycle.rs` loads it and updates
+child state. `shell/preferences.rs` persists the desktop preference.
+The appearance subscription is retained on the shell.
 
-`ThemeState` is registered as a GPUI global at app startup. Views read the active bundle through `theme::palette(cx)` / `theme::bundle(cx)`, which delegate to the global entity.
+Use the existing `theme_rgb(&self.theme, token)` adapter in desktop views.
+Mew does not expose Zedra's `ThemePalette`, `ThemeBundle`,
+`theme::palette(cx)` or `ThemeStateEvent::Changed` APIs.
 
-```
-Settings / system on launch
-        ↓
-   ThemeState (preference + ThemeBundle)
-        ↓
-   ┌────┴────┬──────────────┐
-   │         │              │
-GPUI views  Editor        Terminal
-theme::*    EditorTheme   TerminalTheme
-```
+## Tokens in desktop views
 
-## Rules For New UI
+| Purpose | Existing token |
+| --- | --- |
+| Root chrome | `background` |
+| Body text | `text.body` |
+| Secondary text | `text.muted` |
+| Panels | `panel.background` |
+| Sidebar | `sidebar.background` |
+| Inputs and quiet controls | `input`, `muted` |
+| Borders | `divider` |
+| Focus and active state | `text.accent`, `accent` |
+| Selection | `selection.foreground`, `selection.background` |
 
-**Required**
+Resolve semantic colors at render time through the existing adapter. Reuse the
+existing shell layout constants and `DesktopFocusExt`. Keep literal colors in
+conversion/infrastructure code or protocol-provided terminal styles where they
+represent data, not product chrome.
 
-- Read **UI colors** from `theme::palette(cx)` or the `theme::bg_primary(cx)`-style accessors in `render()`. Wrap hex tokens with `rgb(...)` (or `Hsla` fields on the palette).
-- Use **layout and typography constants** (`SPACING_*`, `FONT_*`, `ICON_*`, etc.). Those are appearance-independent; do not duplicate magic numbers in views.
-- Use **semantic accents** only for meaning (connected, warning, destructive, focus).
-- If a surface must react to a theme toggle, subscribe to `ThemeStateEvent::Changed` and call `cx.notify()` on the owning entity.
+## Child entities and caches
 
-**Forbidden in view `render()` and leaf components**
+Reloading the shell theme does not automatically update a child entity's retained
+colors or application-owned row cache. Pass changed colors to the terminal,
+invalidate its row projection, and notify that entity. Default-color cells,
+cursor and selection must update even when no new PTY bytes arrive. Keep explicit
+ANSI foreground/background colors and inverse styles semantically correct.
 
-- Hardcoded `0xRRGGBB` / `rgb(0x...)` for product chrome, text, borders, or backgrounds.
-- Per-component light/dark branches (`if light { ... } else { ... }`) unless you are implementing theme infrastructure itself.
-- Render-time hacks that only fix contrast for one screen (tint overlays, one-off HSLA nudges). Add or adjust a token instead.
+Check both system appearance changes and explicit light/dark preferences.
+Switch theme while the terminal is idle, with a selection, and after font changes;
+waiting for terminal output can hide a missing invalidation.
 
-## Using Tokens During Render
+## References
 
-Pass `cx` and use accessors:
-
-```rust
-use crate::theme;
-
-div()
-    .bg(rgb(theme::bg_primary(cx)))
-    .child(
-        Label::new("Title")
-            .text_color(rgb(theme::text_primary(cx)))
-            .text_size(px(theme::FONT_BODY)),
-    )
-```
-
-When several fields are needed together (e.g. badges), take `let palette = theme::palette(cx);` once.
-
-`ThemePalette` fields:
-
-| Field | Typical use |
-|-------|-------------|
-| `bg_primary`, `bg_surface` | Full-height shells, workspace background |
-| `bg_card`, `bg_overlay` | Raised panels, cards, sheets |
-| `bg_card_dim` | Lower-contrast card fill |
-| `text_primary`, `text_secondary`, `text_muted` | Labels, body, metadata |
-| `border_subtle`, `border_default`, `border_active`, `border_highlight` | 1px separators and control edges |
-| `accent_green`, `accent_blue`, `accent_yellow`, `accent_red`, `accent_dim` | Status and semantic emphasis only |
-| `row_pressed_bg`, `overlay_backdrop` | Pressed rows, modal backdrops (`Hsla`) |
-
-Adding a new UI color: extend `ThemePalette` for both `dark()` and `light()`, add an accessor if it will be used widely, then use it from views.
-
-## Subscribing To Theme Changes
-
-**App shell** — subscribe to `ThemeState` and call `cx.notify()` so top-level screens re-render.
-
-**Feature-owned surfaces** — subscribe where the entity owns the subtree that must update:
-
-```rust
-cx.subscribe(&theme_state, |this, _, _: &ThemeStateEvent, cx| {
-    this.sync_theme(cx); // or cx.notify()
-});
-```
-
-Call the sync helper once after subscribe setup so the initial preference is applied.
-
-Changing preference:
-
-```rust
-theme_state.update(cx, |state, cx| {
-    state.set_preference(ThemePreference::Light, cx);
-});
-```
-
-## Checklist For New Screens
-
-1. All backgrounds, text, and borders use `theme::` accessors (or `theme::palette(cx)` fields).
-2. Spacing and font sizes use `theme::` layout constants.
-3. Parent entity subscribes to `ThemeStateEvent::Changed` if the screen is not under the app shell's notify path.
-4. Manual test: toggle light/dark and verify the screen updates.
-
-## Related Docs
-
-- [DESIGN.md](DESIGN.md) — visual tone and component patterns
-- [CONVENTIONS.md](CONVENTIONS.md) — GPUI `render()` purity and UI design pointer
+- [Rendering and caches](GPUI_RENDERING_MODEL.md)
+- [Design conventions](DESIGN.md)
+- [Pinned appearance/window API](https://github.com/zed-industries/zed/blob/322cd509dcccaee1f6bc44725d270598ae8171ad/crates/gpui/src/window.rs)

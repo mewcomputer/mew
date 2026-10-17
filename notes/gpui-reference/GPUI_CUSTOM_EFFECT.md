@@ -1,5 +1,9 @@
 # GPUI Custom Render Effect
 
+> Historical Zedra fork design. The hooks and `MetalRenderEffect` API below
+> are not supported mew APIs at the [verified GPUI pin](README.md#source-policy).
+> Consult this only when explicitly planning a new renderer integration.
+
 > **Source note:** This guide was originally written for [tanlethanh/zedra](https://github.com/tanlethanh/zedra) and references zedra-specific code paths. The GPUI concepts generalize, but keep the original project context in mind when reading.
 
 Design for a generic post-scene render effect seam in GPUI, and for its first
@@ -229,4 +233,4 @@ cargo test -p zedra --features ios-platform
 On device: drag the droplet over terminal and editor content; verify
 refraction, shape stretch on fast drags, and no frame drops. With the toggle
 off, rendering behavior must be unchanged. Add manual steps to
-[MANUAL_TEST.md](./MANUAL_TEST.md): drag, toggle off/on, rotate/resize.
+The original Zedra `MANUAL_TEST.md` covers drag, toggle off/on, and rotate/resize.
