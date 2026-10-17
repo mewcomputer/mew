@@ -2359,3 +2359,16 @@ The 14 supervisor tests and eight desktop lifecycle tests passed with real
 localhost handshakes, socket backpressure, subprocesses and an actual failed
 thread creation followed by a successful retry. Existing daemons remain
 attach-only. Tests explicitly permit external-thread wakeups in GPUI's harness.
+
+
+## 2026-10-17 - Painted text geometry and wrapped composer sizing
+
+Native IME range/caret bounds now reuse the focused shell field's painted
+shaping, converting UTF-16 ranges and rejecting stale text or field geometry.
+Caret placement before explicit newlines stays on its logical line. Composer
+height counts visual wrapped rows before applying its existing height cap.
+
+All ten composer tests passed, including actual paint-to-input-handler geometry
+and a narrow paragraph that previously received 48px instead of 78px. Native
+smoke verified Unicode paste, visible wrapped rows and retained drafts. Native
+OS IME candidate UI has not been exercised; terminal IME remains unsupported.

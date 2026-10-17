@@ -343,6 +343,7 @@ impl DesktopShell {
             composer_marked_range: None,
             composer_is_selecting: false,
             composer_bounds: None,
+            text_input_layout: None,
             browser_url_focus_handle,
             browser_url_focus_requested: false,
             browser_url_selection: 0..0,

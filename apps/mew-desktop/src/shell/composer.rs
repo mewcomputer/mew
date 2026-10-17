@@ -16,9 +16,69 @@ pub(super) struct ComposerElement {
 }
 
 pub(super) struct ComposerPrepaint {
+    text: String,
     lines: Vec<WrappedLine>,
     cursor: Option<Point<Pixels>>,
     line_height: Pixels,
+}
+
+pub(super) struct TextInputLayout {
+    target: TextInputTarget,
+    text: String,
+    lines: Vec<WrappedLine>,
+    line_height: Pixels,
+}
+
+impl TextInputLayout {
+    fn bounds_for_range(
+        &self,
+        target: TextInputTarget,
+        text: &str,
+        range_utf16: Range<usize>,
+        bounds: Bounds<Pixels>,
+    ) -> Option<Bounds<Pixels>> {
+        if self.target != target || self.text != text {
+            return None;
+        }
+        if text.is_empty() {
+            return Some(Bounds::new(
+                bounds.origin,
+                gpui::size(px(0.), self.line_height),
+            ));
+        }
+        let start = byte_offset_for_utf16(text, range_utf16.start);
+        let end = byte_offset_for_utf16(text, range_utf16.end);
+        let range = start.min(end)..start.max(end);
+        let start_position = cursor_position(&self.lines, text, range.start, self.line_height)?;
+        let mut line_start = 0;
+        for line in &self.lines {
+            let line_end = line_start + line.len();
+            if range.start <= line_end {
+                // AppKit requests the first rectangle when a range spans visual rows.
+                let row_end = line
+                    .wrap_boundaries()
+                    .iter()
+                    .map(|boundary| line.runs()[boundary.run_ix].glyphs[boundary.glyph_ix].index)
+                    .find(|&index| index >= range.start - line_start)
+                    .unwrap_or(line.len());
+                let end_position = cursor_position(
+                    &self.lines,
+                    text,
+                    range.end.min(line_start + row_end),
+                    self.line_height,
+                )?;
+                return Some(Bounds::new(
+                    point(
+                        bounds.left() + start_position.x.min(end_position.x),
+                        bounds.top() + start_position.y,
+                    ),
+                    gpui::size((end_position.x - start_position.x).abs(), self.line_height),
+                ));
+            }
+            line_start = line_end + 1;
+        }
+        None
+    }
 }
 
 fn normalized_browser_url_range(text: &str, range: &Range<usize>) -> Range<usize> {
@@ -853,7 +913,12 @@ impl Element for ComposerElement {
                             Some(width),
                             Some(3),
                         )
-                        .map(|lines| lines.len())
+                        .map(|lines| {
+                            lines
+                                .iter()
+                                .map(|line| line.wrap_boundaries().len() + 1)
+                                .sum()
+                        })
                         .unwrap_or(1)
                 };
                 px(composer_input_height(
@@ -955,6 +1020,7 @@ impl Element for ComposerElement {
             cursor_position(&lines, cursor_text, cursor, window.line_height())
         };
         ComposerPrepaint {
+            text: content,
             lines: lines.into_vec(),
             cursor,
             line_height: window.line_height(),
@@ -1016,6 +1082,15 @@ impl Element for ComposerElement {
                     theme_rgb(&theme, "foreground"),
                 ));
             }
+            let layout = TextInputLayout {
+                target: self.target,
+                text: std::mem::take(&mut prepaint.text),
+                lines: std::mem::take(&mut prepaint.lines),
+                line_height: prepaint.line_height,
+            };
+            self.shell.update(cx, |shell, _| {
+                shell.text_input_layout = Some(layout);
+            });
         }
     }
 }
@@ -1042,8 +1117,7 @@ fn cursor_position(
                 .map(|offset| search_offset + offset)?
         };
         let line_end = line_start + line.len();
-        let cursor_belongs_here = cursor < line_end
-            || (cursor == line_end && text.as_bytes().get(cursor) != Some(&b'\n'));
+        let cursor_belongs_here = cursor <= line_end;
         if cursor_belongs_here {
             let local_cursor = cursor.saturating_sub(line_start).min(line.len());
             let position = line.position_for_index(local_cursor, line_height)?;
@@ -1217,12 +1291,18 @@ impl EntityInputHandler for DesktopShell {
 
     fn bounds_for_range(
         &mut self,
-        _range_utf16: Range<usize>,
-        _element_bounds: Bounds<Pixels>,
-        _window: &mut Window,
+        range_utf16: Range<usize>,
+        element_bounds: Bounds<Pixels>,
+        window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        None
+        let target = self.text_input_target(window);
+        self.text_input_layout.as_ref()?.bounds_for_range(
+            target,
+            self.text_input_value(target),
+            range_utf16,
+            element_bounds,
+        )
     }
 
     fn character_index_for_point(
@@ -1262,7 +1342,301 @@ impl EntityInputHandler for DesktopShell {
 
 #[cfg(test)]
 mod tests {
-    use super::normalized_browser_url_range;
+    use super::*;
+
+    fn input_layout(cx: &mut gpui::TestAppContext, text: &str, width: f32) -> TextInputLayout {
+        let display_text = if text.is_empty() { "Placeholder" } else { text };
+        let lines = cx.add_empty_window().update(|window, _| {
+            window
+                .text_system()
+                .shape_text(
+                    display_text.to_owned().into(),
+                    px(16.),
+                    &[TextRun {
+                        len: display_text.len(),
+                        font: gpui::font("Helvetica"),
+                        color: gpui::black(),
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    }],
+                    Some(px(width)),
+                    None,
+                )
+                .unwrap()
+                .into_vec()
+        });
+        TextInputLayout {
+            target: TextInputTarget::Composer,
+            text: text.to_owned(),
+            lines,
+            line_height: px(24.),
+        }
+    }
+
+    fn input_bounds() -> Bounds<Pixels> {
+        Bounds::new(point(px(80.), px(120.)), gpui::size(px(400.), px(96.)))
+    }
+
+    #[gpui::test]
+    fn ime_caret_in_empty_input_uses_field_origin(cx: &mut gpui::TestAppContext) {
+        let layout = input_layout(cx, "", 400.);
+
+        let bounds = layout
+            .bounds_for_range(TextInputTarget::Composer, "", 0..0, input_bounds())
+            .unwrap();
+
+        assert_eq!(bounds.origin, input_bounds().origin);
+        assert_eq!(bounds.size, gpui::size(px(0.), px(24.)));
+    }
+
+    #[gpui::test]
+    fn ime_range_uses_utf16_offsets_and_painted_glyph_positions(cx: &mut gpui::TestAppContext) {
+        let text = "é🙂z";
+        let layout = input_layout(cx, text, 400.);
+        let line = &layout.lines[0];
+
+        let bounds = layout
+            .bounds_for_range(TextInputTarget::Composer, text, 1..3, input_bounds())
+            .unwrap();
+
+        assert_eq!(
+            bounds.left(),
+            input_bounds().left() + line.unwrapped_layout.x_for_index(2)
+        );
+        assert_eq!(
+            bounds.right(),
+            input_bounds().left() + line.unwrapped_layout.x_for_index(6)
+        );
+        assert_eq!(bounds.top(), input_bounds().top());
+        assert_eq!(bounds.size.height, px(24.));
+
+        let end = layout
+            .bounds_for_range(TextInputTarget::Composer, text, 99..99, input_bounds())
+            .unwrap();
+        assert_eq!(
+            end.left(),
+            input_bounds().left() + line.unwrapped_layout.x_for_index(text.len())
+        );
+        assert_eq!(end.size.width, px(0.));
+    }
+
+    #[gpui::test]
+    fn ime_ranges_at_newlines_anchor_to_the_first_requested_line(cx: &mut gpui::TestAppContext) {
+        let text = "ab\ncdef\n";
+        let layout = input_layout(cx, text, 400.);
+
+        let before_newline = layout
+            .bounds_for_range(TextInputTarget::Composer, text, 2..2, input_bounds())
+            .unwrap();
+        assert_eq!(before_newline.top(), input_bounds().top());
+        assert_eq!(
+            before_newline.left(),
+            input_bounds().left() + layout.lines[0].width()
+        );
+
+        let multiline = layout
+            .bounds_for_range(TextInputTarget::Composer, text, 1..6, input_bounds())
+            .unwrap();
+        assert_eq!(multiline.top(), input_bounds().top());
+        assert_eq!(
+            multiline.right(),
+            input_bounds().left() + layout.lines[0].width()
+        );
+        assert_eq!(multiline.size.height, px(24.));
+
+        let trailing_newline = layout
+            .bounds_for_range(TextInputTarget::Composer, text, 8..8, input_bounds())
+            .unwrap();
+        assert_eq!(
+            trailing_newline.origin,
+            input_bounds().origin + point(px(0.), px(48.))
+        );
+    }
+
+    #[gpui::test]
+    fn painted_caret_before_newline_stays_on_its_logical_line(cx: &mut gpui::TestAppContext) {
+        let layout = input_layout(cx, "ab\ncdef\n", 400.);
+
+        let position = cursor_position(&layout.lines, &layout.text, 2, layout.line_height).unwrap();
+
+        assert_eq!(position, point(layout.lines[0].width(), px(0.)));
+    }
+
+    #[gpui::test]
+    fn ime_wrapped_ranges_use_the_first_visual_row(cx: &mut gpui::TestAppContext) {
+        let text = "alpha beta gamma delta";
+        let layout = input_layout(cx, text, 80.);
+        let line = &layout.lines[0];
+        let boundary = line.wrap_boundaries()[0];
+        let row_end = line.runs()[boundary.run_ix].glyphs[boundary.glyph_ix].index;
+        assert!(row_end < text.len());
+
+        let bounds = layout
+            .bounds_for_range(
+                TextInputTarget::Composer,
+                text,
+                0..text.len(),
+                input_bounds(),
+            )
+            .unwrap();
+        assert_eq!(bounds.origin, input_bounds().origin);
+        assert_eq!(bounds.size.height, px(24.));
+        assert_eq!(
+            bounds.right(),
+            input_bounds().left() + line.unwrapped_layout.x_for_index(row_end)
+        );
+
+        let boundary_offset = utf16_offset_for_byte(text, row_end);
+        let boundary_caret = layout
+            .bounds_for_range(
+                TextInputTarget::Composer,
+                text,
+                boundary_offset..boundary_offset,
+                input_bounds(),
+            )
+            .unwrap();
+        let painted_caret =
+            cursor_position(&layout.lines, text, row_end, layout.line_height).unwrap();
+        assert_eq!(painted_caret.y, px(0.));
+        assert_eq!(boundary_caret.origin, input_bounds().origin + painted_caret);
+
+        let end = layout
+            .bounds_for_range(
+                TextInputTarget::Composer,
+                text,
+                text.len()..text.len(),
+                input_bounds(),
+            )
+            .unwrap();
+        assert!(end.top() > input_bounds().top());
+        assert_eq!(end.size.width, px(0.));
+    }
+
+    #[gpui::test]
+    fn ime_geometry_rejects_stale_content_or_another_focused_field(cx: &mut gpui::TestAppContext) {
+        let layout = input_layout(cx, "old", 400.);
+
+        assert!(layout
+            .bounds_for_range(TextInputTarget::Composer, "new", 0..0, input_bounds())
+            .is_none());
+        assert!(layout
+            .bounds_for_range(TextInputTarget::BrowserUrl, "old", 0..0, input_bounds())
+            .is_none());
+    }
+
+    #[gpui::test]
+    fn ime_geometry_supports_each_shell_input_target(cx: &mut gpui::TestAppContext) {
+        let mut layout = input_layout(cx, "field", 400.);
+
+        for target in [
+            TextInputTarget::Composer,
+            TextInputTarget::BrowserUrl,
+            TextInputTarget::Rename,
+            TextInputTarget::SidebarSearch,
+            TextInputTarget::ModelSearch,
+        ] {
+            layout.target = target;
+            let bounds = layout
+                .bounds_for_range(target, "field", 0..0, input_bounds())
+                .unwrap();
+
+            assert_eq!(bounds.origin, input_bounds().origin);
+            assert_eq!(bounds.size, gpui::size(px(0.), layout.line_height));
+        }
+    }
+
+    #[gpui::test]
+    fn painted_shell_field_supplies_native_ime_geometry(cx: &mut gpui::TestAppContext) {
+        cx.skip_drawing();
+        let cx = cx.add_empty_window();
+        let shell = cx
+            .new_window_entity(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        let text = "é🙂\nend";
+        cx.update(|window, cx| {
+            let focus = shell.update(cx, |shell, _| {
+                shell.model.ui.composer = text.into();
+                shell.composer_selection = 6..6;
+                shell.composer_cursor_visible = true;
+                shell.composer_focus_handle.clone()
+            });
+            window.focus(&focus, cx);
+        });
+        let origin = point(px(80.), px(120.));
+        let (_, painted) = cx.draw(origin, gpui::size(px(400.), px(96.)), |_, _| {
+            ComposerElement {
+                shell: shell.clone(),
+                target: TextInputTarget::Composer,
+            }
+        });
+        let painted_caret = painted.cursor.unwrap();
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                let field = shell.composer_bounds.unwrap();
+                let caret = shell.bounds_for_range(3..3, field, window, cx).unwrap();
+                assert_eq!(caret.origin, origin + painted_caret);
+                assert_eq!(caret.size, gpui::size(px(0.), painted.line_height));
+                let selected = shell.bounds_for_range(1..3, field, window, cx).unwrap();
+                assert_eq!(selected.right(), caret.left());
+                assert_eq!(selected.top(), caret.top());
+                assert!(selected.left() > field.left());
+                assert!(selected.size.width > px(0.));
+
+                shell.model.ui.composer = "changed before repaint".into();
+                assert!(shell.bounds_for_range(3..3, field, window, cx).is_none());
+                shell.model.ui.composer = text.into();
+                shell.sidebar_search = text.into();
+            });
+            let focus = shell.read(cx).sidebar_search_focus_handle.clone();
+            window.focus(&focus, cx);
+            shell.update(cx, |shell, cx| {
+                let field = shell.composer_bounds.unwrap();
+                assert!(shell.bounds_for_range(3..3, field, window, cx).is_none());
+                shell.quitting = true;
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn narrow_composer_allocates_height_for_its_wrapped_visual_rows(cx: &mut gpui::TestAppContext) {
+        cx.skip_drawing();
+        let cx = cx.add_empty_window();
+        let shell = cx
+            .new_window_entity(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        let text = "alpha beta gamma delta";
+        cx.update(|window, cx| {
+            let focus = shell.update(cx, |shell, _| {
+                shell.model.ui.composer = text.into();
+                shell.composer_selection = text.len()..text.len();
+                shell.composer_focus_handle.clone()
+            });
+            window.focus(&focus, cx);
+        });
+        for _ in 0..2 {
+            cx.draw(
+                point(px(80.), px(120.)),
+                gpui::size(px(80.), px(96.)),
+                |_, _| ComposerElement {
+                    shell: shell.clone(),
+                    target: TextInputTarget::Composer,
+                },
+            );
+        }
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                let layout = shell.text_input_layout.as_ref().unwrap();
+                assert_eq!(layout.lines.len(), 1);
+                assert_eq!(layout.lines[0].wrap_boundaries().len(), 2);
+                let field = shell.composer_bounds.unwrap();
+                assert_eq!(field.size.height, layout.line_height * 3.);
+                let caret = shell
+                    .bounds_for_range(text.len()..text.len(), field, window, cx)
+                    .unwrap();
+                assert!(caret.bottom() <= field.bottom());
+                shell.quitting = true;
+            });
+        });
+    }
 
     #[test]
     fn stale_browser_url_ranges_are_clamped_to_valid_boundaries() {

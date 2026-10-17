@@ -125,6 +125,7 @@ pub(super) struct DesktopShell {
     pub(super) composer_marked_range: Option<Range<usize>>,
     pub(super) composer_is_selecting: bool,
     pub(super) composer_bounds: Option<Bounds<Pixels>>,
+    pub(super) text_input_layout: Option<composer::TextInputLayout>,
     pub(super) browser_url_focus_handle: FocusHandle,
     pub(super) browser_url_focus_requested: bool,
     pub(super) browser_url_selection: Range<usize>,
