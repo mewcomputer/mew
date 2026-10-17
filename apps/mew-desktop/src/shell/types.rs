@@ -223,7 +223,7 @@ impl DesktopFrameProbe {
             return None;
         }
 
-        gpui::profiler::set_frame_trace_enabled(true);
+        gpui::profiler::set_trace_enabled(true);
         eprintln!("[mew desktop perf] frame tracing enabled");
         let trace_path = std::env::temp_dir().join("mew-desktop-frame-trace.log");
         let trace_file = OpenOptions::new()
@@ -258,17 +258,19 @@ impl DesktopFrameProbe {
     }
 
     pub(super) fn collect(&mut self) {
-        self.samples
-            .extend(
-                self.collector
-                    .collect_unseen()
-                    .into_iter()
-                    .map(|frame| DesktopFrameSample {
+        self.samples.extend(
+            self.collector
+                .collect_unseen()
+                .into_iter()
+                .filter_map(|event| match event {
+                    gpui::FrameEvent::Draw(frame) => Some(DesktopFrameSample {
                         draw_duration: frame.draw_duration(),
                         dirty_to_draw_duration: frame.dirty_to_draw_duration(),
                         invalidations: frame.invalidations,
                     }),
-            );
+                    gpui::FrameEvent::Present(_) => None,
+                }),
+        );
 
         if self.samples.len() >= DESKTOP_FRAME_TRACE_BATCH_SIZE {
             self.report();
@@ -958,4 +960,63 @@ pub(super) struct TranscriptRenderRow {
     pub(super) message_index: usize,
     pub(super) part_index: usize,
     pub(super) block_index: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{DrawPhases, FrameEvent, FrameTiming, PresentTiming, WindowId};
+    use std::time::Instant;
+
+    #[test]
+    fn frame_probe_collects_each_draw_once_without_counting_presentations() {
+        let enabled_tracing = gpui::profiler::set_trace_enabled(true);
+        let mut probe = DesktopFrameProbe {
+            collector: gpui::FrameTimingCollector::new(),
+            trace_file: None,
+            samples: Vec::new(),
+            root_renders: 0,
+            transcript_renders: 0,
+        };
+        let start = Instant::now();
+        let frame = FrameTiming {
+            window_id: WindowId::from(1),
+            dirty_at: Some(start),
+            invalidations: 3,
+            draw_start: start + Duration::from_millis(2),
+            draw_end: start + Duration::from_millis(6),
+            refresh_interval: None,
+            signal_at: None,
+            phases: DrawPhases::default(),
+        };
+        gpui::profiler::record_frame_event(FrameEvent::Draw(frame));
+        gpui::profiler::record_frame_event(FrameEvent::Present(PresentTiming {
+            window_id: frame.window_id,
+            present_start: frame.draw_end,
+            present_end: start + Duration::from_millis(7),
+            animation_interval: None,
+        }));
+        gpui::profiler::record_frame_event(FrameEvent::Draw(FrameTiming {
+            dirty_at: None,
+            invalidations: 1,
+            ..frame
+        }));
+
+        probe.collect();
+        probe.collect();
+
+        if enabled_tracing {
+            gpui::profiler::set_trace_enabled(false);
+        }
+        assert_eq!(probe.samples.len(), 2);
+        assert_eq!(probe.samples[0].draw_duration, Duration::from_millis(4));
+        assert_eq!(
+            probe.samples[0].dirty_to_draw_duration,
+            Some(Duration::from_millis(6))
+        );
+        assert_eq!(probe.samples[0].invalidations, 3);
+        assert_eq!(probe.samples[1].draw_duration, Duration::from_millis(4));
+        assert_eq!(probe.samples[1].dirty_to_draw_duration, None);
+        assert_eq!(probe.samples[1].invalidations, 1);
+    }
 }

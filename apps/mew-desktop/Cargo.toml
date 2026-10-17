@@ -14,8 +14,8 @@ path = "src/main.rs"
 anyhow = { workspace = true }
 futures = { workspace = true }
 libghostty-vt = { workspace = true }
-gpui = { git = "https://github.com/zed-industries/zed.git", rev = "ae394f3d474f4996d2cdef6ee97551fdb6748acd" }
-gpui_platform = { git = "https://github.com/zed-industries/zed.git", rev = "ae394f3d474f4996d2cdef6ee97551fdb6748acd", features = ["font-kit"] }
+gpui = { git = "https://github.com/zed-industries/zed.git", rev = "322cd509dcccaee1f6bc44725d270598ae8171ad", features = ["profiler"] }
+gpui_platform = { git = "https://github.com/zed-industries/zed.git", rev = "322cd509dcccaee1f6bc44725d270598ae8171ad", features = ["font-kit"] }
 iroh = { workspace = true }
 mdstream = { workspace = true }
 mew-client-core = { workspace = true }

@@ -2296,3 +2296,23 @@ paths are kept as references across context compaction.
 Verified the plan-tool tests, workspace-scoped agent tests, mew-agent,
 mew-config and prompt tests, formatting, architecture checks, and strict
 Clippy for the changed Rust crates. The full workspace CI gate was not run.
+
+### 2026-10-17: update pinned GPUI and preserve frame tracing
+
+Updated gpui and gpui_platform from ae394f3d to upstream revision 322cd509.
+Enabled GPUI's profiler feature and adapted the desktop frame probe to the
+unified trace toggle and draw/present event collector. A regression test uses
+real profiler events to verify draw durations, absent invalidation timestamps,
+invalidation counts, presentation exclusion, and collection without duplicates.
+
+The baseline passed all 154 desktop tests; the updated suite passes 155. The
+native desktop build and full macOS just ci gate passed: 2,477 Rust test
+executions, 30 JS tests, strict Clippy, formatting, architecture, generated
+themes, subprocess end-to-end checks, and the 38-page documentation build.
+An isolated native smoke test verified rendering, composer text entry, sidebar
+mouse and keyboard actions, retained text, and actual 60-frame trace reports.
+
+Native checks used the matching CEF SDK at target/cef-sdk. The first full gate
+exhausted disk space during test compilation; removing only generated artifacts
+created during this task and retrying with two compiler jobs completed the gate.
+The existing block crate future-compatibility and web bundle-size warnings remain.
