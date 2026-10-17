@@ -1056,9 +1056,8 @@ impl Element for ComposerElement {
         let selection = shell.text_input_selection(self.target).clone();
         let selection_foreground: gpui::Hsla =
             theme_rgb(&shell.theme, "selection.foreground").into();
-        let selection_background: gpui::Hsla = theme_rgb(&shell.theme, "selection.background")
-            .opacity(0.18)
-            .into();
+        let selection_background: gpui::Hsla =
+            theme_rgb(&shell.theme, "selection.background").into();
         let mut runs = Vec::new();
         let mut run_start = 0;
         let split_points = if content.is_empty() {
@@ -1150,8 +1149,19 @@ impl Element for ComposerElement {
             ElementInputHandler::new(bounds, self.shell.clone()),
             cx,
         );
+        let selection = self.shell.read(cx).text_input_selection(self.target);
         let mut line_y = bounds.top();
         for line in &prepaint.lines {
+            if !selection.is_empty() {
+                let _ = line.paint_background(
+                    point(bounds.left(), line_y),
+                    prepaint.line_height,
+                    gpui::TextAlign::Left,
+                    Some(bounds),
+                    window,
+                    cx,
+                );
+            }
             let _ = line.paint(
                 point(bounds.left(), line_y),
                 prepaint.line_height,
@@ -1173,7 +1183,6 @@ impl Element for ComposerElement {
                     theme_rgb(&theme, "foreground"),
                 ));
             }
-            let selection = self.shell.read(cx).text_input_selection(self.target);
             let geometry_changed =
                 self.shell
                     .read(cx)
@@ -1965,8 +1974,31 @@ mod tests {
                 assert_eq!(shell.text_input_selection(target), 6..6);
             });
             cx.dispatch_action(TextSelectAll);
-            shell.read_with(cx, |shell, _| {
+            cx.refresh().unwrap();
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let shell = shell.read(cx);
                 assert_eq!(shell.text_input_selection(target), 0..original.len());
+                let layout = shell.text_input_layout.as_ref().unwrap();
+                assert_eq!(layout.target, target);
+                assert_eq!(layout.text.as_ref(), original);
+                assert!(
+                    !layout.lines.is_empty(),
+                    "selected {target:?} must remain painted"
+                );
+                assert!(layout.lines[0].width() > px(0.));
+                let background: gpui::Hsla = theme_rgb(&shell.theme, "selection.background").into();
+                let field = layout.bounds.scale(window.scale_factor());
+                assert!(
+                    window.painted_quads().iter().any(|quad| {
+                        quad.background.as_solid().is_some_and(|mut color| {
+                            let visible = color.a > 0.8;
+                            color.a = 1.;
+                            visible && color == background
+                        }) && !quad.bounds.intersect(&field).is_empty()
+                    }),
+                    "selected {target:?} needs its contrasting background"
+                );
             });
             cx.update(|_, cx| {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string("replacement".into()))

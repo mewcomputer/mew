@@ -52,11 +52,17 @@ apps, and launch it with the isolated environment before attaching UI tools.
 Attaching to a stopped app may launch it without those environment variables.
 
 Check Pinyin candidates with physical keyboard input on the first and wrapped or
-second lines, then resize. For CEF, first focus the URL field and then an actual
+second lines, then resize and move the window while composing. Check placement
+during the drag and after release, including display transitions when available.
+For CEF, first focus the URL field and then an actual
 page input. Copy/paste, selection and command deletion must edit the page while
 leaving the URL draft unchanged. Check the native Edit menu too. Background UI
 automation can route key equivalents differently or inject control characters;
 confirm suspected native keyboard failures with the app in the foreground.
+
+For GPUI selection, check the painted scene as well as retained text and clipboard
+contents. A correct value can still disappear when its contrasting background
+is omitted. `Window::painted_quads` supports this check without rasterization.
 
 The opt-in real AppKit responder regression runs without writing the clipboard:
 

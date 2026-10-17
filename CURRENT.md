@@ -2471,3 +2471,29 @@ availability and actual image attachment bytes. Strict Clippy for all affected
 targets, formatting, architecture and theme checks passed. The final native
 binary built and the complete debug app bundle was refreshed. The maintained
 focus/input and verification guides document these native integration rules.
+
+## 2026-10-17 - Visible field selection and window-move IME refresh
+
+The apparent Copy deletion reproduced as a paint defect: selected GPUI text kept
+its value but vanished because its inverted foreground lacked the selection
+background. Shell fields now paint the paired theme background before glyphs,
+at its intended opacity, and skip that pass when there is no selection. Native
+UI checks retained the selected composer text and pasted a second identical copy.
+The CEF input also completed an actual copy/paste roundtrip with its URL draft
+unchanged. App quit exited cleanly, reaped CEF helpers and left the attach-only
+QA daemon alive.
+
+The user confirmed first-line and multiline/resize Pinyin placement, then found
+that the popup did not follow window movement. The existing window-bounds
+observer now invalidates native character coordinates even when the field's
+local rectangle is unchanged. Physical candidate tracking during and after a
+window drag remains pending in the corrected isolated QA app.
+
+The five-field clipboard regression now checks the actual painted selection
+background as well as retained text, glyph geometry and clipboard contents.
+Removing the background-paint call reproduces its failure. All 211 affected Rust
+tests and the real AppKit responder regression passed; the focused paint test
+also passed after avoiding background work for empty selections. Strict desktop
+Clippy, formatting and the native build passed, and the debug bundle was
+refreshed. The input and native-smoke guides cover separate background painting
+and window movement.

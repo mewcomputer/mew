@@ -81,6 +81,8 @@ font, font size and wrapping width. Reject mismatched field/text geometry rather
 than returning a stale rectangle. After paint, call
 `Window::invalidate_character_coordinates` when the focused field's geometry,
 text style or selection changes; avoid invalidating it on every idle frame.
+Also invalidate from the window-bounds observer: moving a window changes native
+screen coordinates while the field's local rectangle stays identical.
 
 For application-driven text or selection changes, the pin also exposes
 `Window::notify_text_input_changed` and `notify_text_selection_changed` for native
@@ -88,6 +90,11 @@ services. These notifications complement GPUI redraw; use them when changing the
 registered input through application commands.
 
 ## Pointer selection
+
+`WrappedLine::paint` paints glyphs and text decorations. Paint selected text's
+background separately with `WrappedLine::paint_background` before the glyphs.
+Use the theme's paired selection foreground/background colors together; fading
+only the background can hide the inverted foreground against the field.
 
 Selection starts, drag motion and release must invalidate the owning view when
 the highlight changes. Handle `on_mouse_up_out` as well as release inside the

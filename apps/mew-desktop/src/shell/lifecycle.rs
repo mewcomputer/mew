@@ -165,6 +165,8 @@ impl DesktopShell {
             shell.reload_theme(window.appearance(), cx);
         });
         let bounds_subscription = cx.observe_window_bounds(window, |shell, window, cx| {
+            // Screen coordinates change even when the field's local bounds do not.
+            window.invalidate_character_coordinates();
             let changed = shell.update_window_width(f32::from(window.bounds().size.width));
             if changed {
                 shell.persist_layout();
