@@ -2,15 +2,20 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gpui::*;
+use libghostty_vt::fmt::Format;
 use libghostty_vt::key::{Action as KeyAction, Encoder as KeyEncoder, Event as KeyEvent, Mods};
 use libghostty_vt::mouse::{
     self, Action as MouseAction, Button, Encoder as MouseEncoder, Event as MouseEvent,
 };
 use libghostty_vt::render::{CellIterator, CursorViewport, Dirty, RowIterator};
 use libghostty_vt::screen::CellWide;
+use libghostty_vt::selection::{
+    FormatOptions as SelectionFormatOptions, Selection as TerminalSelection,
+};
 use libghostty_vt::terminal::{
-    ConformanceLevel, DeviceAttributeFeature, DeviceAttributes, DeviceType,
-    PrimaryDeviceAttributes, ScrollViewport, SecondaryDeviceAttributes, SizeReportSize,
+    ConformanceLevel, DeviceAttributeFeature, DeviceAttributes, DeviceType, Point as TerminalPoint,
+    PointCoordinate, PrimaryDeviceAttributes, ScrollViewport, SecondaryDeviceAttributes,
+    SizeReportSize,
 };
 use libghostty_vt::{RenderState, Terminal, TerminalOptions};
 
@@ -23,7 +28,7 @@ use super::render::build_row_elements;
 use super::styling::{hsla_from_rgb, style_to_highlight};
 
 pub struct TerminalView {
-    terminal: Box<Terminal<'static, 'static>>,
+    terminal: Terminal<'static, 'static>,
     render_state: RenderState<'static>,
     row_iter: RowIterator<'static>,
     cell_iter: CellIterator<'static>,
@@ -37,6 +42,7 @@ pub struct TerminalView {
     last_default_fg: Hsla,
     last_default_bg: Hsla,
     custom_theme_colors: bool,
+    presentation_dirty: bool,
     selection: Option<Selection>,
     selecting: bool,
     protocol_write_buf: Rc<RefCell<Vec<u8>>>,
@@ -64,12 +70,7 @@ impl TerminalView {
         Self::build(terminal, cx)
     }
 
-    fn build(terminal: Terminal<'static, 'static>, cx: &mut Context<Self>) -> Self {
-        // Box the terminal before registering handlers. Each on_* call stores
-        // &self.vtable (a raw pointer) in the C library as userdata. The terminal
-        // must not move after that point — boxing it here ensures the vtable address
-        // stays stable when the view struct itself is moved.
-        let mut terminal = Box::new(terminal);
+    fn build(mut terminal: Terminal<'static, 'static>, cx: &mut Context<Self>) -> Self {
         let render_state = RenderState::new().expect("failed to create render state");
         let row_iter = RowIterator::new().expect("failed to create row iterator");
         let cell_iter = CellIterator::new().expect("failed to create cell iterator");
@@ -159,6 +160,7 @@ impl TerminalView {
             last_default_fg: Hsla::white(),
             last_default_bg: Hsla::black(),
             custom_theme_colors: false,
+            presentation_dirty: true,
             selection: None,
             selecting: false,
             protocol_write_buf,
@@ -185,10 +187,16 @@ impl TerminalView {
         self.cached_cursor = None;
         self.selection = None;
         self.selecting = false;
+        self.presentation_dirty = true;
         cx.notify();
     }
 
-    pub fn set_theme_colors(&mut self, foreground: gpui::Rgba, background: gpui::Rgba) {
+    pub fn set_theme_colors(
+        &mut self,
+        foreground: gpui::Rgba,
+        background: gpui::Rgba,
+        cx: &mut Context<Self>,
+    ) {
         self.last_default_fg = hsla_from_rgb(
             (foreground.r * 255.0).round() as u8,
             (foreground.g * 255.0).round() as u8,
@@ -200,6 +208,8 @@ impl TerminalView {
             (background.b * 255.0).round() as u8,
         );
         self.custom_theme_colors = true;
+        self.presentation_dirty = true;
+        cx.notify();
     }
 
     pub fn set_font_family(&mut self, family: impl Into<SharedString>, cx: &mut Context<Self>) {
@@ -293,7 +303,7 @@ impl TerminalView {
         let cached_cursor = cursor;
         let mut new_rows: Option<Vec<RowData>> = None;
 
-        if matches!(dirty, Dirty::Full | Dirty::Partial) {
+        if self.presentation_dirty || matches!(dirty, Dirty::Full | Dirty::Partial) {
             let num_cols = snapshot.cols().unwrap_or(self.current_cols) as usize;
             let num_rows = snapshot.rows().unwrap_or(self.current_rows) as usize;
 
@@ -302,6 +312,7 @@ impl TerminalView {
                 .row_iter
                 .update(&snapshot)
                 .expect("row iterator update failed");
+            let mut cell_text = String::with_capacity(4);
 
             for row_idx in 0..num_rows {
                 let Some(row) = row_iter.next() else { break };
@@ -338,16 +349,16 @@ impl TerminalView {
                         continue;
                     }
 
-                    let graphemes = cell.graphemes().unwrap_or_default();
-                    let ch = graphemes.first().copied().unwrap_or(' ');
                     let start = text.len();
-                    text.push(ch);
-
-                    let is_wide = matches!(cell_wide, Some(CellWide::Wide));
-                    if is_wide {
+                    cell_text.clear();
+                    let _ = cell.graphemes_utf8(&mut cell_text);
+                    if cell_text.is_empty() {
                         text.push(' ');
+                    } else {
+                        text.push_str(&cell_text);
                     }
 
+                    let is_wide = matches!(cell_wide, Some(CellWide::Wide));
                     let end = text.len();
                     let col_span = if is_wide { 2 } else { 1 };
 
@@ -368,9 +379,11 @@ impl TerminalView {
                         .is_some_and(|c| c.x as usize == col_idx && c.y as usize == row_idx);
 
                     let is_selected = self.selection.is_some_and(|sel| {
-                        sel.contains(GridPos {
-                            col: col_idx,
-                            row: row_idx,
+                        (0..col_span).any(|offset| {
+                            sel.contains(GridPos {
+                                col: col_idx + offset,
+                                row: row_idx,
+                            })
                         })
                     });
 
@@ -413,11 +426,16 @@ impl TerminalView {
                         highlights.push((start..end, highlight));
                     }
 
+                    if is_wide {
+                        cell_iter.next();
+                    }
                     col_idx += col_span;
                 }
 
                 // Emit the final bg run, covering through num_cols.
                 bg_runs.push(super::data::BgRun::new(run_start, num_cols, run_color));
+                row.set_dirty(false)
+                    .expect("failed to reset render row dirty tracking");
 
                 rows.push(RowData {
                     text,
@@ -427,10 +445,13 @@ impl TerminalView {
             }
 
             new_rows = Some(rows);
+            self.presentation_dirty = false;
         }
 
         // Reset dirty state so the next update reports only actual changes.
-        let _ = snapshot.set_dirty(Dirty::Clean);
+        snapshot
+            .set_dirty(Dirty::Clean)
+            .expect("failed to reset render state dirty tracking");
 
         (new_rows, cached_cursor, default_fg, default_bg)
     }
@@ -660,6 +681,8 @@ impl TerminalView {
         let pos = GridPos::from_pixel(self.local_pos(event.position), &self.cell_metrics);
         self.selecting = true;
         self.selection = Some(Selection::new(pos, pos));
+        self.presentation_dirty = true;
+        cx.notify();
     }
 
     fn handle_mouse_move(
@@ -677,12 +700,16 @@ impl TerminalView {
             return;
         }
 
-        if !self.selecting {
+        if !self.selecting || !event.dragging() {
             return;
         }
         let pos = GridPos::from_pixel(self.local_pos(event.position), &self.cell_metrics);
         if let Some(ref mut sel) = self.selection {
-            sel.end = pos;
+            if sel.end != pos {
+                sel.end = pos;
+                self.presentation_dirty = true;
+                cx.notify();
+            }
         }
     }
 
@@ -692,6 +719,9 @@ impl TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.buttons_pressed == 0 {
+            return;
+        }
         self.buttons_pressed = self.buttons_pressed.saturating_sub(1);
 
         if self.is_mouse_tracking() {
@@ -708,6 +738,8 @@ impl TerminalView {
         if let Some(ref sel) = self.selection {
             if sel.is_empty() {
                 self.selection = None;
+                self.presentation_dirty = true;
+                cx.notify();
             }
         }
     }
@@ -717,37 +749,32 @@ impl TerminalView {
             return;
         };
         let (start, end) = sel.ordered();
-        let num_rows = self.cached_rows.len();
-        if start.row >= num_rows || end.row >= num_rows {
+        if start.row >= self.current_rows as usize || end.row >= self.current_rows as usize {
             return;
         }
 
-        let mut text = String::new();
-        for row_idx in start.row..=end.row.min(num_rows - 1) {
-            let row = &self.cached_rows[row_idx];
-            let row_text = row.text.trim_end_matches(' ');
-            if row_idx == start.row && row_idx == end.row {
-                let s = start.col.min(row_text.len());
-                let e = (end.col + 1).min(row_text.len());
-                if s < e {
-                    text.push_str(&row_text[s..e]);
-                }
-            } else if row_idx == start.row {
-                let s = start.col.min(row_text.len());
-                if s < row_text.len() {
-                    text.push_str(&row_text[s..]);
-                }
-                text.push('\n');
-            } else if row_idx == end.row {
-                let e = (end.col + 1).min(row_text.len());
-                if e > 0 {
-                    text.push_str(&row_text[..e]);
-                }
-            } else {
-                text.push_str(row_text);
-                text.push('\n');
-            }
-        }
+        let point = |pos: GridPos| {
+            TerminalPoint::Viewport(PointCoordinate {
+                x: pos.col.min(self.current_cols as usize - 1) as u16,
+                y: pos.row as u32,
+            })
+        };
+        let (Ok(start), Ok(end)) = (
+            self.terminal.grid_ref(point(start)),
+            self.terminal.grid_ref(point(end)),
+        ) else {
+            return;
+        };
+        let selection = TerminalSelection::new(start, end, false);
+        let options = SelectionFormatOptions::new()
+            .with_selection(&selection)
+            .with_emit_format(Format::Plain)
+            .with_unwrap(true)
+            .with_trim(true);
+        let Ok(Some(bytes)) = self.terminal.format_selection_alloc(None, options) else {
+            return;
+        };
+        let text = String::from_utf8_lossy(&bytes).into_owned();
 
         if !text.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -830,6 +857,7 @@ impl Render for TerminalView {
             .on_key_down(cx.listener(Self::handle_key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::handle_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::handle_mouse_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::handle_mouse_up))
             .on_mouse_move(cx.listener(Self::handle_mouse_move))
             .on_scroll_wheel(cx.listener(Self::handle_scroll))
             .child(origin_capture)
@@ -843,3 +871,449 @@ pub enum TerminalEvent {
 }
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::prelude::v1::test;
+
+    fn project_rows(view: &mut TerminalView) -> bool {
+        let (rows, _, _, _) = view.render_terminal();
+        if let Some(rows) = rows {
+            view.cached_rows = rows;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn cell_position(view: &TerminalView, col: usize) -> Point<Pixels> {
+        point(
+            px(PADDING_LEFT + (col as f32 + 0.5) * view.cell_metrics.width),
+            px(PADDING_TOP + view.cell_metrics.height / 2.0),
+        )
+    }
+
+    #[gpui::test]
+    fn named_control_keys_emit_terminal_escape_sequences(cx: &mut TestAppContext) {
+        let terminal = cx.new(TerminalView::new_remote);
+        let input = Rc::new(RefCell::new(Vec::new()));
+        let _subscribe = cx.update(|cx| {
+            let input = input.clone();
+            cx.subscribe(&terminal, move |_, event, _| {
+                if let TerminalEvent::Input(bytes) = event {
+                    input.borrow_mut().extend_from_slice(bytes);
+                }
+            })
+        });
+        let cx = cx.add_empty_window();
+        for (key, expected) in [("up", "\u{1b}[1;5A"), ("left", "\u{1b}[1;5D")] {
+            input.borrow_mut().clear();
+            cx.update(|window, cx| {
+                terminal.update(cx, |view, cx| {
+                    view.handle_key_down(
+                        &KeyDownEvent {
+                            keystroke: Keystroke {
+                                key: key.to_string(),
+                                modifiers: Modifiers {
+                                    control: true,
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            },
+                            is_held: false,
+                            prefer_character_input: false,
+                        },
+                        window,
+                        cx,
+                    );
+                })
+            });
+            assert_eq!(input.borrow().as_slice(), expected.as_bytes(), "ctrl-{key}");
+        }
+    }
+
+    #[gpui::test]
+    fn terminal_protocol_callbacks_write_after_view_construction(cx: &mut TestAppContext) {
+        let terminal = cx.new(TerminalView::new_remote);
+        let input = Rc::new(RefCell::new(Vec::new()));
+        let _subscribe = cx.update(|cx| {
+            let input = input.clone();
+            cx.subscribe(&terminal, move |_, event, _| {
+                if let TerminalEvent::Input(bytes) = event {
+                    input.borrow_mut().extend_from_slice(bytes);
+                }
+            })
+        });
+        terminal.update(cx, |view, cx| view.ingest(b"\x1b[6n\x1b[18t", cx));
+        assert_eq!(input.borrow().as_slice(), b"\x1b[1;1R\x1b[8;24;80t");
+    }
+
+    #[gpui::test]
+    fn mouse_tracking_ignores_releases_without_a_terminal_press(cx: &mut TestAppContext) {
+        let terminal = cx.new(TerminalView::new_remote);
+        let input = Rc::new(RefCell::new(Vec::new()));
+        let _subscribe = cx.update(|cx| {
+            let input = input.clone();
+            cx.subscribe(&terminal, move |_, event, _| {
+                if let TerminalEvent::Input(bytes) = event {
+                    input.borrow_mut().extend_from_slice(bytes);
+                }
+            })
+        });
+        terminal.update(cx, |view, cx| {
+            view.ingest(b"\x1b[?1002h\x1b[?1006h", cx);
+            assert!(view.is_mouse_tracking());
+        });
+        let cx = cx.add_empty_window();
+        cx.update(|window, cx| {
+            terminal.update(cx, |view, cx| {
+                view.handle_mouse_up(
+                    &MouseUpEvent {
+                        button: MouseButton::Left,
+                        position: cell_position(view, 0),
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
+                );
+            })
+        });
+        assert!(
+            input.borrow().is_empty(),
+            "a release over another pane must not reach the PTY"
+        );
+        cx.update(|window, cx| {
+            terminal.update(cx, |view, cx| {
+                view.handle_mouse_down(
+                    &MouseDownEvent {
+                        button: MouseButton::Left,
+                        position: cell_position(view, 0),
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
+                );
+                view.handle_mouse_up(
+                    &MouseUpEvent {
+                        button: MouseButton::Left,
+                        position: cell_position(view, 0),
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
+                );
+            })
+        });
+        assert_eq!(input.borrow().as_slice(), b"\x1b[<0;1;1M\x1b[<0;1;1m");
+    }
+
+    #[gpui::test]
+    fn unchanged_terminal_frames_reuse_rows(cx: &mut TestAppContext) {
+        let terminal = cx.new(TerminalView::new_remote);
+        terminal.update(cx, |view, cx| {
+            view.ingest(b"hello", cx);
+            assert!(project_rows(view));
+            assert!(view.cached_rows[0].text.starts_with("hello"));
+            assert!(!project_rows(view));
+        });
+    }
+
+    #[test]
+    fn ghostty_snapshot_dirty_state_can_be_reset() {
+        let terminal = Terminal::new(TerminalOptions {
+            cols: 8,
+            rows: 3,
+            max_scrollback: 0,
+        })
+        .unwrap();
+        let mut render_state = RenderState::new().unwrap();
+        {
+            let snapshot = render_state.update(&terminal).unwrap();
+            snapshot.set_dirty(Dirty::Clean).unwrap();
+            assert_eq!(snapshot.dirty().unwrap(), Dirty::Clean);
+        }
+        assert_eq!(
+            render_state.update(&terminal).unwrap().dirty().unwrap(),
+            Dirty::Clean
+        );
+    }
+
+    #[gpui::test]
+    fn selection_reprojects_and_notifies_an_idle_terminal(cx: &mut TestAppContext) {
+        let terminal = cx.new(TerminalView::new_remote);
+        terminal.update(cx, |view, cx| {
+            view.ingest(b"hello", cx);
+            assert!(project_rows(view));
+        });
+        let notifications = Rc::new(Cell::new(0));
+        let _observe = cx.update(|cx| {
+            let notifications = notifications.clone();
+            cx.observe(&terminal, move |_, _| {
+                notifications.set(notifications.get() + 1)
+            })
+        });
+        let cx = cx.add_empty_window();
+        cx.update(|window, cx| {
+            terminal.update(cx, |view, cx| {
+                view.handle_mouse_down(
+                    &MouseDownEvent {
+                        button: MouseButton::Left,
+                        position: cell_position(view, 0),
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
+                );
+            })
+        });
+        assert_eq!(notifications.get(), 1);
+        cx.update(|window, cx| {
+            terminal.update(cx, |view, cx| {
+                assert!(
+                    project_rows(view),
+                    "selection must refresh a clean VT snapshot"
+                );
+                assert!(view.cached_rows[0]
+                    .bg_runs
+                    .iter()
+                    .any(|run| run.start_col == 0
+                        && run.end_col == 1
+                        && run.color == hsla_from_rgb(240, 153, 179)));
+                assert!(!project_rows(view));
+                view.handle_mouse_up(
+                    &MouseUpEvent {
+                        button: MouseButton::Left,
+                        position: cell_position(view, 0),
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
+                );
+                assert!(
+                    project_rows(view),
+                    "releasing an empty selection clears its highlight"
+                );
+                assert!(!view.cached_rows[0]
+                    .bg_runs
+                    .iter()
+                    .any(|run| run.color == hsla_from_rgb(240, 153, 179)));
+            })
+        });
+        assert_eq!(notifications.get(), 2);
+    }
+
+    #[gpui::test]
+    fn theme_reprojects_and_notifies_an_idle_terminal(cx: &mut TestAppContext) {
+        let terminal = cx.new(TerminalView::new_remote);
+        terminal.update(cx, |view, cx| {
+            view.ingest(b"hello", cx);
+            assert!(project_rows(view));
+        });
+        let notifications = Rc::new(Cell::new(0));
+        let _observe = cx.update(|cx| {
+            let notifications = notifications.clone();
+            cx.observe(&terminal, move |_, _| {
+                notifications.set(notifications.get() + 1)
+            })
+        });
+        terminal.update(cx, |view, cx| {
+            view.set_theme_colors(rgb(0x336699), rgb(0x112233), cx)
+        });
+        assert_eq!(notifications.get(), 1);
+        terminal.update(cx, |view, _| {
+            assert!(project_rows(view), "theme must refresh a clean VT snapshot");
+            assert_eq!(
+                view.cached_rows[0].highlights[0].1.color,
+                Some(hsla_from_rgb(0x33, 0x66, 0x99))
+            );
+            assert_eq!(
+                view.cached_rows[0].bg_runs.last().unwrap().color,
+                hsla_from_rgb(0x11, 0x22, 0x33)
+            );
+            assert!(!project_rows(view));
+        });
+    }
+
+    #[gpui::test]
+    fn clipboard_uses_terminal_columns_and_preserves_graphemes(cx: &mut TestAppContext) {
+        let terminal = cx.new(TerminalView::new_remote);
+        for (text, start, end, expected) in [
+            ("café", 3, 3, "é"),
+            ("A界B", 1, 2, "界"),
+            ("A界B", 2, 2, "界"),
+            ("A界B", 3, 3, "B"),
+            ("A界B", 0, 3, "A界B"),
+            ("e\u{301}!", 0, 0, "e\u{301}"),
+            ("hello", 1, 3, "ell"),
+        ] {
+            terminal.update(cx, |view, cx| {
+                view.clear(cx);
+                view.ingest(text.as_bytes(), cx);
+                assert!(project_rows(view));
+                view.selection = Some(Selection::new(GridPos::new(start, 0), GridPos::new(end, 0)));
+                view.copy_selection(cx);
+            });
+            assert_eq!(
+                cx.read_from_clipboard().and_then(|item| item.text()),
+                Some(expected.to_string()),
+                "{text:?} at columns {start}..={end}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn rendered_rows_preserve_full_unicode_cell_text(cx: &mut TestAppContext) {
+        let terminal = cx.new(TerminalView::new_remote);
+        for text in ["café", "A界B", "e\u{301}!"] {
+            terminal.update(cx, |view, cx| {
+                view.clear(cx);
+                view.ingest(text.as_bytes(), cx);
+                assert!(project_rows(view));
+                assert_eq!(view.cached_rows[0].text.trim_end_matches(' '), text);
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn selection_of_a_wide_character_tail_highlights_the_whole_character(cx: &mut TestAppContext) {
+        let terminal = cx.new(TerminalView::new_remote);
+        terminal.update(cx, |view, cx| {
+            view.ingest("A界B".as_bytes(), cx);
+            view.selection = Some(Selection::new(GridPos::new(2, 0), GridPos::new(2, 0)));
+            assert!(project_rows(view));
+            assert!(view.cached_rows[0]
+                .bg_runs
+                .iter()
+                .any(|run| run.start_col == 1
+                    && run.end_col == 3
+                    && run.color == hsla_from_rgb(240, 153, 179)));
+        });
+    }
+
+    #[gpui::test]
+    fn clipboard_preserves_multiline_selection_and_trims_row_padding(cx: &mut TestAppContext) {
+        let terminal = cx.new(TerminalView::new_remote);
+        terminal.update(cx, |view, cx| {
+            view.ingest("café\r\n界!\r\nlast".as_bytes(), cx);
+            assert!(project_rows(view));
+            view.selection = Some(Selection::new(GridPos::new(2, 2), GridPos::new(3, 0)));
+            view.copy_selection(cx);
+        });
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("é\n界!\nlas".to_string())
+        );
+    }
+
+    #[gpui::test]
+    fn clipboard_preserves_blank_lines_and_ignores_outside_rows(cx: &mut TestAppContext) {
+        let terminal = cx.new(TerminalView::new_remote);
+        terminal.update(cx, |view, cx| {
+            view.ingest(b"x  \r\n\r\ny", cx);
+            view.selection = Some(Selection::new(GridPos::new(0, 0), GridPos::new(79, 2)));
+            view.copy_selection(cx);
+        });
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("x\n\ny".to_string())
+        );
+        cx.write_to_clipboard(ClipboardItem::new_string("unchanged".to_string()));
+        terminal.update(cx, |view, cx| {
+            view.selection = Some(Selection::new(
+                GridPos::new(0, 0),
+                GridPos::new(0, DEFAULT_ROWS as usize),
+            ));
+            view.copy_selection(cx);
+        });
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("unchanged".to_string())
+        );
+    }
+
+    #[gpui::test]
+    fn unpressed_mouse_move_does_not_extend_selection(cx: &mut TestAppContext) {
+        let terminal = cx.new(TerminalView::new_remote);
+        let cx = cx.add_empty_window();
+        cx.update(|window, cx| {
+            terminal.update(cx, |view, cx| {
+                view.ingest(b"hello", cx);
+                assert!(project_rows(view));
+                view.handle_mouse_down(
+                    &MouseDownEvent {
+                        button: MouseButton::Left,
+                        position: cell_position(view, 0),
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
+                );
+                project_rows(view);
+                view.handle_mouse_move(
+                    &MouseMoveEvent {
+                        position: cell_position(view, 3),
+                        pressed_button: Some(MouseButton::Left),
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
+                );
+                assert!(project_rows(view), "dragging must refresh the selection");
+                assert!(view.cached_rows[0]
+                    .bg_runs
+                    .iter()
+                    .any(|run| run.start_col == 0
+                        && run.end_col == 4
+                        && run.color == hsla_from_rgb(240, 153, 179)));
+                view.handle_mouse_move(
+                    &MouseMoveEvent {
+                        position: cell_position(view, 8),
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
+                );
+                assert_eq!(view.selection.unwrap().end.col, 3);
+                assert!(!project_rows(view));
+            })
+        });
+    }
+
+    struct TerminalFixture(Entity<TerminalView>);
+
+    impl Render for TerminalFixture {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(div().h(px(100.)).child(self.0.clone()))
+                .child(div().id("composer").flex_1())
+        }
+    }
+
+    #[gpui::test]
+    fn mouse_release_over_composer_finishes_terminal_selection(cx: &mut TestAppContext) {
+        let terminal = cx.new(TerminalView::new_remote);
+        let (_, cx) = cx.add_window_view(|_, _| TerminalFixture(terminal.clone()));
+        let start = terminal.read_with(cx, |view, _| cell_position(view, 0));
+        let end = terminal.read_with(cx, |view, _| cell_position(view, 3));
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(
+            point(end.x, px(150.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        terminal.read_with(cx, |view, _| {
+            assert!(
+                !view.selecting,
+                "release outside the terminal must finish the drag"
+            );
+            assert_eq!(view.buttons_pressed, 0);
+        });
+        cx.simulate_mouse_move(start, None, Modifiers::default());
+        terminal.read_with(cx, |view, _| assert_eq!(view.selection.unwrap().end.col, 3));
+    }
+}

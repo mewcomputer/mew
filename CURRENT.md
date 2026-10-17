@@ -2329,3 +2329,18 @@ The native archive now includes its SIMD dependencies, so the build links the
 single archive and preserves Cargo-scoped Zig outputs. Validation matched all
 173 exported bindings to the native headers and passed the real external-cache
 rebuild plus a linked, executed FFI probe. The production desktop build passed.
+
+
+## 2026-10-17 - Native terminal input and projection
+
+Restricted direct control bytes to single ASCII keys, retained named-key
+modifiers, and made idle selection/theme changes invalidate and notify the
+terminal. Ghostty now formats selections by terminal cells; projection retains
+full Unicode clusters and consumes wide tails without shifting later columns.
+Outside release ends selection without sending unrelated releases to the PTY.
+The new wrapper owns callback stability, so the extra terminal box is removed.
+
+All 15 terminal regressions passed, including dirty-state reset, Unicode and
+wide-cell copy, cached-row reuse, real GPUI notification and outside release.
+Native smoke also rendered Unicode PTY output and retained a composer draft
+after dragging a terminal selection into another pane.

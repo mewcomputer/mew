@@ -39,5 +39,6 @@ ulid = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
+gpui = { git = "https://github.com/zed-industries/zed.git", rev = "322cd509dcccaee1f6bc44725d270598ae8171ad", features = ["test-support"] }
 mew-message = { workspace = true }
 tokio-tungstenite = { workspace = true }

@@ -39,10 +39,11 @@ impl DesktopShell {
         );
         self.theme = Theme::load(theme_name);
         let theme = self.theme.clone();
-        self.terminal_view.update(cx, |view, _cx| {
+        self.terminal_view.update(cx, |view, cx| {
             view.set_theme_colors(
                 theme_rgb(&theme, "text.body"),
                 theme_rgb(&theme, "panel.background"),
+                cx,
             );
         });
         cx.notify();
@@ -176,6 +177,7 @@ impl DesktopShell {
             view.set_theme_colors(
                 theme_rgb(&theme, "text.body"),
                 theme_rgb(&theme, "panel.background"),
+                cx,
             );
             view.set_font_family(terminal_font_family.clone(), cx);
         });
