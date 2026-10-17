@@ -1,6 +1,7 @@
 use super::*;
 
 fn set_app_menus(cx: &mut App) {
+    cx.bind_keys([gpui::KeyBinding::new("cmd-q", Quit, None)]);
     cx.set_menus([
         Menu::new("mew").items([MenuItem::action("Quit", Quit)]),
         Menu::new("File").items([
@@ -257,4 +258,20 @@ pub(crate) fn run() {
             }
             cx.activate(true);
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[gpui::test]
+    fn native_quit_menu_exposes_the_standard_shortcut(cx: &mut gpui::TestAppContext) {
+        cx.update(set_app_menus);
+        cx.add_empty_window().update(|window, _| {
+            let bindings = window.bindings_for_action(&Quit);
+            assert!(bindings.iter().any(|binding| {
+                matches!(binding.keystrokes(), [key] if key.inner() == &gpui::Keystroke::parse("cmd-q").unwrap())
+            }));
+        });
+    }
 }

@@ -99,6 +99,8 @@ pub(super) fn detect_workspace_open_destinations() -> Vec<WorkspaceOpenDestinati
 fn application_available(name: &str) -> bool {
     std::process::Command::new("open")
         .args(["-Ra", name])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
 }
@@ -1482,6 +1484,30 @@ mod workspace_tests {
 #[cfg(test)]
 mod workspace_open_tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn unavailable_workspace_application_is_silent() {
+        const CHILD: &str = "MEW_TEST_MISSING_APPLICATION";
+        if std::env::var_os(CHILD).is_some() {
+            assert!(!application_available("mew-nonexistent-editor-7866137"));
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "shell::helpers::workspace_open_tests::unavailable_workspace_application_is_silent",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(
+            output.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn remembered_editor_falls_back_when_unavailable() {

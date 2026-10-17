@@ -2372,3 +2372,15 @@ All ten composer tests passed, including actual paint-to-input-handler geometry
 and a narrow paragraph that previously received 48px instead of 78px. Native
 smoke verified Unicode paste, visible wrapped rows and retained drafts. Native
 OS IME candidate UI has not been exercised; terminal IME remains unsupported.
+
+
+## 2026-10-17 - Native failure feedback and quit shortcut
+
+Deferred browser initialization now notifies before returning an unavailable
+runtime or startup error. Expected missing-editor probes are silent. The native
+Quit menu now registers Cmd-Q; GUI smoke found that the shortcut was absent.
+
+Real GPUI/subprocess regressions cover visible browser failure notification and
+quiet application discovery. The missing quit binding reproduced in the real
+GPUI key map before the binding fix passed. An isolated fake-provider native
+conversation streamed successfully and displayed the browser-unavailable state.

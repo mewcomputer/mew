@@ -200,10 +200,12 @@ impl DesktopShell {
                         "native browser is unavailable; install the packaged browser runtime"
                             .into(),
                     );
+                    cx.notify();
                     return;
                 }
                 Err(error) => {
                     self.browser_error = Some(format!("could not start native browser: {error:#}"));
+                    cx.notify();
                     return;
                 }
             }
@@ -337,5 +339,78 @@ impl DesktopShell {
         }
         self.browser_native_rect = None;
         self.sync_browser_visibility();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[gpui::test]
+    fn unavailable_browser_runtime_notifies_the_shell(cx: &mut gpui::TestAppContext) {
+        const CHILD: &str = "MEW_TEST_BROWSER_UNAVAILABLE";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "shell::browser::tests::unavailable_browser_runtime_notifies_the_shell",
+                ])
+                .env(CHILD, "1")
+                .env("MEW_CEF_FRAMEWORK_PATH", "/dev/null/mew-missing-cef")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            return;
+        }
+        cx.skip_drawing();
+        let window =
+            cx.add_window(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        let shell = window.root(cx).unwrap();
+        let profile = DesktopConnectionProfile::LocalWebSocket {
+            url: "ws://127.0.0.1:25566".into(),
+        };
+        let page = BrowserPage::new(BrowserOwner {
+            connection_profile: profile.endpoint_label(),
+            session_id: "browser-test".into(),
+        });
+        shell.update(cx, |shell, _| {
+            shell.model.connection = crate::model::ShellConnection::Connected;
+            shell.connection_profile = Some(profile);
+            shell
+                .browser_confirmed_sessions
+                .insert(page.owner.session_id.clone());
+            shell.browser_initialization_pending = Some(page.clone());
+        });
+        let notifications = Rc::new(std::cell::Cell::new(0));
+        let _subscription = cx.update(|cx| {
+            let notifications = notifications.clone();
+            cx.observe(&shell, move |_, _| {
+                notifications.set(notifications.get() + 1)
+            })
+        });
+        cx.update(|cx| {
+            cx.defer(move |cx| {
+                shell.update(cx, |shell, cx| {
+                    shell.initialize_browser_portal(0, page, cx);
+                    assert!(shell.browser_initialization_pending.is_none());
+                    assert!(shell
+                        .browser_error
+                        .as_ref()
+                        .unwrap()
+                        .contains("unavailable"));
+                    shell.quitting = true;
+                });
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            notifications.get(),
+            1,
+            "deferred failure must repaint its error"
+        );
     }
 }
