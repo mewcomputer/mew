@@ -81,8 +81,6 @@ font, font size and wrapping width. Reject mismatched field/text geometry rather
 than returning a stale rectangle. After paint, call
 `Window::invalidate_character_coordinates` when the focused field's geometry,
 text style or selection changes; avoid invalidating it on every idle frame.
-Also invalidate from the window-bounds observer: moving a window changes native
-screen coordinates while the field's local rectangle stays identical.
 
 For application-driven text or selection changes, the pin also exposes
 `Window::notify_text_input_changed` and `notify_text_selection_changed` for native

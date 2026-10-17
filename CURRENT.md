@@ -2497,3 +2497,32 @@ also passed after avoiding background work for empty selections. Strict desktop
 Clippy, formatting and the native build passed, and the debug bundle was
 refreshed. The input and native-smoke guides cover separate background painting
 and window movement.
+
+## 2026-10-17 - Native manual QA closeout
+
+The user clarified that the remaining IME report concerned live window resizing.
+Candidates dismiss during window drag and remain at their screen position during
+live resize, matching the user's comparison with other apps. Initial placement,
+second/wrapped-line composition and post-resize placement were confirmed in the
+native QA checks. The extra window-bounds invalidation added for the movement
+report was removed because no distinct mew defect remained. Composition callbacks
+still refresh shaped geometry before native queries, and painted field changes
+still invalidate native character coordinates.
+
+Cmd-C was the reported Copy shortcut. Its apparent deletion was reproduced as
+invisible selected GPUI text; the retained value and clipboard stayed intact.
+The selection-background fix remains, with real composer and CEF copy/paste
+roundtrips verified. Packaged CEF rendering, native input, resize, scrolling,
+retained pages and clean shutdown checks are complete for this macOS setup.
+
+All 194 desktop tests passed after removing the unnecessary invalidation; the
+unchanged 17 host/browser tests and real AppKit responder regression had already
+passed. Formatting, native build and final debug packaging passed. The QA app
+exited cleanly and its helpers were reaped. The isolated daemon and fixture
+server were then stopped, both disposable QA directories were removed, and small
+diagnostic logs/fixture sources were retained under the process temporary root.
+The selected keyboard layout is U.S. The native-smoke guide now records the
+observed platform behavior rather than requiring the popup to follow a drag.
+
+Optional follow-up: expose native Edit menu actions for terminal/transcript
+focus; their existing keyboard clipboard shortcuts remain supported.

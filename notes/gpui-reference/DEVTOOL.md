@@ -54,8 +54,13 @@ Attaching to a stopped app may launch it without those environment variables.
 Check Pinyin candidates with physical keyboard input on the first and wrapped or
 second lines, then resize and move the window while composing. Check placement
 during the drag and after release, including display transitions when available.
-For CEF, first focus the URL field and then an actual
-page input. Copy/paste, selection and command deletion must edit the page while
+Compare with native apps before treating popup behavior as a geometry defect:
+the macOS manual check found candidates dismiss on window drag and keep their
+screen position during live resize. Reopen candidates after resizing to check
+their new anchor.
+
+For CEF, first focus the URL field and then an actual page input. Copy/paste,
+selection and command deletion must edit the page while
 leaving the URL draft unchanged. Check the native Edit menu too. Background UI
 automation can route key equivalents differently or inject control characters;
 confirm suspected native keyboard failures with the app in the foreground.
