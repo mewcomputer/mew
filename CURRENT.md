@@ -2283,3 +2283,16 @@ passed with both path fixes: 2,472 Rust test executions, 30 web-client tests,
 strict Clippy, formatting, architecture, generated themes, subprocess end-to-end
 checks and the 38-page documentation build. Native checks used the existing
 matching CEF 150.0.14 SDK. The next remote run will verify both platforms.
+
+### 2026-10-14: per-plan names and no CURRENT.md agent directives
+
+Removed the active CURRENT.md instructions from the repository guidance and
+built-in builder persona. The default plan location is now `plans/`: each
+`write_plan` call creates a collision-safe two-word filename using resona,
+returns its path, and `edit_plan` takes that path to revise any generated plan.
+Explicit fixed plan paths retain their overwrite/edit behavior. Generated plan
+paths are kept as references across context compaction.
+
+Verified the plan-tool tests, workspace-scoped agent tests, mew-agent,
+mew-config and prompt tests, formatting, architecture checks, and strict
+Clippy for the changed Rust crates. The full workspace CI gate was not run.

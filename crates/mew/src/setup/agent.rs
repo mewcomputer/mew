@@ -73,6 +73,18 @@ pub(crate) fn build_tools(
     hashline_enabled: bool,
     plan_path: String,
 ) -> Vec<Arc<dyn mew_tools::Tool>> {
+    let (write_plan, edit_plan): (Arc<dyn mew_tools::Tool>, Arc<dyn mew_tools::Tool>) =
+        if plan_path == mew_config::DEFAULT_PLAN_PATH {
+            (
+                Arc::new(WritePlan::generated()),
+                Arc::new(EditPlan::generated()),
+            )
+        } else {
+            (
+                Arc::new(WritePlan::new(plan_path.clone())),
+                Arc::new(EditPlan::new(plan_path)),
+            )
+        };
     let mut tools: Vec<Arc<dyn mew_tools::Tool>> = vec![
         Arc::new(Read),
         Arc::new(Write),
@@ -97,8 +109,8 @@ pub(crate) fn build_tools(
         Arc::new(WebFetch),
         // Plan-workflow tools. Registered unconditionally; nothing enforces
         // planner-only use — persona allowlists gate access when set.
-        Arc::new(WritePlan::new(plan_path.clone())),
-        Arc::new(EditPlan::new(plan_path)),
+        write_plan,
+        edit_plan,
         Arc::new(ProposeGoal),
         Arc::new(CompleteGoal),
         Arc::new(BlockGoal),
@@ -589,7 +601,9 @@ pub(crate) fn build_session_agent(
     agent.max_subagent_depth = cfg.orchestration.max_subagent_depth;
     agent.set_permission_engine(permission_engine);
     maybe_set_classifier_provider(&mut agent, cfg, cat, raw, provider_id, model_id);
-    agent.set_plan_path(&cfg.plan_path);
+    if cfg.plan_path != mew_config::DEFAULT_PLAN_PATH {
+        agent.set_plan_path(&cfg.plan_path);
+    }
     agent.set_personas((*personas_arc).clone());
 
     // Enable a persistent shell session so `cd`, `export`, and other
@@ -712,6 +726,11 @@ fn rebuild_session_system(agent: &mut Agent, ctx_files: &[mew_context::File]) {
     if !ctx_files.is_empty() {
         let rendered_ctx = render_templated_context_files(ctx_files, agent);
         system.push_str(&mew_context::build_system_prompt(&rendered_ctx));
+    }
+    if let Some(path) = agent.resolved_plan_path() {
+        system.push_str(&format!("\n\nConfigured plan file: {}\n", path.display()));
+    } else {
+        system.push_str(&format!("\n\nPlans directory: {}/ (plans/ relative to the workspace). Each write_plan call creates a new plan and returns its path; edit_plan requires that path.\n", agent.cwd.join("plans").display()));
     }
     agent.set_system(system);
 }

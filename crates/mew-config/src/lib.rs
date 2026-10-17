@@ -36,9 +36,9 @@ pub struct Config {
     /// Set to "none" or "default" to start without a persona.
     #[serde(default = "default_persona")]
     pub default_persona: String,
-    /// Where the planner persona writes its plan and the builder reads it.
-    /// Defaults to "PLAN.md" in the workspace root. Can be a relative path
-    /// (".mew/plans/current.md") or absolute.
+    /// Where the planner writes plans and the builder reads them. By default,
+    /// each write creates a new pronounceable filename in `plans/`.
+    /// Other relative or absolute paths name a fixed file.
     #[serde(default = "default_plan_path")]
     pub plan_path: String,
     /// TUI configuration (theme, etc.).
@@ -137,8 +137,10 @@ fn default_persona() -> String {
 }
 
 fn default_plan_path() -> String {
-    "PLAN.md".into()
+    DEFAULT_PLAN_PATH.into()
 }
+
+pub const DEFAULT_PLAN_PATH: &str = "plans/";
 
 impl Default for Config {
     fn default() -> Self {

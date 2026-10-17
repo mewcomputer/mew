@@ -337,7 +337,7 @@ pub struct Agent {
     /// Path to the plan file (e.g. `PLAN.md`). When set and the file exists,
     /// it's auto-flagged as important at the start of each turn so it
     /// survives context compaction without the model having to remember.
-    /// Set from `config.toml: plan_path = "PLAN.md"`.
+    /// Set from the session's resolved `plan_path` configuration.
     pub plan_path: Option<PathBuf>,
     /// Optional callback that builds a new provider for a given
     /// `provider/model` string. Used by the turn loop to try fallback

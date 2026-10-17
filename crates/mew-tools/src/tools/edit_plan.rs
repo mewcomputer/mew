@@ -3,17 +3,25 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::path::PathBuf;
 
-/// Edit the configured plan file with an exact string replacement. Like
-/// `edit_str_replace` but pinned to the session's plan path — the planner
-/// cannot edit arbitrary files. Supports `replace_all` for repeated strings.
+/// Edit a fixed plan path or a named plan in the default `plans/` directory.
+/// Generated plans require an explicit path so prior plans can be revised.
 pub struct EditPlan {
     plan_path: String,
+    generated: bool,
 }
 
 impl EditPlan {
     pub fn new(plan_path: impl Into<String>) -> Self {
         Self {
             plan_path: plan_path.into(),
+            generated: false,
+        }
+    }
+
+    pub fn generated() -> Self {
+        Self {
+            plan_path: "plans".into(),
+            generated: true,
         }
     }
 
@@ -25,6 +33,48 @@ impl EditPlan {
             cwd.join(p)
         }
     }
+
+    fn generated_path(&self, cwd: &std::path::Path, input: &Value) -> Result<PathBuf, ToolError> {
+        use std::path::Component;
+
+        let supplied = input.get("path").and_then(Value::as_str).ok_or_else(|| {
+            ToolError::InvalidInput("missing plan path; use the path returned by write_plan".into())
+        })?;
+        let path = std::path::Path::new(supplied);
+        let relative = if path.is_absolute() {
+            path.strip_prefix(cwd).map_err(|_| {
+                ToolError::InvalidInput(
+                    "plan path must be in the workspace plans/ directory".into(),
+                )
+            })?
+        } else {
+            path
+        };
+        let components: Vec<_> = relative.components().collect();
+        let [Component::Normal(dir), Component::Normal(file)] = components.as_slice() else {
+            return Err(ToolError::InvalidInput(
+                "plan path must be plans/<name>.md".into(),
+            ));
+        };
+        if *dir != "plans" || !file.to_string_lossy().ends_with(".md") {
+            return Err(ToolError::InvalidInput(
+                "plan path must be plans/<name>.md".into(),
+            ));
+        }
+        let name = file.to_string_lossy();
+        let stem = name.strip_suffix(".md").unwrap_or_default();
+        let words: Vec<_> = stem.split('-').collect();
+        if words.len() != 2
+            || words
+                .iter()
+                .any(|word| word.is_empty() || !word.bytes().all(|ch| ch.is_ascii_lowercase()))
+        {
+            return Err(ToolError::InvalidInput(
+                "plan path must be a generated plan filename".into(),
+            ));
+        }
+        Ok(cwd.join(relative))
+    }
 }
 
 #[async_trait]
@@ -34,18 +84,23 @@ impl Tool for EditPlan {
     }
 
     fn description(&self) -> &str {
-        "Replace old_string with new_string in the configured plan file. Exact \
-         match required; fails if ambiguous unless replace_all is set. Intended \
-         for the planning workflow: use write_plan first, then edit_plan to \
-         revise after user feedback."
+        "Replace old_string with new_string in a plan. For generated plans, \
+         supply the path returned by write_plan; configured fixed paths need \
+         no path. Exact match required unless replace_all is set."
     }
 
     fn schema(&self) -> &Value {
-        static SCHEMA: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
-        SCHEMA.get_or_init(|| {
+        static FIXED: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+        static GENERATED: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+        let schema = if self.generated { &GENERATED } else { &FIXED };
+        schema.get_or_init(|| {
             serde_json::json!({
                 "type": "object",
                 "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path returned by write_plan. Required for generated plans in plans/."
+                    },
                     "old_string": {
                         "type": "string",
                         "description": "The exact text to replace."
@@ -59,7 +114,7 @@ impl Tool for EditPlan {
                         "description": "Replace every occurrence instead of requiring a unique match. Defaults to false."
                     }
                 },
-                "required": ["old_string", "new_string"]
+                "required": if self.generated { vec!["path", "old_string", "new_string"] } else { vec!["old_string", "new_string"] }
             })
         })
     }
@@ -82,7 +137,25 @@ impl Tool for EditPlan {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let path = self.resolve(&ctx.cwd);
+        let path = if self.generated {
+            let path = self.generated_path(&ctx.cwd, &input)?;
+            for check in [&ctx.cwd.join("plans"), &path] {
+                let metadata = tokio::fs::symlink_metadata(check).await.map_err(|e| {
+                    ToolError::Execution(format!(
+                        "plan file {} could not be inspected ({e})",
+                        check.display()
+                    ))
+                })?;
+                if metadata.file_type().is_symlink() {
+                    return Err(ToolError::InvalidInput(
+                        "generated plan paths cannot be symlinks".into(),
+                    ));
+                }
+            }
+            path
+        } else {
+            self.resolve(&ctx.cwd)
+        };
         let content = tokio::fs::read_to_string(&path).await.map_err(|e| {
             ToolError::Execution(format!(
                 "plan file {} could not be read ({e}) — use write_plan first",
@@ -238,5 +311,72 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("write_plan"));
+    }
+
+    #[tokio::test]
+    async fn generated_edit_requires_a_plan_path_and_cannot_escape_plans() {
+        let dir = tempfile::tempdir().unwrap();
+        let writer = crate::tools::write_plan::WritePlan::generated();
+        writer
+            .execute(
+                ctx(dir.path().to_path_buf()),
+                serde_json::json!({"content": "first"}),
+            )
+            .await
+            .unwrap();
+        let path = std::fs::read_dir(dir.path().join("plans"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let tool = EditPlan::generated();
+        let input = serde_json::json!({"old_string": "first", "new_string": "revised"});
+        assert!(tool
+            .execute(ctx(dir.path().to_path_buf()), input.clone())
+            .await
+            .is_err());
+        assert!(tool
+            .execute(
+                ctx(dir.path().to_path_buf()),
+                serde_json::json!({"path": "plans/../outside.md", "old_string": "first", "new_string": "revised"}),
+            )
+            .await
+            .is_err());
+        assert!(tool
+            .execute(
+                ctx(dir.path().to_path_buf()),
+                serde_json::json!({"path": dir.path().join("outside.md"), "old_string": "first", "new_string": "revised"}),
+            )
+            .await
+            .is_err());
+        tool.execute(
+            ctx(dir.path().to_path_buf()),
+            serde_json::json!({"path": path, "old_string": "first", "new_string": "revised"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "revised");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn generated_edit_rejects_a_symlinked_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let plans = dir.path().join("plans");
+        std::fs::create_dir(&plans).unwrap();
+        let outside = dir.path().join("outside.md");
+        std::fs::write(&outside, "do not change").unwrap();
+        std::os::unix::fs::symlink(&outside, plans.join("luma-vare.md")).unwrap();
+        let err = EditPlan::generated()
+            .execute(
+                ctx(dir.path().to_path_buf()),
+                serde_json::json!({"path": "plans/luma-vare.md", "old_string": "do not", "new_string": "please"}),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("symlink"));
+        assert_eq!(std::fs::read_to_string(outside).unwrap(), "do not change");
     }
 }

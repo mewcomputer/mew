@@ -3,18 +3,25 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::path::PathBuf;
 
-/// Write the full content of the configured plan file. Unlike `write`, this
-/// tool has no `path` parameter — it always targets the plan path configured
-/// for the session (`config.toml: plan_path`, default `PLAN.md`), so the
-/// planner cannot write arbitrary files.
+/// Write a plan to the configured path, or create a new file in `plans/` when
+/// the default plan location is selected. No arbitrary path input is accepted.
 pub struct WritePlan {
     plan_path: String,
+    generated: bool,
 }
 
 impl WritePlan {
     pub fn new(plan_path: impl Into<String>) -> Self {
         Self {
             plan_path: plan_path.into(),
+            generated: false,
+        }
+    }
+
+    pub fn generated() -> Self {
+        Self {
+            plan_path: "plans".into(),
+            generated: true,
         }
     }
 
@@ -37,9 +44,9 @@ impl Tool for WritePlan {
     }
 
     fn description(&self) -> &str {
-        "Write the full content of the configured plan file (creates or \
-         overwrites). Intended for the planning workflow: draft the plan here, \
-         then summarize it for the user."
+        "Write the full plan. By default each call creates a new named file in plans/; \
+         configured fixed paths are overwritten. The result contains the path to \
+         use with edit_plan or to give to the builder."
     }
 
     fn schema(&self) -> &Value {
@@ -68,26 +75,69 @@ impl Tool for WritePlan {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidInput("missing content".into()))?;
 
-        let path = self.resolve(&ctx.cwd);
-
-        let old_content = tokio::fs::read_to_string(&path).await.ok();
-
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| ToolError::Execution(format!("create dirs failed: {}", e)))?;
+        let target = self.resolve(&ctx.cwd);
+        let parent_dir = if self.generated {
+            target.as_path()
+        } else {
+            target.parent().unwrap_or(std::path::Path::new("."))
+        };
+        let old_content = if self.generated {
+            None
+        } else {
+            tokio::fs::read_to_string(&target).await.ok()
+        };
+        tokio::fs::create_dir_all(parent_dir)
+            .await
+            .map_err(|e| ToolError::Execution(format!("create dirs failed: {e}")))?;
+        if self.generated {
+            let metadata = tokio::fs::symlink_metadata(parent_dir).await.map_err(|e| {
+                ToolError::Execution(format!("inspect plans directory failed: {e}"))
+            })?;
+            if metadata.file_type().is_symlink() {
+                return Err(ToolError::InvalidInput(
+                    "plans directory cannot be a symlink".into(),
+                ));
+            }
         }
 
-        // Atomic write: write to a temp file in the same directory, then rename.
-        let parent_dir = path.parent().unwrap_or(std::path::Path::new("."));
+        // A same-directory temp file keeps fixed-path renames atomic. For new
+        // plans, linking it is atomic and refuses to replace an existing name.
         let tmp = parent_dir.join(format!(".mew-tmp-{}", ulid::Ulid::new()));
         tokio::fs::write(&tmp, content)
             .await
-            .map_err(|e| ToolError::Execution(format!("write failed: {}", e)))?;
-        if let Err(e) = tokio::fs::rename(&tmp, &path).await {
+            .map_err(|e| ToolError::Execution(format!("write failed: {e}")))?;
+        let result = if self.generated {
+            async {
+                for _ in 0..16 {
+                    let config = resona::Config::default();
+                    let first = resona::sona(&config)
+                        .map_err(|e| ToolError::Execution(format!("plan name failed: {e}")))?;
+                    let second = resona::sona(&config)
+                        .map_err(|e| ToolError::Execution(format!("plan name failed: {e}")))?;
+                    let path = parent_dir.join(format!("{first}-{second}.md"));
+                    match tokio::fs::hard_link(&tmp, &path).await {
+                        Ok(()) => return Ok(path),
+                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                        Err(e) => {
+                            return Err(ToolError::Execution(format!("create plan failed: {e}")))
+                        }
+                    }
+                }
+                Err(ToolError::Execution(
+                    "could not find an unused plan name".into(),
+                ))
+            }
+            .await
+        } else {
+            tokio::fs::rename(&tmp, &target)
+                .await
+                .map(|()| target)
+                .map_err(|e| ToolError::Execution(format!("rename failed: {e}")))
+        };
+        if self.generated || result.is_err() {
             let _ = tokio::fs::remove_file(&tmp).await;
-            return Err(ToolError::Execution(format!("rename failed: {}", e)));
         }
+        let path = result?;
 
         let diff = if let Some(ref old) = old_content {
             let mut diff_text = format!(
@@ -114,7 +164,16 @@ impl Tool for WritePlan {
         };
 
         Ok(ToolOutput {
-            output: format!("wrote {} bytes to {}", content.len(), path.display()),
+            output: if self.generated {
+                format!(
+                    "wrote {} bytes to {} (plan path: {})",
+                    content.len(),
+                    path.display(),
+                    path.strip_prefix(&ctx.cwd).unwrap_or(&path).display()
+                )
+            } else {
+                format!("wrote {} bytes to {}", content.len(), path.display())
+            },
             error: String::new(),
             diff,
             file_delta: Some(super::compute_file_delta(
@@ -208,6 +267,29 @@ mod tests {
         .unwrap();
         let written = tokio::fs::read_to_string(&abs).await.unwrap();
         assert_eq!(written, "abs");
+    }
+
+    #[tokio::test]
+    async fn generated_plans_do_not_overwrite_each_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = WritePlan::generated();
+        for content in ["first", "second"] {
+            let result = tool
+                .execute(
+                    ctx(dir.path().to_path_buf()),
+                    serde_json::json!({"content": content}),
+                )
+                .await
+                .unwrap();
+            assert!(result.output.contains("plans/"));
+        }
+        let contents: Vec<_> = std::fs::read_dir(dir.path().join("plans"))
+            .unwrap()
+            .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+            .collect();
+        assert_eq!(contents.len(), 2);
+        assert!(contents.contains(&"first".to_string()));
+        assert!(contents.contains(&"second".to_string()));
     }
 
     #[tokio::test]

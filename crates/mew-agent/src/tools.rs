@@ -708,8 +708,27 @@ impl Agent {
                     })
                     .await;
             }
-            // If the flag_important tool ran, emit the current flagged-files set.
-            if tc.tool_name == "flag_important" {
+            // Keep generated plan paths discoverable after compaction without
+            // inlining every plan written during a session.
+            if success && tc.tool_name == "write_plan" && self.plan_path.is_none() {
+                if let Some(delta) = &output.file_delta {
+                    let path = std::path::PathBuf::from(&delta.path);
+                    let mut flagged = self.flagged_files.lock().await;
+                    if !flagged.iter().any(|file| file.path == path) {
+                        flagged.push(mew_tools::tools::flag_important::FlaggedFile {
+                            path,
+                            mode: mew_tools::tools::flag_important::FlagMode::Referenced,
+                        });
+                    }
+                }
+            }
+            // Publish changes made by flag_important or generated plan writes.
+            if tc.tool_name == "flag_important"
+                || (success
+                    && tc.tool_name == "write_plan"
+                    && self.plan_path.is_none()
+                    && output.file_delta.is_some())
+            {
                 let files: Vec<crate::FlaggedFileInfo> = self
                     .flagged_files
                     .lock()
