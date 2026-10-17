@@ -2384,3 +2384,12 @@ Real GPUI/subprocess regressions cover visible browser failure notification and
 quiet application discovery. The missing quit binding reproduced in the real
 GPUI key map before the binding fix passed. An isolated fake-provider native
 conversation streamed successfully and displayed the browser-unavailable state.
+
+
+## 2026-10-17 - Isolated desktop CI configuration
+
+The existing macOS default-config-path test now checks the actual resolver in
+a subprocess without MEW_CONFIG_DIR or XDG_CONFIG_HOME overrides. This preserves
+the default-path assertion while letting full CI isolate desktop settings and
+sessions from the user's data. The prior assertion failed under the isolated
+environment; the focused regression and full isolated CI gate then passed.

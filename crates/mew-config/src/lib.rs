@@ -1055,6 +1055,25 @@ values = ["sk_test_deadbeef"]
     #[cfg(target_os = "macos")]
     #[test]
     fn test_macos_config_dir_uses_xdg_style_location() {
+        if std::env::var_os("MEW_CONFIG_DIR").is_some()
+            || std::env::var_os("XDG_CONFIG_HOME").is_some()
+        {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::test_macos_config_dir_uses_xdg_style_location",
+                ])
+                .env_remove("MEW_CONFIG_DIR")
+                .env_remove("XDG_CONFIG_HOME")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            return;
+        }
         let home = std::env::var_os("HOME").expect("HOME should be set on macOS");
         assert_eq!(config_dir(), PathBuf::from(home).join(".config/mew"));
     }
