@@ -2316,3 +2316,16 @@ Native checks used the matching CEF SDK at target/cef-sdk. The first full gate
 exhausted disk space during test compilation; removing only generated artifacts
 created during this task and retrying with two compiler jobs completed the gate.
 The existing block crate future-compatibility and web bundle-size warnings remain.
+
+
+## 2026-10-17 - Ghostty 0.2.2 native API
+
+Upgraded the safe terminal wrapper to exactly 0.2.2 and aligned the existing
+vendored bindings and generator with its pinned Ghostty C revision. This takes
+the upstream render-setter pointer fix instead of masking invalid dirty-state
+values in the desktop. Unused Kitty graphics features remain disabled.
+
+The native archive now includes its SIMD dependencies, so the build links the
+single archive and preserves Cargo-scoped Zig outputs. Validation matched all
+173 exported bindings to the native headers and passed the real external-cache
+rebuild plus a linked, executed FFI probe. The production desktop build passed.

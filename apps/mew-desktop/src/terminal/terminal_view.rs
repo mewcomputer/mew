@@ -118,7 +118,7 @@ impl TerminalView {
                 Some(DeviceAttributes {
                     primary: PrimaryDeviceAttributes::new(
                         ConformanceLevel::VT220,
-                        [
+                        &[
                             DeviceAttributeFeature::COLUMNS_132,
                             DeviceAttributeFeature::SELECTIVE_ERASE,
                             DeviceAttributeFeature::ANSI_COLOR,

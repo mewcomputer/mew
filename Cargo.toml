@@ -80,7 +80,7 @@ minijinja = "2"
 shell-words = "1"
 
 # native terminal emulation
-libghostty-vt = "0.1"
+libghostty-vt = { version = "=0.2.2", default-features = false }
 
 # id generation
 ulid = { version = "1", features = ["serde"] }

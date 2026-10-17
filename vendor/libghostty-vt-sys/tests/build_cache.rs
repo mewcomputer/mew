@@ -55,7 +55,7 @@ fn native_archives_are_resolved_with_external_zig_caches() {
         .lines()
         .find_map(|line| line.strip_prefix("host: "))
         .unwrap();
-    let compiled = Command::new(rustc)
+    let compiled = Command::new(&rustc)
         .arg("--edition=2024")
         .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("build.rs"))
         .arg("-o")
@@ -83,15 +83,35 @@ fn native_archives_are_resolved_with_external_zig_caches() {
         "{}",
         String::from_utf8_lossy(&built.stderr)
     );
-    for archive in [
-        "libghostty-vt.a",
-        "libsimdutf.a",
-        "libhighway.a",
-        "libutfcpp.a",
-    ] {
-        let installed = output.join("ghostty-install/lib").join(archive);
-        assert!(std::fs::metadata(installed).unwrap().len() > 0, "{archive}");
+    let lib_dir = output.join("ghostty-install/lib");
+    assert!(std::fs::metadata(lib_dir.join("libghostty-vt.a")).unwrap().len() > 0);
+    let probe_source = temporary.0.join("probe.rs");
+    std::fs::write(&probe_source, r#"
+use std::ffi::c_void;
+unsafe extern "C" {
+    fn ghostty_key_event_new(allocator: *const c_void, event: *mut *mut c_void) -> i32;
+    fn ghostty_key_event_free(event: *mut c_void);
+}
+fn main() {
+    let mut event = std::ptr::null_mut();
+    unsafe {
+        assert_eq!(ghostty_key_event_new(std::ptr::null(), &mut event), 0);
+        assert!(!event.is_null());
+        ghostty_key_event_free(event);
     }
+}
+"#).unwrap();
+    let probe = temporary.0.join("probe");
+    let linked = Command::new(&rustc)
+        .arg("--edition=2024")
+        .arg(&probe_source)
+        .args(["-L", &format!("native={}", lib_dir.display()), "-l", "static=ghostty-vt"])
+        .arg("-o")
+        .arg(&probe)
+        .output()
+        .unwrap();
+    assert!(linked.status.success(), "{}", String::from_utf8_lossy(&linked.stderr));
+    assert!(Command::new(probe).status().unwrap().success());
     assert!(
         output
             .join("ghostty-install/include/ghostty/vt.h")
