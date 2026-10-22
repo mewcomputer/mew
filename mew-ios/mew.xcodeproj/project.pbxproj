@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		B67F88A1A1044574B031AE64 /* DaemonManagementView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE63 /* DaemonManagementView.swift */; };
+		B67F88A1A1044574B031AE65 /* DaemonManagementView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE63 /* DaemonManagementView.swift */; };
 		B67F88A1A1044574B031AE54 /* PhoneSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE53 /* PhoneSettings.swift */; };
 		B67F88A1A1044574B031AE55 /* PhoneSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE53 /* PhoneSettings.swift */; };
 		B67F88A1A1044574B031AE52 /* PhoneSettingsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE51 /* PhoneSettingsTests.swift */; };
@@ -95,6 +97,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		B67F88A1A1044574B031AE63 /* DaemonManagementView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonManagementView.swift; sourceTree = "<group>"; };
 		B67F88A1A1044574B031AE53 /* PhoneSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneSettings.swift; sourceTree = "<group>"; };
 		B67F88A1A1044574B031AE51 /* PhoneSettingsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneSettingsTests.swift; sourceTree = "<group>"; };
 		BDD7B0882730ED265818ED48 /* AppNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppNavigation.swift; sourceTree = "<group>"; };
@@ -235,6 +238,7 @@
 			children = (
 				545CECE3392D12E734D9A133 /* AppStore.swift */,
 				B67F88A1A1044574B031AE53 /* PhoneSettings.swift */,
+				B67F88A1A1044574B031AE63 /* DaemonManagementView.swift */,
 				B88D5B96B52F24E2D3C0DD85 /* ChatView.swift */,
 				B67F88A1A1044574B031AE21 /* ConversationActivity.swift */,
 				B67F88A1A1044574B031AE33 /* SessionTimeline.swift */,
@@ -390,6 +394,7 @@
 			files = (
 				36E2687C83C9A15519FBB164 /* AppStore.swift in Sources */,
 				B67F88A1A1044574B031AE54 /* PhoneSettings.swift in Sources */,
+				B67F88A1A1044574B031AE64 /* DaemonManagementView.swift in Sources */,
 				64FF009410027CFE96073711 /* ChatView.swift in Sources */,
 				B67F88A1A1044574B031AE23 /* ConversationActivity.swift in Sources */,
 				B67F88A1A1044574B031AE35 /* SessionTimeline.swift in Sources */,
@@ -428,6 +433,7 @@
 			files = (
 				0BAEB661227D370ACEAB5007 /* AppStore.swift in Sources */,
 				B67F88A1A1044574B031AE55 /* PhoneSettings.swift in Sources */,
+				B67F88A1A1044574B031AE65 /* DaemonManagementView.swift in Sources */,
 				FDEC179FCD1D0B1F5CA253E1 /* ChatView.swift in Sources */,
 				B67F88A1A1044574B031AE22 /* ConversationActivity.swift in Sources */,
 				B67F88A1A1044574B031AE34 /* SessionTimeline.swift in Sources */,

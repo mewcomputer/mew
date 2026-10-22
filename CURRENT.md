@@ -2911,3 +2911,29 @@ through clean connection closure. Rebuilt device/simulator/host core artifacts
 and regenerated the checked-in Swift bindings. All 125 iOS tests pass on both
 simulator and physical iPhone using the rebuilt core; the Swift integration is
 recorded in the next chunk.
+
+# 2026-10-22 — iOS new-chat defaults and paired-device screens
+
+Machine details now links to new-chat defaults and paired-device management.
+Defaults show confirmed policy, preview the open chat's settings before saving,
+and explain that changes affect new chats from every client. Save, reset and
+revocation require explicit confirmation. Device details show access scope,
+pairing date and copyable identity; self-revocation explains disconnection and
+re-pairing. Confirmed revocation retains its detail screen with an access-revoked
+state even after its list row disappears.
+
+Reads and mutations correlate daemon/request identities, prohibit overlapping
+requests, expire after five seconds, and invalidate on disconnect/removal.
+Unsolicited updates do not acknowledge another pending mutation, and failed
+operations retain prior confirmed values. Saving requires the exact confirmed
+selected chat. Updated-daemon and full-control requirements are visible.
+
+All 125 tests pass on simulator and physical iPhone from the final sources,
+including timeout/chat isolation and navigation through confirmed revocation.
+Inspected seeded simulator previews of defaults, paired devices, revocation,
+loading, offline and permission failures, plus dark mode and accessibility text.
+Saved a before/after revocation GIF outside the repo, removed capture fixtures
+and updated user/developer documentation. Full-workspace pre-commit Clippy,
+formatting and architecture checks pass. Physical haptic feel, VoiceOver,
+keyboard/gesture behavior and live network-change walkthroughs remain manual
+verification work.

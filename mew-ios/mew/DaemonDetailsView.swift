@@ -32,6 +32,10 @@ struct DaemonDetailsView: View {
                     connectionSection
                     nicknameSection(daemon)
                     automationSections
+                    Section("Daemon settings") {
+                        NavigationLink("New chat defaults") { DaemonDefaultsView(daemonNodeId: daemonNodeId) }
+                        NavigationLink("Paired devices") { PairedDevicesView(daemonNodeId: daemonNodeId) }
+                    }
                     advancedSection(daemon)
                     Section {
                         Button("Remove from this phone", role: .destructive) {

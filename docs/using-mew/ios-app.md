@@ -169,11 +169,22 @@ the information button for that machine's details:
 - **Connection** offers Retry connection or Pair again when needed.
 - **Auto-title** affects prompts sent through this phone's current connection.
 - **Auto-summary** affects every session and client on the daemon.
+- **New chat defaults** reads the daemon's saved model, provider, persona,
+  thinking and permission policy. Use the open chat's settings as defaults,
+  or reset to the daemon's startup configuration. This affects new chats from
+  every client; existing chats retain their own settings.
+- **Paired devices** lists authorized devices and their access level. Open a
+  device to revoke it, including this phone. Revocation disconnects the device
+  and requires a new pairing invite; conversations remain on the machine.
 - **Advanced** contains the daemon version and copyable Node ID.
 
 Automation controls display values confirmed by the daemon. Update the daemon
 to use these controls and scoped chat-opening errors; older versions show
-settings as unavailable rather than assuming they are off. Removing a saved
+settings as unavailable rather than assuming they are off. New-chat defaults
+and paired-device controls require an updated daemon and full-control access.
+They show confirmed results, retain prior values on failure and expire requests
+when connections change. Some token-only remote endpoints cannot list devices;
+the app explicitly reports that limitation. Removing a saved
 connection disconnects this phone and removes its local entry. It keeps the
 daemon's conversations and does not revoke the phone's authorization.
 

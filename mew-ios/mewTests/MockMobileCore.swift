@@ -25,6 +25,10 @@ final class MockMobileCore: @preconcurrency MobileCoreProtocol {
     var settingsReadCalls: [String] = []
     var autoTitleCalls: [(nodeId: String, enabled: Bool)] = []
     var autoSummaryCalls: [(nodeId: String, enabled: Bool)] = []
+    var managementReadCalls: [(nodeId: String, requestId: String)] = []
+    var saveDefaultsCalls: [(nodeId: String, sessionId: String, requestId: String)] = []
+    var resetDefaultsCalls: [(nodeId: String, requestId: String)] = []
+    var revokeDeviceCalls: [(nodeId: String, deviceId: String, requestId: String)] = []
     var askUserCancelCalls: [(nodeId: String, requestId: String)] = []
     var cancelCalls: [String] = []
     var attachCalls: [(nodeId: String, sessionId: String)] = []
@@ -152,6 +156,26 @@ final class MockMobileCore: @preconcurrency MobileCoreProtocol {
     }
     func setAutoSummary(id: DaemonId, enabled: Bool) -> Bool {
         autoSummaryCalls.append((id.nodeId, enabled))
+        return settingsAccepted
+    }
+
+    func readDaemonSettings(id: DaemonId, requestId: String) -> Bool {
+        managementReadCalls.append((id.nodeId, requestId))
+        return settingsAccepted
+    }
+
+    func saveSessionDefaults(id: DaemonId, sessionId: String, requestId: String) -> Bool {
+        saveDefaultsCalls.append((id.nodeId, sessionId, requestId))
+        return settingsAccepted
+    }
+
+    func resetSessionDefaults(id: DaemonId, requestId: String) -> Bool {
+        resetDefaultsCalls.append((id.nodeId, requestId))
+        return settingsAccepted
+    }
+
+    func revokeDevice(id: DaemonId, deviceId: String, requestId: String) -> Bool {
+        revokeDeviceCalls.append((id.nodeId, deviceId, requestId))
         return settingsAccepted
     }
 

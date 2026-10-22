@@ -1,5 +1,6 @@
 import XCTest
 import SwiftUI
+import Combine
 import MewMobileCore
 @testable import mew
 
@@ -28,6 +29,172 @@ final class AppStoreEventHandlingTests: XCTestCase {
         store = nil
         mock = nil
         super.tearDown()
+    }
+
+    func testManagementReadsRequireTheirOwnDaemonAndRequestBeforePublishingDefaults() throws {
+        store.daemonStatuses["daemon-2"] = .connected
+        store.readDaemonManagementSettings(daemonNodeId: "daemon-2")
+        let id = try XCTUnwrap(mock.managementReadCalls.first?.requestId)
+        XCTAssertNil(store.managementSettings["daemon-2"])
+        let settings = DaemonManagementSettings(defaults: nil, devices: nil)
+        store.handleEvent(.daemonManagementSettings(daemon: "daemon-1", requestId: id, settings: settings))
+        store.handleEvent(.daemonManagementSettings(daemon: "daemon-2", requestId: "old", settings: settings))
+        XCTAssertNil(store.managementSettings["daemon-1"])
+        XCTAssertNil(store.managementSettings["daemon-2"])
+        store.handleEvent(.daemonManagementSettings(daemon: "daemon-2", requestId: id, settings: settings))
+        XCTAssertNotNil(store.managementSettings["daemon-2"])
+        XCTAssertNil(store.managementSettings["daemon-2"]?.defaults)
+        XCTAssertNil(store.managementSettings["daemon-2"]?.devices)
+        XCTAssertNil(store.managementRequestIds["daemon-2"])
+    }
+
+    func testManagementFailureKeepsConfirmedValuesAndCanBeRetried() throws {
+        store.daemonStatuses["daemon-1"] = .connected
+        store.managementSettings["daemon-1"] = managementSnapshot(model: "confirmed")
+        store.resetSessionDefaults(daemonNodeId: "daemon-1")
+        let id = try XCTUnwrap(mock.resetDefaultsCalls.first?.requestId)
+        store.handleEvent(.daemonManagementFailed(daemon: "daemon-1", requestId: "old", message: "late"))
+        XCTAssertNil(store.managementErrors["daemon-1"])
+        store.handleEvent(.daemonManagementFailed(daemon: "daemon-1", requestId: id, message: "Read only"))
+        XCTAssertEqual(store.managementSettings["daemon-1"]?.defaults?.model, "confirmed")
+        XCTAssertEqual(store.managementErrors["daemon-1"], "Read only")
+        XCTAssertNil(store.managementRequestIds["daemon-1"])
+        store.readDaemonManagementSettings(daemonNodeId: "daemon-1")
+        XCTAssertNil(store.managementErrors["daemon-1"])
+        XCTAssertEqual(mock.managementReadCalls.count, 1)
+    }
+
+    func testUnsolicitedManagementUpdatesDoNotFinishAnotherPendingMutation() throws {
+        store.daemonStatuses["daemon-1"] = .connected
+        store.managementSettings["daemon-1"] = managementSnapshot(model: "old")
+        store.resetSessionDefaults(daemonNodeId: "daemon-1")
+        let id = try XCTUnwrap(mock.resetDefaultsCalls.first?.requestId)
+        store.handleEvent(.daemonManagementSettings(daemon: "daemon-1", requestId: nil, settings: managementSnapshot(model: "elsewhere")))
+        XCTAssertEqual(store.managementSettings["daemon-1"]?.defaults?.model, "elsewhere")
+        XCTAssertEqual(store.managementRequestIds["daemon-1"], id)
+        store.handleEvent(.daemonManagementSettings(daemon: "daemon-1", requestId: id,
+            settings: DaemonManagementSettings(defaults: nil, devices: [])))
+        XCTAssertNil(store.managementRequestIds["daemon-1"])
+        XCTAssertNil(store.managementSettings["daemon-1"]?.defaults)
+    }
+
+    func testDisconnectInvalidatesManagementRepliesAndQueuedMutations() throws {
+        store.daemonStatuses["daemon-1"] = .connected
+        store.readDaemonManagementSettings(daemonNodeId: "daemon-1")
+        let id = try XCTUnwrap(mock.managementReadCalls.first?.requestId)
+        store.handleEvent(.daemonStatusChanged(daemon: "daemon-1", status: .disconnected))
+        store.handleEvent(.daemonManagementSettings(daemon: "daemon-1", requestId: id, settings: managementSnapshot(model: "late")))
+        store.handleEvent(.daemonManagementSettings(daemon: "daemon-1", requestId: nil, settings: managementSnapshot(model: "late")))
+        store.resetSessionDefaults(daemonNodeId: "daemon-1")
+        XCTAssertNil(store.managementSettings["daemon-1"])
+        XCTAssertNil(store.managementRequestIds["daemon-1"])
+        XCTAssertTrue(mock.resetDefaultsCalls.isEmpty)
+        XCTAssertNotNil(store.managementErrors["daemon-1"])
+    }
+
+    func testSavingDefaultsRequiresTheConfirmedChatAndWaitsForAcknowledgment() throws {
+        mock.snapshotResult = historySnapshot(before: nil, texts: [])
+        store.daemonStatuses["daemon-1"] = .connected
+        store.managementSettings["daemon-1"] = managementSnapshot(model: "old")
+        store.saveSessionDefaults(daemonNodeId: "daemon-2", sessionId: "sess-1")
+        store.saveSessionDefaults(daemonNodeId: "daemon-1", sessionId: "other")
+        XCTAssertTrue(mock.saveDefaultsCalls.isEmpty)
+        store.saveSessionDefaults(daemonNodeId: "daemon-1", sessionId: "sess-1")
+        let call = try XCTUnwrap(mock.saveDefaultsCalls.first)
+        XCTAssertEqual(call.nodeId, "daemon-1")
+        XCTAssertEqual(call.sessionId, "sess-1")
+        XCTAssertEqual(store.managementSettings["daemon-1"]?.defaults?.model, "old")
+        store.handleEvent(.daemonManagementSettings(daemon: "daemon-1", requestId: call.requestId, settings: managementSnapshot(model: "saved")))
+        XCTAssertEqual(store.managementSettings["daemon-1"]?.defaults?.model, "saved")
+    }
+
+    func testRevokeUsesAConfirmedDeviceOnItsOwnMachineWithoutOptimisticRemoval() throws {
+        store.daemonStatuses["daemon-2"] = .connected
+        store.managementSettings["daemon-2"] = managementSnapshot(model: "default")
+        store.revokeDevice(daemonNodeId: "daemon-2", deviceId: "unknown")
+        XCTAssertTrue(mock.revokeDeviceCalls.isEmpty)
+        store.revokeDevice(daemonNodeId: "daemon-2", deviceId: "phone")
+        let call = try XCTUnwrap(mock.revokeDeviceCalls.first)
+        XCTAssertEqual(call.nodeId, "daemon-2")
+        XCTAssertEqual(call.deviceId, "phone")
+        XCTAssertEqual(store.managementSettings["daemon-2"]?.devices?.count, 1)
+        store.handleEvent(.daemonManagementSettings(daemon: "daemon-2", requestId: call.requestId,
+            settings: DaemonManagementSettings(defaults: nil, devices: [])))
+        XCTAssertEqual(store.managementSettings["daemon-2"]?.devices?.count, 0)
+    }
+
+    func testManagementRequestsDoNotOverlapAndRejectedSendsNeverInventSettings() {
+        store.daemonStatuses["daemon-1"] = .connected
+        mock.settingsAccepted = false
+        store.readDaemonManagementSettings(daemonNodeId: "daemon-1")
+        XCTAssertNil(store.managementRequestIds["daemon-1"])
+        XCTAssertNil(store.managementSettings["daemon-1"])
+        XCTAssertNotNil(store.managementErrors["daemon-1"])
+        mock.settingsAccepted = true
+        store.readDaemonManagementSettings(daemonNodeId: "daemon-1")
+        store.readDaemonManagementSettings(daemonNodeId: "daemon-1")
+        store.resetSessionDefaults(daemonNodeId: "daemon-1")
+        XCTAssertEqual(mock.managementReadCalls.count, 2)
+        XCTAssertTrue(mock.resetDefaultsCalls.isEmpty)
+    }
+
+    func testUnsupportedManagementRequestsTimeOutAndIgnoreLateReplies() async throws {
+        store.daemonStatuses["daemon-1"] = .connected
+        mock.snapshotResult = historySnapshot(before: nil, texts: [])
+        XCTAssertTrue(store.sendPrompt("keep pending"))
+        let timedOut = expectation(description: "Unconfirmed management request expires")
+        let observation = store.$managementErrors.sink { errors in
+            if errors["daemon-1"] != nil { timedOut.fulfill() }
+        }
+        store.readDaemonManagementSettings(daemonNodeId: "daemon-1")
+        let id = try XCTUnwrap(mock.managementReadCalls.first?.requestId)
+        await fulfillment(of: [timedOut], timeout: 7)
+        observation.cancel()
+        XCTAssertFalse(store.canSendPrompt, "Settings compatibility must not release the pending chat submission")
+        XCTAssertNotEqual(store.lastTurnFailed["sess-1"], true)
+        XCTAssertTrue(store.alerts.isEmpty)
+        XCTAssertNil(store.managementRequestIds["daemon-1"])
+        XCTAssertNil(store.managementSettings["daemon-1"])
+        store.handleEvent(.daemonManagementSettings(daemon: "daemon-1", requestId: id, settings: managementSnapshot(model: "late")))
+        XCTAssertNil(store.managementSettings["daemon-1"])
+    }
+
+    func testDeviceDetailStaysOpenAfterConfirmedRevocationRemovesItsListRow() async throws {
+        let settings = managementSnapshot(model: "saved")
+        let device = try XCTUnwrap(settings.devices?.first)
+        store.daemonStatuses["daemon-1"] = .connected
+        store.managementSettings["daemon-1"] = settings
+        let controller = UIHostingController(rootView: NavigationStack(path: .constant([device])) {
+            PairedDevicesView(daemonNodeId: "daemon-1")
+        }.environmentObject(store))
+        let window = UIWindow(windowScene: try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene))
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        func navigationBar(in view: UIView) -> UINavigationBar? {
+            if let bar = view as? UINavigationBar { return bar }
+            return view.subviews.lazy.compactMap { navigationBar(in: $0) }.first
+        }
+        let opened = expectation(for: NSPredicate { _, _ in
+            navigationBar(in: controller.view)?.topItem?.title == device.name
+        }, evaluatedWith: nil)
+        await fulfillment(of: [opened], timeout: 3)
+        let readId = try XCTUnwrap(store.managementRequestIds["daemon-1"])
+        store.handleEvent(.daemonManagementSettings(daemon: "daemon-1", requestId: readId, settings: settings))
+        store.revokeDevice(daemonNodeId: "daemon-1", deviceId: device.id)
+        let revokeId = try XCTUnwrap(mock.revokeDeviceCalls.first?.requestId)
+        store.handleEvent(.daemonManagementSettings(daemon: "daemon-1", requestId: revokeId,
+            settings: DaemonManagementSettings(defaults: settings.defaults, devices: [])))
+        // Allow navigation to react to removal of the source row.
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(navigationBar(in: controller.view)?.topItem?.title, device.name)
+        XCTAssertEqual(store.managementSettings["daemon-1"]?.devices, [])
+    }
+
+    private func managementSnapshot(model: String) -> DaemonManagementSettings {
+        DaemonManagementSettings(defaults: NewChatDefaults(model: model, provider: "test", persona: "builder",
+            thinkingVariant: nil, permissionMode: "standard"),
+            devices: [PairedDevice(id: "phone", name: "My phone", nodeId: "phone-node", scope: "control", pairedAt: 123)])
     }
 
     func testToolOnlyMessagesStayCompactInConversation() {

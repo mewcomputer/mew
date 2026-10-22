@@ -168,6 +168,10 @@ final class AppStore: ObservableObject {
     @Published var modelsByDaemon: [String: [ModelSummary]] = [:]
     @Published var daemonSettings: [String: AutomationSettings] = [:]
     @Published var daemonSettingsErrors: [String: String] = [:]
+    @Published var managementSettings: [String: DaemonManagementSettings] = [:]
+    @Published var managementErrors: [String: String] = [:]
+    @Published private(set) var managementRequestIds: [String: String] = [:]
+    private var managementTimeouts: [String: Task<Void, Never>] = [:]
     @Published var drafts: [NavigationRoute: String] = [:]
     private var settingsRequests: [String: Task<Void, Never>] = [:]
     private var removedDaemons: Set<String> = []
@@ -328,6 +332,7 @@ final class AppStore: ObservableObject {
         sessionLists.removeValue(forKey: daemon.nodeId)
         modelsByDaemon.removeValue(forKey: daemon.nodeId)
         daemonSettings.removeValue(forKey: daemon.nodeId)
+        clearManagementSettings(daemonNodeId: daemon.nodeId)
         settingsRequests.removeValue(forKey: daemon.nodeId)?.cancel()
         pendingPermissions.removeAll { $0.daemon == daemon.nodeId }
         pendingAskUser.removeAll { $0.daemon == daemon.nodeId }
@@ -695,6 +700,67 @@ final class AppStore: ObservableObject {
         }
     }
 
+    func readDaemonManagementSettings(daemonNodeId: String) {
+        beginManagementRequest(daemonNodeId: daemonNodeId) { id, request in
+            core?.readDaemonSettings(id: id, requestId: request) == true
+        }
+    }
+
+    func saveSessionDefaults(daemonNodeId: String, sessionId: String) {
+        guard selectedDaemonId?.nodeId == daemonNodeId, selectedSessionId == sessionId, canSendPrompt else {
+            managementErrors[daemonNodeId] = "Open this conversation and wait for it to finish loading before saving its defaults."
+            return
+        }
+        beginManagementRequest(daemonNodeId: daemonNodeId) { id, request in
+            core?.saveSessionDefaults(id: id, sessionId: sessionId, requestId: request) == true
+        }
+    }
+
+    func resetSessionDefaults(daemonNodeId: String) {
+        beginManagementRequest(daemonNodeId: daemonNodeId) { id, request in
+            core?.resetSessionDefaults(id: id, requestId: request) == true
+        }
+    }
+
+    func revokeDevice(daemonNodeId: String, deviceId: String) {
+        guard managementSettings[daemonNodeId]?.devices?.contains(where: { $0.id == deviceId }) == true else {
+            managementErrors[daemonNodeId] = "Refresh settings before revoking this device."
+            return
+        }
+        beginManagementRequest(daemonNodeId: daemonNodeId) { id, request in
+            core?.revokeDevice(id: id, deviceId: deviceId, requestId: request) == true
+        }
+    }
+
+    private func beginManagementRequest(daemonNodeId: String, send: (DaemonId, String) -> Bool) {
+        guard managementRequestIds[daemonNodeId] == nil else { return }
+        guard !removedDaemons.contains(daemonNodeId), case .connected? = daemonStatuses[daemonNodeId] else {
+            managementErrors[daemonNodeId] = "Connect to this machine to manage its settings."
+            return
+        }
+        managementErrors.removeValue(forKey: daemonNodeId)
+        let request = UUID().uuidString
+        guard send(DaemonId(nodeId: daemonNodeId), request) else {
+            managementErrors[daemonNodeId] = "Couldn't send the request. Reconnect and try again."
+            return
+        }
+        managementRequestIds[daemonNodeId] = request
+        managementTimeouts[daemonNodeId] = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(5)) } catch { return }
+            guard let self, managementRequestIds[daemonNodeId] == request else { return }
+            managementRequestIds.removeValue(forKey: daemonNodeId)
+            managementTimeouts.removeValue(forKey: daemonNodeId)
+            managementErrors[daemonNodeId] = "The daemon didn't confirm the request. Update the daemon if needed, then refresh settings before trying again."
+        }
+    }
+
+    private func clearManagementSettings(daemonNodeId: String) {
+        managementSettings.removeValue(forKey: daemonNodeId)
+        managementErrors.removeValue(forKey: daemonNodeId)
+        managementRequestIds.removeValue(forKey: daemonNodeId)
+        managementTimeouts.removeValue(forKey: daemonNodeId)?.cancel()
+    }
+
     func archiveSession(_ sessionId: String, archived: Bool) {
         guard let daemonId = selectedDaemonId, let core else { return }
         core.archiveSession(id: daemonId, sessionId: sessionId, archived: archived)
@@ -733,6 +799,7 @@ final class AppStore: ObservableObject {
                 settingsRequests.removeValue(forKey: daemon)?.cancel()
                 daemonSettings.removeValue(forKey: daemon)
                 daemonSettingsErrors.removeValue(forKey: daemon)
+                clearManagementSettings(daemonNodeId: daemon)
                 pendingSubmissions.removeValue(forKey: daemon)
                 if workerHistory?.daemon == daemon, workerHistory?.isLoading == true {
                     workerHistory?.isLoading = false
@@ -1022,6 +1089,24 @@ final class AppStore: ObservableObject {
             daemonSettings[daemon] = settings
             daemonSettingsErrors.removeValue(forKey: daemon)
             settingsRequests.removeValue(forKey: daemon)?.cancel()
+
+        case .daemonManagementSettings(let daemon, let requestId, let settings):
+            guard !removedDaemons.contains(daemon), case .connected? = daemonStatuses[daemon] else { return }
+            if let requestId {
+                guard managementRequestIds[daemon] == requestId else { return }
+                managementRequestIds.removeValue(forKey: daemon)
+                managementTimeouts.removeValue(forKey: daemon)?.cancel()
+                managementErrors.removeValue(forKey: daemon)
+            } else if managementSettings[daemon] == nil {
+                return
+            }
+            managementSettings[daemon] = settings
+
+        case .daemonManagementFailed(let daemon, let requestId, let message):
+            guard managementRequestIds[daemon] == requestId else { return }
+            managementRequestIds.removeValue(forKey: daemon)
+            managementTimeouts.removeValue(forKey: daemon)?.cancel()
+            managementErrors[daemon] = message
 
         case .autoSummaryChanged(let daemon, let enabled):
             daemonSettings[daemon]?.autoSummaryEnabled = enabled
