@@ -313,14 +313,39 @@ struct QueuedCommand {
 }
 
 impl QueuedCommand {
+    fn delivery_failure(&self, daemon: &str, title: &str, detail: &str) -> Option<CoreEvent> {
+        match &self.message {
+            ClientMessage::ReadDaemonSettings { request_id }
+            | ClientMessage::SaveSessionDefaults { request_id, .. }
+            | ClientMessage::ResetSessionDefaults { request_id }
+            | ClientMessage::RevokeDevice { request_id, .. } => {
+                Some(CoreEvent::DaemonManagementFailed {
+                    daemon: daemon.into(),
+                    request_id: request_id.clone(),
+                    message: detail.into(),
+                })
+            }
+            _ => self.session_id.as_ref().map(|session_id| CoreEvent::Alert {
+                daemon: daemon.into(),
+                session_id: session_id.clone(),
+                kind: "error".into(),
+                title: title.into(),
+                detail: Some(detail.into()),
+            }),
+        }
+    }
+
     fn ready(&self, state: &ConnState) -> bool {
         if let Some(generation) = self.connection_generation {
             let client = state.client_state.lock().unwrap();
-            return client.connection == Some(mew_client_core::ConnectionStatus::Connected)
+            let valid = client.connection == Some(mew_client_core::ConnectionStatus::Connected)
                 && state.connection_generation.load(Ordering::Relaxed) == generation
                 && (!matches!(self.message, ClientMessage::NewSession { .. })
                     || self.generation
                         == Some(state.attachment_generation.load(Ordering::Relaxed)));
+            if !valid {
+                return false;
+            }
         }
         if let Some(session_id) = &self.session_id {
             let client = state.client_state.lock().unwrap();
@@ -349,6 +374,10 @@ impl DaemonConnection {
             ClientMessage::ReadAutomationSettings
                 | ClientMessage::SetAutoTitle { .. }
                 | ClientMessage::SetAutoSummary { .. }
+                | ClientMessage::ReadDaemonSettings { .. }
+                | ClientMessage::ResetSessionDefaults { .. }
+                | ClientMessage::RevokeDevice { .. }
+                | ClientMessage::SaveSessionDefaults { .. }
                 | ClientMessage::NewSession { .. }
         ) {
             let client = self.state.client_state.lock().unwrap();
@@ -375,6 +404,7 @@ impl DaemonConnection {
                 | ClientMessage::LoadSessionHistory { .. }
                 | ClientMessage::ReadSubagentHistory { .. }
                 | ClientMessage::ReadJobOutput { .. }
+                | ClientMessage::SaveSessionDefaults { .. }
         );
         let (session_id, generation) = if session_scoped {
             let client = self.state.client_state.lock().unwrap();
@@ -388,6 +418,7 @@ impl DaemonConnection {
                     | ClientMessage::LoadSessionHistory { session_id: requested, .. }
                     | ClientMessage::ReadSubagentHistory { session_id: requested, .. }
                     | ClientMessage::ReadJobOutput { session_id: requested, .. }
+                    | ClientMessage::SaveSessionDefaults { session_id: requested, .. }
                     if session_id.as_ref() != Some(requested))
             {
                 return false;
@@ -944,6 +975,54 @@ impl MobileCore {
             .is_some_and(|conn| conn.send(ClientMessage::ReadAutomationSettings))
     }
 
+    /// Read daemon-owned defaults and authorized devices without attaching a chat.
+    pub fn read_daemon_settings(&self, id: DaemonId, request_id: String) -> bool {
+        self.connections
+            .lock()
+            .unwrap()
+            .get(&id.node_id)
+            .is_some_and(|conn| conn.send(ClientMessage::ReadDaemonSettings { request_id }))
+    }
+
+    pub fn save_session_defaults(
+        &self,
+        id: DaemonId,
+        session_id: String,
+        request_id: String,
+    ) -> bool {
+        self.connections
+            .lock()
+            .unwrap()
+            .get(&id.node_id)
+            .is_some_and(|conn| {
+                conn.send(ClientMessage::SaveSessionDefaults {
+                    session_id,
+                    request_id,
+                })
+            })
+    }
+
+    pub fn reset_session_defaults(&self, id: DaemonId, request_id: String) -> bool {
+        self.connections
+            .lock()
+            .unwrap()
+            .get(&id.node_id)
+            .is_some_and(|conn| conn.send(ClientMessage::ResetSessionDefaults { request_id }))
+    }
+
+    pub fn revoke_device(&self, id: DaemonId, device_id: String, request_id: String) -> bool {
+        self.connections
+            .lock()
+            .unwrap()
+            .get(&id.node_id)
+            .is_some_and(|conn| {
+                conn.send(ClientMessage::RevokeDevice {
+                    device_id,
+                    request_id,
+                })
+            })
+    }
+
     /// Enable or disable titles for prompts from this connection.
     pub fn set_auto_title(&self, id: DaemonId, enabled: bool) -> bool {
         self.connections
@@ -1334,28 +1413,28 @@ async fn connect_and_run(
                             if let (Some(session_id), Some(generation)) = (&queued.session_id, queued.generation) {
                                 if matches!(queued.message, ClientMessage::Prompt { .. }) { conn_state.release_submission(session_id, generation); }
                             }
-                            if let Some(session_id) = queued.session_id {
-                                emit_event(CoreEvent::Alert { daemon: daemon_id.to_string(), session_id, kind: "error".into(), title: "Message was not sent".into(), detail: Some("The session connection changed. Reattach and retry.".into()) });
+                            if let Some(event) = queued.delivery_failure(daemon_id, "Message was not sent", "The session connection changed. Reattach and retry.") {
+                                emit_event(event);
                             }
                             continue;
                         }
-                        let client_msg = queued.message;
+                        let client_msg = &queued.message;
                         // Track last sent prompt for UserMessage dedup.
-                        if let ClientMessage::Prompt { text, .. } = &client_msg {
+                        if let ClientMessage::Prompt { text, .. } = client_msg {
                             last_sent_prompt = Some(text.clone());
                         }
-                        let json = mew_protocol::encode_json(&client_msg)?;
+                        let json = mew_protocol::encode_json(client_msg)?;
                         if ws.send(Message::Text(json)).await.is_err() {
                             if let (Some(session_id), Some(generation)) = (&queued.session_id, queued.generation) {
                                 if matches!(client_msg, ClientMessage::Prompt { .. }) { conn_state.release_submission(session_id, generation); }
                             }
-                            if let Some(session_id) = queued.session_id {
-                                emit_event(CoreEvent::Alert { daemon: daemon_id.to_string(), session_id, kind: "error".into(), title: "Message delivery interrupted".into(), detail: Some("Check the session history after reconnecting before retrying.".into()) });
+                            if let Some(event) = queued.delivery_failure(daemon_id, "Message delivery interrupted", "Check the session history after reconnecting before retrying.") {
+                                emit_event(event);
                             }
                             drop_reason = Some("failed to send message to daemon".to_string());
                             break;
                         }
-                        conn_state.record_session_request(&client_msg,
+                        conn_state.record_session_request(client_msg,
                             queued.generation.unwrap_or_else(|| conn_state.attachment_generation.load(Ordering::Relaxed)));
                     }
                     None => { user_disconnected = true; break; }, // Channel closed — daemon removed.
@@ -1380,6 +1459,8 @@ async fn connect_and_run(
                 let text = match ws_msg {
                     Message::Text(t) => t.to_string(),
                     Message::Close(_) => {
+                        // tungstenite queues the close reply while reading it.
+                        let _ = tokio::time::timeout(Duration::from_millis(100), ws.flush()).await;
                         info!(daemon = %daemon_id, "connection closed by daemon");
                         drop_reason = Some("closed by daemon".to_string());
                         break;
@@ -1455,6 +1536,24 @@ fn translate_message(
     let d = daemon_id.to_string();
     let mut events = Vec::new();
     if let ServerMessage::Error { message } = msg {
+        // Older daemons cannot correlate unknown management commands. Let the
+        // settings request expire without reducing their decoder error as a
+        // failure of the attached chat.
+        if message
+            .strip_prefix("invalid message: unknown variant `")
+            .and_then(|rest| rest.split_once('`'))
+            .is_some_and(|(command, _)| {
+                matches!(
+                    command,
+                    "read_daemon_settings"
+                        | "save_session_defaults"
+                        | "reset_session_defaults"
+                        | "revoke_device"
+                )
+            })
+        {
+            return events;
+        }
         let mut legacy_error = conn_state.legacy_session_error.lock().unwrap();
         if legacy_error.as_ref() == Some(message) {
             *legacy_error = None;
@@ -2074,6 +2173,55 @@ fn translate_message(
             });
         }
 
+        ServerMessage::DaemonSettings {
+            request_id,
+            defaults,
+            devices,
+        } => {
+            events.push(CoreEvent::DaemonManagementSettings {
+                daemon: d,
+                request_id: request_id.clone(),
+                settings: events::DaemonManagementSettings {
+                    defaults: defaults.as_ref().map(|policy| events::NewChatDefaults {
+                        model: policy.model.clone(),
+                        provider: policy.provider.clone(),
+                        persona: policy.persona.clone(),
+                        thinking_variant: policy.thinking_variant.clone(),
+                        permission_mode: policy.permission_mode.clone(),
+                    }),
+                    devices: devices.as_ref().map(|devices| {
+                        devices
+                            .iter()
+                            .map(|device| events::PairedDevice {
+                                id: device.id.clone(),
+                                name: device.name.clone(),
+                                node_id: device.node_id.clone(),
+                                scope: device.scope.map(|scope| {
+                                    match scope {
+                                        mew_protocol::RemoteScope::Observe => "observe",
+                                        mew_protocol::RemoteScope::Collaborate => "collaborate",
+                                        mew_protocol::RemoteScope::Control => "control",
+                                    }
+                                    .to_owned()
+                                }),
+                                paired_at: device.paired_at,
+                            })
+                            .collect()
+                    }),
+                },
+            });
+        }
+        ServerMessage::DaemonSettingsFailed {
+            request_id,
+            message,
+        } => {
+            events.push(CoreEvent::DaemonManagementFailed {
+                daemon: d,
+                request_id: request_id.clone(),
+                message: message.clone(),
+            });
+        }
+
         ServerMessage::ModelList { models } => {
             let summaries = models
                 .iter()
@@ -2614,6 +2762,185 @@ fn rand_jitter() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn daemon_management_is_connection_scoped_and_defaults_require_the_exact_chat() {
+        let (core, id, state, mut rx) = connected_core().await;
+        assert!(!core.save_session_defaults(id.clone(), "other".into(), "wrong".into()));
+        assert!(core.read_daemon_settings(id.clone(), "read".into()));
+        assert!(core.reset_session_defaults(id.clone(), "reset".into()));
+        assert!(core.revoke_device(id.clone(), "device".into(), "revoke".into()));
+        let queued = (0..3).map(|_| rx.try_recv().unwrap()).collect::<Vec<_>>();
+        assert!(queued.iter().all(|command| command.ready(&state)));
+        state.connection_generation.fetch_add(1, Ordering::Relaxed);
+        assert!(queued.iter().all(|command| !command.ready(&state)));
+        state.client_state.lock().unwrap().connection =
+            Some(mew_client_core::ConnectionStatus::Disconnected);
+        assert!(!core.read_daemon_settings(id.clone(), "offline".into()));
+        assert!(!core.reset_session_defaults(id.clone(), "offline".into()));
+        assert!(!core.revoke_device(id, "device".into(), "offline".into()));
+    }
+
+    #[tokio::test]
+    async fn defaults_commands_expire_when_the_attached_chat_changes() {
+        let (core, id, state, mut rx) = connected_core().await;
+        let session = state
+            .client_state
+            .lock()
+            .unwrap()
+            .attached_session
+            .clone()
+            .unwrap();
+        assert!(core.save_session_defaults(id, session, "save".into()));
+        let queued = rx.try_recv().unwrap();
+        assert!(queued.ready(&state));
+        state.attachment_generation.fetch_add(1, Ordering::Relaxed);
+        assert!(!queued.ready(&state));
+    }
+
+    #[tokio::test]
+    async fn defaults_commands_expire_when_the_connection_changes_even_if_the_chat_matches() {
+        let (core, id, state, mut rx) = connected_core().await;
+        let session = state
+            .client_state
+            .lock()
+            .unwrap()
+            .attached_session
+            .clone()
+            .unwrap();
+        assert!(core.save_session_defaults(id, session, "save".into()));
+        let queued = rx.try_recv().unwrap();
+        assert!(queued.ready(&state));
+        state.connection_generation.fetch_add(1, Ordering::Relaxed);
+        assert!(!queued.ready(&state));
+    }
+
+    #[test]
+    fn management_delivery_failures_never_become_chat_errors() {
+        for message in [
+            ClientMessage::ReadDaemonSettings {
+                request_id: "read".into(),
+            },
+            ClientMessage::SaveSessionDefaults {
+                session_id: "chat".into(),
+                request_id: "save".into(),
+            },
+            ClientMessage::ResetSessionDefaults {
+                request_id: "reset".into(),
+            },
+            ClientMessage::RevokeDevice {
+                device_id: "phone".into(),
+                request_id: "revoke".into(),
+            },
+        ] {
+            let queued = QueuedCommand {
+                message,
+                session_id: Some("chat".into()),
+                generation: None,
+                connection_generation: None,
+            };
+            assert!(
+                matches!(queued.delivery_failure("daemon", "Not sent", "Connection changed"),
+                Some(CoreEvent::DaemonManagementFailed { daemon, message, .. }) if daemon == "daemon" && message == "Connection changed")
+            );
+        }
+        let prompt = QueuedCommand {
+            message: ClientMessage::Cancel,
+            session_id: Some("chat".into()),
+            generation: None,
+            connection_generation: None,
+        };
+        assert!(
+            matches!(prompt.delivery_failure("daemon", "Not sent", "Connection changed"),
+            Some(CoreEvent::Alert { session_id, title, .. }) if session_id == "chat" && title == "Not sent")
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_daemon_management_preserves_the_attached_chat() {
+        let (core, id, state, mut outbound) = connected_core().await;
+        assert!(core.prompt(id.clone(), "still sending".into()));
+        let _prompt = outbound.recv().await.unwrap();
+        let session_id = state
+            .client_state
+            .lock()
+            .unwrap()
+            .attached_session
+            .clone()
+            .unwrap();
+        state.history_pending.store(true, Ordering::Relaxed);
+        state.take_shared_events();
+        for command in [
+            "read_daemon_settings",
+            "save_session_defaults",
+            "reset_session_defaults",
+            "revoke_device",
+        ] {
+            let message = format!("invalid message: unknown variant `{command}`, expected one of `ping`, `prompt` at line 1 column 30");
+            let events = translate_message(
+                &ServerMessage::Error { message },
+                &state,
+                &mut None,
+                &id.node_id,
+            );
+            assert!(
+                events.is_empty(),
+                "Unsupported management must use the settings timeout, not chat alerts"
+            );
+            assert!(state
+                .pending_submissions
+                .lock()
+                .unwrap()
+                .contains_key(&session_id));
+            assert!(state.history_pending.load(Ordering::Relaxed));
+            assert!(state.take_shared_events().is_empty());
+        }
+        let events = translate_message(
+            &ServerMessage::Error {
+                message: "invalid message: unknown variant `prompt`".into(),
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(matches!(events.as_slice(), [CoreEvent::Alert { kind, .. }] if kind == "error"));
+        assert!(!state
+            .pending_submissions
+            .lock()
+            .unwrap()
+            .contains_key(&session_id));
+        core.endpoint.close().await;
+    }
+
+    #[test]
+    fn daemon_settings_replies_retain_request_identity_and_unknown_values() {
+        let state = Arc::new(ConnState::new());
+        let events = translate_message(
+            &ServerMessage::DaemonSettings {
+                request_id: Some("read".into()),
+                defaults: None,
+                devices: None,
+            },
+            &state,
+            &mut None,
+            "remote",
+        );
+        assert!(
+            matches!(&events[..], [CoreEvent::DaemonManagementSettings { daemon, request_id: Some(id), settings }] if daemon == "remote" && id == "read" && settings.defaults.is_none() && settings.devices.is_none())
+        );
+        let events = translate_message(
+            &ServerMessage::DaemonSettingsFailed {
+                request_id: "save".into(),
+                message: "read only".into(),
+            },
+            &state,
+            &mut None,
+            "remote",
+        );
+        assert!(
+            matches!(&events[..], [CoreEvent::DaemonManagementFailed { daemon, request_id, message }] if daemon == "remote" && request_id == "save" && message == "read only")
+        );
+    }
 
     #[test]
     fn summary_updates_do_not_invent_connection_title_settings() {

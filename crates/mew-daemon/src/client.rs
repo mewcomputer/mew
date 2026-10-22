@@ -973,6 +973,8 @@ async fn translate_server_message(
         | ServerMessage::PromptReceipt { .. }
         | ServerMessage::ModelList { .. }
         | ServerMessage::AutomationSettings { .. }
+        | ServerMessage::DaemonSettings { .. }
+        | ServerMessage::DaemonSettingsFailed { .. }
         | ServerMessage::SessionOperationFailed { .. }
         | ServerMessage::AutoSummaryChanged { .. }
         | ServerMessage::ModelSwitched { .. }

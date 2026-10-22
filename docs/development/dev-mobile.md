@@ -252,10 +252,31 @@ Timeline tests cover millisecond timestamps, chronological ordering, calendar
 boundaries including daylight saving, daemon-scoped alert promotion, unknown
 chat discovery, and refreshes that preserve the active conversation.
 
+Daemon management uses correlated `read_daemon_settings`,
+`save_session_defaults`, `reset_session_defaults` and `revoke_device` commands.
+Only full-control connections may use them. Defaults persist in
+`new-chat-defaults.json` under the session directory; reset restores startup
+configuration, and resumed chats keep their own policy. Device snapshots
+support legacy trusted nodes and scoped remote pairings. An unavailable device
+manager is distinct from an empty device list.
+
+Management replies retain daemon/request identity; unsolicited snapshots do not
+complete another pending mutation. The app expires unanswered requests after
+five seconds and invalidates them on disconnect. Older-daemon unknown-command
+errors and unsent management commands must never clear a chat's pending send
+or mark its turn failed. Revocation persists before confirmation, rechecks
+control during asynchronous operations and closes active connections with a
+bounded WebSocket handshake. The real iroh M0 test covers read/save/reset,
+self-revocation confirmation and clean closure.
+
 Physical-phone checks remain necessary before release:
 
 - Pair a fresh identity with an invite, including an expired invite and
   an already consumed invite. Connect to two daemons and switch chats.
+- Save and reset new-chat defaults, create chats from two clients and verify
+  resumed chats keep their policy. Revoke another device and then this phone;
+  check confirmation, disconnection and re-pairing. Check older daemons and
+  read-only connections without disrupting an active chat.
 - Send and cancel a reply, load older messages during streaming, then
   leave the app and return. Check reading position, keyboard behavior,
   pending permission/question sheets, and reconnect after a network change.

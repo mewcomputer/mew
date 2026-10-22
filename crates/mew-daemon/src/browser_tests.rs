@@ -171,6 +171,7 @@ async fn remote_and_legacy_connections_cannot_register_local_pages() {
                 scope,
                 None,
                 legacy,
+                None,
             )
             .await
             .unwrap();

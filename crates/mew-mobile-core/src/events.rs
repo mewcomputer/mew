@@ -30,6 +30,17 @@ pub enum CoreEvent {
         enabled: bool,
     },
 
+    DaemonManagementSettings {
+        daemon: String,
+        request_id: Option<String>,
+        settings: DaemonManagementSettings,
+    },
+    DaemonManagementFailed {
+        daemon: String,
+        request_id: String,
+        message: String,
+    },
+
     /// Full or updated session list for a daemon.
     SessionList {
         daemon: String,
@@ -299,6 +310,30 @@ pub struct ReviewFile {
     pub hunks: Vec<ReviewHunk>,
     pub added: u64,
     pub removed: u64,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct DaemonManagementSettings {
+    pub defaults: Option<NewChatDefaults>,
+    pub devices: Option<Vec<PairedDevice>>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct NewChatDefaults {
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub persona: Option<String>,
+    pub thinking_variant: Option<String>,
+    pub permission_mode: String,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct PairedDevice {
+    pub id: String,
+    pub name: String,
+    pub node_id: String,
+    pub scope: Option<String>,
+    pub paired_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]

@@ -81,6 +81,33 @@ function makeFactory(): {
   };
 }
 
+test("daemon settings retain request identity and unavailable device management", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connected = client.connect();
+  latest().open();
+  await connected;
+  const settings: unknown[] = [];
+  const failures: unknown[] = [];
+  client.on("daemon-settings", (data) => settings.push(data));
+  client.on("daemon-settings-failed", (data) => failures.push(data));
+  client.readDaemonSettings("read");
+  client.saveSessionDefaults("chat", "save");
+  client.resetSessionDefaults("reset");
+  client.revokeDevice("phone", "revoke");
+  assert.deepEqual(latest().sent, [
+    { type: "read_daemon_settings", request_id: "read" },
+    { type: "save_session_defaults", session_id: "chat", request_id: "save" },
+    { type: "reset_session_defaults", request_id: "reset" },
+    { type: "revoke_device", device_id: "phone", request_id: "revoke" },
+  ]);
+  latest().peerSend({ type: "daemon_settings", request_id: "read", defaults: null, devices: null });
+  latest().peerSend({ type: "daemon_settings_failed", request_id: "save", message: "read only" });
+  assert.deepEqual(settings, [{ request_id: "read", defaults: null, devices: null }]);
+  assert.deepEqual(failures, [{ request_id: "save", message: "read only" }]);
+  client.disconnect();
+});
+
 test("connect resolves when the socket opens", async () => {
   const { factory, latest } = makeFactory();
   const client = new MewClient("ws://test/", { socketFactory: factory });

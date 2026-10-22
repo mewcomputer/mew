@@ -102,6 +102,24 @@ pub enum ClientMessage {
     /// Read this connection's title preference and the daemon's summary preference.
     ReadAutomationSettings,
 
+    /// Read daemon-owned defaults and authorized devices. Requires full control.
+    ReadDaemonSettings {
+        request_id: String,
+    },
+    /// Copy the attached chat's confirmed policy into defaults for future chats.
+    SaveSessionDefaults {
+        session_id: String,
+        request_id: String,
+    },
+    /// Resume using the daemon's configured startup defaults for future chats.
+    ResetSessionDefaults {
+        request_id: String,
+    },
+    RevokeDevice {
+        device_id: String,
+        request_id: String,
+    },
+
     /// Enable or disable titles generated after prompts from this connection.
     SetAutoTitle {
         enabled: bool,
@@ -441,6 +459,16 @@ pub enum RemoteScope {
     Collaborate,
     /// Full daemon authority, including mutating tools subject to permissions.
     Control,
+}
+
+/// Public device metadata. Pairing credentials and their digests never cross the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairedDeviceInfo {
+    pub id: String,
+    pub name: String,
+    pub node_id: String,
+    pub scope: Option<RemoteScope>,
+    pub paired_at: Option<u64>,
 }
 
 /// Info about a single available model, returned by `ListModels`.
@@ -915,6 +943,18 @@ pub enum ServerMessage {
         auto_title_enabled: bool,
         /// Shared by every connection to this daemon.
         auto_summary_enabled: bool,
+    },
+
+    DaemonSettings {
+        /// None denotes a change notification to other authorized clients.
+        request_id: Option<String>,
+        defaults: Option<mew_session::SessionPolicy>,
+        /// None when this daemon has no remote device manager.
+        devices: Option<Vec<PairedDeviceInfo>>,
+    },
+    DaemonSettingsFailed {
+        request_id: String,
+        message: String,
     },
 
     /// The daemon-wide summary preference changed through another connection.
@@ -4073,6 +4113,66 @@ mod automation_wire_tests {
             assert_eq!(
                 serde_json::to_value(decoded).unwrap(),
                 serde_json::to_value(message).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn daemon_management_wire_roundtrips_keep_request_and_target_identity() {
+        for command in [
+            ClientMessage::ReadDaemonSettings {
+                request_id: "read".into(),
+            },
+            ClientMessage::SaveSessionDefaults {
+                request_id: "save".into(),
+                session_id: "chat".into(),
+            },
+            ClientMessage::ResetSessionDefaults {
+                request_id: "reset".into(),
+            },
+            ClientMessage::RevokeDevice {
+                request_id: "revoke".into(),
+                device_id: "phone".into(),
+            },
+        ] {
+            let encoded = encode_json(&command).unwrap();
+            assert_eq!(
+                encoded,
+                encode_json(&decode_json::<ClientMessage>(&encoded).unwrap()).unwrap()
+            );
+        }
+        for message in [
+            ServerMessage::DaemonSettings {
+                request_id: None,
+                defaults: None,
+                devices: None,
+            },
+            ServerMessage::DaemonSettings {
+                request_id: Some("read".into()),
+                defaults: Some(mew_session::SessionPolicy {
+                    model: Some("model".into()),
+                    provider: Some("provider".into()),
+                    persona: None,
+                    thinking_variant: None,
+                    permission_mode: "standard".into(),
+                }),
+                devices: Some(vec![PairedDeviceInfo {
+                    id: "phone".into(),
+                    name: "My phone".into(),
+                    node_id: "node".into(),
+                    scope: Some(RemoteScope::Control),
+                    paired_at: Some(123),
+                }]),
+            },
+            ServerMessage::DaemonSettingsFailed {
+                request_id: "save".into(),
+                message: "read only".into(),
+            },
+        ] {
+            let encoded = encode_json(&message).unwrap();
+            assert_eq!(
+                encoded,
+                encode_json(&decode_json::<ServerMessage>(&encoded).unwrap()).unwrap()
             );
         }
     }

@@ -2883,3 +2883,31 @@ wrapped review layout. Inspected seeded light/dark simulator settings and
 scrolling/wrapped diff captures; saved a comparison GIF outside the repo and
 removed the temporary fixture. Physical haptic feel and a complete hands-on
 gesture walkthrough remain manual verification work.
+
+# 2026-10-22 — daemon new-chat defaults and device management
+
+Added full-control-only daemon settings reads, saving the exact attached chat's
+confirmed policy as new-chat defaults, reset to startup defaults, and paired
+device inspection/revocation. Defaults persist under the session directory and
+apply only to new chats. Failed writes preserve prior values; corrupt defaults
+fail visibly and can be reset. Legacy trusted nodes and scoped device records
+share management operations, while token-only connections report unavailable
+device management explicitly.
+
+Revocation persists before confirmation, closes existing connections and denies
+later commands. Authorization is rechecked through asynchronous waits and inside
+persisted mutations. Independent monitoring interrupts blocked operations; a
+receipt lock preserves self-revocation confirmation ordering. Shutdown bounds
+writer backpressure and waits for the peer's WebSocket close acknowledgment
+before dropping the QUIC transport. Protocol, Rust client, TypeScript client and
+mobile APIs retain request identities. Old-daemon decoder errors and queued
+management failures cannot fail an unrelated chat.
+
+Verified 107 daemon tests with one existing browser-dependent ignore, 74
+mobile-core tests, protocol roundtrips, 31 TypeScript client tests and typecheck,
+strict scoped all-target Clippy, formatting and architecture checks. The real
+iroh M0 round trip covers defaults read/save/reset and self-revocation receipt
+through clean connection closure. Rebuilt device/simulator/host core artifacts
+and regenerated the checked-in Swift bindings. All 125 iOS tests pass on both
+simulator and physical iPhone using the rebuilt core; the Swift integration is
+recorded in the next chunk.

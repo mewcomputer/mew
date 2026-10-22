@@ -32,6 +32,28 @@ export interface Attachment {
 
 export type PermissionDecision = "allow_once" | "allow_session" | "deny";
 
+export interface NewChatDefaults {
+  model: string | null;
+  provider: string | null;
+  persona: string | null;
+  thinking_variant: string | null;
+  permission_mode: string;
+}
+
+export interface PairedDevice {
+  id: string;
+  name: string;
+  node_id: string;
+  scope: "observe" | "collaborate" | "control" | null;
+  paired_at: number | null;
+}
+
+export interface DaemonSettings {
+  request_id: string | null;
+  defaults: NewChatDefaults | null;
+  devices: PairedDevice[] | null;
+}
+
 export type ClientMessage =
   | { type: "remote_hello"; token?: string; device_name: string }
   | { type: "new_session"; cwd: string | null; client_kind: string }
@@ -43,6 +65,10 @@ export type ClientMessage =
   | { type: "delete_session"; session_id: string }
   | { type: "rename_session"; session_id: string; title: string }
   | { type: "set_auto_title"; enabled: boolean }
+  | { type: "read_daemon_settings"; request_id: string }
+  | { type: "save_session_defaults"; session_id: string; request_id: string }
+  | { type: "reset_session_defaults"; request_id: string }
+  | { type: "revoke_device"; device_id: string; request_id: string }
   | { type: "set_auto_summary"; enabled: boolean }
   | { type: "prompt"; text: string; attachments: Attachment[] }
   | { type: "cancel" }
@@ -486,6 +512,8 @@ export interface Segment {
 }
 
 export type ServerMessage =
+  | ({ type: "daemon_settings" } & DaemonSettings)
+  | { type: "daemon_settings_failed"; request_id: string; message: string }
   | { type: "remote_ready"; scope: "observe" | "collaborate" | "control" }
   | { type: "session_ready"; session_id: string; cwd?: string; model?: string; provider?: string; permission_mode?: string }
   | { type: "error"; message: string }
@@ -664,6 +692,8 @@ const defaultSocketFactory: SocketFactory = (url) => {
 // ---------------------------------------------------------------------------
 
 export interface MewClientEvents {
+  "daemon-settings": (data: DaemonSettings) => void;
+  "daemon-settings-failed": (data: { request_id: string; message: string }) => void;
   open: () => void;
   close: (code: number, reason: string) => void;
   error: (err: unknown) => void;
@@ -1135,6 +1165,22 @@ export class MewClient {
     this.send({ type: "set_auto_title", enabled });
   }
 
+  readDaemonSettings(requestId: string): void {
+    this.send({ type: "read_daemon_settings", request_id: requestId });
+  }
+
+  saveSessionDefaults(sessionId: string, requestId: string): void {
+    this.send({ type: "save_session_defaults", session_id: sessionId, request_id: requestId });
+  }
+
+  resetSessionDefaults(requestId: string): void {
+    this.send({ type: "reset_session_defaults", request_id: requestId });
+  }
+
+  revokeDevice(deviceId: string, requestId: string): void {
+    this.send({ type: "revoke_device", device_id: deviceId, request_id: requestId });
+  }
+
   setAutoSummary(enabled: boolean): void {
     this.send({ type: "set_auto_summary", enabled });
   }
@@ -1354,6 +1400,12 @@ export class MewClient {
 
   private dispatch(msg: ServerMessage): void {
     switch (msg.type) {
+      case "daemon_settings":
+        this.emit("daemon-settings", { request_id: msg.request_id, defaults: msg.defaults, devices: msg.devices });
+        break;
+      case "daemon_settings_failed":
+        this.emit("daemon-settings-failed", { request_id: msg.request_id, message: msg.message });
+        break;
       case "session_ready":
         this.sessionId = msg.session_id;
         this.emit("session-ready", {

@@ -22,8 +22,8 @@ use tracing::{info, warn};
 use mew_protocol::RemoteScope;
 
 use crate::{
-    groups::GroupsStore, handle_connection_with_authorizer, handle_connection_with_scope,
-    remote::RemoteAccessStore, session::SessionManager, RemoteAuthorizer, ThinkingSetter,
+    groups::GroupsStore, handle_connection_with_authorizer, remote::RemoteAccessStore,
+    remote_token_authorizer, session::SessionManager, RemoteAuthorizer, ThinkingSetter,
 };
 
 /// ALPN protocol identifier for mew wire protocol over iroh.
@@ -129,26 +129,52 @@ impl NodeIdAllowlist {
 
     /// Add a NodeId to the allowlist and persist to disk.
     pub fn add(&self, node_id: &str) -> Result<()> {
+        let _lock = crate::remote::acquire_file_lock(&self.path)?;
+        let mut next = self.read_nodes()?;
         let mut nodes = self.nodes.lock().unwrap();
         let id = node_id.to_string();
-        if !nodes.contains(&id) {
-            nodes.push(id);
-            self.save_locked(&nodes)?;
+        if !next.contains(&id) {
+            next.push(id);
+            self.save_locked(&next)?;
         }
+        *nodes = next;
         Ok(())
     }
 
     /// Remove a NodeId from the allowlist and persist to disk.
     pub fn remove(&self, node_id: &str) -> Result<()> {
+        self.remove_as(node_id, None)
+    }
+
+    pub(crate) fn remove_as(&self, node_id: &str, actor: Option<&str>) -> Result<()> {
+        let _lock = crate::remote::acquire_file_lock(&self.path)?;
+        let mut next = self.read_nodes()?;
+        if let Some(actor) = actor {
+            anyhow::ensure!(
+                next.iter().any(|node| node == actor),
+                "this device is no longer authorized"
+            );
+        }
         let mut nodes = self.nodes.lock().unwrap();
-        nodes.retain(|n| n != node_id);
-        self.save_locked(&nodes)?;
+        next.retain(|n| n != node_id);
+        self.save_locked(&next)?;
+        *nodes = next;
         Ok(())
     }
 
     /// List all trusted NodeIds.
     pub fn list(&self) -> Vec<String> {
         self.nodes.lock().unwrap().clone()
+    }
+
+    /// Read the shared file so pairing and revocation by another process take effect.
+    pub fn read_nodes(&self) -> Result<Vec<String>> {
+        match std::fs::read(&self.path) {
+            Ok(bytes) if bytes.is_empty() => Ok(Vec::new()),
+            Ok(bytes) => serde_json::from_slice(&bytes).context("read authorized devices"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn save_locked(&self, nodes: &[String]) -> Result<()> {
@@ -195,12 +221,32 @@ impl std::fmt::Debug for MewIrohHandler {
     }
 }
 
+impl MewIrohHandler {
+    fn configure_device_manager(&self) {
+        if self.remote_scope.is_some() && self.remote_store.is_none() {
+            return;
+        }
+        self.session_manager
+            .remote_devices
+            .get_or_init(|| match &self.remote_store {
+                Some(store) => crate::remote::RemoteDeviceManager::Scoped(store.clone()),
+                None => crate::remote::RemoteDeviceManager::Legacy(self.allowlist.clone()),
+            });
+    }
+}
+
 impl ProtocolHandler for MewIrohHandler {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        self.configure_device_manager();
         let remote_id = connection.remote_id();
         let id_str = remote_id.to_string();
 
-        if !self.allowlist.contains(&id_str) && self.remote_scope.is_none() {
+        if !self
+            .allowlist
+            .read_nodes()
+            .is_ok_and(|nodes| nodes.contains(&id_str))
+            && self.remote_scope.is_none()
+        {
             warn!(peer = %id_str, "rejected iroh connection: not in allowlist");
             connection.close(1u32.into(), b"unauthorized");
             return Ok(());
@@ -236,18 +282,20 @@ impl ProtocolHandler for MewIrohHandler {
                 self.remote_scope,
                 Some(authorizer),
                 false,
+                Some(id_str.clone()),
             )
             .await
         } else {
-            handle_connection_with_scope(
+            handle_connection_with_authorizer(
                 stream,
                 self.session_manager.clone(),
                 self.groups_store.clone(),
                 self.thinking_setter.clone(),
                 self.auto_summary_enabled.clone(),
                 self.remote_scope,
-                self.remote_token.as_deref(),
+                remote_token_authorizer(self.remote_scope, self.remote_token.as_deref()),
                 true,
+                Some(id_str.clone()),
             )
             .await
         };
@@ -333,6 +381,7 @@ pub async fn run_iroh(
         remote_token: config.remote_token,
         remote_store,
     };
+    handler.configure_device_manager();
 
     let router = Router::builder(endpoint).accept(MEW_ALPN, handler).spawn();
 
@@ -485,6 +534,28 @@ mod tests {
         let path = PathBuf::from("/tmp/mew-test-does-not-exist-12345.json");
         let allowlist = NodeIdAllowlist::load(path).unwrap();
         assert!(allowlist.list().is_empty());
+    }
+
+    #[test]
+    fn legacy_device_management_reads_changes_from_another_process_and_preserves_failed_revocations(
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("authorized_nodes.json");
+        let daemon = Arc::new(NodeIdAllowlist::load(path.clone()).unwrap());
+        let cli = NodeIdAllowlist::load(path).unwrap();
+        cli.add("phone").unwrap();
+        let manager = crate::remote::RemoteDeviceManager::Legacy(daemon.clone());
+        let devices = manager.devices(0).unwrap();
+        assert_eq!(devices[0].node_id, "phone");
+        assert_eq!(devices[0].scope, None);
+        assert!(manager.authorized_scope("phone", 0).unwrap().is_some());
+        std::fs::create_dir(root.path().join("authorized_nodes.json.tmp")).unwrap();
+        assert!(manager.revoke("phone", 0).is_err());
+        assert_eq!(daemon.read_nodes().unwrap(), vec!["phone"]);
+        std::fs::remove_dir(root.path().join("authorized_nodes.json.tmp")).unwrap();
+        manager.revoke("phone", 0).unwrap();
+        assert!(manager.devices(0).unwrap().is_empty());
+        assert_eq!(manager.authorized_scope("phone", 0).unwrap(), None);
     }
 
     #[test]

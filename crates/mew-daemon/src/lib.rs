@@ -373,6 +373,10 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
                 | ClientMessage::DeleteSession { .. }
                 | ClientMessage::RenameSession { .. }
                 | ClientMessage::ReadAutomationSettings
+                | ClientMessage::ReadDaemonSettings { .. }
+                | ClientMessage::SaveSessionDefaults { .. }
+                | ClientMessage::ResetSessionDefaults { .. }
+                | ClientMessage::RevokeDevice { .. }
                 | ClientMessage::SetAutoTitle { .. }
                 | ClientMessage::SetAutoSummary { .. }
                 | ClientMessage::Prompt { .. }
@@ -692,15 +696,7 @@ pub async fn handle_connection_with_scope<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let authorizer = match (remote_scope, remote_token) {
-        (Some(scope), Some(expected)) => {
-            let expected = expected.to_owned();
-            Some(Arc::new(move |token: Option<&str>, _device_name: &str| {
-                Ok((token == Some(expected.as_str())).then_some(scope))
-            }) as RemoteAuthorizer)
-        }
-        _ => None,
-    };
+    let authorizer = remote_token_authorizer(remote_scope, remote_token);
     handle_connection_with_authorizer(
         stream,
         session_manager,
@@ -710,13 +706,62 @@ where
         remote_scope,
         authorizer,
         legacy_iroh,
+        None,
     )
     .await
+}
+
+pub(crate) fn remote_token_authorizer(
+    remote_scope: Option<RemoteScope>,
+    remote_token: Option<&str>,
+) -> Option<RemoteAuthorizer> {
+    match (remote_scope, remote_token) {
+        (Some(scope), Some(expected)) => {
+            let expected = expected.to_owned();
+            Some(Arc::new(move |token: Option<&str>, _device_name: &str| {
+                Ok((token == Some(expected.as_str())).then_some(scope))
+            }) as RemoteAuthorizer)
+        }
+        _ => None,
+    }
 }
 
 /// Resolve a remote connection's scope from its first protocol message.
 pub type RemoteAuthorizer =
     Arc<dyn Fn(Option<&str>, &str) -> Result<Option<RemoteScope>> + Send + Sync>;
+
+#[derive(Clone)]
+pub(crate) struct RemoteAuthorization {
+    peer: String,
+    devices: remote::RemoteDeviceManager,
+    revocation_receipt: Arc<std::sync::Mutex<()>>,
+}
+
+impl RemoteAuthorization {
+    fn require_control(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.devices
+                .authorized_scope(&self.peer, remote::unix_now())?
+                == Some(RemoteScope::Control),
+            "this device no longer has full control"
+        );
+        Ok(())
+    }
+
+    async fn scope(&self) -> Result<Option<RemoteScope>> {
+        let authorization = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _receipt = authorization
+                .revocation_receipt
+                .lock()
+                .expect("revocation receipt lock");
+            authorization
+                .devices
+                .authorized_scope(&authorization.peer, remote::unix_now())
+        })
+        .await?
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_connection_with_authorizer<S>(
@@ -728,6 +773,7 @@ pub async fn handle_connection_with_authorizer<S>(
     mut remote_scope: Option<RemoteScope>,
     remote_authorizer: Option<RemoteAuthorizer>,
     legacy_iroh: bool,
+    remote_peer: Option<String>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -751,6 +797,20 @@ where
     let mut workspace_watch: Option<CancellationToken> = None;
     let mut auto_title_enabled = true;
     let mut summary_updates = auto_summary_enabled.subscribe();
+    let mut settings_updates = session_manager.settings_changed.subscribe();
+    let mut observes_daemon_settings = false;
+    let authorization = remote_peer.and_then(|peer| {
+        session_manager
+            .remote_devices
+            .get()
+            .cloned()
+            .map(|devices| RemoteAuthorization {
+                peer,
+                devices,
+                revocation_receipt: Arc::new(std::sync::Mutex::new(())),
+            })
+    });
+    let mut authorization_monitor = None;
     let mut remote_ready = remote_scope.is_none() && remote_authorizer.is_none();
 
     // auto_summary_enabled is passed in from the daemon (daemon-wide task
@@ -758,13 +818,36 @@ where
 
     // Spawn a writer task that owns the WebSocket sink.
     let mut ws_tx = ws_tx;
+    let writer_lifetime = connection_lifetime.clone();
     let writer = tokio::spawn(async move {
-        while let Some(msg) = client_rx.recv().await {
-            if send_msg(&mut ws_tx, msg).await.is_err() {
-                break;
+        {
+            let write_messages = async {
+                loop {
+                    let msg = tokio::select! {
+                        message = client_rx.recv() => match message { Some(message) => message, None => break },
+                        _ = writer_lifetime.cancelled() => {
+                            client_rx.close();
+                            while let Some(message) = client_rx.recv().await {
+                                if send_msg(&mut ws_tx, message).await.is_err() { break; }
+                            }
+                            break;
+                        }
+                    };
+                    if send_msg(&mut ws_tx, msg).await.is_err() {
+                        break;
+                    }
+                }
+            };
+            tokio::pin!(write_messages);
+            tokio::select! {
+                _ = &mut write_messages => {}
+                _ = writer_lifetime.cancelled() => {
+                    // Allow a self-revocation receipt to flush, but never retain a blocked peer.
+                    let _ = tokio::time::timeout(std::time::Duration::from_millis(250), &mut write_messages).await;
+                }
             }
         }
-        let _ = ws_tx.close().await;
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(100), ws_tx.close()).await;
     });
 
     let reply = |msg: ServerMessage| {
@@ -779,19 +862,87 @@ where
         reply(ServerMessage::Error { message });
     };
 
-    loop {
-        let msg = tokio::select! {
+    enum ConnectionUpdate {
+        Frame(std::result::Result<Message, tungstenite::Error>),
+        Summary,
+        Settings,
+    }
+    'connection: loop {
+        if remote_ready && authorization_monitor.is_none() {
+            if let Some(authorization) = authorization.clone() {
+                let lifetime = connection_lifetime.clone();
+                authorization_monitor = Some(tokio::spawn(async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    loop {
+                        tokio::select! {
+                            _ = lifetime.cancelled() => break,
+                            _ = interval.tick() => {
+                                if !matches!(authorization.scope().await, Ok(Some(_))) {
+                                    lifetime.cancel();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }));
+            }
+        }
+        let update = tokio::select! {
             // Deliver pending setting changes before the next client command.
             biased;
+            _ = connection_lifetime.cancelled() => break,
+            changed = settings_updates.changed(), if observes_daemon_settings && remote_ready && remote_scope.is_none_or(|scope| scope == RemoteScope::Control) => {
+                if changed.is_err() { break; }
+                ConnectionUpdate::Settings
+            }
             changed = summary_updates.changed(), if remote_ready => {
                 if changed.is_err() { break; }
-                let enabled = *summary_updates.borrow_and_update();
-                reply(ServerMessage::AutoSummaryChanged { enabled });
-                continue;
+                ConnectionUpdate::Summary
             }
             message = ws_rx.next() => {
                 let Some(message) = message else { break; };
-                message
+                ConnectionUpdate::Frame(message)
+            }
+        };
+        if remote_ready {
+            if let Some(authorization) = &authorization {
+                match authorization.scope().await {
+                    Ok(Some(scope)) => {
+                        if remote_scope.is_some() {
+                            remote_scope = Some(scope);
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(error) => {
+                        tracing::warn!(%error, "could not verify remote authorization");
+                        break;
+                    }
+                }
+            }
+        }
+        let msg = match update {
+            ConnectionUpdate::Frame(message) => message,
+            ConnectionUpdate::Summary => {
+                reply(ServerMessage::AutoSummaryChanged {
+                    enabled: *summary_updates.borrow_and_update(),
+                });
+                continue;
+            }
+            ConnectionUpdate::Settings => {
+                if remote_scope.is_some_and(|scope| scope != RemoteScope::Control) {
+                    continue;
+                }
+                let result = tokio::select! {
+                    biased;
+                    _ = connection_lifetime.cancelled() => break 'connection,
+                    result = daemon_settings_message(&session_manager, None, authorization.clone()) => result,
+                };
+                match result {
+                    Ok(message) => reply(message),
+                    Err(error) => tracing::warn!(%error, "could not publish daemon settings"),
+                }
+                continue;
             }
         };
         let msg = match msg {
@@ -883,12 +1034,22 @@ where
                 continue;
             };
             if !remote_message_allowed(scope, &client_msg) {
-                reply(ServerMessage::Error {
-                    message: format!(
-                        "remote access scope `{}` does not allow this operation",
-                        remote_scope_label(scope)
-                    ),
-                });
+                let message = format!(
+                    "remote access scope `{}` does not allow this operation",
+                    remote_scope_label(scope)
+                );
+                match &client_msg {
+                    ClientMessage::ReadDaemonSettings { request_id }
+                    | ClientMessage::SaveSessionDefaults { request_id, .. }
+                    | ClientMessage::ResetSessionDefaults { request_id }
+                    | ClientMessage::RevokeDevice { request_id, .. } => {
+                        reply(ServerMessage::DaemonSettingsFailed {
+                            request_id: request_id.clone(),
+                            message,
+                        })
+                    }
+                    _ => reply(ServerMessage::Error { message }),
+                }
                 continue;
             }
             if matches!(
@@ -1516,6 +1677,119 @@ where
                     auto_title_enabled,
                     auto_summary_enabled: *auto_summary_enabled.borrow(),
                 });
+            }
+            message @ (ClientMessage::ReadDaemonSettings { .. }
+            | ClientMessage::SaveSessionDefaults { .. }
+            | ClientMessage::ResetSessionDefaults { .. }
+            | ClientMessage::RevokeDevice { .. }) => {
+                observes_daemon_settings = true;
+                let request_id = match &message {
+                    ClientMessage::ReadDaemonSettings { request_id }
+                    | ClientMessage::SaveSessionDefaults { request_id, .. }
+                    | ClientMessage::ResetSessionDefaults { request_id }
+                    | ClientMessage::RevokeDevice { request_id, .. } => request_id.clone(),
+                    _ => unreachable!(),
+                };
+                let operation = async {
+                    match message {
+                        ClientMessage::ReadDaemonSettings { .. } => {}
+                        ClientMessage::SaveSessionDefaults { session_id, .. } => {
+                            let session = attached_session
+                                .as_ref()
+                                .filter(|session| session.id == session_id)
+                                .context("open this conversation before saving its defaults")?;
+                            #[cfg(test)]
+                            session_manager.settings_operation_started.notify_one();
+                            let policy = session.policy(&*session.agent.lock().await).await;
+                            session_manager
+                                .set_session_defaults_authorized(
+                                    Some(policy),
+                                    authorization.clone(),
+                                )
+                                .await?;
+                        }
+                        ClientMessage::ResetSessionDefaults { .. } => {
+                            session_manager
+                                .set_session_defaults_authorized(None, authorization.clone())
+                                .await?
+                        }
+                        ClientMessage::RevokeDevice { device_id, .. } => {
+                            // Capture the final authorized snapshot before self-revocation removes access.
+                            let mut confirmation = daemon_settings_message(
+                                &session_manager,
+                                Some(request_id.clone()),
+                                authorization.clone(),
+                            )
+                            .await?;
+                            let devices = session_manager
+                                .remote_devices
+                                .get()
+                                .cloned()
+                                .context("remote device management is unavailable")?;
+                            let actor = authorization
+                                .as_ref()
+                                .map(|authorization| authorization.peer.clone());
+                            let receipt = authorization
+                                .as_ref()
+                                .map(|authorization| authorization.revocation_receipt.clone());
+                            let changes = session_manager.settings_changed.clone();
+                            let sender = client_tx.clone();
+                            #[cfg(test)]
+                            let commit_hook = session_manager
+                                .revocation_commit_hook
+                                .lock()
+                                .unwrap()
+                                .clone();
+                            tokio::task::spawn_blocking(move || -> Result<()> {
+                                let _receipt = receipt.as_ref().map(|receipt| {
+                                    receipt.lock().expect("revocation receipt lock")
+                                });
+                                devices.revoke_as(
+                                    &device_id,
+                                    remote::unix_now(),
+                                    actor.as_deref(),
+                                )?;
+                                #[cfg(test)]
+                                if let Some(hook) = commit_hook {
+                                    hook();
+                                }
+                                if let ServerMessage::DaemonSettings {
+                                    devices: Some(devices),
+                                    ..
+                                } = &mut confirmation
+                                {
+                                    devices.retain(|device| device.id != device_id);
+                                }
+                                let _ = sender.send(confirmation);
+                                changes.send_replace(());
+                                Ok(())
+                            })
+                            .await??;
+                            return Ok(None);
+                        }
+                        _ => unreachable!(),
+                    }
+                    daemon_settings_message(
+                        &session_manager,
+                        Some(request_id.clone()),
+                        authorization.clone(),
+                    )
+                    .await
+                    .map(Some)
+                };
+                let result = tokio::select! {
+                    biased;
+                    _ = connection_lifetime.cancelled() => break 'connection,
+                    result = operation => result,
+                };
+                match result {
+                    Ok(Some(message)) => reply(message),
+                    Ok(None) => {}
+                    Err(error) => reply(ServerMessage::DaemonSettingsFailed {
+                        request_id,
+                        message: format!("{error:#}"),
+                    }),
+                }
             }
             ClientMessage::SetAutoTitle { enabled } => {
                 auto_title_enabled = enabled;
@@ -2838,6 +3112,9 @@ where
         }
     }
     connection_lifetime.cancel();
+    if let Some(monitor) = authorization_monitor {
+        monitor.abort();
+    }
     for registered in browser_pages
         .lock()
         .expect("browser registrations lock")
@@ -2857,6 +3134,16 @@ where
     }
     drop(client_tx);
     writer.await?;
+    // Retain the transport until the peer acknowledges our close frame. In
+    // particular, dropping an iroh connection can discard buffered stream data.
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while let Some(Ok(message)) = ws_rx.next().await {
+            if matches!(message, Message::Close(_)) {
+                break;
+            }
+        }
+    })
+    .await;
 
     Ok(())
 }
@@ -2866,6 +3153,29 @@ where
 // ---------------------------------------------------------------------------
 
 type WsSink<S> = futures::stream::SplitSink<tokio_tungstenite::WebSocketStream<S>, Message>;
+
+async fn daemon_settings_message(
+    manager: &SessionManager,
+    request_id: Option<String>,
+    authorization: Option<RemoteAuthorization>,
+) -> Result<ServerMessage> {
+    #[cfg(test)]
+    manager.settings_operation_started.notify_one();
+    let defaults = manager.read_session_defaults().await?;
+    let devices = if let Some(devices) = manager.remote_devices.get().cloned() {
+        Some(tokio::task::spawn_blocking(move || devices.devices(remote::unix_now())).await??)
+    } else {
+        None
+    };
+    if let Some(authorization) = authorization {
+        tokio::task::spawn_blocking(move || authorization.require_control()).await??;
+    }
+    Ok(ServerMessage::DaemonSettings {
+        request_id,
+        defaults,
+        devices,
+    })
+}
 
 /// Register cancellation before accepting work or waiting for the agent lock.
 async fn register_turn(session: &Session) -> CancellationToken {
