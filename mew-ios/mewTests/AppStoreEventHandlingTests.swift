@@ -19,6 +19,78 @@ final class AppStoreEventHandlingTests: XCTestCase {
         store.selectedSessionId = "sess-1"
     }
 
+    func testToolDurationsUseMillisecondsAndHandleClockBoundaries() {
+        let start: Int64 = 1_800_000_000_000
+        let now = Date(timeIntervalSince1970: Double(start + 2_500) / 1_000)
+        XCTAssertEqual(FormatHelper.toolDuration(start: start, end: start + 1_800, now: now), "1s")
+        XCTAssertEqual(FormatHelper.toolDuration(start: start, end: start + 61_000, now: now), "1m 1s")
+        XCTAssertEqual(FormatHelper.toolDuration(start: start, end: nil, now: now), "2s")
+        XCTAssertEqual(FormatHelper.toolDuration(start: start, end: start + 999, now: now), "<1s")
+        XCTAssertEqual(FormatHelper.toolDuration(start: start, end: start, now: now), "<1s")
+        XCTAssertNil(FormatHelper.toolDuration(start: start, end: start - 1, now: now))
+        XCTAssertNil(FormatHelper.toolDuration(start: nil, end: start, now: now))
+        XCTAssertNil(FormatHelper.toolDuration(start: 0, end: start, now: now))
+    }
+
+    func testReviewRefreshKeepsLastResultUntilSuccessfulReplacement() {
+        let file = ReviewFile(path: "src/main.rs", oldPath: nil, status: .modified, hunks: [], added: 1, removed: 1)
+        store.refreshReview(daemon: "daemon-1", sessionId: "sess-1")
+        store.handleEvent(.reviewLoaded(daemon: "daemon-1", sessionId: "sess-1", requestId: store.review!.requestId, files: [file]))
+        store.refreshReview(daemon: "daemon-1", sessionId: "sess-1")
+        XCTAssertEqual(store.review!.files.map(\.path), ["src/main.rs"])
+        XCTAssertTrue(store.review!.isLoading)
+        store.handleEvent(.reviewFailed(daemon: "daemon-1", sessionId: "sess-1", requestId: store.review!.requestId, message: "Connection lost"))
+        XCTAssertEqual(store.review!.files.map(\.path), ["src/main.rs"])
+        XCTAssertNotNil(store.review!.error)
+        mock.reviewAccepted = false
+        store.refreshReview(daemon: "daemon-1", sessionId: "sess-1")
+        XCTAssertEqual(store.review!.files.map(\.path), ["src/main.rs"])
+        XCTAssertFalse(store.review!.isLoading)
+        XCTAssertNotNil(store.review!.error)
+        mock.reviewAccepted = true
+        store.refreshReview(daemon: "daemon-1", sessionId: "sess-1")
+        XCTAssertNil(store.review!.error)
+        store.handleEvent(.reviewLoaded(daemon: "daemon-1", sessionId: "sess-1", requestId: store.review!.requestId, files: []))
+        XCTAssertTrue(store.review!.files.isEmpty)
+    }
+
+    func testWorkerRefreshKeepsTranscriptOnErrorButClearsItForAnotherWorker() {
+        let messages = historySnapshot(before: nil, texts: ["worker findings"]).sessions[0].messages
+        store.openWorkerHistory(daemon: "daemon-1", sessionId: "sess-1", childSessionId: "child")
+        store.handleEvent(.workerHistoryLoaded(daemon: "daemon-1", sessionId: "sess-1", childSessionId: "child", requestId: store.workerHistory!.requestId, messages: messages, error: nil))
+        store.openWorkerHistory(daemon: "daemon-1", sessionId: "sess-1", childSessionId: "child")
+        XCTAssertEqual(store.workerHistory!.messages.map(\.id), ["worker findings"])
+        store.handleEvent(.workerHistoryLoaded(daemon: "daemon-1", sessionId: "sess-1", childSessionId: "child", requestId: store.workerHistory!.requestId, messages: [], error: "Connection lost"))
+        XCTAssertEqual(store.workerHistory!.messages.map(\.id), ["worker findings"])
+        XCTAssertFalse(store.workerHistory!.isLoading)
+        XCTAssertNotNil(store.workerHistory!.error)
+        mock.detailAccepted = false
+        store.openWorkerHistory(daemon: "daemon-1", sessionId: "sess-1", childSessionId: "child")
+        XCTAssertEqual(store.workerHistory!.messages.map(\.id), ["worker findings"])
+        XCTAssertFalse(store.workerHistory!.isLoading)
+        XCTAssertNotNil(store.workerHistory!.error)
+        mock.detailAccepted = true
+        store.openWorkerHistory(daemon: "daemon-1", sessionId: "sess-1", childSessionId: "other-child")
+        XCTAssertTrue(store.workerHistory!.messages.isEmpty)
+        store.handleEvent(.workerHistoryLoaded(daemon: "daemon-1", sessionId: "sess-1", childSessionId: "other-child", requestId: store.workerHistory!.requestId, messages: messages, error: nil))
+        store.openWorkerHistory(daemon: "daemon-1", sessionId: "sess-1", childSessionId: "other-child")
+        store.handleEvent(.workerHistoryLoaded(daemon: "daemon-1", sessionId: "sess-1", childSessionId: "other-child", requestId: store.workerHistory!.requestId, messages: [], error: nil))
+        XCTAssertTrue(store.workerHistory!.messages.isEmpty)
+    }
+
+    func testRefreshCannotReuseContentFromAnotherDaemonOrParentConversation() {
+        let file = ReviewFile(path: "other/private.rs", oldPath: nil, status: .modified, hunks: [], added: 1, removed: 1)
+        let messages = historySnapshot(before: nil, texts: ["other worker findings"]).sessions[0].messages
+        for (daemon, session) in [("daemon-2", "sess-1"), ("daemon-1", "other-parent")] {
+            store.review = WorkspaceReview(daemon: daemon, sessionId: session, requestId: "old", files: [file], isLoading: false)
+            store.workerHistory = WorkerHistory(daemon: daemon, sessionId: session, childSessionId: "child", requestId: "old", messages: messages, isLoading: false)
+            store.refreshReview(daemon: "daemon-1", sessionId: "sess-1")
+            store.openWorkerHistory(daemon: "daemon-1", sessionId: "sess-1", childSessionId: "child")
+            XCTAssertTrue(store.review!.files.isEmpty)
+            XCTAssertTrue(store.workerHistory!.messages.isEmpty)
+        }
+    }
+
     func testWorkspaceReviewAcceptsOnlyTheCurrentDaemonSessionAndRequest() {
         store.refreshReview(daemon: "daemon-1", sessionId: "sess-1")
         let request = store.review!.requestId

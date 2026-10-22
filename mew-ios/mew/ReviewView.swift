@@ -17,7 +17,9 @@ struct ReviewView: View {
         NavigationStack {
             Group {
                 if let review {
-                    if review.isLoading {
+                    if !review.files.isEmpty {
+                        fileList(review.files)
+                    } else if review.isLoading {
                         ProgressView("Loading changes…")
                     } else if let error = review.error {
                         ContentUnavailableView {
@@ -27,11 +29,9 @@ struct ReviewView: View {
                         } actions: {
                             Button("Try again", action: refresh)
                         }
-                    } else if review.files.isEmpty {
+                    } else {
                         ContentUnavailableView("No changes", systemImage: "checkmark.circle",
                             description: Text("This workspace matches its latest commit."))
-                    } else {
-                        fileList(review.files)
                     }
                 } else {
                     ContentUnavailableView("Review changes", systemImage: "doc.text.magnifyingglass",
@@ -39,6 +39,11 @@ struct ReviewView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if let review, !review.files.isEmpty {
+                    RefreshStatusView(isLoading: review.isLoading, error: review.error, retry: refresh)
+                }
+            }
             .navigationTitle("Changes")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -47,6 +52,7 @@ struct ReviewView: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Refresh", systemImage: "arrow.clockwise", action: refresh)
+                        .disabled(review?.isLoading == true)
                 }
             }
             .task { refresh() }

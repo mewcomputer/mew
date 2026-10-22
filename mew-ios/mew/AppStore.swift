@@ -367,7 +367,11 @@ final class AppStore: ObservableObject {
     func refreshReview(daemon: String, sessionId: String) {
         guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
         let requestId = UUID().uuidString
-        review = WorkspaceReview(daemon: daemon, sessionId: sessionId, requestId: requestId)
+        var files: [ReviewFile] = []
+        if let review, review.daemon == daemon, review.sessionId == sessionId {
+            files = review.files
+        }
+        review = WorkspaceReview(daemon: daemon, sessionId: sessionId, requestId: requestId, files: files)
         if core?.readSessionDiff(id: DaemonId(nodeId: daemon), sessionId: sessionId, requestId: requestId) != true {
             review?.isLoading = false
             review?.error = "Connect to this session before reviewing changes."
@@ -392,7 +396,13 @@ final class AppStore: ObservableObject {
     func openWorkerHistory(daemon: String, sessionId: String, childSessionId: String) {
         guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
         let requestId = UUID().uuidString
-        workerHistory = WorkerHistory(daemon: daemon, sessionId: sessionId, childSessionId: childSessionId, requestId: requestId)
+        var messages: [ChatMessage] = []
+        if let workerHistory, workerHistory.daemon == daemon, workerHistory.sessionId == sessionId,
+           workerHistory.childSessionId == childSessionId {
+            messages = workerHistory.messages
+        }
+        workerHistory = WorkerHistory(daemon: daemon, sessionId: sessionId, childSessionId: childSessionId,
+            requestId: requestId, messages: messages)
         if core?.readSubagentHistory(id: DaemonId(nodeId: daemon), sessionId: sessionId, childSessionId: childSessionId, requestId: requestId) != true {
             workerHistory?.isLoading = false
             workerHistory?.error = "Connect to the parent conversation to read this worker's history."
@@ -607,7 +617,7 @@ final class AppStore: ObservableObject {
                   workerHistory?.daemon == daemon, workerHistory?.sessionId == sessionId,
                   workerHistory?.childSessionId == childSessionId, workerHistory?.requestId == requestId,
                   workerHistory?.isLoading == true else { return }
-            workerHistory?.messages = messages
+            if error == nil { workerHistory?.messages = messages }
             workerHistory?.error = error
             workerHistory?.isLoading = false
 

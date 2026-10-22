@@ -304,11 +304,14 @@ struct ToolHistoryView: View {
     @State private var search = ""
 
     var body: some View {
-        let tools = messages.flatMap(\.parts).filter { part in
+        let tools = Array(messages.lazy.flatMap(\.parts).filter { part in
             guard part.kind == .toolCall else { return false }
-            return search.isEmpty || [part.toolName, part.toolInput, part.toolOutput, part.toolError]
-                .compactMap { $0 }.contains { $0.localizedCaseInsensitiveContains(search) }
-        }
+            return search.isEmpty
+                || part.toolName?.localizedCaseInsensitiveContains(search) == true
+                || part.toolInput?.localizedCaseInsensitiveContains(search) == true
+                || part.toolOutput?.localizedCaseInsensitiveContains(search) == true
+                || part.toolError?.localizedCaseInsensitiveContains(search) == true
+        })
         NavigationStack {
             Group {
                 if tools.isEmpty {
@@ -371,16 +374,19 @@ private struct ToolCallRow: View {
 
                     stateIndicator
 
-                    if let duration = formattedDuration {
-                        Text(duration)
-                            .font(.caption2.monospaced())
-                            .foregroundStyle(.tertiary)
+                    if part.toolState == "running" {
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            durationLabel(now: context.date)
+                        }
+                    } else if part.toolTimeEnd != nil {
+                        durationLabel(now: Date())
                     }
 
                     Image(systemName: expanded ? "chevron.up" : "chevron.down")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
+                .frame(minHeight: 44)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -394,6 +400,15 @@ private struct ToolCallRow: View {
     }
 
     @ViewBuilder
+    private func durationLabel(now: Date) -> some View {
+        if let duration = FormatHelper.toolDuration(start: part.toolTimeStart, end: part.toolTimeEnd, now: now) {
+            Text(duration)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
     private var detailContent: some View {
         VStack(alignment: .leading, spacing: 8) {
             // Input
@@ -402,7 +417,7 @@ private struct ToolCallRow: View {
                     Text("Input")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
-                    Text(prettyJSON(input))
+                    Text(FormatHelper.prettyJSON(input))
                         .font(.caption.monospaced())
                         .foregroundStyle(.primary)
                         .textSelection(.enabled)
@@ -447,43 +462,24 @@ private struct ToolCallRow: View {
         .padding(.top, 2)
     }
 
-    private var formattedDuration: String? {
-        guard let start = part.toolTimeStart else { return nil }
-        let end = part.toolTimeEnd ?? Int64(Date().timeIntervalSince1970)
-        let elapsed = end - start
-        if elapsed < 1 { return nil }
-        if elapsed < 60 { return "\(elapsed)s" }
-        return "\(elapsed / 60)m\(elapsed % 60)s"
-    }
-
-    private func prettyJSON(_ raw: String) -> String {
-        guard let data = raw.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data),
-              let pretty = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]),
-              let result = String(data: pretty, encoding: .utf8) else {
-            return raw
-        }
-        return result
-    }
-
     @ViewBuilder
     private var stateIndicator: some View {
         switch state {
         case .pending:
             Image(systemName: "circle")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.toolPending)
                 .font(.caption)
         case .running:
             ProgressView()
                 .controlSize(.small)
-                .tint(.blue)
+                .tint(Theme.toolRunning)
         case .completed:
             Image(systemName: "checkmark.circle.fill")
-                .foregroundStyle(.green)
+                .foregroundStyle(Theme.toolCompleted)
                 .font(.caption)
         case .error:
             Image(systemName: "xmark.circle.fill")
-                .foregroundStyle(.red)
+                .foregroundStyle(Theme.toolError)
                 .font(.caption)
         }
     }

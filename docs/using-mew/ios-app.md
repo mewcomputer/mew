@@ -117,7 +117,8 @@ latest commit, including staged and unstaged edits.
 
 Use **Refresh** to read the workspace again. Loading, connection failures,
 and repository errors have distinct states; a failed read does not appear
-as an empty diff. Review replies are scoped to their daemon, session, and
+as an empty diff. Refresh keeps the previous file list visible, with progress
+or a retry message alongside it. Review replies are scoped to their daemon, session, and
 request, so a late reply cannot replace a newer review.
 
 ### Workers and background jobs
@@ -127,14 +128,16 @@ Workers show their current status and tool. Tap a worker to read its
 transcript without leaving the parent conversation, then use **Refresh**
 to fetch newer messages. Completed workers leave the active list; an open
 transcript remains available.
+Refreshing a transcript preserves its messages, including when the read fails.
 
 Worker history currently loads as a single transcript. Transcripts larger
 than 8 MiB return a size-limit error; they do not disconnect the conversation.
 
-Tap a background job to read its captured output. **Check for more output**
-loads another chunk, and **Refresh** starts again from the beginning.
+Tap a background job to read its captured output. **Load more output**
+loads another chunk, and **Reload output** starts again from the beginning.
 Connection errors preserve output already read. If the daemon could not
-capture all output, the detail view says so.
+capture all output, the detail view says so. **End of output** marks a
+completed read, including jobs with no captured output.
 
 ### Settings
 

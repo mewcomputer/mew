@@ -2628,3 +2628,31 @@ commands and a physical-phone checklist to dev-mobile.md. Interactive
 pairing, background/network transitions, VoiceOver and long-history phone
 performance still need a device walkthrough. Temporary screenshot fixtures
 and access-level changes are removed; captures remain outside the repo.
+
+# 2026-10-22 — iOS cleanliness and UX pass
+
+Review and worker refreshes retain the last successful content, scoped to the
+same daemon/parent/worker, with shared progress and retry feedback. Successful
+empty results still replace prior content. Worker initial failures now offer
+an inline retry. Job output distinguishes loading, no captured output and end
+of output; reload and incremental-read controls have specific labels.
+
+Tool disclosures have 44-point targets and use shared state colors. Corrected
+millisecond duration formatting, including clock-boundary cases, and update
+running timers once per second. Reused JSON formatting and eliminated temporary
+flatten/search arrays. Added behavior coverage for refresh retention, immediate
+send failures, empty replacement, origin isolation and time formatting.
+
+Three regressions failed before their fixes. All 49 iOS behavior tests pass
+after removing capture fixtures. Inspected light/dark tool states, refresh/error
+feedback, an empty completed job and a larger-text worker retry state. Captured
+a six-second GIF of real simulator renders driven by seeded refresh/failure/
+retry responses. Independent breaker/simplifier/operator review found no
+required changes; the captured-output wording nit was corrected. Project-file
+validation and diff whitespace checks pass.
+
+Verification follow-up: mew-agent/src/tools.rs creates some terminal ToolTime
+records with start and end both set at completion (e.g. the generic execution
+path at lines 657/672). A tool can show elapsed time while running then <1s on
+completion. The iOS formatter now interprets milliseconds correctly; preserving
+the original start in agent-produced metadata needs a separate runtime fix.

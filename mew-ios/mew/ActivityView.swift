@@ -40,7 +40,7 @@ struct ActivityView: View {
                                     NavigationLink(value: ActivityDestination.job(id: job.jobId, command: job.command)) {
                                         VStack(alignment: .leading, spacing: 5) {
                                             Text(job.command).font(.subheadline.monospaced()).lineLimit(2)
-                                            Text(job.state).font(.caption).foregroundStyle(.secondary)
+                                            Text(job.state.capitalized).font(.caption).foregroundStyle(.secondary)
                                         }
                                         .padding(.vertical, 4)
                                     }
@@ -91,15 +91,7 @@ private struct WorkerHistoryView: View {
         Group {
             if let history = store.workerHistory, history.daemon == daemon,
                history.sessionId == sessionId, history.childSessionId == childSessionId {
-                if history.isLoading {
-                    ProgressView("Loading worker history…")
-                } else if let error = history.error {
-                    ContentUnavailableView("Couldn't load worker history", systemImage: "exclamationmark.triangle",
-                        description: Text(error))
-                } else if history.messages.isEmpty {
-                    ContentUnavailableView("No messages yet", systemImage: "text.bubble",
-                        description: Text("Refresh to read the worker's latest messages."))
-                } else {
+                if !history.messages.isEmpty {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 4) {
                             ForEach(history.messages, id: \.id) { message in
@@ -107,17 +99,38 @@ private struct WorkerHistoryView: View {
                             }
                         }
                     }
+                } else if history.isLoading {
+                    ProgressView("Loading worker history…")
+                } else if let error = history.error {
+                    ContentUnavailableView {
+                        Label("Couldn't load worker history", systemImage: "exclamationmark.triangle")
+                    } description: {
+                        Text(error)
+                    } actions: {
+                        Button("Try again", action: refresh)
+                    }
+                } else {
+                    ContentUnavailableView("No messages yet", systemImage: "text.bubble",
+                        description: Text("Refresh to read the worker's latest messages."))
                 }
             } else {
                 ProgressView()
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if let history = store.workerHistory, history.daemon == daemon,
+               history.sessionId == sessionId, history.childSessionId == childSessionId,
+               !history.messages.isEmpty {
+                RefreshStatusView(isLoading: history.isLoading, error: history.error, retry: refresh)
+            }
+        }
         .navigationTitle(name.isEmpty ? "Worker history" : name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button("Refresh", systemImage: "arrow.clockwise", action: refresh)
+                    .disabled(store.workerHistory?.isLoading == true)
             }
         }
         .task { refresh() }
@@ -140,7 +153,7 @@ private struct JobOutputView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(command).font(.caption.monospaced()).textSelection(.enabled).padding(.horizontal)
+            Text(command).font(.subheadline.monospaced()).textSelection(.enabled).padding(.horizontal)
             if let detail = store.jobOutput, detail.daemon == daemon,
                detail.sessionId == sessionId, detail.jobId == jobId {
                 if let error = detail.error {
@@ -151,15 +164,32 @@ private struct JobOutputView: View {
                     Text("Some output could not be captured.").font(.caption).foregroundStyle(.secondary).padding(.horizontal)
                 }
                 ScrollView([.horizontal, .vertical]) {
-                    Text(detail.output.isEmpty ? "No output yet." : detail.output)
-                        .font(.caption.monospaced()).textSelection(.enabled)
-                        .fixedSize(horizontal: true, vertical: false).padding()
+                    if !detail.output.isEmpty {
+                        Text(detail.output)
+                            .font(.caption.monospaced()).textSelection(.enabled)
+                            .fixedSize(horizontal: true, vertical: false).padding()
+                    } else if !detail.isLoading {
+                        Text(detail.done ? "No output was captured." : "No output yet.")
+                            .font(.callout).foregroundStyle(.secondary).padding()
+                    }
                 }
                 .defaultScrollAnchor(.topLeading)
                 if detail.isLoading {
                     ProgressView("Loading output…").frame(maxWidth: .infinity)
-                } else if !detail.done {
-                    Button("Check for more output") { store.loadMoreJobOutput() }
+                } else if detail.error != nil {
+                    Button("Try again") { store.loadMoreJobOutput() }
+                        .buttonStyle(.bordered)
+                        .controlSize(.large)
+                        .frame(maxWidth: .infinity)
+                } else if detail.done {
+                    Text("End of output")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity)
+                } else {
+                    Button("Load more output") { store.loadMoreJobOutput() }
+                        .buttonStyle(.bordered)
+                        .controlSize(.large)
                         .frame(maxWidth: .infinity)
                 }
             } else {
@@ -171,9 +201,11 @@ private struct JobOutputView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button("Refresh", systemImage: "arrow.clockwise") {
+                Button("Reload output", systemImage: "arrow.clockwise") {
                     store.openJobOutput(daemon: daemon, sessionId: sessionId, jobId: jobId)
                 }
+                .accessibilityHint("Read output again from the beginning")
+                .disabled(store.jobOutput?.isLoading == true)
             }
         }
         .task { store.openJobOutput(daemon: daemon, sessionId: sessionId, jobId: jobId) }

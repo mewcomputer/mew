@@ -2,6 +2,16 @@ import SwiftUI
 
 /// Helpers for formatting cost, time, and session state.
 enum FormatHelper {
+    static func toolDuration(start: Int64?, end: Int64?, now: Date = Date()) -> String? {
+        guard let start, start > 0 else { return nil }
+        let end = end ?? Int64(now.timeIntervalSince1970 * 1_000)
+        guard end >= start else { return nil }
+        let elapsed = (end - start) / 1_000
+        if elapsed < 1 { return "<1s" }
+        if elapsed < 60 { return "\(elapsed)s" }
+        return "\(elapsed / 60)m \(elapsed % 60)s"
+    }
+
     static func cost(_ value: Double) -> String {
         if value < 0.01 {
             return String(format: "$%.4f", value)
