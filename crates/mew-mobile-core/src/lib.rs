@@ -1633,7 +1633,7 @@ fn translate_message(
                                 let (input_str, output, error, time_start, time_end) =
                                     state::tool_state_fields(&tcp.state);
                                 p.tool_name = Some(tcp.tool_name.clone());
-                                p.tool_state = Some(format!("{:?}", tcp.state).to_lowercase());
+                                p.tool_state = Some(state::tool_state_name(&tcp.state).into());
                                 p.tool_input = input_str;
                                 p.tool_output = output;
                                 p.tool_error = error;
@@ -2338,6 +2338,70 @@ fn rand_jitter() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn tool_states_keep_stable_names_in_live_updates_and_history() {
+        let (core, id, state, _rx) = connected_core().await;
+        for status in ["pending", "running", "completed", "error"] {
+            let mut message = history_message(1);
+            message.role = mew_message::Role::Assistant;
+            let part = Part::ToolCall(mew_message::ToolCallPart {
+                base: mew_message::PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: message.id,
+                    session_id: message.session_id,
+                },
+                tool_name: "shell".into(),
+                call_id: "call".into(),
+                raw_input: String::new(),
+                state: serde_json::from_value(serde_json::json!({
+                    "status": status,
+                    "input": {"command": "private input"},
+                    "output": "private output",
+                    "error": "private error",
+                    "time": {"start": 1, "end": 2}
+                }))
+                .unwrap(),
+            });
+            message.parts = vec![part.clone()];
+            for wire in [
+                ServerMessage::SessionHistoryPage {
+                    session_id: "confirmed".into(),
+                    messages: vec![message],
+                    next_cursor: None,
+                    replace: true,
+                },
+                ServerMessage::Provider {
+                    event: ProviderEventWire::PartStart { part: part.clone() },
+                },
+                ServerMessage::PartUpdated {
+                    part_id: part.id(),
+                    part: part.clone(),
+                },
+            ] {
+                translate_message(&wire, &state, &mut None, &id.node_id);
+                let snapshot = core.snapshot(id.clone()).unwrap();
+                let projected = snapshot.sessions[0]
+                    .messages
+                    .last()
+                    .unwrap()
+                    .parts
+                    .last()
+                    .unwrap();
+                assert_eq!(projected.tool_state.as_deref(), Some(status));
+                assert!(projected
+                    .tool_input
+                    .as_ref()
+                    .unwrap()
+                    .contains("private input"));
+                if status == "completed" {
+                    assert_eq!(projected.tool_output.as_deref(), Some("private output"));
+                } else if status == "error" {
+                    assert_eq!(projected.tool_error.as_deref(), Some("private error"));
+                }
+            }
+        }
+    }
 
     #[tokio::test]
     async fn activity_projection_recovers_workers_and_jobs_without_changing_the_chat() {

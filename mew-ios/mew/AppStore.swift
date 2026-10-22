@@ -144,10 +144,15 @@ final class AppStore: ObservableObject {
     @Published var workerHistory: WorkerHistory?
     @Published var jobOutput: JobOutputDetail?
 
-    /// Messages filtered to exclude empty entries (no visible content).
+    /// Completed content; the active text part is rendered by StreamingBubble.
     var visibleMessages: [ChatMessage] {
-        messages.filter { msg in
-            msg.parts.contains { part in
+        messages.compactMap { msg -> ChatMessage? in
+            var visible = msg
+            if let streamingPartId, !streamingText.isEmpty,
+               msg.parts.contains(where: { $0.id == streamingPartId }) {
+                visible.parts.removeAll { $0.id == streamingPartId }
+            }
+            let hasContent = visible.parts.contains { part in
                 switch part.kind {
                 case .text:
                     return (part.text?.isEmpty == false)
@@ -159,6 +164,7 @@ final class AppStore: ObservableObject {
                     return (part.text?.isEmpty == false)
                 }
             }
+            return hasContent ? visible : nil
         }
     }
     @Published var streamingText: String = ""
@@ -720,8 +726,12 @@ final class AppStore: ObservableObject {
                 streamingText = delta
             }
 
-        case .partUpdated(let daemon, let sessionId, let partId, _, _):
+        case .partUpdated(let daemon, let sessionId, let partId, _, let state):
             guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
+            if state == "completed", streamingPartId == partId {
+                streamingPartId = nil
+                streamingText = ""
+            }
             // Update the message part in place
             updatePartInMessages(partId: partId)
 

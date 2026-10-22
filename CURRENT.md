@@ -2586,3 +2586,21 @@ checks exact output across the 64 KiB boundary, a multi-byte character,
 missing jobs and unauthorized child reads. The daemon suite also passes
 (136 tests, one existing ignored test). Independent review found tool-state
 projection and streaming/history display defects to fix in the next chunk.
+
+# 2026-10-22 — iOS streaming and tool-state regression fixes
+
+Replaced Rust debug payloads with stable pending/running/completed/error tool
+states across history, live events and part updates. Tool rows and accessibility
+now receive the intended short state while input/output/error stay separate.
+Chat snapshots exclude the current streaming part from the completed transcript;
+part completion transfers it back without duplicating text or dropping earlier
+completed parts. Added regressions for both bugs and malformed/empty job chunks.
+
+Verified the regressions fail before their fixes, then pass. The final related
+Rust suites pass 289 tests, including 51 mobile unit tests and all seven real
+iroh tests. All 45 iOS application tests pass after removing temporary rendering
+fixtures. Inspected ten light/dark simulator captures covering chat history,
+tool states, activity, worker history and job output. Rebuilt matching device,
+simulator and host libraries/bindings; strict all-target mobile Clippy,
+formatting, architecture and generated-theme checks pass. Independent reviewers
+confirmed both required findings are resolved.

@@ -335,7 +335,7 @@ impl SessionState {
                                 kind: PartKind::ToolCall,
                                 text: None,
                                 tool_name: Some(tcp.tool_name.clone()),
-                                tool_state: Some(format!("{:?}", tcp.state).to_lowercase()),
+                                tool_state: Some(tool_state_name(&tcp.state).into()),
                                 tool_input: input_str,
                                 tool_output: output,
                                 tool_error: error,
@@ -521,7 +521,7 @@ fn to_mobile_part(part: &mew_message::Part) -> Option<MessagePart> {
         kind: PartKind::ToolCall,
         text: None,
         tool_name: Some(base.tool_name.clone()),
-        tool_state: Some(format!("{:?}", base.state).to_lowercase()),
+        tool_state: Some(tool_state_name(&base.state).into()),
         tool_input,
         tool_output,
         tool_error,
@@ -530,6 +530,15 @@ fn to_mobile_part(part: &mew_message::Part) -> Option<MessagePart> {
         tool_time_end,
         tool_sensitivity: None,
     })
+}
+
+pub(crate) fn tool_state_name(state: &mew_message::ToolState) -> &'static str {
+    match state {
+        mew_message::ToolState::Pending(_) => "pending",
+        mew_message::ToolState::Running(_) => "running",
+        mew_message::ToolState::Completed(_) => "completed",
+        mew_message::ToolState::Error(_) => "error",
+    }
 }
 
 /// Extracted fields from a `ToolState`.

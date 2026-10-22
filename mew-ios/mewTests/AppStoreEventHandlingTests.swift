@@ -90,6 +90,34 @@ final class AppStoreEventHandlingTests: XCTestCase {
         XCTAssertNil(store.historyError)
     }
 
+    func testOlderHistoryShowsTheActiveAssistantPartOnceBetweenDeltas() {
+        mock.snapshotResult = historySnapshot(before: 24, texts: ["latest"], running: true)
+        store.handleEvent(.sessionReloaded(daemon: "daemon-1", sessionId: "sess-1"))
+        store.handleEvent(.textDelta(daemon: "daemon-1", sessionId: "sess-1", partId: "active", delta: "current"))
+        var snapshot = historySnapshot(before: nil, texts: ["older", "latest"], running: true)
+        let parts = [("completed", "earlier answer"), ("active", "current")].map { id, text in
+            MessagePart(id: id, kind: .text, text: text, toolName: nil, toolState: nil,
+                toolInput: nil, toolOutput: nil, toolError: nil, toolCallId: nil,
+                toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil)
+        }
+        snapshot.sessions[0].messages.append(ChatMessage(id: "assistant", role: "assistant", parts: parts, assistantMeta: nil))
+        mock.snapshotResult = snapshot
+
+        store.handleEvent(.historyExtended(daemon: "daemon-1", sessionId: "sess-1"))
+        XCTAssertEqual(store.visibleMessages.flatMap(\.parts).compactMap(\.text), ["older", "latest", "earlier answer"])
+        XCTAssertEqual(store.streamingText, "current")
+        store.handleEvent(.textDelta(daemon: "daemon-1", sessionId: "sess-1", partId: "active", delta: " reply"))
+        XCTAssertEqual(store.streamingText, "current reply")
+
+        snapshot.sessions[0].messages[2].parts[1].text = "current reply"
+        mock.snapshotResult = snapshot
+        store.handleEvent(.partUpdated(daemon: "daemon-1", sessionId: "sess-1", partId: "active", partKind: "text", state: "completed"))
+        XCTAssertEqual(store.visibleMessages.flatMap(\.parts).compactMap(\.text), ["older", "latest", "earlier answer", "current reply"])
+        XCTAssertTrue(store.streamingText.isEmpty)
+        XCTAssertNil(store.streamingPartId)
+        XCTAssertTrue(store.isStreaming)
+    }
+
     func testActivityAndWorkerHistoryStayWithTheirParentConversation() {
         let worker = WorkerInfo(taskId: "task", childSessionId: "child", name: "researcher", displayName: "Curie", status: "checking files", toolName: "read")
         store.handleEvent(.activityUpdated(daemon: "daemon-2", sessionId: "sess-1", subagents: [worker], jobs: []))
@@ -146,6 +174,29 @@ final class AppStoreEventHandlingTests: XCTestCase {
         store.selectSession("other")
         XCTAssertNil(store.jobOutput)
         XCTAssertTrue(store.subagents.isEmpty)
+    }
+
+    func testJobOutputRejectsInvalidChunksWithoutLosingReadOutput() {
+        store.openJobOutput(daemon: "daemon-1", sessionId: "sess-1", jobId: "job")
+        store.handleEvent(.jobOutputLoaded(daemon: "daemon-1", sessionId: "sess-1", jobId: "job", requestId: store.jobOutput!.requestId,
+            offset: 0, nextOffset: 3, output: "猫", done: false, incomplete: false))
+        for (offset, nextOffset, output) in [(UInt64(0), UInt64(1), "x"), (3, 2, ""), (3, 4, "猫")] {
+            store.loadMoreJobOutput()
+            store.handleEvent(.jobOutputLoaded(daemon: "daemon-1", sessionId: "sess-1", jobId: "job", requestId: store.jobOutput!.requestId,
+                offset: offset, nextOffset: nextOffset, output: output, done: true, incomplete: false))
+            XCTAssertEqual(store.jobOutput!.output, "猫")
+            XCTAssertEqual(store.jobOutput!.nextOffset, 3)
+            XCTAssertFalse(store.jobOutput!.isLoading)
+            XCTAssertFalse(store.jobOutput!.done)
+            XCTAssertNotNil(store.jobOutput!.error)
+        }
+        store.loadMoreJobOutput()
+        store.handleEvent(.jobOutputLoaded(daemon: "daemon-1", sessionId: "sess-1", jobId: "job", requestId: store.jobOutput!.requestId,
+            offset: 3, nextOffset: 3, output: "", done: false, incomplete: false))
+        XCTAssertEqual(store.jobOutput!.output, "猫")
+        XCTAssertFalse(store.jobOutput!.isLoading)
+        XCTAssertFalse(store.jobOutput!.done)
+        XCTAssertNil(store.jobOutput!.error)
     }
 
     func testWorkspaceReviewRefreshRejectsLateSuccessAndFailure() {
