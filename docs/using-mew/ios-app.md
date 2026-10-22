@@ -8,7 +8,7 @@ mew has an iOS app that connects to daemons on your machines over iroh
 permissions, send prompts — all from your phone.
 
 The app is in early development. It pairs with any number of daemons,
-shows per-daemon session rails with needs-you ordering, attaches to
+shows per-daemon session rails ordered by recent activity, attaches to
 sessions with recent history replay + live streaming, and supports
 sending prompts, canceling turns, answering permission and ask-user
 requests, and switching models.
@@ -59,13 +59,15 @@ permissions and questions across all sessions on that daemon.
 
 ### Session rail
 
-Per-daemon session list, sorted by attention:
+Per-daemon chats appear newest first, grouped into **Today**, **Yesterday**,
+**Previous 7 days**, **Previous 30 days**, and **Older**. Message timestamps
+determine recency, with creation time as a fallback. New alerts received while
+connected move their chat up immediately. Pending permission/question badges
+remain visible without permanently placing older chats above newer ones.
 
-1. **Needs attention** (amber) — sessions with pending permissions or
-   questions
-2. **Running** (blue) — sessions with an active turn
-3. **Active** (green) — sessions with recent activity
-4. **Idle** (gray) — sessions waiting for input
+Rows show the workspace and session state. Pull down to refresh, including
+from an empty list. **Show archived** remains available when every chat is
+archived. Pins mark chats without overriding chronological order.
 
 Swipe actions: pin, archive, delete (with confirmation). Tap **+** to
 create a new session — opens a project picker showing recent projects

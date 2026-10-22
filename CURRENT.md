@@ -2756,3 +2756,29 @@ not cover the newly identified defects. Screenshots and attachment-state evidenc
 are saved outside the repo under ios-ux-audit. Implementation order proposed:
 identity/pairing correctness, settings ownership and switcher, working-context
 restoration, then remaining discovery/copy refinements and phone verification.
+
+# 2026-10-22 — chronological iOS chat lists
+
+Per-daemon rails now sort by recent activity instead of pending/running/idle
+priority. Today, Yesterday, Previous 7 days, Previous 30 days and Older use
+local calendar boundaries. Rows retain attention badges, show workspace names,
+and allow two lines for titles. Pins remain markers rather than a sort override.
+
+Canonical millisecond message/creation timestamps are preserved. Live alert
+receipt times are held separately by daemon/session for the app lifetime, so a
+new alert promotes its chat without permanently prioritizing unresolved badges.
+Unknown-chat alerts request metadata from their originating daemon before the
+chat enters the list. Connected pull-to-refresh now requests sessions, including
+from empty states. Archive access remains visible when all chats are archived.
+
+The unknown-chat discovery regression failed before its fix. All 72 iOS tests
+pass after removing the capture fixture, including nine timeline tests for
+timestamp units/fallbacks, stable identities/ties, day/DST boundaries, filtering,
+alert promotion across list refreshes, late metadata, monotonic receipt times,
+and refresh origin isolation. Inspected light/dark alert promotion and archived/
+empty states; saved a seeded simulator GIF outside the repo. Independent review
+found no remaining required changes. Calendar cutoffs are calculated once per
+projection; a host benchmark of 2,400 entries improved from ~12 ms to ~0.06 ms.
+
+This chunk keeps existing per-daemon navigation. The optional question about a
+combined All-daemons view remains open for the switcher/navigation pass.

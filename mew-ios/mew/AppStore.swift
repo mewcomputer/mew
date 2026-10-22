@@ -116,6 +116,7 @@ final class AppStore: ObservableObject {
 
     // Per-daemon session lists
     @Published var sessionLists: [String: [SessionSummary]] = [:]
+    @Published private var sessionAlertTimes: [String: [String: Int64]] = [:]
     @Published var projectLists: [String: [ProjectInfo]] = [:]
     @Published var directoryListings: [String: DirListing] = [:]
     @Published var directoryLoading: Set<String> = []
@@ -272,6 +273,17 @@ final class AppStore: ObservableObject {
 
     // MARK: - Session management
 
+    func sessionTimeline(daemonNodeId: String, includeArchived: Bool, now: Date = Date(),
+                         calendar: Calendar = .current) -> [SessionTimelineSection] {
+        var items: [SessionTimelineItem] = []
+        for session in sessionLists[daemonNodeId] ?? [] where includeArchived || !session.archived {
+            let activityAt = max(session.createdAt, session.lastMessageAt ?? 0,
+                sessionAlertTimes[daemonNodeId]?[session.sessionId] ?? 0)
+            items.append(SessionTimelineItem(daemonNodeId: daemonNodeId, session: session, activityAt: activityAt))
+        }
+        return SessionTimelineSection.grouped(items, now: now, calendar: calendar)
+    }
+
     func selectDaemon(_ daemon: DaemonEntry) {
         subagents = []
         jobs = []
@@ -285,6 +297,10 @@ final class AppStore: ObservableObject {
         if let core {
             core.listSessions(id: selectedDaemonId!)
         }
+    }
+
+    func refreshSessions(daemonNodeId: String) {
+        core?.listSessions(id: DaemonId(nodeId: daemonNodeId))
     }
 
     func openAlertSession(_ alert: AlertItem) {
@@ -558,7 +574,7 @@ final class AppStore: ObservableObject {
 
     // MARK: - Event handling (called by CoreListenerBridge)
 
-    func handleEvent(_ event: CoreEvent) {
+    func handleEvent(_ event: CoreEvent, receivedAt: Date = Date()) {
         switch event {
         case .daemonStatusChanged(let daemon, let status):
             daemonStatuses[daemon] = status
@@ -798,6 +814,14 @@ final class AppStore: ObservableObject {
             pendingAskUser.removeAll { $0.daemon == daemon && $0.requestId == requestId }
 
         case .alert(let daemon, let sessionId, let kind, let title, let detail):
+            if !sessionId.isEmpty {
+                let timestamp = Int64(receivedAt.timeIntervalSince1970 * 1_000)
+                sessionAlertTimes[daemon, default: [:]][sessionId] = max(
+                    sessionAlertTimes[daemon]?[sessionId] ?? 0, timestamp)
+                if sessionLists[daemon]?.contains(where: { $0.sessionId == sessionId }) != true {
+                    refreshSessions(daemonNodeId: daemon)
+                }
+            }
             switch kind {
             case "error", "turncomplete", "turnfailed":
                 pendingSubmissions[daemon]?.remove(sessionId)

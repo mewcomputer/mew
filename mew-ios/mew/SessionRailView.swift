@@ -3,8 +3,8 @@ import MewMobileCore
 
 /// Session rail: lists sessions for a single daemon, mirroring the web UI.
 ///
-/// Sorted by "needs attention": pending permissions/questions first, then
-/// running, active, idle. Archived sessions are hidden behind a toggle.
+/// Recent messages and new alerts determine chronological order; pending
+/// permissions/questions remain visible as badges. Archives are optional.
 struct SessionRailView: View {
     let daemonNodeId: String
 
@@ -28,12 +28,6 @@ struct SessionRailView: View {
     private var isConnected: Bool {
         if case .connected = status { return true }
         return false
-    }
-
-    private var sessions: [SessionSummary] {
-        let all = store.sessionLists[daemonNodeId] ?? []
-        let filtered = showArchived ? all : all.filter { !$0.archived }
-        return filtered.sorted { lhs, rhs in attentionRank(lhs) < attentionRank(rhs) }
     }
 
     var body: some View {
@@ -117,35 +111,48 @@ struct SessionRailView: View {
 
     @ViewBuilder
     private var sessionList: some View {
-        if sessions.isEmpty {
-            ContentUnavailableView(
-                showArchived ? "No Archived Sessions" : "No Sessions",
-                systemImage: "bubble.left.and.bubble.right",
-                description: Text(showArchived
-                    ? "Archived sessions will appear here."
-                    : "Tap + to start a new conversation with this daemon.")
-            )
-        } else {
+        TimelineView(.periodic(from: .now, by: 60)) { context in
+            let sections = store.sessionTimeline(daemonNodeId: daemonNodeId, includeArchived: showArchived, now: context.date)
             List {
-                Section {
-                    ForEach(sessions, id: \.sessionId) { session in
-                        sessionRow(session)
-                    }
-                } header: {
-                    if hasArchived {
+                if hasArchived {
+                    Section {
                         Toggle(isOn: $showArchived) {
-                            Label("Show Archived", systemImage: "archivebox")
+                            Label("Show archived", systemImage: "archivebox")
                         }
                     }
                 }
+                if sections.isEmpty {
+                    emptySessions.listRowSeparator(.hidden)
+                }
+                ForEach(sections) { section in
+                    Section {
+                        ForEach(section.items) { item in
+                            sessionRow(item.session)
+                                .listRowSeparator(.hidden)
+                        }
+                    } header: {
+                        Text(section.period.title)
+                            .font(.headline)
+                            .foregroundStyle(.primary)
+                            .textCase(nil)
+                    }
+                    .listSectionSeparator(.hidden)
+                }
             }
-            .listStyle(.insetGrouped)
+            .listStyle(.plain)
+            .listSectionSpacing(.compact)
             .refreshable {
-                // The store owns session listing via CoreEvents; nothing to
-                // call directly here. The control is shown for parity with
-                // the web UI's pull-to-refresh affordance.
+                store.refreshSessions(daemonNodeId: daemonNodeId)
             }
         }
+    }
+
+    private var emptySessions: some View {
+        ContentUnavailableView(hasArchived && !showArchived ? "No active chats" : "No chats",
+            systemImage: "bubble.left.and.bubble.right",
+            description: Text(hasArchived && !showArchived
+                ? "Turn on Show archived to see your archived conversations."
+                : "Pull down to refresh, or tap + to start a conversation."))
     }
 
     // MARK: - Connecting / disconnected
@@ -243,11 +250,17 @@ struct SessionRailView: View {
                     }
                     Text(displayName(session))
                         .font(.body)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                        .lineLimit(2)
+                        .truncationMode(.tail)
                 }
 
                 HStack(spacing: 8) {
+                    if let cwd = session.cwd, !cwd.isEmpty {
+                        Label((cwd as NSString).lastPathComponent, systemImage: "folder")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
                     stateLabel(session.state)
                         .font(.caption)
                         .foregroundStyle(stateColor(session.state))
@@ -428,19 +441,6 @@ struct SessionRailView: View {
             }
             return m.model == model
         }?.contextWindow
-    }
-
-    /// Lower rank sorts first: pending > running > active > idle.
-    private func attentionRank(_ session: SessionSummary) -> Int {
-        if session.pendingPermissions > 0 || session.pendingQuestions > 0 {
-            return 0
-        }
-        switch session.state {
-        case "running": return 1
-        case "active":  return 2
-        case "idle":    return 3
-        default:       return 4
-        }
     }
 
     /// Ensure the store's `selectedDaemonId` matches this rail so that

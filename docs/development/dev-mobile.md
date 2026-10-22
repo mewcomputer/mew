@@ -222,6 +222,9 @@ UTF-8 output chunks, and workspace review freshness/errors. The iOS suite
 also checks stale reply rejection, output recovery and streaming while
 loading older messages, consecutive tool summaries, invisible turn boundaries,
 and expanded tool details surviving history-page merges.
+Timeline tests cover millisecond timestamps, chronological ordering, calendar
+boundaries including daylight saving, daemon-scoped alert promotion, unknown
+chat discovery, and refreshes that preserve the active conversation.
 
 Physical-phone checks remain necessary before release:
 

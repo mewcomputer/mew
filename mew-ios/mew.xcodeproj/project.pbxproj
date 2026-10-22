@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		B67F88A1A1044574B031AE34 /* SessionTimeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE33 /* SessionTimeline.swift */; };
+		B67F88A1A1044574B031AE35 /* SessionTimeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE33 /* SessionTimeline.swift */; };
+		B67F88A1A1044574B031AE32 /* SessionTimelineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE31 /* SessionTimelineTests.swift */; };
 		B67F88A1A1044574B031AE22 /* ConversationActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE21 /* ConversationActivity.swift */; };
 		B67F88A1A1044574B031AE23 /* ConversationActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE21 /* ConversationActivity.swift */; };
 		B67F88A1A1044574B031AE25 /* ConversationActivityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE24 /* ConversationActivityTests.swift */; };
@@ -79,6 +82,8 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		B67F88A1A1044574B031AE33 /* SessionTimeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionTimeline.swift; sourceTree = "<group>"; };
+		B67F88A1A1044574B031AE31 /* SessionTimelineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionTimelineTests.swift; sourceTree = "<group>"; };
 		B67F88A1A1044574B031AE21 /* ConversationActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationActivity.swift; sourceTree = "<group>"; };
 		B67F88A1A1044574B031AE24 /* ConversationActivityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationActivityTests.swift; sourceTree = "<group>"; };
 		B67F88A1A1044574B031AE11 /* RefreshStatusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RefreshStatusView.swift; sourceTree = "<group>"; };
@@ -191,6 +196,7 @@
 				1DF104663A4B9CEC1F06E91E /* MockMobileCore.swift */,
 				3FD7A599A73C712D62E6DF76 /* AppStoreEventHandlingTests.swift */,
 				B67F88A1A1044574B031AE24 /* ConversationActivityTests.swift */,
+				B67F88A1A1044574B031AE31 /* SessionTimelineTests.swift */,
 			);
 			path = mewTests;
 			sourceTree = "<group>";
@@ -209,6 +215,7 @@
 				545CECE3392D12E734D9A133 /* AppStore.swift */,
 				B88D5B96B52F24E2D3C0DD85 /* ChatView.swift */,
 				B67F88A1A1044574B031AE21 /* ConversationActivity.swift */,
+				B67F88A1A1044574B031AE33 /* SessionTimeline.swift */,
 				B67F88A1A1044574B031AE01 /* ActivityView.swift */,
 				AB83A9F1D619452A8E38F812 /* ReviewView.swift */,
 				B67F88A1A1044574B031AE11 /* RefreshStatusView.swift */,
@@ -359,6 +366,7 @@
 				36E2687C83C9A15519FBB164 /* AppStore.swift in Sources */,
 				64FF009410027CFE96073711 /* ChatView.swift in Sources */,
 				B67F88A1A1044574B031AE23 /* ConversationActivity.swift in Sources */,
+				B67F88A1A1044574B031AE35 /* SessionTimeline.swift in Sources */,
 				B67F88A1A1044574B031AE03 /* ActivityView.swift in Sources */,
 				AB83A9F1D619452A8E38F814 /* ReviewView.swift in Sources */,
 				B67F88A1A1044574B031AE13 /* RefreshStatusView.swift in Sources */,
@@ -378,6 +386,7 @@
 				CF7A311BE95F8E5D561A24A6 /* MockMobileCore.swift in Sources */,
 				8C656AA687DF734C8FC3B3FC /* AppStoreEventHandlingTests.swift in Sources */,
 				B67F88A1A1044574B031AE25 /* ConversationActivityTests.swift in Sources */,
+				B67F88A1A1044574B031AE32 /* SessionTimelineTests.swift in Sources */,
 				9D4F7BBD61F807B2EF078A4B /* TodoPanelView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -389,6 +398,7 @@
 				0BAEB661227D370ACEAB5007 /* AppStore.swift in Sources */,
 				FDEC179FCD1D0B1F5CA253E1 /* ChatView.swift in Sources */,
 				B67F88A1A1044574B031AE22 /* ConversationActivity.swift in Sources */,
+				B67F88A1A1044574B031AE34 /* SessionTimeline.swift in Sources */,
 				B67F88A1A1044574B031AE02 /* ActivityView.swift in Sources */,
 				AB83A9F1D619452A8E38F813 /* ReviewView.swift in Sources */,
 				B67F88A1A1044574B031AE12 /* RefreshStatusView.swift in Sources */,
