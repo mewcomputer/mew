@@ -8,7 +8,7 @@ mew has an iOS app that connects to daemons on your machines over iroh
 permissions, send prompts — all from your phone.
 
 The app is in early development. It pairs with any number of daemons,
-shows per-daemon session rails ordered by recent activity, attaches to
+shows a combined chat list with machine filters ordered by recent activity, attaches to
 sessions with recent history replay + live streaming, and supports
 sending prompts, canceling turns, answering permission and ask-user
 requests, and switching models.
@@ -24,7 +24,7 @@ requests, and switching models.
    In another terminal, run `mew pair`. This prints a QR code containing a
    single-use invite that expires after 120 seconds.
 
-2. On your phone, open the mew app and tap **+**.
+2. On your phone, open **Machines** from the Chats toolbar, then tap **+**.
 
 3. Scan the QR code, or paste a complete pairing invite into the text field.
    The invite includes the credential needed to authorize your phone.
@@ -51,29 +51,44 @@ error message.
 
 ## What you see
 
-### Daemon list
+### Machines
 
-Each daemon shows a status dot (connected / connecting / unreachable),
-the daemon's version, and an aggregate needs-you badge summing pending
-permissions and questions across all sessions on that daemon.
+Open **Machines** in the Chats toolbar to manage saved connections. Each machine
+shows its connection state and an aggregate needs-you badge summing pending
+permissions and questions across its chats. Machine details include the daemon
+version, connection controls and daemon settings.
 
-### Session rail
+### Chats
 
-Per-daemon chats appear newest first, grouped into **Today**, **Yesterday**,
-**Previous 7 days**, **Previous 30 days**, and **Older**. Message timestamps
-determine recency, with creation time as a fallback. New alerts received while
-connected move their chat up immediately. Pending permission/question badges
-remain visible without permanently placing older chats above newer ones.
+The home screen combines conversations from all saved machines. **All** shows
+one chronological timeline; the machine filters narrow it without opening a
+chat. Each row identifies its machine and workspace. The list keeps the chosen
+filter independently of the open chat, including after returning from it.
 
-Rows show the workspace and session state. Pull down to refresh, including
-from an empty list. **Show archived** remains available when every chat is
-archived. Pins mark chats without overriding chronological order.
+Chats appear newest first, grouped into **Today**, **Yesterday**, **Previous 7
+days**, **Previous 30 days**, and **Older**. Message timestamps determine
+recency, with creation time as a fallback. New alerts move their chat up
+immediately. Pending permission/question badges remain visible without
+permanently placing older chats above newer ones. Pins mark chats without
+overriding chronological order.
 
-Swipe actions: pin, archive, delete (with confirmation). Tap **+** to
-create a new session — opens a project picker showing recent projects
-(derived from previous session cwds and `workspace.roots`) plus a
-free-text path input. The daemon validates the chosen cwd before
-creating the session, and rejects bad paths with an error.
+Pull down to refresh, including from an empty list. Returning from a chat also
+refreshes the visible machines' metadata, so newly created chats appear without
+a manual refresh. **Show archived** remains available when every chat is
+archived and follows the selected machine filter.
+
+Previously loaded chats remain visible when a machine disconnects, with explicit
+**Offline** labels. Its filter offers connection details and retry; mutations
+and new chats require a connection. The combined list can still show live chats
+from other machines.
+
+Swipe actions pin, archive, rename and delete (with confirmation) on the row's
+own machine. Tap **New chat** in the toolbar to create a conversation. From
+**All**, choose the machine first; a machine filter uses that machine directly.
+The project picker shows recent projects from that machine's previous chat
+workspaces and `workspace.roots`, plus a path input. The selected machine is
+visible above the picker, with an option to change it. The daemon validates the
+chosen workspace and rejects unavailable paths with an error.
 
 ### Chat view
 
@@ -161,7 +176,7 @@ not change conversation text. About contains a shareable connection diagnostic
 report with versions and connection states. The report excludes names, Node
 IDs, credentials, raw errors, paths, and conversation content.
 
-Tap the machine name in a chat or conversation list to open the switcher.
+Tap the machine name in a chat to open the switcher.
 It shows connection state, the selected machine, and pending requests. Tap
 the information button for that machine's details:
 
@@ -188,11 +203,12 @@ the app explicitly reports that limitation. Removing a saved
 connection disconnects this phone and removes its local entry. It keeps the
 daemon's conversations and does not revoke the phone's authorization.
 
-The app reopens the last explicitly selected machine and its working chat or
-list. An offline machine stays selected while it reconnects. A missing chat
-falls back to its machine's list; a removed machine falls back to the picker.
-With no saved choice, one machine opens directly and several show the picker.
-Each chat retains its own draft while switching within the app.
+The app restores the last open chat and the list's machine filter separately.
+With no saved location it opens **All**. An offline chat remains selected while
+its machine reconnects. A missing chat returns to the filtered list; a removed
+filter falls back to **All**. Each chat retains its own draft while switching
+within the app. Choosing a machine in the chat's switcher restores that
+machine's remembered chat, with its filter selected behind it.
 
 ## Connection lifecycle
 

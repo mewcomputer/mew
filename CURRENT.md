@@ -2937,3 +2937,30 @@ and updated user/developer documentation. Full-workspace pre-commit Clippy,
 formatting and architecture checks pass. Physical haptic feel, VoiceOver,
 keyboard/gesture behavior and live network-change walkthroughs remain manual
 verification work.
+
+# 2026-10-22 — combined iOS chats with machine filters
+
+Chats is now the home screen, merging saved machines into one chronological
+timeline with All and per-machine filters. Rows retain machine-scoped identity,
+name their machine, and explicitly mark offline cached entries. The selected
+filter persists independently of the open chat and drafts; removed filters fall
+back to All. Machine management remains available from the toolbar, and the chat
+switcher retains each machine's remembered conversation.
+
+Pin/archive/rename/delete, project reads and new-chat creation carry explicit
+machine identities. All asks for a machine before the project picker; a machine
+filter uses its own connection. Offline mutations and creation are disabled.
+Returning to the list refreshes summaries through the navigation transition,
+including newly created empty chats. Pending creation cannot navigate after a
+filter or destination change. Accessibility text sizes stack row metadata, and
+the filter strip keeps the selected machine visible.
+
+All 135 tests pass on both simulator and the unlocked physical iPhone, including
+merged ordering/archives, duplicate chat IDs, offline cache, scoped mutations,
+filter/chat restoration, creation routing and create/Back/refresh behavior.
+Inspected seeded light/dark, filtered/offline, accessibility-size and chat-context
+captures, plus a GIF comparing filter and navigation states. Removed temporary
+capture fixtures and updated mobile documentation. Three review lenses found
+no remaining blockers after fixing list refresh and explicit offline labeling.
+Hands-on VoiceOver, gestures, keyboard and live network changes remain part of
+the wider verification pass.

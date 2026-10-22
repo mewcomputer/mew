@@ -35,6 +35,9 @@ final class MockMobileCore: @preconcurrency MobileCoreProtocol {
     var listSessionsCalls: [String] = []
     var listModelsCalls: [String] = []
     var newSessionCalls: [String?] = []
+    var newSessionTargets: [String] = []
+    var projectCalls: [String] = []
+    var sessionMutationCalls: [(nodeId: String, sessionId: String, action: String)] = []
     var reviewAccepted = true
     var historyAccepted = true
     var historyCalls: [(nodeId: String, sessionId: String)] = []
@@ -114,8 +117,11 @@ final class MockMobileCore: @preconcurrency MobileCoreProtocol {
     }
 
     func listSessions(id: DaemonId) { listSessionsCalls.append(id.nodeId) }
-    func newSession(id: DaemonId, cwd: String?) { newSessionCalls.append(cwd) }
-    func listProjects(id: DaemonId) {}
+    func newSession(id: DaemonId, cwd: String?) {
+        newSessionCalls.append(cwd)
+        newSessionTargets.append(id.nodeId)
+    }
+    func listProjects(id: DaemonId) { projectCalls.append(id.nodeId) }
     func listDir(id: DaemonId, sessionId: String, path: String?) {}
 
     func readSessionDiff(id: DaemonId, sessionId: String, requestId: String) -> Bool {
@@ -192,10 +198,18 @@ final class MockMobileCore: @preconcurrency MobileCoreProtocol {
         setThinkingVariantCalls.append((id.nodeId, variant))
     }
 
-    func archiveSession(id: DaemonId, sessionId: String, archived: Bool) {}
-    func pinSession(id: DaemonId, sessionId: String, pinned: Bool) {}
-    func deleteSession(id: DaemonId, sessionId: String) {}
-    func renameSession(id: DaemonId, sessionId: String, title: String) {}
+    func archiveSession(id: DaemonId, sessionId: String, archived: Bool) {
+        sessionMutationCalls.append((id.nodeId, sessionId, "archive:\(archived)"))
+    }
+    func pinSession(id: DaemonId, sessionId: String, pinned: Bool) {
+        sessionMutationCalls.append((id.nodeId, sessionId, "pin:\(pinned)"))
+    }
+    func deleteSession(id: DaemonId, sessionId: String) {
+        sessionMutationCalls.append((id.nodeId, sessionId, "delete"))
+    }
+    func renameSession(id: DaemonId, sessionId: String, title: String) {
+        sessionMutationCalls.append((id.nodeId, sessionId, "rename:\(title)"))
+    }
 
     func nodeId() -> String { nodeIdResult }
 

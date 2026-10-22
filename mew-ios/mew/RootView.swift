@@ -1,7 +1,7 @@
 import SwiftUI
 import MewMobileCore
 
-/// Root navigation: Daemons → Sessions → Chat
+/// The combined conversation list owns navigation to chats and settings.
 struct RootView: View {
     @EnvironmentObject var store: AppStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -10,11 +10,11 @@ struct RootView: View {
 
     var body: some View {
         NavigationStack(path: $store.path) {
-            DaemonListView()
+            SessionRailView()
                 .navigationDestination(for: NavigationRoute.self) { route in
                     switch route {
-                    case .sessions(let daemonNodeId):
-                        SessionRailView(daemonNodeId: daemonNodeId)
+                    case .machines:
+                        DaemonListView()
                     case .chat(let daemonNodeId, let sessionId):
                         ChatView(daemonNodeId: daemonNodeId, sessionId: sessionId)
                     case .settings:
@@ -108,7 +108,7 @@ struct RootView: View {
 }
 
 enum NavigationRoute: Hashable {
-    case sessions(daemonNodeId: String)
+    case machines
     case chat(daemonNodeId: String, sessionId: String)
     case settings
     case daemonDetails(daemonNodeId: String)

@@ -131,6 +131,14 @@ final class AppStore: ObservableObject {
         }
     }
 
+    // The list filter is independent of the chat currently open.
+    @Published var sessionFilter: String? {
+        didSet {
+            preferences.set(sessionFilter, forKey: "mew.sessionFilter")
+            if sessionFilter != oldValue { pendingNewSessionDaemon = nil }
+        }
+    }
+
     // Active daemon + session
     @Published var selectedDaemonId: DaemonId?
     @Published var selectedSessionId: String?
@@ -241,6 +249,7 @@ final class AppStore: ObservableObject {
 
     init(defaults: UserDefaults = .standard) {
         preferences = defaults
+        sessionFilter = defaults.string(forKey: "mew.sessionFilter")
         phoneSettings = PhoneSettings(defaults: defaults)
         fontChoice = MewFontChoice(rawValue: defaults.string(forKey: "mew.fontChoice") ?? "Mi Sans") ?? .miSans
     }
@@ -372,13 +381,16 @@ final class AppStore: ObservableObject {
 
     // MARK: - Session management
 
-    func sessionTimeline(daemonNodeId: String, includeArchived: Bool, now: Date = Date(),
+    func sessionTimeline(daemonNodeId: String?, includeArchived: Bool, now: Date = Date(),
                          calendar: Calendar = .current) -> [SessionTimelineSection] {
         var items: [SessionTimelineItem] = []
-        for session in sessionLists[daemonNodeId] ?? [] where includeArchived || !session.archived {
-            let activityAt = max(session.createdAt, session.lastMessageAt ?? 0,
-                sessionAlertTimes[daemonNodeId]?[session.sessionId] ?? 0)
-            items.append(SessionTimelineItem(daemonNodeId: daemonNodeId, session: session, activityAt: activityAt))
+        let machines = daemonNodeId.map { [$0] } ?? daemons.map(\.nodeId)
+        for machine in machines {
+            for session in sessionLists[machine] ?? [] where includeArchived || !session.archived {
+                let activityAt = max(session.createdAt, session.lastMessageAt ?? 0,
+                    sessionAlertTimes[machine]?[session.sessionId] ?? 0)
+                items.append(SessionTimelineItem(daemonNodeId: machine, session: session, activityAt: activityAt))
+            }
         }
         return SessionTimelineSection.grouped(items, now: now, calendar: calendar)
     }
@@ -400,23 +412,22 @@ final class AppStore: ObservableObject {
         historyError = nil
     }
 
-    func selectDaemon(nodeId: String) {
-        if selectedDaemonId?.nodeId != nodeId || selectedSessionId != nil {
-            clearChat()
-        }
-        selectedDaemonId = DaemonId(nodeId: nodeId)
-        selectedSessionId = nil
-        core?.listSessions(id: DaemonId(nodeId: nodeId))
-    }
-
     func clearSelection() {
         clearChat()
         selectedSessionId = nil
         selectedDaemonId = nil
     }
 
-    func refreshSessions(daemonNodeId: String) {
-        core?.listSessions(id: DaemonId(nodeId: daemonNodeId))
+    func refreshSessions(daemonNodeId: String?) {
+        if let daemonNodeId {
+            core?.listSessions(id: DaemonId(nodeId: daemonNodeId))
+        } else {
+            for daemon in daemons {
+                if case .connected? = daemonStatuses[daemon.nodeId] {
+                    core?.listSessions(id: DaemonId(nodeId: daemon.nodeId))
+                }
+            }
+        }
     }
 
     func openAlertSession(_ alert: AlertItem) {
@@ -453,11 +464,12 @@ final class AppStore: ObservableObject {
         core.attach(id: DaemonId(nodeId: daemonNodeId), sessionId: sessionId)
     }
 
-    func newSession(cwd: String? = nil) {
-        guard let daemonId = selectedDaemonId, let core else { return }
-        let nodeId = daemonId.nodeId
-        pendingNewSessionDaemon = nodeId
-        core.newSession(id: daemonId, cwd: cwd)
+    @discardableResult
+    func newSession(cwd: String? = nil, daemonNodeId: String) -> Bool {
+        guard case .connected? = daemonStatuses[daemonNodeId], let core else { return false }
+        pendingNewSessionDaemon = daemonNodeId
+        core.newSession(id: DaemonId(nodeId: daemonNodeId), cwd: cwd)
+        return true
     }
 
     private func failSessionCreation(daemon: String, message: String) {
@@ -469,10 +481,10 @@ final class AppStore: ObservableObject {
         if isAppActive { activeBanner = item }
     }
 
-    func fetchProjects() {
-        guard let daemonId = selectedDaemonId, let core else { return }
-        projectsLoading.insert(daemonId.nodeId)
-        core.listProjects(id: daemonId)
+    func fetchProjects(daemonNodeId: String) {
+        guard let core else { return }
+        projectsLoading.insert(daemonNodeId)
+        core.listProjects(id: DaemonId(nodeId: daemonNodeId))
     }
 
     /// Browse a directory on the daemon. The result arrives as a
@@ -761,24 +773,24 @@ final class AppStore: ObservableObject {
         managementTimeouts.removeValue(forKey: daemonNodeId)?.cancel()
     }
 
-    func archiveSession(_ sessionId: String, archived: Bool) {
-        guard let daemonId = selectedDaemonId, let core else { return }
-        core.archiveSession(id: daemonId, sessionId: sessionId, archived: archived)
+    func archiveSession(_ sessionId: String, daemonNodeId: String, archived: Bool) {
+        guard case .connected? = daemonStatuses[daemonNodeId], let core else { return }
+        core.archiveSession(id: DaemonId(nodeId: daemonNodeId), sessionId: sessionId, archived: archived)
     }
 
-    func pinSession(_ sessionId: String, pinned: Bool) {
-        guard let daemonId = selectedDaemonId, let core else { return }
-        core.pinSession(id: daemonId, sessionId: sessionId, pinned: pinned)
+    func pinSession(_ sessionId: String, daemonNodeId: String, pinned: Bool) {
+        guard case .connected? = daemonStatuses[daemonNodeId], let core else { return }
+        core.pinSession(id: DaemonId(nodeId: daemonNodeId), sessionId: sessionId, pinned: pinned)
     }
 
-    func deleteSession(_ sessionId: String) {
-        guard let daemonId = selectedDaemonId, let core else { return }
-        core.deleteSession(id: daemonId, sessionId: sessionId)
+    func deleteSession(_ sessionId: String, daemonNodeId: String) {
+        guard case .connected? = daemonStatuses[daemonNodeId], let core else { return }
+        core.deleteSession(id: DaemonId(nodeId: daemonNodeId), sessionId: sessionId)
     }
 
-    func renameSession(_ sessionId: String, title: String) {
-        guard let daemonId = selectedDaemonId, let core else { return }
-        core.renameSession(id: daemonId, sessionId: sessionId, title: title)
+    func renameSession(_ sessionId: String, daemonNodeId: String, title: String) {
+        guard case .connected? = daemonStatuses[daemonNodeId], let core else { return }
+        core.renameSession(id: DaemonId(nodeId: daemonNodeId), sessionId: sessionId, title: title)
     }
 
     // MARK: - Event handling (called by CoreListenerBridge)
@@ -921,7 +933,6 @@ final class AppStore: ObservableObject {
         case .sessionCreated(let daemon, let sessionId):
             guard pendingNewSessionDaemon == daemon else { return }
             pendingNewSessionDaemon = nil
-            guard selectedDaemonId?.nodeId == daemon else { return }
             path.append(.chat(daemonNodeId: daemon, sessionId: sessionId))
 
         case .sessionCreationFailed(let daemon, let message):

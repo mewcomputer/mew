@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 import MewMobileCore
 @testable import mew
 
@@ -28,6 +29,97 @@ final class AppNavigationTests: XCTestCase {
         super.tearDown()
     }
 
+    func testListFilterPersistsIndependentlyOfTheOpenChatAndDraft() {
+        store.daemons = [daemon("a"), daemon("b")]
+        store.path = [.chat(daemonNodeId: "a", sessionId: "same")]
+        store.drafts[.chat(daemonNodeId: "a", sessionId: "same")] = "unfinished"
+        store.sessionFilter = "b"
+        XCTAssertEqual(store.selectedDaemonId?.nodeId, "a")
+        XCTAssertEqual(store.selectedSessionId, "same")
+        store.path = []
+        let restored = AppStore(defaults: defaults)
+        restored.injectCore(MockMobileCore())
+        restored.daemons = store.daemons
+        restored.restoreWorkingLocation()
+        XCTAssertEqual(restored.sessionFilter, "b")
+        XCTAssertTrue(restored.path.isEmpty)
+        XCTAssertEqual(store.drafts[.chat(daemonNodeId: "a", sessionId: "same")], "unfinished")
+        restored.sessionFilter = nil
+        XCTAssertNil(AppStore(defaults: defaults).sessionFilter)
+    }
+
+    func testAllFilterSurvivesRestoringAChatFromAnotherMachine() {
+        store.daemons = [daemon("a"), daemon("b")]
+        store.sessionFilter = nil
+        store.path = [.chat(daemonNodeId: "b", sessionId: "remote")]
+        let restored = AppStore(defaults: defaults)
+        restored.injectCore(MockMobileCore())
+        restored.daemons = store.daemons
+        restored.restoreWorkingLocation()
+        XCTAssertNil(restored.sessionFilter)
+        XCTAssertEqual(restored.path, [.chat(daemonNodeId: "b", sessionId: "remote")])
+        restored.path = []
+        XCTAssertNil(restored.selectedDaemonId)
+        XCTAssertNil(restored.selectedSessionId)
+    }
+
+    func testRowMutationsUseTheirOwnMachineWithoutChangingTheActiveChat() {
+        store.selectSession("same", daemonNodeId: "a")
+        store.daemonStatuses["b"] = .connected
+        store.archiveSession("same", daemonNodeId: "b", archived: true)
+        store.pinSession("same", daemonNodeId: "b", pinned: true)
+        store.renameSession("same", daemonNodeId: "b", title: "Remote")
+        store.deleteSession("same", daemonNodeId: "b")
+        XCTAssertEqual(core.sessionMutationCalls.map { $0.nodeId }, ["b", "b", "b", "b"])
+        XCTAssertEqual(core.sessionMutationCalls.map { $0.sessionId }, ["same", "same", "same", "same"])
+        XCTAssertEqual(core.sessionMutationCalls.map { $0.action }, ["archive:true", "pin:true", "rename:Remote", "delete"])
+        XCTAssertEqual(store.selectedDaemonId?.nodeId, "a")
+        XCTAssertEqual(store.selectedSessionId, "same")
+        store.daemonStatuses["b"] = .disconnected
+        store.deleteSession("same", daemonNodeId: "b")
+        XCTAssertEqual(core.sessionMutationCalls.count, 4)
+    }
+
+    func testCreationFromAllUsesTheChosenMachineAndCannotFollowAFilterChange() {
+        store.daemons = [daemon("a"), daemon("b")]
+        store.daemonStatuses["b"] = .connected
+        XCTAssertTrue(store.newSession(cwd: "/remote/project", daemonNodeId: "b"))
+        XCTAssertEqual(core.newSessionTargets, ["b"])
+        XCTAssertNil(store.selectedDaemonId)
+        store.handleEvent(.sessionCreated(daemon: "a", sessionId: "wrong"))
+        XCTAssertTrue(store.path.isEmpty)
+        store.handleEvent(.sessionCreated(daemon: "b", sessionId: "new"))
+        XCTAssertEqual(store.path, [.chat(daemonNodeId: "b", sessionId: "new")])
+        XCTAssertNil(store.sessionFilter)
+        store.path = []
+        XCTAssertTrue(store.newSession(cwd: "/remote/project", daemonNodeId: "b"))
+        store.sessionFilter = "a"
+        store.handleEvent(.sessionCreated(daemon: "b", sessionId: "late"))
+        XCTAssertTrue(store.path.isEmpty)
+    }
+
+    func testProjectReadsAndOfflineCreationNeverSwitchMachines() {
+        store.daemons = [daemon("a"), daemon("b")]
+        store.selectSession("current", daemonNodeId: "a")
+        store.fetchProjects(daemonNodeId: "b")
+        XCTAssertEqual(core.projectCalls, ["b"])
+        XCTAssertEqual(store.selectedDaemonId?.nodeId, "a")
+        XCTAssertFalse(store.newSession(cwd: "/remote/project", daemonNodeId: "b"))
+        XCTAssertTrue(core.newSessionTargets.isEmpty)
+        store.handleEvent(.sessionCreated(daemon: "b", sessionId: "late"))
+        XCTAssertEqual(store.selectedSessionId, "current")
+    }
+
+    func testRemovingAFilteredMachineReturnsTheListToAll() {
+        store.daemons = [daemon("a"), daemon("b")]
+        core.daemonsResult = store.daemons
+        store.sessionFilter = "b"
+        store.removeDaemon(daemon("b"))
+        XCTAssertNil(store.sessionFilter)
+        XCTAssertTrue(store.path.isEmpty)
+        XCTAssertEqual(store.daemons.map(\.nodeId), ["a"])
+    }
+
     func testSavedDaemonAndChatRestoreRegardlessOfConnectionOrder() {
         defaults.set("b", forKey: "mew.lastDaemon")
         defaults.set(["a": "local", "b": "remote"], forKey: "mew.lastChats")
@@ -44,7 +136,7 @@ final class AppNavigationTests: XCTestCase {
             }
             restored.handleEvent(.sessionReloaded(daemon: "b", sessionId: "remote"))
 
-            XCTAssertEqual(restored.path, [.sessions(daemonNodeId: "b"), .chat(daemonNodeId: "b", sessionId: "remote")])
+            XCTAssertEqual(restored.path, [.chat(daemonNodeId: "b", sessionId: "remote")])
             XCTAssertEqual(restored.selectedDaemonId?.nodeId, "b")
             XCTAssertEqual(restored.selectedSessionId, "remote")
             XCTAssertEqual(restored.messages.first?.parts.first?.text, "remote history")
@@ -67,7 +159,7 @@ final class AppNavigationTests: XCTestCase {
         XCTAssertFalse(store.canSendPrompt)
     }
 
-    func testMissingSavedMachineReturnsToThePicker() {
+    func testMissingSavedMachineReturnsToTheCombinedList() {
         defaults.set("removed", forKey: "mew.lastDaemon")
         defaults.set(["removed": "old-chat"], forKey: "mew.lastChats")
         store.daemons = [daemon("available")]
@@ -79,10 +171,11 @@ final class AppNavigationTests: XCTestCase {
         XCTAssertNil(store.selectedSessionId)
     }
 
-    func testFirstLaunchOpensTheOnlyMachineButKeepsThePickerForSeveral() {
+    func testFirstLaunchShowsAllChatsForOneOrSeveralMachines() {
         store.daemons = [daemon("a")]
         store.restoreWorkingLocation()
-        XCTAssertEqual(store.path, [.sessions(daemonNodeId: "a")])
+        XCTAssertTrue(store.path.isEmpty)
+        XCTAssertNil(store.sessionFilter)
 
         defaults.removePersistentDomain(forName: suiteName)
         let multiple = AppStore(defaults: defaults)
@@ -93,7 +186,7 @@ final class AppNavigationTests: XCTestCase {
         XCTAssertNil(multiple.selectedDaemonId)
     }
 
-    func testConfirmedMissingRestoredChatFallsBackOnlyToItsOwnMachineList() {
+    func testConfirmedMissingRestoredChatFallsBackToTheCombinedList() {
         defaults.set("b", forKey: "mew.lastDaemon")
         defaults.set(["b": "gone"], forKey: "mew.lastChats")
         store.daemons = [daemon("a"), daemon("b")]
@@ -103,8 +196,9 @@ final class AppNavigationTests: XCTestCase {
         XCTAssertEqual(store.path.last, .chat(daemonNodeId: "b", sessionId: "gone"))
         store.handleEvent(.sessionList(daemon: "b", sessions: [summary("different")]))
 
-        XCTAssertEqual(store.path, [.sessions(daemonNodeId: "b")])
-        XCTAssertEqual(store.selectedDaemonId?.nodeId, "b")
+        XCTAssertTrue(store.path.isEmpty)
+        XCTAssertNil(store.sessionFilter)
+        XCTAssertNil(store.selectedDaemonId)
         XCTAssertNil(store.selectedSessionId)
         XCTAssertTrue(store.messages.isEmpty)
     }
@@ -113,7 +207,7 @@ final class AppNavigationTests: XCTestCase {
         defaults.set("a", forKey: "mew.lastDaemon")
         defaults.set(["a": "saved"], forKey: "mew.lastChats")
         store.daemons = [daemon("a"), daemon("b")]
-        store.path = [.sessions(daemonNodeId: "b"), .chat(daemonNodeId: "b", sessionId: "chosen")]
+        store.path = [.chat(daemonNodeId: "b", sessionId: "chosen")]
 
         store.restoreWorkingLocation()
 
@@ -126,8 +220,8 @@ final class AppNavigationTests: XCTestCase {
         let first = daemon("a")
         let second = daemon("b")
         store.daemons = [first, second]
-        store.path = [.sessions(daemonNodeId: "a"), .chat(daemonNodeId: "a", sessionId: "local")]
-        store.path = [.sessions(daemonNodeId: "b"), .chat(daemonNodeId: "b", sessionId: "remote")]
+        store.path = [.chat(daemonNodeId: "a", sessionId: "local")]
+        store.path = [.chat(daemonNodeId: "b", sessionId: "remote")]
 
         store.openDaemon(first)
         XCTAssertEqual(store.path.last, .chat(daemonNodeId: "a", sessionId: "local"))
@@ -146,13 +240,13 @@ final class AppNavigationTests: XCTestCase {
     func testIdenticalSessionIdsOnDifferentMachinesCannotShowThePreviousTranscript() {
         store.daemons = [daemon("a"), daemon("b")]
         core.snapshotsByDaemon["a"] = snapshot("same", text: "machine a history")
-        store.path = [.sessions(daemonNodeId: "a"), .chat(daemonNodeId: "a", sessionId: "same")]
+        store.path = [.chat(daemonNodeId: "a", sessionId: "same")]
         XCTAssertEqual(store.messages.first?.parts.first?.text, "machine a history")
         store.streamingPartId = "a-stream"
         store.streamingText = "machine a live response"
         store.isStreaming = true
 
-        store.path = [.sessions(daemonNodeId: "b"), .chat(daemonNodeId: "b", sessionId: "same")]
+        store.path = [.chat(daemonNodeId: "b", sessionId: "same")]
 
         XCTAssertTrue(store.messages.isEmpty)
         XCTAssertTrue(store.streamingText.isEmpty)
@@ -166,7 +260,7 @@ final class AppNavigationTests: XCTestCase {
         let removed = daemon("a")
         store.daemons = [removed]
         core.snapshotsByDaemon["a"] = snapshot("chat", text: "old history")
-        store.path = [.sessions(daemonNodeId: "a"), .chat(daemonNodeId: "a", sessionId: "chat")]
+        store.path = [.chat(daemonNodeId: "a", sessionId: "chat")]
         store.streamingText = "old live response"
         store.streamingPartId = "old-part"
         store.isStreaming = true
@@ -204,7 +298,7 @@ final class AppNavigationTests: XCTestCase {
     }
 
     func testDetailsNavigationDoesNotRepeatAPendingChatAttachment() {
-        store.path = [.sessions(daemonNodeId: "a"), .chat(daemonNodeId: "a", sessionId: "pending")]
+        store.path = [.chat(daemonNodeId: "a", sessionId: "pending")]
         XCTAssertEqual(core.attachCalls.count, 1)
         store.path.append(.daemonDetails(daemonNodeId: "a"))
         store.path.removeLast()
@@ -218,9 +312,9 @@ final class AppNavigationTests: XCTestCase {
         let firstChat = NavigationRoute.chat(daemonNodeId: "a", sessionId: "same")
         let secondChat = NavigationRoute.chat(daemonNodeId: "b", sessionId: "same")
         store.daemons = [first, second]
-        store.path = [.sessions(daemonNodeId: "a"), firstChat]
+        store.path = [firstChat]
         store.drafts[firstChat] = "unfinished local question"
-        store.path = [.sessions(daemonNodeId: "b"), secondChat]
+        store.path = [secondChat]
         store.drafts[secondChat] = "unfinished remote question"
 
         store.openDaemon(first)
@@ -243,6 +337,44 @@ final class AppNavigationTests: XCTestCase {
         XCTAssertEqual(store.selectedModel(daemonNodeId: "a")?.id, "a-selected")
         XCTAssertEqual(store.modelsByDaemon["a"]?.map(\.id), ["a-wrong", "a-selected"])
         XCTAssertEqual(store.modelsByDaemon["b"]?.map(\.id), ["b-model"])
+    }
+
+    func testReturningFromANewChatRefreshesConnectedMachinesWithoutChangingTheFilter() async throws {
+        store.daemons = [daemon("a"), daemon("b")]
+        store.handleEvent(.daemonStatusChanged(daemon: "a", status: .connected))
+        store.handleEvent(.daemonStatusChanged(daemon: "b", status: .connected))
+        store.sessionFilter = nil
+        let window = UIWindow(windowScene: try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene))
+        window.rootViewController = UIHostingController(rootView: RootView().environmentObject(store))
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        let initialRead = expectation(for: NSPredicate { _, _ in self.core.listSessionsCalls.count >= 2 }, evaluatedWith: nil)
+        await fulfillment(of: [initialRead], timeout: 3)
+        core.snapshotsByDaemon["b"] = snapshot("new", text: "new chat")
+        XCTAssertTrue(store.newSession(daemonNodeId: "b"))
+        store.handleEvent(.sessionCreated(daemon: "b", sessionId: "new"))
+        try await Task.sleep(for: .milliseconds(350))
+        core.listSessionsCalls = []
+        store.path = []
+        let refreshed = expectation(for: NSPredicate { _, _ in Set(self.core.listSessionsCalls) == ["a", "b"] }, evaluatedWith: nil)
+        await fulfillment(of: [refreshed], timeout: 3)
+        store.handleEvent(.sessionList(daemon: "b", sessions: [summary("new")]))
+        XCTAssertEqual(store.sessionTimeline(daemonNodeId: nil, includeArchived: false).flatMap(\.items).map { $0.session.sessionId }, ["new"])
+        XCTAssertNil(store.sessionFilter)
+        XCTAssertNil(store.selectedDaemonId)
+    }
+
+    func testMissingSavedFilterFallsBackToAllWithoutLosingTheRestoredChat() {
+        defaults.set("removed", forKey: "mew.sessionFilter")
+        defaults.set("a", forKey: "mew.lastDaemon")
+        defaults.set(["a": "chat"], forKey: "mew.lastChats")
+        let restored = AppStore(defaults: defaults)
+        restored.injectCore(core)
+        restored.daemons = [daemon("a")]
+        restored.restoreWorkingLocation()
+        XCTAssertNil(restored.sessionFilter)
+        XCTAssertNil(defaults.string(forKey: "mew.sessionFilter"))
+        XCTAssertEqual(restored.path, [.chat(daemonNodeId: "a", sessionId: "chat")])
     }
 
     private func daemon(_ id: String) -> DaemonEntry {

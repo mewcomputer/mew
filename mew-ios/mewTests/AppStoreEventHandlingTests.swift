@@ -694,9 +694,10 @@ final class AppStoreEventHandlingTests: XCTestCase {
     }
 
     func testPendingNewSessionCannotBeCompletedByAnOlderHistoryReload() {
-        let destination = [NavigationRoute.sessions(daemonNodeId: "daemon-1")]
+        let destination: [NavigationRoute] = []
         store.path = destination
-        store.newSession(cwd: "/work/new")
+        store.daemonStatuses["daemon-1"] = .connected
+        store.newSession(cwd: "/work/new", daemonNodeId: "daemon-1")
 
         store.handleEvent(.sessionReloaded(daemon: "daemon-1", sessionId: "old-session"))
 
@@ -713,10 +714,10 @@ final class AppStoreEventHandlingTests: XCTestCase {
     }
 
     func testCreationResultsCannotHijackNavigationAwayFromTheRequest() {
-        store.path = [.sessions(daemonNodeId: "daemon-1")]
-        store.newSession()
-        let destination = [NavigationRoute.sessions(daemonNodeId: "daemon-1"),
-                           .chat(daemonNodeId: "daemon-1", sessionId: "chosen-chat")]
+        store.path = []
+        store.daemonStatuses["daemon-1"] = .connected
+        store.newSession(daemonNodeId: "daemon-1")
+        let destination = [NavigationRoute.chat(daemonNodeId: "daemon-1", sessionId: "chosen-chat")]
         store.path = destination
 
         store.handleEvent(.sessionCreated(daemon: "daemon-1", sessionId: "late-created-chat"))
@@ -728,9 +729,10 @@ final class AppStoreEventHandlingTests: XCTestCase {
     }
 
     func testCreationFailureReleasesOnlyItsOwnReservationAndAllowsRetry() {
-        let destination = [NavigationRoute.sessions(daemonNodeId: "daemon-1")]
+        let destination: [NavigationRoute] = []
         store.path = destination
-        store.newSession(cwd: "/missing")
+        store.daemonStatuses["daemon-1"] = .connected
+        store.newSession(cwd: "/missing", daemonNodeId: "daemon-1")
         store.handleEvent(.sessionCreationFailed(daemon: "daemon-2", message: "unrelated failure"))
         XCTAssertTrue(store.alerts.isEmpty)
 
@@ -741,16 +743,17 @@ final class AppStoreEventHandlingTests: XCTestCase {
         XCTAssertEqual(store.activeBanner?.sessionId, "")
         store.handleEvent(.sessionCreated(daemon: "daemon-1", sessionId: "late-result"))
         XCTAssertEqual(store.path, destination)
-        store.newSession(cwd: "/available")
+        store.newSession(cwd: "/available", daemonNodeId: "daemon-1")
         store.handleEvent(.sessionCreated(daemon: "daemon-1", sessionId: "retry-result"))
         XCTAssertEqual(mock.newSessionCalls, ["/missing", "/available"])
         XCTAssertEqual(store.selectedSessionId, "retry-result")
     }
 
     func testDisconnectAbandonsOnlyTheOriginatingPendingCreation() {
-        let destination = [NavigationRoute.sessions(daemonNodeId: "daemon-1")]
+        let destination: [NavigationRoute] = []
         store.path = destination
-        store.newSession()
+        store.daemonStatuses["daemon-1"] = .connected
+        store.newSession(daemonNodeId: "daemon-1")
         store.handleEvent(.daemonStatusChanged(daemon: "daemon-2", status: .disconnected))
         XCTAssertTrue(store.alerts.isEmpty)
 
@@ -823,7 +826,7 @@ final class AppStoreEventHandlingTests: XCTestCase {
 
     func testReturningFromACrossDaemonAlertRestoresTheRouteOwner() {
         store.daemons = [DaemonEntry(nodeId: "daemon-2", name: "Server", addedAt: 0, lastConnectedAt: nil, lastKnownVersion: nil, keepConnected: true, pairingToken: nil)]
-        store.path = [.sessions(daemonNodeId: "daemon-1"), .chat(daemonNodeId: "daemon-1", sessionId: "sess-1")]
+        store.path = [.chat(daemonNodeId: "daemon-1", sessionId: "sess-1")]
         store.openAlertSession(AlertItem(daemon: "daemon-2", sessionId: "sess-2", kind: "question", title: "Input", detail: nil))
         store.path.removeLast()
         XCTAssertEqual(store.selectedDaemonId?.nodeId, "daemon-1")
@@ -860,7 +863,7 @@ final class AppStoreEventHandlingTests: XCTestCase {
             lastKnownVersion: nil, keepConnected: true, pairingToken: "old-credential")
         store.daemons = [daemon]
         mock.daemonsResult = [daemon]
-        store.path = [.sessions(daemonNodeId: daemon.nodeId), .chat(daemonNodeId: daemon.nodeId, sessionId: "sess-1")]
+        store.path = [.chat(daemonNodeId: daemon.nodeId, sessionId: "sess-1")]
         mock.attachCalls = []
         let invite = DialInfo(nodeId: "saved-machine", name: nil, pairingToken: "new-credential")
         XCTAssertNil(store.addDaemon(info: invite, name: daemon.name, replacingDaemonNodeId: daemon.nodeId))
@@ -877,7 +880,7 @@ final class AppStoreEventHandlingTests: XCTestCase {
     }
 
     func testOpeningDetailsCannotEraseAnAttachmentErrorWithCachedHistory() {
-        store.path = [.sessions(daemonNodeId: "daemon-1"), .chat(daemonNodeId: "daemon-1", sessionId: "sess-1")]
+        store.path = [.chat(daemonNodeId: "daemon-1", sessionId: "sess-1")]
         mock.snapshotResult = historySnapshot(before: nil, texts: ["cached history"])
         store.daemonStatuses["daemon-1"] = .connected
         store.handleEvent(.sessionAttachmentFailed(daemon: "daemon-1", sessionId: "sess-1", message: "Resume failed"))

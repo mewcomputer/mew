@@ -250,7 +250,12 @@ loading older messages, consecutive tool summaries, invisible turn boundaries,
 and expanded tool details surviving history-page merges.
 Timeline tests cover millisecond timestamps, chronological ordering, calendar
 boundaries including daylight saving, daemon-scoped alert promotion, unknown
-chat discovery, and refreshes that preserve the active conversation.
+chat discovery, combined multi-daemon ordering and identity, cached offline
+chats, and refreshes that preserve the active conversation. Navigation tests
+cover independent filter/chat restoration, explicit machine ownership for row
+mutations and project reads, creation from All, and refreshing metadata when
+returning from a newly created chat. Row actions never infer a machine from
+the active conversation.
 
 Daemon management uses correlated `read_daemon_settings`,
 `save_session_defaults`, `reset_session_defaults` and `revoke_device` commands.
@@ -272,7 +277,9 @@ self-revocation confirmation and clean closure.
 Physical-phone checks remain necessary before release:
 
 - Pair a fresh identity with an invite, including an expired invite and
-  an already consumed invite. Connect to two daemons and switch chats.
+  an already consumed invite. Connect to two daemons, filter the combined
+  timeline, and switch chats. Check that Back retains the filter, offline chats
+  stay labeled, and creating from All targets the chosen machine.
 - Save and reset new-chat defaults, create chats from two clients and verify
   resumed chats keep their policy. Revoke another device and then this phone;
   check confirmation, disconnection and re-pairing. Check older daemons and

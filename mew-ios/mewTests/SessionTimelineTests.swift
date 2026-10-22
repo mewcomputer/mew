@@ -23,6 +23,42 @@ final class SessionTimelineTests: XCTestCase {
             inputTokens: 0, outputTokens: 0, turns: 0, contextTokens: nil)
     }
 
+    func testAllMachinesMergeByTimeWithScopedIdentityAndCachedOfflineChats() {
+        let store = AppStore()
+        store.daemons = ["a", "b"].map { id in
+            DaemonEntry(nodeId: id, name: id, addedAt: 0, lastConnectedAt: nil,
+                lastKnownVersion: nil, keepConnected: true, pairingToken: nil)
+        }
+        store.daemonStatuses = ["a": .connected, "b": .disconnected]
+        store.sessionLists = ["a": [session("same", at: date(2026, 10, 21)), session("archived", at: date(), archived: true)],
+                              "b": [session("same", at: date())],
+                              "removed": [session("stale", at: date(2026, 10, 23))]]
+        let items = store.sessionTimeline(daemonNodeId: nil, includeArchived: false, now: date(), calendar: calendar).flatMap(\.items)
+        XCTAssertEqual(items.map(\.daemonNodeId), ["b", "a"])
+        XCTAssertEqual(Set(items.map(\.id)).count, 2)
+        XCTAssertEqual(store.sessionTimeline(daemonNodeId: nil, includeArchived: true, now: date(), calendar: calendar)
+            .flatMap(\.items).count, 3)
+        store.handleEvent(.alert(daemon: "a", sessionId: "same", kind: "turncomplete", title: "Done", detail: nil), receivedAt: date(2026, 10, 23))
+        XCTAssertEqual(store.sessionTimeline(daemonNodeId: nil, includeArchived: false, now: date(), calendar: calendar)
+            .first?.items.first?.daemonNodeId, "a")
+    }
+
+    func testRefreshingAllMachinesKeepsTheOpenChatAndSkipsOfflineMachines() {
+        let store = AppStore()
+        let core = MockMobileCore()
+        store.injectCore(core)
+        store.daemons = ["a", "b", "offline"].map { id in
+            DaemonEntry(nodeId: id, name: id, addedAt: 0, lastConnectedAt: nil,
+                lastKnownVersion: nil, keepConnected: true, pairingToken: nil)
+        }
+        store.daemonStatuses = ["a": .connected, "b": .connected, "offline": .disconnected]
+        store.selectSession("current", daemonNodeId: "a")
+        store.refreshSessions(daemonNodeId: nil)
+        XCTAssertEqual(core.listSessionsCalls, ["a", "b"])
+        XCTAssertEqual(store.selectedSessionId, "current")
+        XCTAssertEqual(store.selectedDaemonId?.nodeId, "a")
+    }
+
     func testRecentActivityOrdersChatsInsteadOfAttentionOrPinState() {
         let store = AppStore()
         store.sessionLists = ["a": [session("old-pending", at: date(2026, 10, 20), pending: 1, pinned: true),

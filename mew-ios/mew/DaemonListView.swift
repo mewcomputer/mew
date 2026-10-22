@@ -41,12 +41,12 @@ struct DaemonListView: View {
                 }
             }
         }
-        .navigationTitle("mew")
+        .navigationTitle("Machines")
         .toolbarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) {
-                Text("mew")
-                    .font(.mewDisplay(24))
+                Text("Machines")
+                    .font(.headline)
                     .foregroundStyle(.primary)
             }
             ToolbarItem(placement: .topBarTrailing) {
@@ -90,7 +90,9 @@ struct DaemonListView: View {
             acc + Int(s.pendingPermissions) + Int(s.pendingQuestions)
         } ?? 0
 
-        NavigationLink(value: NavigationRoute.sessions(daemonNodeId: daemon.nodeId)) {
+        Button {
+            store.openDaemon(daemon)
+        } label: {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(daemon.name)
