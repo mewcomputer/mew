@@ -65,6 +65,23 @@ pub enum CoreEvent {
         message: String,
     },
 
+    /// The daemon acknowledged a new-session command from this client.
+    SessionCreated {
+        daemon: String,
+        session_id: String,
+    },
+
+    SessionCreationFailed {
+        daemon: String,
+        message: String,
+    },
+
+    SessionAttachmentFailed {
+        daemon: String,
+        session_id: String,
+        message: String,
+    },
+
     /// An attachment was acknowledged; discard cached required actions before replay.
     SessionReady {
         daemon: String,

@@ -973,6 +973,7 @@ async fn translate_server_message(
         | ServerMessage::PromptReceipt { .. }
         | ServerMessage::ModelList { .. }
         | ServerMessage::AutomationSettings { .. }
+        | ServerMessage::SessionOperationFailed { .. }
         | ServerMessage::AutoSummaryChanged { .. }
         | ServerMessage::ModelSwitched { .. }
         | ServerMessage::RequestResolved { .. }
@@ -1180,6 +1181,13 @@ mod tests {
 
             client.attach_session("missing").await.unwrap();
 
+            assert!(matches!(notifications.recv().await,
+                Some(ServerMessage::SessionOperationFailed {
+                    operation: mew_protocol::SessionOperation::Attach,
+                    session_id: Some(session_id),
+                    message,
+                }) if session_id == "missing" && message == "session not found"
+            ));
             assert!(matches!(notifications.recv().await,
                 Some(ServerMessage::Error { message }) if message == "session not found"
             ));

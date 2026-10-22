@@ -2816,3 +2816,20 @@ Verified 120 protocol tests, 84 daemon tests (one existing browser-dependent
 ignore), and 59 mobile-core tests. Rebuilt device, simulator and host core
 artifacts and regenerated the Swift bindings with just ios-core. Swift screen
 and navigation integration follows in the next chunk.
+
+# 2026-10-22 — daemon settings and session recovery safeguards
+
+Settings notifications now reach authenticated websocket clients even before
+they attach a chat. Queued automation mutations expire with their connection;
+new-chat commands also expire on reconnect or superseding attachment. Mobile
+tracks actually sent create/attach replies, rejects stale ready/history events,
+and emits distinct creation and attachment failure events. Daemon failures
+carry operation/session identity alongside the legacy error reply. Older
+daemons retain generic errors but require an update for typed recovery.
+
+Verified 68 mobile-core, 126 protocol, 86 daemon-library and seven daemon
+integration tests, with one existing browser-dependent ignore. The real iroh
+listener/streaming round trip includes creation confirmation. Strict all-target
+Clippy and formatting pass. Rebuilt all iOS core slices from frozen sources and
+regenerated bindings. Disk exhaustion interrupted the final gate; removing only
+the rebuildable host incremental cache allowed the checks to finish.

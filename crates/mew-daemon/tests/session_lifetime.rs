@@ -60,7 +60,7 @@ async fn connect(server: &DaemonServer) -> (Ws, JoinHandle<()>) {
             manager,
             groups,
             None,
-            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tokio::sync::watch::channel(false).0,
         )
         .await
         .unwrap();

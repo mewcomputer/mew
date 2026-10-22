@@ -178,7 +178,7 @@ pub struct MewIrohHandler {
     pub session_manager: Arc<SessionManager>,
     pub groups_store: Arc<GroupsStore>,
     pub thinking_setter: Option<ThinkingSetter>,
-    pub auto_summary_enabled: Arc<std::sync::atomic::AtomicBool>,
+    pub auto_summary_enabled: tokio::sync::watch::Sender<bool>,
     /// Scope applied to every protocol message after NodeId authentication.
     pub remote_scope: Option<RemoteScope>,
     /// Pairing token required by the explicit remote modes. Legacy mobile
@@ -279,7 +279,7 @@ pub async fn run_iroh(
     session_manager: Arc<SessionManager>,
     groups_store: Arc<GroupsStore>,
     thinking_setter: Option<ThinkingSetter>,
-    auto_summary_enabled: Arc<std::sync::atomic::AtomicBool>,
+    auto_summary_enabled: tokio::sync::watch::Sender<bool>,
     config: IrohListenerConfig,
 ) -> Result<()> {
     let allowlist = Arc::new(NodeIdAllowlist::load(config.allowlist_path.clone())?);

@@ -186,6 +186,14 @@ async fn mobile_core_emits_events_through_listener() -> Result<()> {
         matches!(e, CoreEvent::SessionReloaded { .. })
     });
     println!("✓ Received SessionReloaded (SessionReady)");
+    assert!(
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event, CoreEvent::SessionCreated { .. })),
+        "a real NewSession acknowledgment must identify creation independently of history reloads"
+    );
 
     // Send a prompt.
     core.prompt(daemon_id.clone(), "hello from M1 test".into());

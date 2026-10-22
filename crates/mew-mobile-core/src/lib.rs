@@ -4,7 +4,7 @@
 //! mew wire protocol, assembles session state, and emits typed events to
 //! the platform layer via `CoreListener`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -160,13 +160,23 @@ pub struct MobileCore {
     runtime: tokio::runtime::Handle,
 }
 
+struct SentSessionRequest {
+    operation: mew_protocol::SessionOperation,
+    session_id: Option<String>,
+    generation: u64,
+}
+
 /// Shared connection state, accessible from both the background task
 /// (for updates) and the foreground API (for snapshots).
 struct ConnState {
     /// Session requested by the user, retained across reconnects.
     requested_session: Mutex<Option<String>>,
+    session_requests: Mutex<VecDeque<SentSessionRequest>>,
+    legacy_session_error: Mutex<Option<String>>,
     /// Reject commands queued before a reconnect or attachment change.
     attachment_generation: AtomicU64,
+    /// Settings belong to one connection, independently of session attachments.
+    connection_generation: AtomicU64,
     /// SessionReady confirms this generation, even when reattaching the same ID.
     confirmed_generation: AtomicU64,
     /// Accepted prompts awaiting daemon running activity or rejection.
@@ -206,7 +216,10 @@ impl ConnState {
     fn new() -> Self {
         Self {
             requested_session: Mutex::new(None),
+            session_requests: Mutex::new(VecDeque::new()),
+            legacy_session_error: Mutex::new(None),
             attachment_generation: AtomicU64::new(0),
+            connection_generation: AtomicU64::new(0),
             confirmed_generation: AtomicU64::new(u64::MAX),
             pending_submissions: Mutex::new(HashMap::new()),
             history_pending: AtomicBool::new(false),
@@ -226,6 +239,25 @@ impl ConnState {
             #[cfg(test)]
             shared_events: Mutex::new(Vec::new()),
         }
+    }
+
+    fn record_session_request(&self, message: &ClientMessage, generation: u64) {
+        let (operation, session_id) = match message {
+            ClientMessage::NewSession { .. } => (mew_protocol::SessionOperation::Create, None),
+            ClientMessage::AttachSession { session_id, .. } => (
+                mew_protocol::SessionOperation::Attach,
+                Some(session_id.clone()),
+            ),
+            _ => return,
+        };
+        self.session_requests
+            .lock()
+            .unwrap()
+            .push_back(SentSessionRequest {
+                operation,
+                session_id,
+                generation,
+            });
     }
 
     fn invalidate_session_commands(&self) {
@@ -277,10 +309,19 @@ struct QueuedCommand {
     message: ClientMessage,
     session_id: Option<String>,
     generation: Option<u64>,
+    connection_generation: Option<u64>,
 }
 
 impl QueuedCommand {
     fn ready(&self, state: &ConnState) -> bool {
+        if let Some(generation) = self.connection_generation {
+            let client = state.client_state.lock().unwrap();
+            return client.connection == Some(mew_client_core::ConnectionStatus::Connected)
+                && state.connection_generation.load(Ordering::Relaxed) == generation
+                && (!matches!(self.message, ClientMessage::NewSession { .. })
+                    || self.generation
+                        == Some(state.attachment_generation.load(Ordering::Relaxed)));
+        }
         if let Some(session_id) = &self.session_id {
             let client = state.client_state.lock().unwrap();
             let generation = state.attachment_generation.load(Ordering::Relaxed);
@@ -294,7 +335,8 @@ impl QueuedCommand {
                 && state.requested_session.lock().unwrap().as_ref() == Some(session_id);
         }
         if let ClientMessage::AttachSession { session_id, .. } = &self.message {
-            return state.requested_session.lock().unwrap().as_ref() == Some(session_id);
+            return state.requested_session.lock().unwrap().as_ref() == Some(session_id)
+                && self.generation == Some(state.attachment_generation.load(Ordering::Relaxed));
         }
         true
     }
@@ -302,16 +344,21 @@ impl QueuedCommand {
 
 impl DaemonConnection {
     fn send(&self, message: ClientMessage) -> bool {
-        if matches!(
+        let connection_generation = if matches!(
             &message,
             ClientMessage::ReadAutomationSettings
                 | ClientMessage::SetAutoTitle { .. }
                 | ClientMessage::SetAutoSummary { .. }
-        ) && self.state.client_state.lock().unwrap().connection
-            != Some(mew_client_core::ConnectionStatus::Connected)
-        {
-            return false;
-        }
+                | ClientMessage::NewSession { .. }
+        ) {
+            let client = self.state.client_state.lock().unwrap();
+            if client.connection != Some(mew_client_core::ConnectionStatus::Connected) {
+                return false;
+            }
+            Some(self.state.connection_generation.load(Ordering::Relaxed))
+        } else {
+            None
+        };
         let session_scoped = matches!(
             &message,
             ClientMessage::Cancel
@@ -346,6 +393,14 @@ impl DaemonConnection {
                 return false;
             }
             (session_id, Some(generation))
+        } else if matches!(
+            &message,
+            ClientMessage::NewSession { .. } | ClientMessage::AttachSession { .. }
+        ) {
+            (
+                None,
+                Some(self.state.attachment_generation.load(Ordering::Relaxed)),
+            )
         } else {
             (None, None)
         };
@@ -354,6 +409,7 @@ impl DaemonConnection {
                 message,
                 session_id,
                 generation,
+                connection_generation,
             })
             .is_ok()
     }
@@ -594,6 +650,12 @@ impl MobileCore {
     pub fn attach(&self, id: DaemonId, session_id: String) {
         let conns = self.connections.lock().unwrap();
         if let Some(conn) = conns.get(&id.node_id) {
+            if conn.state.client_state.lock().unwrap().connection
+                == Some(mew_client_core::ConnectionStatus::Connected)
+                && conn.state.requested_session.lock().unwrap().as_ref() == Some(&session_id)
+            {
+                return;
+            }
             conn.state.invalidate_session_commands();
             *conn.state.requested_session.lock().unwrap() = Some(session_id.clone());
             let _ = conn.send(ClientMessage::AttachSession {
@@ -637,6 +699,7 @@ impl MobileCore {
                 },
                 session_id: Some(session_id.clone()),
                 generation: Some(generation),
+                connection_generation: None,
             })
             .is_err()
         {
@@ -726,13 +789,27 @@ impl MobileCore {
     /// Create a new session on a daemon.
     pub fn new_session(&self, id: DaemonId, cwd: Option<String>) {
         let conns = self.connections.lock().unwrap();
-        if let Some(conn) = conns.get(&id.node_id) {
+        let accepted = if let Some(conn) = conns.get(&id.node_id).filter(|conn| {
+            conn.state.client_state.lock().unwrap().connection
+                == Some(mew_client_core::ConnectionStatus::Connected)
+        }) {
             conn.state.invalidate_session_commands();
             *conn.state.requested_session.lock().unwrap() = None;
-            let _ = conn.send(ClientMessage::NewSession {
+            conn.send(ClientMessage::NewSession {
                 cwd,
                 client_kind: mew_protocol::ClientKind::Mobile,
-            });
+            })
+        } else {
+            false
+        };
+        drop(conns);
+        if !accepted {
+            if let Some(listener) = self.listener.lock().unwrap().clone() {
+                listener.on_event(CoreEvent::SessionCreationFailed {
+                    daemon: id.node_id,
+                    message: "Connect to this machine before starting a conversation.".into(),
+                });
+            }
         }
     }
 
@@ -1097,6 +1174,11 @@ fn set_shared_connection_status(
 ) {
     let mut client = conn_state.client_state.lock().unwrap();
     if status != mew_client_core::ConnectionStatus::Connected {
+        conn_state.session_requests.lock().unwrap().clear();
+        *conn_state.legacy_session_error.lock().unwrap() = None;
+        conn_state
+            .connection_generation
+            .fetch_add(1, Ordering::Relaxed);
         conn_state.invalidate_session_commands();
         client.attached_session = None;
         *conn_state.automation_settings.lock().unwrap() = None;
@@ -1221,11 +1303,14 @@ async fn connect_and_run(
     // daemon replays the newest history page (spec: reconnect re-attach).
     let reattach = conn_state.requested_session.lock().unwrap().clone();
     if let Some(session_id) = reattach {
-        let attach_msg = mew_protocol::encode_json(&ClientMessage::AttachSession {
+        let command = ClientMessage::AttachSession {
             session_id,
             client_kind: mew_protocol::ClientKind::Mobile,
-        })?;
+        };
+        let generation = conn_state.attachment_generation.load(Ordering::Relaxed);
+        let attach_msg = mew_protocol::encode_json(&command)?;
         ws.send(Message::Text(attach_msg)).await?;
+        conn_state.record_session_request(&command, generation);
     }
 
     let mut last_sent_prompt: Option<String> = None;
@@ -1270,6 +1355,8 @@ async fn connect_and_run(
                             drop_reason = Some("failed to send message to daemon".to_string());
                             break;
                         }
+                        conn_state.record_session_request(&client_msg,
+                            queued.generation.unwrap_or_else(|| conn_state.attachment_generation.load(Ordering::Relaxed)));
                     }
                     None => { user_disconnected = true; break; }, // Channel closed — daemon removed.
                 }
@@ -1367,10 +1454,93 @@ fn translate_message(
     use mew_protocol::ServerMessage;
     let d = daemon_id.to_string();
     let mut events = Vec::new();
+    if let ServerMessage::Error { message } = msg {
+        let mut legacy_error = conn_state.legacy_session_error.lock().unwrap();
+        if legacy_error.as_ref() == Some(message) {
+            *legacy_error = None;
+            return events;
+        }
+    }
+    if let ServerMessage::SessionOperationFailed {
+        operation,
+        session_id,
+        message,
+    } = msg
+    {
+        *conn_state.legacy_session_error.lock().unwrap() = Some(message.clone());
+        let mut requests = conn_state.session_requests.lock().unwrap();
+        let matches = requests.front().is_some_and(|request| {
+            request.operation == *operation && request.session_id == *session_id
+        });
+        if !matches {
+            return events;
+        }
+        let request = requests.pop_front().unwrap();
+        drop(requests);
+        if request.generation != conn_state.attachment_generation.load(Ordering::Relaxed) {
+            return events;
+        }
+        let attached = conn_state
+            .client_state
+            .lock()
+            .unwrap()
+            .attached_session
+            .clone();
+        *conn_state.requested_session.lock().unwrap() = attached.clone();
+        conn_state.confirmed_generation.store(
+            if attached.is_some() {
+                request.generation
+            } else {
+                u64::MAX
+            },
+            Ordering::Relaxed,
+        );
+        match (operation, session_id) {
+            (mew_protocol::SessionOperation::Create, None) => {
+                events.push(CoreEvent::SessionCreationFailed {
+                    daemon: d,
+                    message: message.clone(),
+                })
+            }
+            (mew_protocol::SessionOperation::Attach, Some(session_id)) => {
+                events.push(CoreEvent::SessionAttachmentFailed {
+                    daemon: d,
+                    session_id: session_id.clone(),
+                    message: message.clone(),
+                })
+            }
+            _ => {}
+        }
+        return events;
+    }
+    let mut created_session = false;
+    if let ServerMessage::SessionReady { session_id, .. } = msg {
+        let mut requests = conn_state.session_requests.lock().unwrap();
+        if let Some(request) = requests.front() {
+            if request.operation == mew_protocol::SessionOperation::Attach
+                && request.session_id.as_ref() != Some(session_id)
+            {
+                return events;
+            }
+            let request = requests.pop_front().unwrap();
+            if request.generation != conn_state.attachment_generation.load(Ordering::Relaxed) {
+                return events;
+            }
+            created_session = request.operation == mew_protocol::SessionOperation::Create;
+        } else if conn_state
+            .requested_session
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|requested| requested != session_id)
+        {
+            return events;
+        }
+    }
     if let ServerMessage::SessionHistoryPage {
         session_id,
         next_cursor,
-        replace: false,
+        replace,
         ..
     } = msg
     {
@@ -1382,9 +1552,19 @@ fn translate_message(
             || conn_state.requested_session.lock().unwrap().as_ref() != Some(session_id)
             || conn_state.confirmed_generation.load(Ordering::Relaxed)
                 != conn_state.attachment_generation.load(Ordering::Relaxed)
-            || before.is_none()
-            || next_cursor.is_some_and(|next| before.is_some_and(|before| next >= before))
-            || !conn_state.history_pending.swap(false, Ordering::Relaxed)
+            || (!replace
+                && (before.is_none()
+                    || next_cursor.is_some_and(|next| before.is_some_and(|before| next >= before))
+                    || !conn_state.history_pending.swap(false, Ordering::Relaxed)))
+        {
+            return events;
+        }
+    }
+    if matches!(msg, ServerMessage::SessionHistory { .. }) {
+        let client = conn_state.client_state.lock().unwrap();
+        if client.attached_session != *conn_state.requested_session.lock().unwrap()
+            || conn_state.confirmed_generation.load(Ordering::Relaxed)
+                != conn_state.attachment_generation.load(Ordering::Relaxed)
         {
             return events;
         }
@@ -1483,6 +1663,12 @@ fn translate_message(
                 if let Some(ss) = conn_state.session_state.lock().unwrap().as_mut() {
                     ss.permission_mode = Some(pm.clone());
                 }
+            }
+            if created_session {
+                events.push(CoreEvent::SessionCreated {
+                    daemon: d.clone(),
+                    session_id: session_id.clone(),
+                });
             }
             events.push(CoreEvent::SessionReady {
                 daemon: d.clone(),
@@ -2117,6 +2303,7 @@ fn translate_message(
         // Explicit arms for unhandled variants — no silent catch-all.
         // New ServerMessage variants will cause a compile error here,
         // forcing a decision about how to handle them.
+        ServerMessage::SessionOperationFailed { .. } => {}
         ServerMessage::Error { message } => {
             events.push(CoreEvent::Alert {
                 daemon: d.clone(),
@@ -2515,6 +2702,53 @@ mod tests {
         assert!(!core.set_auto_title(id.clone(), true));
         assert!(!core.set_auto_summary(id, true));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn queued_automation_requests_expire_after_reconnect() {
+        let (core, id, state, mut rx) = connected_core().await;
+        assert!(core.read_automation_settings(id.clone()));
+        assert!(core.set_auto_title(id.clone(), false));
+        assert!(core.set_auto_summary(id.clone(), false));
+        let queued: Vec<_> = (0..3).map(|_| rx.try_recv().unwrap()).collect();
+        assert!(queued.iter().all(|command| command.ready(&state)));
+
+        set_shared_connection_status(
+            &state,
+            mew_client_core::ConnectionStatus::Backoff {
+                attempt: 0,
+                error: "connection dropped".into(),
+            },
+        );
+        set_shared_connection_status(&state, mew_client_core::ConnectionStatus::Connecting);
+        set_shared_connection_status(&state, mew_client_core::ConnectionStatus::Connected);
+
+        for command in queued {
+            assert!(
+                !command.ready(&state),
+                "a request accepted by the previous connection must not be replayed: {:?}",
+                command.message
+            );
+        }
+        assert!(core.read_automation_settings(id.clone()));
+        assert!(core.set_auto_title(id.clone(), true));
+        assert!(core.set_auto_summary(id, true));
+        for _ in 0..3 {
+            assert!(rx.try_recv().unwrap().ready(&state));
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_automation_requests_survive_session_attachment_changes() {
+        let (core, id, state, mut rx) = connected_core().await;
+        assert!(core.read_automation_settings(id.clone()));
+        assert!(core.set_auto_title(id.clone(), false));
+        assert!(core.set_auto_summary(id.clone(), false));
+        let queued: Vec<_> = (0..3).map(|_| rx.try_recv().unwrap()).collect();
+
+        core.attach(id, "next-session".into());
+
+        assert!(queued.iter().all(|command| command.ready(&state)));
     }
 
     #[tokio::test]
@@ -3148,6 +3382,276 @@ mod tests {
         let session = guard.as_ref().unwrap();
         assert_eq!(session.pending_permissions, 1);
         assert_eq!(session.pending_questions, 2);
+    }
+
+    #[tokio::test]
+    async fn session_creation_ignores_an_older_attach_acknowledgment_and_its_history() {
+        let (core, id, state, mut outbound) = connected_core().await;
+        core.attach(id.clone(), "previous".into());
+        let attach = outbound.recv().await.unwrap();
+        state.record_session_request(
+            &attach.message,
+            state.attachment_generation.load(Ordering::Relaxed),
+        );
+        core.new_session(id.clone(), None);
+        let create = outbound.recv().await.unwrap();
+        state.record_session_request(
+            &create.message,
+            state.attachment_generation.load(Ordering::Relaxed),
+        );
+        let ready = |session: &str| ServerMessage::SessionReady {
+            session_id: session.into(),
+            cwd: None,
+            model: None,
+            provider: None,
+            permission_mode: None,
+        };
+
+        assert!(translate_message(&ready("previous"), &state, &mut None, &id.node_id).is_empty());
+        assert!(translate_message(
+            &ServerMessage::SessionHistoryPage {
+                session_id: "previous".into(),
+                messages: vec![history_message(1)],
+                next_cursor: None,
+                replace: true,
+            },
+            &state,
+            &mut None,
+            &id.node_id
+        )
+        .is_empty());
+        assert!(translate_message(
+            &ServerMessage::SessionHistory {
+                messages: vec![history_message(2)]
+            },
+            &state,
+            &mut None,
+            &id.node_id
+        )
+        .is_empty());
+        assert!(core.snapshot(id.clone()).unwrap().sessions[0]
+            .messages
+            .is_empty());
+
+        let events = translate_message(&ready("created"), &state, &mut None, &id.node_id);
+        assert!(
+            matches!(events.first(), Some(CoreEvent::SessionCreated { daemon, session_id })
+            if daemon == &id.node_id && session_id == "created")
+        );
+        assert_eq!(
+            core.snapshot(id.clone())
+                .unwrap()
+                .attached_session
+                .as_deref(),
+            Some("created")
+        );
+        let history = translate_message(
+            &ServerMessage::SessionHistoryPage {
+                session_id: "created".into(),
+                messages: vec![],
+                next_cursor: None,
+                replace: true,
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(matches!(
+            history.as_slice(),
+            [CoreEvent::SessionReloaded { .. }]
+        ));
+        core.endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn only_typed_session_failures_consume_the_matching_sent_request() {
+        let (core, id, state, mut outbound) = connected_core().await;
+        core.attach(id.clone(), "missing".into());
+        let attach = outbound.recv().await.unwrap();
+        state.record_session_request(
+            &attach.message,
+            state.attachment_generation.load(Ordering::Relaxed),
+        );
+        let unrelated = translate_message(
+            &ServerMessage::Error {
+                message: "unknown settings command".into(),
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(matches!(unrelated.as_slice(), [CoreEvent::Alert { .. }]));
+
+        let failure = translate_message(
+            &ServerMessage::SessionOperationFailed {
+                operation: mew_protocol::SessionOperation::Attach,
+                session_id: Some("missing".into()),
+                message: "session not found".into(),
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(
+            matches!(failure.as_slice(), [CoreEvent::SessionAttachmentFailed { daemon, session_id, message }]
+            if daemon == &id.node_id && session_id == "missing" && message == "session not found")
+        );
+        assert!(translate_message(
+            &ServerMessage::Error {
+                message: "session not found".into()
+            },
+            &state,
+            &mut None,
+            &id.node_id
+        )
+        .is_empty());
+        assert!(core.prompt(id.clone(), "the previous chat is still usable".into()));
+        assert!(matches!(
+            outbound.recv().await.unwrap().message,
+            ClientMessage::Prompt { .. }
+        ));
+
+        core.new_session(id.clone(), None);
+        let create = outbound.recv().await.unwrap();
+        state.record_session_request(
+            &create.message,
+            state.attachment_generation.load(Ordering::Relaxed),
+        );
+        let failed_create = translate_message(
+            &ServerMessage::SessionOperationFailed {
+                operation: mew_protocol::SessionOperation::Create,
+                session_id: None,
+                message: "workspace is unavailable".into(),
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(
+            matches!(failed_create.as_slice(), [CoreEvent::SessionCreationFailed { daemon, message }]
+            if daemon == &id.node_id && message == "workspace is unavailable")
+        );
+        core.endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn an_old_attachment_failure_cannot_fail_a_newer_requested_chat() {
+        let (core, id, state, mut outbound) = connected_core().await;
+        core.attach(id.clone(), "old".into());
+        let old = outbound.recv().await.unwrap();
+        state.record_session_request(
+            &old.message,
+            state.attachment_generation.load(Ordering::Relaxed),
+        );
+        core.attach(id.clone(), "new".into());
+        let new = outbound.recv().await.unwrap();
+        state.record_session_request(
+            &new.message,
+            state.attachment_generation.load(Ordering::Relaxed),
+        );
+        let failure = |session: &str| ServerMessage::SessionOperationFailed {
+            operation: mew_protocol::SessionOperation::Attach,
+            session_id: Some(session.into()),
+            message: "session not found".into(),
+        };
+        assert!(translate_message(&failure("old"), &state, &mut None, &id.node_id).is_empty());
+        assert!(
+            matches!(translate_message(&failure("new"), &state, &mut None, &id.node_id).as_slice(),
+            [CoreEvent::SessionAttachmentFailed { session_id, .. }] if session_id == "new")
+        );
+        core.endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn reselecting_the_confirmed_attachment_does_not_wait_for_an_ack_the_daemon_will_not_send(
+    ) {
+        let (core, id, _state, mut outbound) = connected_core().await;
+        core.attach(id.clone(), "confirmed".into());
+        assert!(outbound.try_recv().is_err());
+        assert!(core.prompt(id, "still ready".into()));
+        core.endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_queued_creation_expires_when_the_user_selects_another_chat() {
+        let (core, id, state, mut outbound) = connected_core().await;
+        core.new_session(id.clone(), None);
+        let creation = outbound.recv().await.unwrap();
+        assert!(creation.ready(&state));
+        core.attach(id, "chosen".into());
+        assert!(!creation.ready(&state));
+        core.endpoint.close().await;
+    }
+
+    #[test]
+    fn attachment_failure_has_scope_even_before_any_session_is_attached() {
+        let state = Arc::new(ConnState::new());
+        set_shared_connection_status(&state, mew_client_core::ConnectionStatus::Connected);
+        *state.requested_session.lock().unwrap() = Some("missing".into());
+        state.record_session_request(
+            &ClientMessage::AttachSession {
+                session_id: "missing".into(),
+                client_kind: mew_protocol::ClientKind::Mobile,
+            },
+            state.attachment_generation.load(Ordering::Relaxed),
+        );
+
+        let events = translate_message(
+            &ServerMessage::SessionOperationFailed {
+                operation: mew_protocol::SessionOperation::Attach,
+                session_id: Some("missing".into()),
+                message: "could not resume session".into(),
+            },
+            &state,
+            &mut None,
+            "daemon",
+        );
+
+        assert!(
+            matches!(events.as_slice(), [CoreEvent::SessionAttachmentFailed { daemon, session_id, message }]
+            if daemon == "daemon" && session_id == "missing" && message == "could not resume session")
+        );
+        assert!(state
+            .client_state
+            .lock()
+            .unwrap()
+            .attached_session
+            .is_none());
+        assert!(state.requested_session.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn offline_creation_reports_failure_and_a_queued_creation_expires_on_reconnect() {
+        struct Listener(mpsc::UnboundedSender<CoreEvent>);
+        impl CoreListener for Listener {
+            fn on_event(&self, event: CoreEvent) {
+                let _ = self.0.send(event);
+            }
+        }
+        let (core, id, state, mut outbound) = connected_core().await;
+        let (sender, mut events) = mpsc::unbounded_channel();
+        core.set_listener(Arc::new(Listener(sender)));
+        set_shared_connection_status(
+            &state,
+            mew_client_core::ConnectionStatus::Backoff {
+                attempt: 0,
+                error: "offline".into(),
+            },
+        );
+        core.new_session(id.clone(), None);
+        assert!(
+            matches!(events.try_recv().unwrap(), CoreEvent::SessionCreationFailed { daemon, .. } if daemon == id.node_id)
+        );
+        assert!(outbound.try_recv().is_err());
+
+        set_shared_connection_status(&state, mew_client_core::ConnectionStatus::Connected);
+        core.new_session(id.clone(), None);
+        let creation = outbound.try_recv().unwrap();
+        assert!(creation.ready(&state));
+        set_shared_connection_status(&state, mew_client_core::ConnectionStatus::Connecting);
+        set_shared_connection_status(&state, mew_client_core::ConnectionStatus::Connected);
+        assert!(!creation.ready(&state));
+        core.endpoint.close().await;
     }
 
     async fn connected_core() -> (

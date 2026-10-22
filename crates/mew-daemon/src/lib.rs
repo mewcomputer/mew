@@ -37,7 +37,7 @@ use mew_protocol::{
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, UnixListener};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tokio_tungstenite::accept_async;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -123,9 +123,8 @@ pub struct DaemonServer {
     pub groups_store: Arc<groups::GroupsStore>,
     /// Workspace pin preferences (projects.json).
     pub project_pins: Arc<projects::ProjectPinsStore>,
-    /// Daemon-wide flag for auto-summary. Shared across all connections
-    /// so the idle-summary task is spawned once, not per-connection.
-    pub auto_summary_enabled: Arc<std::sync::atomic::AtomicBool>,
+    /// Daemon-wide summary setting, observed by clients and the idle-summary task.
+    pub auto_summary_enabled: watch::Sender<bool>,
 }
 
 impl DaemonServer {
@@ -174,7 +173,7 @@ impl DaemonServer {
             session_manager,
             groups_store,
             project_pins,
-            auto_summary_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            auto_summary_enabled: watch::channel(true).0,
         }
     }
 
@@ -656,7 +655,7 @@ pub async fn handle_connection<S>(
     session_manager: Arc<SessionManager>,
     groups_store: Arc<groups::GroupsStore>,
     thinking_setter: Option<ThinkingSetter>,
-    auto_summary_enabled: Arc<std::sync::atomic::AtomicBool>,
+    auto_summary_enabled: watch::Sender<bool>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -685,7 +684,7 @@ pub async fn handle_connection_with_scope<S>(
     session_manager: Arc<SessionManager>,
     groups_store: Arc<groups::GroupsStore>,
     thinking_setter: Option<ThinkingSetter>,
-    auto_summary_enabled: Arc<std::sync::atomic::AtomicBool>,
+    auto_summary_enabled: watch::Sender<bool>,
     remote_scope: Option<RemoteScope>,
     remote_token: Option<&str>,
     legacy_iroh: bool,
@@ -725,7 +724,7 @@ pub async fn handle_connection_with_authorizer<S>(
     session_manager: Arc<SessionManager>,
     groups_store: Arc<groups::GroupsStore>,
     thinking_setter: Option<ThinkingSetter>,
-    auto_summary_enabled: Arc<std::sync::atomic::AtomicBool>,
+    auto_summary_enabled: watch::Sender<bool>,
     mut remote_scope: Option<RemoteScope>,
     remote_authorizer: Option<RemoteAuthorizer>,
     legacy_iroh: bool,
@@ -751,6 +750,7 @@ where
     let mut terminal: Option<terminal::TerminalHandle> = None;
     let mut workspace_watch: Option<CancellationToken> = None;
     let mut auto_title_enabled = true;
+    let mut summary_updates = auto_summary_enabled.subscribe();
     let mut remote_ready = remote_scope.is_none() && remote_authorizer.is_none();
 
     // auto_summary_enabled is passed in from the daemon (daemon-wide task
@@ -770,8 +770,30 @@ where
     let reply = |msg: ServerMessage| {
         let _ = client_tx.send(msg);
     };
+    let session_failure = |operation, session_id, message: String| {
+        reply(ServerMessage::SessionOperationFailed {
+            operation,
+            session_id,
+            message: message.clone(),
+        });
+        reply(ServerMessage::Error { message });
+    };
 
-    while let Some(msg) = ws_rx.next().await {
+    loop {
+        let msg = tokio::select! {
+            // Deliver pending setting changes before the next client command.
+            biased;
+            changed = summary_updates.changed(), if remote_ready => {
+                if changed.is_err() { break; }
+                let enabled = *summary_updates.borrow_and_update();
+                reply(ServerMessage::AutoSummaryChanged { enabled });
+                continue;
+            }
+            message = ws_rx.next() => {
+                let Some(message) = message else { break; };
+                message
+            }
+        };
         let msg = match msg {
             Ok(m) => m,
             Err(e) => {
@@ -931,26 +953,29 @@ where
                 // Validate cwd if provided: must exist and be a directory.
                 if let Some(ref cwd_str) = cwd {
                     if !cwd_str.exists() {
-                        reply(ServerMessage::Error {
-                            message: format!("session cwd does not exist: {}", cwd_str.display()),
-                        });
+                        session_failure(
+                            mew_protocol::SessionOperation::Create,
+                            None,
+                            format!("session cwd does not exist: {}", cwd_str.display()),
+                        );
                         continue;
                     }
                     if !cwd_str.is_dir() {
-                        reply(ServerMessage::Error {
-                            message: format!(
-                                "session cwd is not a directory: {}",
-                                cwd_str.display()
-                            ),
-                        });
+                        session_failure(
+                            mew_protocol::SessionOperation::Create,
+                            None,
+                            format!("session cwd is not a directory: {}", cwd_str.display()),
+                        );
                         continue;
                     }
                 }
                 if let Some(group_id) = requested_group_id.as_deref() {
                     if !groups_store.contains(group_id).await {
-                        reply(ServerMessage::Error {
-                            message: "session group not found".into(),
-                        });
+                        session_failure(
+                            mew_protocol::SessionOperation::Create,
+                            None,
+                            "session group not found".into(),
+                        );
                         continue;
                     }
                 }
@@ -971,9 +996,11 @@ where
                                 .assign_session(&session.id, Some(group_id.to_owned()))
                                 .await
                             {
-                                reply(ServerMessage::Error {
-                                    message: format!("failed to assign session group: {e}"),
-                                });
+                                session_failure(
+                                    mew_protocol::SessionOperation::Create,
+                                    None,
+                                    format!("failed to assign session group: {e}"),
+                                );
                                 continue;
                             }
                         }
@@ -1066,9 +1093,11 @@ where
                     }
                     Err(e) => {
                         tracing::error!(error = %e, error_chain = %format!("{e:#}"), "failed to create session");
-                        reply(ServerMessage::Error {
-                            message: format!("failed to create session: {e:#}"),
-                        });
+                        session_failure(
+                            mew_protocol::SessionOperation::Create,
+                            None,
+                            format!("failed to create session: {e:#}"),
+                        );
                     }
                 }
             }
@@ -1257,20 +1286,26 @@ where
                         }
                     }
                     Err(AttachError::NotFound) => {
-                        reply(ServerMessage::Error {
-                            message: "session not found".into(),
-                        });
+                        session_failure(
+                            mew_protocol::SessionOperation::Attach,
+                            Some(session_id),
+                            "session not found".into(),
+                        );
                     }
                     Err(AttachError::NotTopLevel) => {
-                        reply(ServerMessage::Error {
-                            message: "cannot attach to subagent session".into(),
-                        });
+                        session_failure(
+                            mew_protocol::SessionOperation::Attach,
+                            Some(session_id),
+                            "cannot attach to subagent session".into(),
+                        );
                     }
                     Err(AttachError::BuildAgent(e)) => {
                         tracing::error!(error = %e, error_chain = %format!("{e:#}"), "failed to resume session");
-                        reply(ServerMessage::Error {
-                            message: format!("failed to resume session: {e:#}"),
-                        });
+                        session_failure(
+                            mew_protocol::SessionOperation::Attach,
+                            Some(session_id),
+                            format!("failed to resume session: {e:#}"),
+                        );
                     }
                 }
             }
@@ -1479,8 +1514,7 @@ where
             ClientMessage::ReadAutomationSettings => {
                 reply(ServerMessage::AutomationSettings {
                     auto_title_enabled,
-                    auto_summary_enabled: auto_summary_enabled
-                        .load(std::sync::atomic::Ordering::Relaxed),
+                    auto_summary_enabled: *auto_summary_enabled.borrow(),
                 });
             }
             ClientMessage::SetAutoTitle { enabled } => {
@@ -1488,20 +1522,16 @@ where
                 tracing::info!(auto_title = enabled, "auto-title setting changed");
                 reply(ServerMessage::AutomationSettings {
                     auto_title_enabled,
-                    auto_summary_enabled: auto_summary_enabled
-                        .load(std::sync::atomic::Ordering::Relaxed),
+                    auto_summary_enabled: *auto_summary_enabled.borrow(),
                 });
             }
             ClientMessage::SetAutoSummary { enabled } => {
-                auto_summary_enabled.store(enabled, std::sync::atomic::Ordering::Relaxed);
+                auto_summary_enabled.send_replace(enabled);
                 tracing::info!(auto_summary = enabled, "auto-summary setting changed");
                 reply(ServerMessage::AutomationSettings {
                     auto_title_enabled,
-                    auto_summary_enabled: enabled,
+                    auto_summary_enabled: *summary_updates.borrow_and_update(),
                 });
-                session_manager
-                    .broadcast_all(ServerMessage::AutoSummaryChanged { enabled })
-                    .await;
             }
             ClientMessage::ReadPromptReceipt {
                 session_id,
@@ -3236,7 +3266,7 @@ fn derive_session_title(text: &str) -> String {
 /// been idle for >10 minutes. Runs every 5 minutes.
 async fn idle_summary_task(
     session_manager: std::sync::Arc<crate::session::SessionManager>,
-    enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    enabled: watch::Sender<bool>,
 ) {
     use std::time::Duration;
     let idle_threshold = Duration::from_secs(600); // 10 minutes
@@ -3245,7 +3275,7 @@ async fn idle_summary_task(
     loop {
         tokio::time::sleep(check_interval).await;
 
-        if !enabled.load(std::sync::atomic::Ordering::Relaxed) {
+        if !*enabled.borrow() {
             continue;
         }
 

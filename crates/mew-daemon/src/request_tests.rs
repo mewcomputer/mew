@@ -90,6 +90,48 @@ fn request_id(message: &ServerMessage) -> Option<&str> {
     }
 }
 
+#[tokio::test]
+async fn session_operation_errors_keep_the_requested_identity_and_legacy_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = test_server(dir.path().to_path_buf());
+    let mut socket = connect(&server).await;
+    send(
+        &mut socket,
+        ClientMessage::AttachSession {
+            session_id: "missing".into(),
+            client_kind: ClientKind::Mobile,
+        },
+    )
+    .await;
+    let messages = flush(&mut socket).await;
+    assert!(
+        matches!(&messages[..], [ServerMessage::SessionOperationFailed {
+        operation: mew_protocol::SessionOperation::Attach, session_id: Some(session), message,
+    }, ServerMessage::Error { message: legacy }]
+        if session == "missing" && message == "session not found" && message == legacy)
+    );
+
+    send(
+        &mut socket,
+        ClientMessage::NewSession {
+            cwd: Some(
+                dir.path()
+                    .join("missing-workspace")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            client_kind: ClientKind::Mobile,
+        },
+    )
+    .await;
+    let messages = flush(&mut socket).await;
+    assert!(
+        matches!(&messages[..], [ServerMessage::SessionOperationFailed {
+        operation: mew_protocol::SessionOperation::Create, session_id: None, message,
+    }, ServerMessage::Error { message: legacy }] if message.contains("does not exist") && message == legacy)
+    );
+}
+
 fn hook_call() -> mew_hooks::ToolCall {
     mew_hooks::ToolCall {
         tool_name: "write".into(),
@@ -197,6 +239,33 @@ fn automation_reads_respect_remote_scope_without_granting_write_access() {
             scope == RemoteScope::Control
         );
     }
+}
+
+#[tokio::test]
+async fn summary_changes_reach_settings_observers_that_never_attach_to_a_session() {
+    let directory = tempfile::tempdir().unwrap();
+    let server = test_server(directory.path().to_path_buf());
+    let mut writer = connect(&server).await;
+    let mut observer = connect(&server).await;
+    send(
+        &mut observer,
+        ClientMessage::SetAutoTitle { enabled: false },
+    )
+    .await;
+    flush(&mut observer).await;
+
+    for enabled in [false, true] {
+        send(&mut writer, ClientMessage::SetAutoSummary { enabled }).await;
+        flush(&mut writer).await;
+        let notifications = flush(&mut observer).await;
+        assert!(notifications.iter().any(|message|
+            matches!(message, ServerMessage::AutoSummaryChanged { enabled: value } if *value == enabled)),
+            "unattached settings observer missed shared setting: {notifications:?}");
+        send(&mut observer, ClientMessage::ReadAutomationSettings).await;
+        assert!(matches!(flush(&mut observer).await.as_slice(),
+            [ServerMessage::AutomationSettings { auto_title_enabled: false, auto_summary_enabled }] if *auto_summary_enabled == enabled));
+    }
+    assert!(server.session_manager.active.lock().await.is_empty());
 }
 
 #[tokio::test]

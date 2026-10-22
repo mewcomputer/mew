@@ -650,6 +650,13 @@ pub enum PromptStatus {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionOperation {
+    Create,
+    Attach,
+}
+
 /// A message from the daemon to the frontend.
 ///
 /// This is the wire representation of `AgentEvent`. The variants that carry
@@ -684,6 +691,14 @@ pub enum ServerMessage {
         /// Current permission mode (lowercase id). Absent means "standard".
         #[serde(default, skip_serializing_if = "Option::is_none")]
         permission_mode: Option<String>,
+    },
+
+    /// A failed session command, scoped before any attachment exists.
+    /// A create operation has no session ID yet.
+    SessionOperationFailed {
+        operation: SessionOperation,
+        session_id: Option<String>,
+        message: String,
     },
 
     /// An error before or outside a session turn.
@@ -1660,6 +1675,28 @@ mod tests {
     fn round_trip<T: Serialize + serde::de::DeserializeOwned>(msg: &T) -> T {
         let json = encode_json(msg).unwrap();
         decode_json(&json).unwrap()
+    }
+
+    #[test]
+    fn session_operation_failures_roundtrip_with_the_requested_scope() {
+        for (operation, session_id) in [
+            (SessionOperation::Create, None),
+            (
+                SessionOperation::Attach,
+                Some("missing-session".to_string()),
+            ),
+        ] {
+            let response = ServerMessage::SessionOperationFailed {
+                operation,
+                session_id: session_id.clone(),
+                message: "could not open conversation".into(),
+            };
+            assert!(
+                matches!(round_trip(&response), ServerMessage::SessionOperationFailed {
+                operation: actual, session_id: target, message,
+            } if actual == operation && target == session_id && message == "could not open conversation")
+            );
+        }
     }
 
     #[test]
