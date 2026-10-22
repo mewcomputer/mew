@@ -38,6 +38,8 @@ pub struct SessionInfo {
     pub turns: u32,
     pub todos: Vec<crate::events::TodoItem>,
     pub history_before: Option<u64>,
+    pub subagents: Vec<crate::activity::WorkerInfo>,
+    pub jobs: Vec<crate::activity::BackgroundJob>,
 }
 
 /// A chat message in the snapshot.
@@ -444,7 +446,7 @@ impl SessionState {
     }
 }
 
-fn to_mobile_message(message: &mew_message::Message) -> Option<ChatMessage> {
+pub(crate) fn to_mobile_message(message: &mew_message::Message) -> Option<ChatMessage> {
     let role = match message.role {
         mew_message::Role::User => "user",
         mew_message::Role::Assistant => "assistant",

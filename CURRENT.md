@@ -2570,3 +2570,19 @@ Verified 47 mobile unit tests, 40 iOS application tests, regenerated matching
 device/simulator/host libraries and Swift bindings, and a real iroh integration
 test loading 61 messages over three pages in exact chronological order. The
 broader verification pass follows worker/job detail implementation.
+
+# 2026-10-22 — iOS worker and background job details
+
+Added live worker/job activity snapshots and a chat activity sheet. Worker
+transcripts load through the parent session without changing the selected
+conversation. Background output uses bounded UTF-8 chunks, validates byte
+offsets, rejects stale/duplicate replies, and preserves output on disconnect.
+Details show loading, empty, failure and incomplete-capture states.
+
+Verified 50 mobile unit tests and 43 iOS application tests, rebuilt matching
+device/simulator/host libraries and bindings, and exercised actual persisted
+child history and shell output through a real iroh daemon. The integration
+checks exact output across the 64 KiB boundary, a multi-byte character,
+missing jobs and unauthorized child reads. The daemon suite also passes
+(136 tests, one existing ignored test). Independent review found tool-state
+projection and streaming/history display defects to fix in the next chunk.

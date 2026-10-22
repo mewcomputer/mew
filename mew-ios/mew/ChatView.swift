@@ -35,6 +35,7 @@ struct ChatView: View {
     // Sheets
     @State private var showsReview = false
     @State private var showsTools = false
+    @State private var showsActivity = false
 
     // File browser: nil = closed; non-nil = showing that path. The path
     // is the current directory being browsed; tap a folder to navigate in.
@@ -133,6 +134,9 @@ struct ChatView: View {
             }
             .sheet(isPresented: $showsTools) {
                 ToolHistoryView(messages: store.messages)
+            }
+            .sheet(isPresented: $showsActivity) {
+                ActivityView(daemon: daemonNodeId, sessionId: sessionId)
             }
             .onChange(of: store.availableModels) { initializeModelSelection() }
             .onChange(of: store.currentModel) { updateModelSelection() }
@@ -464,6 +468,9 @@ struct ChatView: View {
             Menu {
                 Button("Tools", systemImage: "wrench.and.screwdriver") {
                     showsTools = true
+                }
+                Button("Workers & jobs", systemImage: "person.2") {
+                    showsActivity = true
                 }
                 Divider()
                 Toggle("Auto-title", isOn: Binding(

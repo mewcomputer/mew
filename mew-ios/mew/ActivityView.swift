@@ -1,0 +1,184 @@
+import SwiftUI
+import MewMobileCore
+
+private enum ActivityDestination: Hashable {
+    case worker(id: String, name: String)
+    case job(id: String, command: String)
+}
+
+struct ActivityView: View {
+    let daemon: String
+    let sessionId: String
+    @EnvironmentObject private var store: AppStore
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if store.subagents.isEmpty && store.jobs.isEmpty {
+                    ContentUnavailableView("No workers or jobs", systemImage: "person.2",
+                        description: Text("Active workers and background commands appear here."))
+                } else {
+                    List {
+                        if !store.subagents.isEmpty {
+                            Section("Workers") {
+                                ForEach(store.subagents, id: \.taskId) { worker in
+                                    let name = worker.displayName ?? worker.name
+                                    if let child = worker.childSessionId {
+                                        NavigationLink(value: ActivityDestination.worker(id: child, name: name)) {
+                                            workerLabel(worker, name: name)
+                                        }
+                                    } else {
+                                        workerLabel(worker, name: name)
+                                    }
+                                }
+                            }
+                        }
+                        if !store.jobs.isEmpty {
+                            Section("Background jobs") {
+                                ForEach(store.jobs, id: \.jobId) { job in
+                                    NavigationLink(value: ActivityDestination.job(id: job.jobId, command: job.command)) {
+                                        VStack(alignment: .leading, spacing: 5) {
+                                            Text(job.command).font(.subheadline.monospaced()).lineLimit(2)
+                                            Text(job.state).font(.caption).foregroundStyle(.secondary)
+                                        }
+                                        .padding(.vertical, 4)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Workers & jobs")
+            .navigationBarTitleDisplayMode(.inline)
+            .navigationDestination(for: ActivityDestination.self) { destination in
+                switch destination {
+                case .worker(let id, let name):
+                    WorkerHistoryView(daemon: daemon, sessionId: sessionId, childSessionId: id, name: name)
+                case .job(let id, let command):
+                    JobOutputView(daemon: daemon, sessionId: sessionId, jobId: id, command: command)
+                }
+            }
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private func workerLabel(_ worker: WorkerInfo, name: String) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(name.isEmpty ? "Worker" : name).font(.headline)
+            Text(worker.status).font(.subheadline).foregroundStyle(.secondary)
+            if let tool = worker.toolName {
+                Label(tool, systemImage: "wrench.and.screwdriver").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+private struct WorkerHistoryView: View {
+    let daemon: String
+    let sessionId: String
+    let childSessionId: String
+    let name: String
+    @EnvironmentObject private var store: AppStore
+
+    var body: some View {
+        Group {
+            if let history = store.workerHistory, history.daemon == daemon,
+               history.sessionId == sessionId, history.childSessionId == childSessionId {
+                if history.isLoading {
+                    ProgressView("Loading worker history…")
+                } else if let error = history.error {
+                    ContentUnavailableView("Couldn't load worker history", systemImage: "exclamationmark.triangle",
+                        description: Text(error))
+                } else if history.messages.isEmpty {
+                    ContentUnavailableView("No messages yet", systemImage: "text.bubble",
+                        description: Text("Refresh to read the worker's latest messages."))
+                } else {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 4) {
+                            ForEach(history.messages, id: \.id) { message in
+                                MessageItemView(message: message, fontChoice: store.fontChoice)
+                            }
+                        }
+                    }
+                }
+            } else {
+                ProgressView()
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .navigationTitle(name.isEmpty ? "Worker history" : name)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Refresh", systemImage: "arrow.clockwise", action: refresh)
+            }
+        }
+        .task { refresh() }
+        .onDisappear {
+            if store.workerHistory?.childSessionId == childSessionId { store.workerHistory = nil }
+        }
+    }
+
+    private func refresh() {
+        store.openWorkerHistory(daemon: daemon, sessionId: sessionId, childSessionId: childSessionId)
+    }
+}
+
+private struct JobOutputView: View {
+    let daemon: String
+    let sessionId: String
+    let jobId: String
+    let command: String
+    @EnvironmentObject private var store: AppStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(command).font(.caption.monospaced()).textSelection(.enabled).padding(.horizontal)
+            if let detail = store.jobOutput, detail.daemon == daemon,
+               detail.sessionId == sessionId, detail.jobId == jobId {
+                if let error = detail.error {
+                    Label(error, systemImage: "exclamationmark.triangle")
+                        .font(.callout).foregroundStyle(.secondary).padding(.horizontal)
+                }
+                if detail.incomplete {
+                    Text("Some output could not be captured.").font(.caption).foregroundStyle(.secondary).padding(.horizontal)
+                }
+                ScrollView([.horizontal, .vertical]) {
+                    Text(detail.output.isEmpty ? "No output yet." : detail.output)
+                        .font(.caption.monospaced()).textSelection(.enabled)
+                        .fixedSize(horizontal: true, vertical: false).padding()
+                }
+                .defaultScrollAnchor(.topLeading)
+                if detail.isLoading {
+                    ProgressView("Loading output…").frame(maxWidth: .infinity)
+                } else if !detail.done {
+                    Button("Check for more output") { store.loadMoreJobOutput() }
+                        .frame(maxWidth: .infinity)
+                }
+            } else {
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .padding(.vertical)
+        .navigationTitle("Job output")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Refresh", systemImage: "arrow.clockwise") {
+                    store.openJobOutput(daemon: daemon, sessionId: sessionId, jobId: jobId)
+                }
+            }
+        }
+        .task { store.openJobOutput(daemon: daemon, sessionId: sessionId, jobId: jobId) }
+        .onDisappear {
+            if store.jobOutput?.jobId == jobId { store.jobOutput = nil }
+        }
+    }
+}

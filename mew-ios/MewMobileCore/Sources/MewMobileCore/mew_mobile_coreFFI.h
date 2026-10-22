@@ -449,6 +449,16 @@ void uniffi_mew_mobile_core_fn_method_mobilecore_switch_model(uint64_t ptr, Rust
 void uniffi_mew_mobile_core_fn_method_mobilecore_switch_persona(uint64_t ptr, RustBuffer id, RustBuffer name, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_READ_JOB_OUTPUT
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_READ_JOB_OUTPUT
+int8_t uniffi_mew_mobile_core_fn_method_mobilecore_read_job_output(uint64_t ptr, RustBuffer id, RustBuffer session_id, RustBuffer job_id, RustBuffer request_id, uint64_t offset, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_READ_SUBAGENT_HISTORY
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_READ_SUBAGENT_HISTORY
+int8_t uniffi_mew_mobile_core_fn_method_mobilecore_read_subagent_history(uint64_t ptr, RustBuffer id, RustBuffer session_id, RustBuffer child_session_id, RustBuffer request_id, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_CLONE_CORELISTENER
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_CLONE_CORELISTENER
 uint64_t uniffi_mew_mobile_core_fn_clone_corelistener(uint64_t handle, RustCallStatus *_Nonnull out_status
@@ -947,6 +957,18 @@ uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_switch_model(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_SWITCH_PERSONA
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_SWITCH_PERSONA
 uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_switch_persona(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_READ_JOB_OUTPUT
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_READ_JOB_OUTPUT
+uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_read_job_output(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_READ_SUBAGENT_HISTORY
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_READ_SUBAGENT_HISTORY
+uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_read_subagent_history(void
     
 );
 #endif

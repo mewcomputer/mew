@@ -120,6 +120,19 @@ and repository errors have distinct states; a failed read does not appear
 as an empty diff. Review replies are scoped to their daemon, session, and
 request, so a late reply cannot replace a newer review.
 
+### Workers and background jobs
+
+Open **… → Workers & jobs** to see active workers and background commands.
+Workers show their current status and tool. Tap a worker to read its
+transcript without leaving the parent conversation, then use **Refresh**
+to fetch newer messages. Completed workers leave the active list; an open
+transcript remains available.
+
+Tap a background job to read its captured output. **Check for more output**
+loads another chunk, and **Refresh** starts again from the beginning.
+Connection errors preserve output already read. If the daemon could not
+capture all output, the detail view says so.
+
 ### Settings
 
 - **Your Node ID** — copyable. This is what daemons need to allowlist.

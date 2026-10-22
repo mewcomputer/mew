@@ -43,7 +43,7 @@ final class AppStoreEventHandlingTests: XCTestCase {
         }
         return DaemonSnapshot(sessions: [SessionInfo(sessionId: "sess-1", title: "History", messages: messages,
             running: running, usageCost: 0, pendingPermissions: 0, pendingQuestions: 0,
-            inputTokens: 0, outputTokens: 0, turns: 0, todos: [], historyBefore: before)],
+            inputTokens: 0, outputTokens: 0, turns: 0, todos: [], historyBefore: before, subagents: [], jobs: [])],
             attachedSession: "sess-1", pendingPermissions: [], pendingAskUser: [], models: [],
             daemonVersion: nil, permissionMode: nil, currentModel: nil, currentProvider: nil,
             thinkingVariant: nil, currentPersona: nil, availablePersonas: [])
@@ -88,6 +88,64 @@ final class AppStoreEventHandlingTests: XCTestCase {
         store.selectSession("sess-2")
         XCTAssertNil(store.historyBefore)
         XCTAssertNil(store.historyError)
+    }
+
+    func testActivityAndWorkerHistoryStayWithTheirParentConversation() {
+        let worker = WorkerInfo(taskId: "task", childSessionId: "child", name: "researcher", displayName: "Curie", status: "checking files", toolName: "read")
+        store.handleEvent(.activityUpdated(daemon: "daemon-2", sessionId: "sess-1", subagents: [worker], jobs: []))
+        XCTAssertTrue(store.subagents.isEmpty)
+        store.handleEvent(.activityUpdated(daemon: "daemon-1", sessionId: "sess-1", subagents: [worker], jobs: []))
+        XCTAssertEqual(store.subagents.first?.displayName, "Curie")
+        store.openWorkerHistory(daemon: "daemon-1", sessionId: "sess-1", childSessionId: "child")
+        let request = store.workerHistory!.requestId
+        let messages = historySnapshot(before: nil, texts: ["child response"]).sessions[0].messages
+        store.handleEvent(.workerHistoryLoaded(daemon: "daemon-1", sessionId: "sess-1", childSessionId: "other", requestId: request, messages: messages, error: nil))
+        XCTAssertTrue(store.workerHistory!.isLoading)
+        store.handleEvent(.workerHistoryLoaded(daemon: "daemon-1", sessionId: "sess-1", childSessionId: "child", requestId: request, messages: messages, error: nil))
+        XCTAssertEqual(store.workerHistory!.messages.map(\.id), ["child response"])
+        XCTAssertTrue(store.messages.isEmpty)
+        XCTAssertEqual(store.selectedSessionId, "sess-1")
+    }
+
+    func testJobOutputUsesByteOffsetsAndRejectsDuplicateOrStaleChunks() {
+        store.openJobOutput(daemon: "daemon-1", sessionId: "sess-1", jobId: "job")
+        let first = store.jobOutput!.requestId
+        let chunk = CoreEvent.jobOutputLoaded(daemon: "daemon-1", sessionId: "sess-1", jobId: "job", requestId: first,
+            offset: 0, nextOffset: 3, output: "猫", done: false, incomplete: false)
+        store.handleEvent(chunk)
+        store.handleEvent(chunk)
+        XCTAssertEqual(store.jobOutput!.output, "猫")
+        XCTAssertEqual(store.jobOutput!.nextOffset, 3)
+        store.loadMoreJobOutput()
+        let second = store.jobOutput!.requestId
+        store.handleEvent(.jobOutputFailed(daemon: "daemon-1", sessionId: "sess-1", jobId: "job", requestId: first, message: "old error"))
+        XCTAssertTrue(store.jobOutput!.isLoading)
+        store.handleEvent(.jobOutputLoaded(daemon: "daemon-1", sessionId: "sess-1", jobId: "job", requestId: second,
+            offset: 3, nextOffset: 4, output: "!", done: true, incomplete: true))
+        XCTAssertEqual(store.jobOutput!.output, "猫!")
+        XCTAssertTrue(store.jobOutput!.done)
+        XCTAssertTrue(store.jobOutput!.incomplete)
+        XCTAssertNil(store.jobOutput!.error)
+    }
+
+    func testJobOutputErrorsAndDisconnectPreserveAlreadyReadOutput() {
+        store.openJobOutput(daemon: "daemon-1", sessionId: "sess-1", jobId: "job")
+        store.handleEvent(.jobOutputLoaded(daemon: "daemon-1", sessionId: "sess-1", jobId: "job", requestId: store.jobOutput!.requestId,
+            offset: 0, nextOffset: 1, output: "a", done: false, incomplete: false))
+        mock.detailAccepted = false
+        store.loadMoreJobOutput()
+        XCTAssertEqual(store.jobOutput!.output, "a")
+        XCTAssertFalse(store.jobOutput!.isLoading)
+        XCTAssertNotNil(store.jobOutput!.error)
+        mock.detailAccepted = true
+        store.loadMoreJobOutput()
+        store.handleEvent(.daemonStatusChanged(daemon: "daemon-1", status: .disconnected))
+        XCTAssertEqual(store.jobOutput!.output, "a")
+        XCTAssertFalse(store.jobOutput!.isLoading)
+        XCTAssertNotNil(store.jobOutput!.error)
+        store.selectSession("other")
+        XCTAssertNil(store.jobOutput)
+        XCTAssertTrue(store.subagents.isEmpty)
     }
 
     func testWorkspaceReviewRefreshRejectsLateSuccessAndFailure() {
@@ -250,10 +308,10 @@ final class AppStoreEventHandlingTests: XCTestCase {
     func testSnapshotOnlyRestoresRunningForTheSelectedSession() {
         let other = SessionInfo(sessionId: "sess-2", title: "Other", messages: [],
             running: false, usageCost: 0, pendingPermissions: 0, pendingQuestions: 0,
-            inputTokens: 0, outputTokens: 0, turns: 0, todos: [], historyBefore: nil)
+            inputTokens: 0, outputTokens: 0, turns: 0, todos: [], historyBefore: nil, subagents: [], jobs: [])
         let selected = SessionInfo(sessionId: "sess-1", title: "Selected", messages: [],
             running: true, usageCost: 0, pendingPermissions: 0, pendingQuestions: 0,
-            inputTokens: 0, outputTokens: 0, turns: 0, todos: [], historyBefore: nil)
+            inputTokens: 0, outputTokens: 0, turns: 0, todos: [], historyBefore: nil, subagents: [], jobs: [])
         mock.snapshotResult = DaemonSnapshot(sessions: [other, selected], attachedSession: "sess-1",
             pendingPermissions: [], pendingAskUser: [], models: [], daemonVersion: nil,
             permissionMode: nil, currentModel: nil, currentProvider: nil, thinkingVariant: nil,
@@ -537,7 +595,7 @@ final class AppStoreEventHandlingTests: XCTestCase {
             running: false, usageCost: 0.05,
             pendingPermissions: 0, pendingQuestions: 0,
             inputTokens: 1000, outputTokens: 500, turns: 3,
-            todos: [TodoItem(id: 1, content: "Task", status: "done", dependsOn: [])], historyBefore: nil
+            todos: [TodoItem(id: 1, content: "Task", status: "done", dependsOn: [])], historyBefore: nil, subagents: [], jobs: []
         )
         let snap = DaemonSnapshot(
             sessions: [session], attachedSession: "sess-1",

@@ -64,6 +64,42 @@ pub enum CoreEvent {
     /// Older messages were prepended without restarting session attachment.
     HistoryExtended { daemon: String, session_id: String },
 
+    ActivityUpdated {
+        daemon: String,
+        session_id: String,
+        subagents: Vec<crate::activity::WorkerInfo>,
+        jobs: Vec<crate::activity::BackgroundJob>,
+    },
+
+    WorkerHistoryLoaded {
+        daemon: String,
+        session_id: String,
+        child_session_id: String,
+        request_id: String,
+        messages: Vec<crate::state::ChatMessage>,
+        error: Option<String>,
+    },
+
+    JobOutputLoaded {
+        daemon: String,
+        session_id: String,
+        job_id: String,
+        request_id: String,
+        offset: u64,
+        next_offset: u64,
+        output: String,
+        done: bool,
+        incomplete: bool,
+    },
+
+    JobOutputFailed {
+        daemon: String,
+        session_id: String,
+        job_id: String,
+        request_id: String,
+        message: String,
+    },
+
     /// Streaming text delta for a part. Coalesced in Rust before FFI.
     TextDelta {
         daemon: String,

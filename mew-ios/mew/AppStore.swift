@@ -81,6 +81,29 @@ struct WorkspaceReview {
     var error: String?
 }
 
+struct WorkerHistory {
+    let daemon: String
+    let sessionId: String
+    let childSessionId: String
+    let requestId: String
+    var messages: [ChatMessage] = []
+    var isLoading = true
+    var error: String?
+}
+
+struct JobOutputDetail {
+    let daemon: String
+    let sessionId: String
+    let jobId: String
+    var requestId = ""
+    var output = ""
+    var nextOffset: UInt64 = 0
+    var isLoading = false
+    var done = false
+    var incomplete = false
+    var error: String?
+}
+
 // MARK: - App Store
 
 /// The single source of truth for the app, mirroring the web UI's session store.
@@ -116,6 +139,10 @@ final class AppStore: ObservableObject {
     @Published var historyBefore: UInt64?
     @Published var isLoadingOlderHistory = false
     @Published var historyError: String?
+    @Published var subagents: [WorkerInfo] = []
+    @Published var jobs: [BackgroundJob] = []
+    @Published var workerHistory: WorkerHistory?
+    @Published var jobOutput: JobOutputDetail?
 
     /// Messages filtered to exclude empty entries (no visible content).
     var visibleMessages: [ChatMessage] {
@@ -259,6 +286,10 @@ final class AppStore: ObservableObject {
     // MARK: - Session management
 
     func selectDaemon(_ daemon: DaemonEntry) {
+        subagents = []
+        jobs = []
+        workerHistory = nil
+        jobOutput = nil
         review = nil
         historyBefore = nil
         isLoadingOlderHistory = false
@@ -278,6 +309,10 @@ final class AppStore: ObservableObject {
 
     func selectSession(_ sessionId: String) {
         guard let daemonId = selectedDaemonId, let core else { return }
+        subagents = []
+        jobs = []
+        workerHistory = nil
+        jobOutput = nil
         review = nil
         historyBefore = nil
         isLoadingOlderHistory = false
@@ -346,6 +381,41 @@ final class AppStore: ObservableObject {
             return false
         }
         return true
+    }
+
+    func openWorkerHistory(daemon: String, sessionId: String, childSessionId: String) {
+        guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
+        let requestId = UUID().uuidString
+        workerHistory = WorkerHistory(daemon: daemon, sessionId: sessionId, childSessionId: childSessionId, requestId: requestId)
+        if core?.readSubagentHistory(id: DaemonId(nodeId: daemon), sessionId: sessionId, childSessionId: childSessionId, requestId: requestId) != true {
+            workerHistory?.isLoading = false
+            workerHistory?.error = "Connect to the parent conversation to read this worker's history."
+        }
+    }
+
+    func openJobOutput(daemon: String, sessionId: String, jobId: String) {
+        guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
+        jobOutput = JobOutputDetail(daemon: daemon, sessionId: sessionId, jobId: jobId)
+        requestJobOutput()
+    }
+
+    func loadMoreJobOutput() {
+        guard jobOutput?.isLoading == false, jobOutput?.done == false else { return }
+        requestJobOutput()
+    }
+
+    private func requestJobOutput() {
+        guard let detail = jobOutput, selectedDaemonId?.nodeId == detail.daemon,
+              selectedSessionId == detail.sessionId else { return }
+        let requestId = UUID().uuidString
+        jobOutput?.requestId = requestId
+        jobOutput?.isLoading = true
+        jobOutput?.error = nil
+        if core?.readJobOutput(id: DaemonId(nodeId: detail.daemon), sessionId: detail.sessionId,
+            jobId: detail.jobId, requestId: requestId, offset: detail.nextOffset) != true {
+            jobOutput?.isLoading = false
+            jobOutput?.error = "Connect to this conversation to read job output."
+        }
     }
 
     private func directoryKey(sessionId: String, path: String?) -> String {
@@ -503,6 +573,14 @@ final class AppStore: ObservableObject {
                 }
             } else {
                 pendingSubmissions.removeValue(forKey: daemon)
+                if workerHistory?.daemon == daemon, workerHistory?.isLoading == true {
+                    workerHistory?.isLoading = false
+                    workerHistory?.error = "Connection lost. Reconnect and refresh this worker's history."
+                }
+                if jobOutput?.daemon == daemon, jobOutput?.isLoading == true {
+                    jobOutput?.isLoading = false
+                    jobOutput?.error = "Connection lost. Reconnect to read more output."
+                }
                 if selectedDaemonId?.nodeId == daemon, isLoadingOlderHistory {
                     isLoadingOlderHistory = false
                     historyError = "Connection lost. Reconnect to load older messages."
@@ -512,6 +590,45 @@ final class AppStore: ObservableObject {
                     review?.error = "Connection lost. Reconnect and refresh to review changes."
                 }
             }
+
+        case .activityUpdated(let daemon, let sessionId, let workers, let backgroundJobs):
+            guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
+            subagents = workers
+            jobs = backgroundJobs
+
+        case .workerHistoryLoaded(let daemon, let sessionId, let childSessionId, let requestId, let messages, let error):
+            guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId,
+                  workerHistory?.daemon == daemon, workerHistory?.sessionId == sessionId,
+                  workerHistory?.childSessionId == childSessionId, workerHistory?.requestId == requestId,
+                  workerHistory?.isLoading == true else { return }
+            workerHistory?.messages = messages
+            workerHistory?.error = error
+            workerHistory?.isLoading = false
+
+        case .jobOutputLoaded(let daemon, let sessionId, let jobId, let requestId, let offset, let nextOffset, let output, let done, let incomplete):
+            guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId,
+                  jobOutput?.daemon == daemon, jobOutput?.sessionId == sessionId,
+                  jobOutput?.jobId == jobId, jobOutput?.requestId == requestId,
+                  jobOutput?.isLoading == true else { return }
+            guard offset == jobOutput?.nextOffset, nextOffset >= offset,
+                  nextOffset - offset == UInt64(output.utf8.count) else {
+                jobOutput?.error = "The daemon returned an invalid output chunk. Refresh to try again."
+                jobOutput?.isLoading = false
+                return
+            }
+            jobOutput?.output.append(output)
+            jobOutput?.nextOffset = nextOffset
+            jobOutput?.done = done
+            jobOutput?.incomplete = jobOutput?.incomplete == true || incomplete
+            jobOutput?.isLoading = false
+
+        case .jobOutputFailed(let daemon, let sessionId, let jobId, let requestId, let message):
+            guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId,
+                  jobOutput?.daemon == daemon, jobOutput?.sessionId == sessionId,
+                  jobOutput?.jobId == jobId, jobOutput?.requestId == requestId,
+                  jobOutput?.isLoading == true else { return }
+            jobOutput?.error = message
+            jobOutput?.isLoading = false
 
         case .reviewLoaded(let daemon, let sessionId, let requestId, let files):
             guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId,
@@ -765,6 +882,8 @@ final class AppStore: ObservableObject {
         if let session = snap.sessions.first(where: { $0.sessionId == selectedSessionId }) {
             messages = session.messages
             historyBefore = session.historyBefore
+            subagents = session.subagents
+            jobs = session.jobs
             isStreaming = session.running
             if let daemon = selectedDaemonId?.nodeId {
                 pendingPermissions.removeAll { $0.daemon == daemon && $0.sessionId == session.sessionId }

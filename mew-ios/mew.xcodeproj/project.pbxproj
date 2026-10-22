@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		B67F88A1A1044574B031AE02 /* ActivityView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE01 /* ActivityView.swift */; };
+		B67F88A1A1044574B031AE03 /* ActivityView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE01 /* ActivityView.swift */; };
 		AB83A9F1D619452A8E38F813 /* ReviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB83A9F1D619452A8E38F812 /* ReviewView.swift */; };
 		AB83A9F1D619452A8E38F814 /* ReviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB83A9F1D619452A8E38F812 /* ReviewView.swift */; };
 		02A0EBFC07ECB4A8B8E33F65 /* JunicodeVF-Italic.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 5710FFECFB944E351E490A12 /* JunicodeVF-Italic.ttf */; };
@@ -72,6 +74,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		B67F88A1A1044574B031AE01 /* ActivityView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityView.swift; sourceTree = "<group>"; };
 		AB83A9F1D619452A8E38F812 /* ReviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewView.swift; sourceTree = "<group>"; };
 		060BFA4C32C363DFB0A5DC2A /* Banga-VF.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Banga-VF.ttf"; sourceTree = "<group>"; };
 		0A1ADE8FFE4EDE33968D7384 /* MewApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MewApp.swift; sourceTree = "<group>"; };
@@ -196,6 +199,7 @@
 			children = (
 				545CECE3392D12E734D9A133 /* AppStore.swift */,
 				B88D5B96B52F24E2D3C0DD85 /* ChatView.swift */,
+				B67F88A1A1044574B031AE01 /* ActivityView.swift */,
 				AB83A9F1D619452A8E38F812 /* ReviewView.swift */,
 				679C2551108B9BA54C017BBF /* DaemonListView.swift */,
 				BDC069E4C5076818999AC23D /* FormatHelper.swift */,
@@ -343,6 +347,7 @@
 			files = (
 				36E2687C83C9A15519FBB164 /* AppStore.swift in Sources */,
 				64FF009410027CFE96073711 /* ChatView.swift in Sources */,
+				B67F88A1A1044574B031AE03 /* ActivityView.swift in Sources */,
 				AB83A9F1D619452A8E38F814 /* ReviewView.swift in Sources */,
 				D7A06EE1B80E7200F99DF01E /* DaemonListView.swift in Sources */,
 				1ECD909EFDFC6A663DCF0B51 /* FormatHelper.swift in Sources */,
@@ -369,6 +374,7 @@
 			files = (
 				0BAEB661227D370ACEAB5007 /* AppStore.swift in Sources */,
 				FDEC179FCD1D0B1F5CA253E1 /* ChatView.swift in Sources */,
+				B67F88A1A1044574B031AE02 /* ActivityView.swift in Sources */,
 				AB83A9F1D619452A8E38F813 /* ReviewView.swift in Sources */,
 				D3216BADB70A3EE813135568 /* DaemonListView.swift in Sources */,
 				C88D34820C3694AA611C616D /* FormatHelper.swift in Sources */,

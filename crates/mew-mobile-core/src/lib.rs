@@ -23,6 +23,7 @@ use tracing::{info, warn};
 use mew_message::{Part, ProviderEventWire};
 use mew_protocol::{ClientMessage, ServerMessage};
 
+pub mod activity;
 pub mod codec;
 pub mod events;
 pub mod registry;
@@ -310,6 +311,8 @@ impl DaemonConnection {
                 | ClientMessage::SetAutoSummary { .. }
                 | ClientMessage::ReadSessionDiff { .. }
                 | ClientMessage::LoadSessionHistory { .. }
+                | ClientMessage::ReadSubagentHistory { .. }
+                | ClientMessage::ReadJobOutput { .. }
         );
         let (session_id, generation) = if session_scoped {
             let client = self.state.client_state.lock().unwrap();
@@ -321,6 +324,8 @@ impl DaemonConnection {
                 || session_id != *self.state.requested_session.lock().unwrap()
                 || matches!(&message, ClientMessage::ReadSessionDiff { session_id: requested, .. }
                     | ClientMessage::LoadSessionHistory { session_id: requested, .. }
+                    | ClientMessage::ReadSubagentHistory { session_id: requested, .. }
+                    | ClientMessage::ReadJobOutput { session_id: requested, .. }
                     if session_id.as_ref() != Some(requested))
             {
                 return false;
@@ -912,6 +917,8 @@ impl MobileCore {
                 turns: ss.turns,
                 todos: ss.todos.clone(),
                 history_before: ss.shared.history_before.map(|cursor| cursor as u64),
+                subagents: ss.shared.subagents.iter().map(Into::into).collect(),
+                jobs: ss.shared.jobs.iter().map(Into::into).collect(),
             });
             let client = conn.state.client_state.lock().unwrap();
             if let Some(session) = client.session(&ss.session_id) {
@@ -2089,6 +2096,62 @@ fn translate_message(
             });
         }
 
+        ServerMessage::SubagentHistory {
+            session_id,
+            child_session_id,
+            request_id,
+            messages,
+            error,
+        } => {
+            events.push(CoreEvent::WorkerHistoryLoaded {
+                daemon: d,
+                session_id: session_id.clone(),
+                child_session_id: child_session_id.clone(),
+                request_id: request_id.clone(),
+                messages: messages
+                    .iter()
+                    .filter_map(state::to_mobile_message)
+                    .collect(),
+                error: error.clone(),
+            });
+        }
+        ServerMessage::JobOutput {
+            session_id,
+            job_id,
+            request_id,
+            offset,
+            next_offset,
+            output,
+            done,
+            incomplete,
+        } => {
+            events.push(CoreEvent::JobOutputLoaded {
+                daemon: d,
+                session_id: session_id.clone(),
+                job_id: job_id.clone(),
+                request_id: request_id.clone(),
+                offset: *offset,
+                next_offset: *next_offset,
+                output: output.clone(),
+                done: *done,
+                incomplete: *incomplete,
+            });
+        }
+        ServerMessage::JobOutputError {
+            session_id,
+            job_id,
+            request_id,
+            message,
+        } => {
+            events.push(CoreEvent::JobOutputFailed {
+                daemon: d,
+                session_id: session_id.clone(),
+                job_id: job_id.clone(),
+                request_id: request_id.clone(),
+                message: message.clone(),
+            });
+        }
+
         // These variants are not yet translated to CoreEvent — they are
         // intentionally no-ops for now. Adding a new ServerMessage variant
         // here forces a compile-time decision.
@@ -2133,9 +2196,6 @@ fn translate_message(
         | ServerMessage::FilePreview { .. }
         | ServerMessage::FilesystemDirListing { .. }
         | ServerMessage::GitStatusResult { .. }
-        | ServerMessage::SubagentHistory { .. }
-        | ServerMessage::JobOutput { .. }
-        | ServerMessage::JobOutputError { .. }
         | ServerMessage::TodoUpdated { .. }
         | ServerMessage::TodoUpdateError { .. }
         | ServerMessage::BrowserPageRegistration { .. }
@@ -2156,6 +2216,30 @@ fn translate_message(
 
     if !matches!(msg, ServerMessage::Provider { .. }) {
         sync_mobile_session_from_client_state(conn_state);
+    }
+    let activity_session = match msg {
+        ServerMessage::SessionActivitySnapshot { session_id, .. } => Some(session_id.clone()),
+        ServerMessage::SubagentStart { .. }
+        | ServerMessage::SubagentStatus { .. }
+        | ServerMessage::SubagentEnd { .. }
+        | ServerMessage::JobUpdate { .. } => conn_state
+            .client_state
+            .lock()
+            .unwrap()
+            .attached_session
+            .clone(),
+        _ => None,
+    };
+    if let Some(session_id) = activity_session {
+        let client = conn_state.client_state.lock().unwrap();
+        if let Some(session) = client.session(&session_id) {
+            events.push(CoreEvent::ActivityUpdated {
+                daemon: daemon_id.into(),
+                session_id,
+                subagents: session.subagents.iter().map(Into::into).collect(),
+                jobs: session.jobs.iter().map(Into::into).collect(),
+            });
+        }
     }
     if matches!(msg, ServerMessage::SessionReady { .. }) {
         conn_state.confirmed_generation.store(
@@ -2254,6 +2338,165 @@ fn rand_jitter() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn activity_projection_recovers_workers_and_jobs_without_changing_the_chat() {
+        let (core, id, state, _rx) = connected_core().await;
+        let events = translate_message(
+            &ServerMessage::SessionActivitySnapshot {
+                session_id: "confirmed".into(),
+                subagents: vec![mew_protocol::SubagentActivity {
+                    task_id: "task".into(),
+                    child_session_id: Some("child".into()),
+                    name: "researcher".into(),
+                    display_name: Some("Curie".into()),
+                    status: "running".into(),
+                    tool_name: None,
+                }],
+                jobs: vec![mew_protocol::JobActivity {
+                    job_id: "job".into(),
+                    command: "cargo test".into(),
+                    state: "running".into(),
+                }],
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(
+            matches!(events.as_slice(), [CoreEvent::ActivityUpdated { daemon, session_id, subagents, jobs }]
+            if daemon == &id.node_id && session_id == "confirmed" && subagents[0].display_name.as_deref() == Some("Curie") && jobs[0].command == "cargo test")
+        );
+        translate_message(
+            &ServerMessage::SubagentStatus {
+                parent_call_id: "task".into(),
+                tool_name: "read".into(),
+                message: "checking files".into(),
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        let snapshot = core.snapshot(id.clone()).unwrap();
+        assert_eq!(snapshot.sessions[0].subagents[0].status, "checking files");
+        assert_eq!(
+            snapshot.sessions[0].subagents[0]
+                .child_session_id
+                .as_deref(),
+            Some("child")
+        );
+        assert_eq!(snapshot.sessions[0].jobs[0].job_id, "job");
+        translate_message(
+            &ServerMessage::SubagentEnd {
+                parent_call_id: "task".into(),
+                child_session_id: "child".into(),
+                outcome: mew_protocol::SubagentOutcome::Completed,
+                manifests: vec![],
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(core.snapshot(id.clone()).unwrap().sessions[0]
+            .subagents
+            .is_empty());
+        assert_eq!(
+            core.snapshot(id).unwrap().attached_session.as_deref(),
+            Some("confirmed")
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_history_and_job_output_preserve_origin_and_errors() {
+        let (core, id, state, _rx) = connected_core().await;
+        let events = translate_message(
+            &ServerMessage::SubagentHistory {
+                session_id: "confirmed".into(),
+                child_session_id: "child".into(),
+                request_id: "read".into(),
+                messages: vec![history_message(1)],
+                error: None,
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(
+            matches!(events.as_slice(), [CoreEvent::WorkerHistoryLoaded { daemon, session_id, child_session_id, request_id, messages, error: None }]
+            if daemon == &id.node_id && session_id == "confirmed" && child_session_id == "child" && request_id == "read" && messages[0].parts[0].text.as_deref() == Some("message 1"))
+        );
+        assert!(core.snapshot(id.clone()).unwrap().sessions[0]
+            .messages
+            .is_empty());
+        let events = translate_message(
+            &ServerMessage::JobOutput {
+                session_id: "confirmed".into(),
+                job_id: "job".into(),
+                request_id: "read".into(),
+                offset: 65_535,
+                next_offset: 65_538,
+                output: "猫".into(),
+                done: true,
+                incomplete: true,
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(
+            matches!(events.as_slice(), [CoreEvent::JobOutputLoaded { daemon, session_id, job_id, request_id, offset: 65_535, next_offset: 65_538, output, done: true, incomplete: true }]
+            if daemon == &id.node_id && session_id == "confirmed" && job_id == "job" && request_id == "read" && output == "猫")
+        );
+        let events = translate_message(
+            &ServerMessage::JobOutputError {
+                session_id: "confirmed".into(),
+                job_id: "job".into(),
+                request_id: "read".into(),
+                message: "unknown job".into(),
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(
+            matches!(events.as_slice(), [CoreEvent::JobOutputFailed { message, .. }] if message == "unknown job")
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_and_job_reads_require_the_confirmed_parent() {
+        let (core, id, state, mut rx) = connected_core().await;
+        assert!(!core.read_job_output(id.clone(), "other".into(), "job".into(), "wrong".into(), 0));
+        assert!(!core.read_subagent_history(
+            id.clone(),
+            "other".into(),
+            "child".into(),
+            "wrong".into()
+        ));
+        assert!(rx.try_recv().is_err());
+        assert!(core.read_job_output(
+            id.clone(),
+            "confirmed".into(),
+            "job".into(),
+            "output".into(),
+            42
+        ));
+        assert!(core.read_subagent_history(
+            id.clone(),
+            "confirmed".into(),
+            "child".into(),
+            "history".into()
+        ));
+        let job = rx.try_recv().unwrap();
+        let child = rx.try_recv().unwrap();
+        assert!(matches!(
+            job.message,
+            ClientMessage::ReadJobOutput { offset: 42, .. }
+        ));
+        core.attach(id, "next".into());
+        assert!(!job.ready(&state));
+        assert!(!child.ready(&state));
+    }
 
     fn history_message(number: u128) -> mew_message::Message {
         let message_id = ulid::Ulid::from(number + 100);

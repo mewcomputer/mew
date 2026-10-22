@@ -28,6 +28,7 @@ final class MockMobileCore: @preconcurrency MobileCoreProtocol {
     var reviewAccepted = true
     var historyAccepted = true
     var historyCalls: [(nodeId: String, sessionId: String)] = []
+    var detailAccepted = true
     var reviewCalls: [(nodeId: String, sessionId: String, requestId: String)] = []
 
     // Configurable return values
@@ -101,6 +102,14 @@ final class MockMobileCore: @preconcurrency MobileCoreProtocol {
     func loadOlderHistory(id: DaemonId, sessionId: String) -> Bool {
         historyCalls.append((id.nodeId, sessionId))
         return historyAccepted
+    }
+
+    func readSubagentHistory(id: DaemonId, sessionId: String, childSessionId: String, requestId: String) -> Bool {
+        detailAccepted
+    }
+
+    func readJobOutput(id: DaemonId, sessionId: String, jobId: String, requestId: String, offset: UInt64) -> Bool {
+        detailAccepted
     }
 
     func listModels(id: DaemonId) { listModelsCalls.append(id.nodeId) }
