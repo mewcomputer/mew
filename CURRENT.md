@@ -2656,3 +2656,15 @@ records with start and end both set at completion (e.g. the generic execution
 path at lines 657/672). A tool can show elapsed time while running then <1s on
 completion. The iOS formatter now interprets milliseconds correctly; preserving
 the original start in agent-produced metadata needs a separate runtime fix.
+
+# 2026-10-22 — compact iOS tools in conversation
+
+Removed text-message vertical padding from tool-only assistant entries and
+extra list-cell padding from the tools sheet. Disclosure buttons retain their
+44-point minimum. A rendered layout regression reproduces the former 70-point
+tool-only message and now verifies a compact 44–50-point height.
+
+All 50 iOS tests pass after removing the temporary capture fixture and expansion
+trigger. Inspected seeded conversations in light/dark mode with surrounding user
+and assistant text, collapsed tools and an expanded shell result. Saved context
+screenshots and a six-second disclosure preview outside the repository.

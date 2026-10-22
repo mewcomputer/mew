@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 import MewMobileCore
 @testable import mew
 
@@ -17,6 +18,18 @@ final class AppStoreEventHandlingTests: XCTestCase {
         daemonId = DaemonId(nodeId: "daemon-1")
         store.selectedDaemonId = daemonId
         store.selectedSessionId = "sess-1"
+    }
+
+    func testToolOnlyMessagesStayCompactInConversation() {
+        let part = MessagePart(id: "tool", kind: .toolCall, text: nil, toolName: "read", toolState: "completed",
+            toolInput: "{}", toolOutput: "file contents", toolError: nil, toolCallId: "call",
+            toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil)
+        let message = ChatMessage(id: "assistant", role: "assistant", parts: [part], assistantMeta: nil)
+        let controller = UIHostingController(rootView: MessageItemView(message: message, fontChoice: .system)
+            .environment(\.dynamicTypeSize, .large))
+        let size = controller.sizeThatFits(in: CGSize(width: 393, height: 1_000))
+        XCTAssertLessThanOrEqual(size.height, 50, "Tool-only messages should not inherit text-bubble padding")
+        XCTAssertGreaterThanOrEqual(size.height, 44)
     }
 
     func testToolDurationsUseMillisecondsAndHandleClockBoundaries() {

@@ -72,7 +72,7 @@ struct MessageItemView: View {
             }
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.vertical, message.parts.allSatisfy { $0.kind == .toolCall } ? 0 : 10)
         .frame(maxWidth: 360, alignment: .leading)
         // Assistant messages render with no background — the chat surface
         // shows through and user bubbles provide the only visual separation.
@@ -321,7 +321,7 @@ struct ToolHistoryView: View {
                 } else {
                     List(tools, id: \.id) { part in
                         ToolCallRow(part: part)
-                            .padding(.vertical, 4)
+                            .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
                     }
                 }
             }
