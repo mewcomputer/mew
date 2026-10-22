@@ -2782,3 +2782,17 @@ projection; a host benchmark of 2,400 entries improved from ~12 ms to ~0.06 ms.
 
 This chunk keeps existing per-daemon navigation. The optional question about a
 combined All-daemons view remains open for the switcher/navigation pass.
+
+# 2026-10-22 — compact iOS chat list
+
+Reduced chat-row insets and date-section spacing without shrinking body text.
+Titles use one line at standard text sizes and wrap fully at accessibility
+sizes. Workspace, activity, attention badges and pin markers remain visible;
+rows retain a 44-point minimum touch target. Date headings use a smaller
+semantic text style while retaining their native header contrast.
+
+Inspected seeded simulator captures at 393- and 320-point widths, in light
+and dark mode, and at accessibility text size. The populated reference now
+fits twelve chats instead of seven at the standard size. Before/after images
+are saved outside the repo under ios-compact-list. Removed the temporary
+capture fixture; all 72 iOS tests pass on the final sources.

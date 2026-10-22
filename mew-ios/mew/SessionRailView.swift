@@ -9,6 +9,7 @@ struct SessionRailView: View {
     let daemonNodeId: String
 
     @EnvironmentObject private var store: AppStore
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var showArchived = false
     @State private var sessionToDelete: SessionSummary?
     @State private var sessionToRename: SessionSummary?
@@ -128,19 +129,23 @@ struct SessionRailView: View {
                     Section {
                         ForEach(section.items) { item in
                             sessionRow(item.session)
+                                .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
                                 .listRowSeparator(.hidden)
                         }
                     } header: {
                         Text(section.period.title)
-                            .font(.headline)
+                            .font(.footnote.weight(.semibold))
                             .foregroundStyle(.primary)
                             .textCase(nil)
+                            .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 4, trailing: 16))
                     }
                     .listSectionSeparator(.hidden)
                 }
             }
             .listStyle(.plain)
-            .listSectionSpacing(.compact)
+            .listSectionSpacing(8)
+            .environment(\.defaultMinListRowHeight, 44)
+            .environment(\.defaultMinListHeaderHeight, 28)
             .refreshable {
                 store.refreshSessions(daemonNodeId: daemonNodeId)
             }
@@ -238,10 +243,10 @@ struct SessionRailView: View {
 
     @ViewBuilder
     private func sessionContent(_ session: SessionSummary) -> some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             stateIndicator(session.state)
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     if session.pinned {
                         Image(systemName: "pin.fill")
@@ -250,7 +255,7 @@ struct SessionRailView: View {
                     }
                     Text(displayName(session))
                         .font(.body)
-                        .lineLimit(2)
+                        .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
                         .truncationMode(.tail)
                 }
 
@@ -284,7 +289,6 @@ struct SessionRailView: View {
 
             pendingBadges(session)
         }
-        .padding(.vertical, 2)
     }
 
     // MARK: - Badges
