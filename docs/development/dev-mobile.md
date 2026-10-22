@@ -63,12 +63,15 @@ xcodebuild -scheme MewMobileCore \
 
 ```sh
 cd mew-ios
-xcodegen generate    # creates mew.xcodeproj from project.yml
 xcodebuild -project mew.xcodeproj -scheme mew \
-  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
+  -destination 'platform=iOS Simulator,name=iPhone 17' build
 ```
 
 Or open `mew.xcodeproj` in Xcode and build/run from the GUI.
+
+Use the checked-in Xcode project for builds and tests. `project.yml` does
+not yet describe its test target or current package pin; regenerating the
+project would discard those settings.
 
 ## Crate structure
 
@@ -197,7 +200,46 @@ job fails, run `just ios-core` and commit the regenerated files.
    from the matching `ServerMessage` arm.
 3. Regenerate Swift bindings: `just ios-core` (or `cargo run -p mew-mobile-core --bin uniffi-bindgen -- generate ...`).
 4. Handle the new event in `AppStore.handleEvent()` in `mew-ios/mew/AppStore.swift`.
-5. Rebuild the app: `cd mew-ios && xcodegen generate && xcodebuild ...`.
+5. Rebuild and test the checked-in Xcode project: `just ios-test`.
+
+## Chat, tools, and review verification
+
+Run the mobile/shared client suites and actual daemon transport tests:
+
+```sh
+cargo test -p mew-client-core -p mew-mobile-core -p mew-protocol \
+  -p mew-diff -p mew-session --all-targets --features mew-mobile-core/test-harness
+cargo test -p mew-daemon --features iroh
+cargo clippy -p mew-mobile-core --all-targets --features test-harness -- -D warnings
+cargo clippy -p mew-daemon --all-targets --features iroh -- -D warnings
+just ios-core
+just ios-test
+```
+
+These cover attachment and reconnect identities, ordered history pages,
+tool-state projection, worker transcript authorization and size limits,
+UTF-8 output chunks, and workspace review freshness/errors. The iOS suite
+also checks stale reply rejection, output recovery and streaming while
+loading older messages.
+
+Physical-phone checks remain necessary before release:
+
+- Pair a fresh identity with an invite, including an expired invite and
+  an already consumed invite. Connect to two daemons and switch chats.
+- Send and cancel a reply, load older messages during streaming, then
+  leave the app and return. Check reading position, keyboard behavior,
+  pending permission/question sheets, and reconnect after a network change.
+- Search and expand completed, running and failed tools. Check VoiceOver
+  labels, large text and reduced motion.
+- Open a worker transcript while it runs and keep it open as the worker
+  finishes. Read multiple job-output chunks, refresh, and reconnect after
+  reading part of the output.
+- Review staged, unstaged, renamed, untracked and binary files. Refresh
+  after a same-line-count edit and check light/dark and narrow layouts.
+
+For long sessions, measure scrolling, streaming latency and memory on the
+phone. Chat retains loaded pages and uses an eager stack to preserve parsed
+markdown; simulator renders alone do not establish its performance limit.
 
 ## Known issues
 

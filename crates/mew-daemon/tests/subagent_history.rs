@@ -283,7 +283,7 @@ async fn child_history_reads_recorded_revisions_without_switching_or_waiting_for
 }
 
 #[tokio::test]
-async fn child_history_rejects_unowned_ids_missing_records_and_malformed_complete_lines() {
+async fn child_history_rejects_unowned_missing_malformed_and_oversized_transcripts() {
     let dir = tempfile::tempdir().unwrap();
     let server = DaemonServer::with_session_dir(
         Arc::new(|params| {
@@ -416,6 +416,48 @@ async fn child_history_rejects_unowned_ids_missing_records_and_malformed_complet
         assert!(
             matches!(response, ServerMessage::SubagentHistory { messages, error: Some(error), .. } if messages.is_empty() && error.contains(expected))
         );
+    }
+    let limit = 8 * 1024 * 1024;
+    for (size, oversized) in [(limit + 1, true), (limit, false)] {
+        let mut data = serde_json::to_vec(&recorded_message(child_id.parse().unwrap())).unwrap();
+        data.resize(size - 1, b' ');
+        data.push(b'\n');
+        tokio::fs::write(&path, data).await.unwrap();
+        client
+            .read_subagent_history(&parent.id, &child_id, "size-limit")
+            .await
+            .unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(message @ ServerMessage::SubagentHistory { .. }) =
+                    notifications.recv().await
+                {
+                    break message;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let ServerMessage::SubagentHistory {
+            session_id,
+            child_session_id,
+            request_id,
+            messages,
+            error,
+        } = response
+        else {
+            unreachable!()
+        };
+        assert_eq!(session_id, parent.id);
+        assert_eq!(child_session_id, child_id);
+        assert_eq!(request_id, "size-limit");
+        if oversized {
+            assert!(messages.is_empty());
+            assert!(error.unwrap().contains("size limit"));
+        } else {
+            assert!(error.is_none());
+            assert_eq!(messages.len(), 1);
+        }
     }
     task.abort();
 }

@@ -128,6 +128,9 @@ transcript without leaving the parent conversation, then use **Refresh**
 to fetch newer messages. Completed workers leave the active list; an open
 transcript remains available.
 
+Worker history currently loads as a single transcript. Transcripts larger
+than 8 MiB return a size-limit error; they do not disconnect the conversation.
+
 Tap a background job to read its captured output. **Check for more output**
 loads another chunk, and **Refresh** starts again from the beginning.
 Connection errors preserve output already read. If the daemon could not

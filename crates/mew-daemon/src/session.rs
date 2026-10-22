@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use tokio::io::AsyncReadExt;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio_util::sync::CancellationToken;
 
@@ -138,9 +139,20 @@ impl Session {
             meta.id == child_session_id && meta.parent_session_id.as_deref() == Some(&parent),
             "child metadata does not match the attached parent"
         );
-        let data = tokio::fs::read(children.join(child_session_id).join("session.jsonl"))
+        let mut transcript =
+            tokio::fs::File::open(children.join(child_session_id).join("session.jsonl"))
+                .await
+                .context("read child transcript")?
+                .take((crate::HISTORY_PAGE_MAX_BYTES + 1) as u64);
+        let mut data = Vec::new();
+        transcript
+            .read_to_end(&mut data)
             .await
             .context("read child transcript")?;
+        anyhow::ensure!(
+            data.len() <= crate::HISTORY_PAGE_MAX_BYTES,
+            "worker history exceeds the response size limit (8 MiB)"
+        );
         // A live writer can expose an incomplete final append before its newline.
         let last_record = data
             .iter()

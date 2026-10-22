@@ -2604,3 +2604,27 @@ tool states, activity, worker history and job output. Rebuilt matching device,
 simulator and host libraries/bindings; strict all-target mobile Clippy,
 formatting, architecture and generated-theme checks pass. Independent reviewers
 confirmed both required findings are resolved.
+
+# 2026-10-22 — bounded worker history and final iOS verification
+
+Bound child transcript reads to the shared 8 MiB history budget before
+decoding. Oversized transcripts return a request-scoped error instead of
+creating an unbounded mobile response. The real-daemon regression fails
+before the fix and passes after it, including exactly-at-limit reads and
+a valid read on the same connection after an oversized error.
+
+Final verification passes 425 related Rust tests across client/mobile,
+protocol, diff, session and daemon suites, plus all 45 iOS application
+tests. This includes seven real iroh tests and another mobile worker/job
+smoke test after the daemon bound. Strict all-target daemon and mobile
+Clippy pass, along with the earlier workspace/architecture/theme checks.
+One existing daemon browser test stays ignored because it requires Chrome
+and agent-browser; no mobile tests are skipped. Independent review found
+no issues with the bounded reader.
+
+Documented the worker-history size limit, corrected routine build commands
+to use the checked-in Xcode project, and added repeatable verification
+commands and a physical-phone checklist to dev-mobile.md. Interactive
+pairing, background/network transitions, VoiceOver and long-history phone
+performance still need a device walkthrough. Temporary screenshot fixtures
+and access-level changes are removed; captures remain outside the repo.
