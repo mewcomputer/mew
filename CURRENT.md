@@ -2695,3 +2695,64 @@ Assistant paragraphs, lists, block quotes and links now use UIFont.systemFontSiz
 matching user messages in both streaming and committed replies. Verified seeded
 light/dark conversation renders with identical user and assistant text, plus list,
 link and quote samples. Removed the capture fixture; all 63 iOS tests pass.
+
+# 2026-10-22 — iOS app UX audit and navigation proposal
+
+Reviewed pairing, app settings, daemon selection/recovery, session discovery and
+chat controls, with the recent tool/review/activity work as context. Inspected
+11 seeded simulator captures, including light/dark settings, offline and lost
+pairing, new-chat entry, all-archived sessions and a pending chat switch. Two
+independent source assessments checked design ownership and actual behavior.
+Native computer control was unavailable; these are rendered fixture states,
+not an interactive phone walkthrough. The critique companion skill and its
+HTML detector were unavailable/inapplicable to this native SwiftUI app.
+
+Confirmed follow-up issues:
+
+- P1: AddDaemonView drops DialInfo.pairingToken before AppStore calls the
+  tokenless addDaemon API. New invite-based authorization cannot succeed
+  through this path; the core already provides addDaemonWithToken.
+- P1: selectSession retains previous messages/streaming state while attachment
+  is pending. The simulator showed a new Homelab chat title above the prior
+  MacBook Pro chat content. The recorded selected session and attach request
+  both targeted the new chat. Cross-daemon alert navigation also leaves a
+  prior chat on the back stack without restoring its daemon on return.
+- P2: Cold launch reconnects all saved daemons but restores no explicit daemon
+  selection or working context. Connection timestamps cannot identify the
+  user's last choice because all known daemons reconnect.
+- P2: Per-daemon Settings actions open global app settings. That form mixes
+  appearance, phone identity, paired-machine management and About.
+- P2: Daemon Rename has a no-op Save handler. Connected session pull-to-refresh
+  is also empty. Backoff's "retry now" calls connect, which ignores an existing
+  connection instead of restarting its backoff attempt.
+- P2: Auto-title displays a false default although the daemon defaults true;
+  reconnect only replays true values. Auto-summary is stored per session in
+  the UI but updates a shared daemon-wide atomic. Both need accurate scope
+  and authoritative values before relocating their controls.
+- P2: With only archived chats, the empty-state branch omits Show Archived.
+  Reproduced in the simulator with three archived entries still in the store.
+- P2: The model chip can initialize to the first catalog entry after the actual
+  model event has arrived. The store also discards the model-list daemon ID.
+- P3: Font settings promise app-wide changes but the root remains Mi Sans;
+  Forget/Remove only removes the local connection and does not revoke daemon
+  authorization. Copy should describe the actual effect.
+
+Recommended direction for discussion: a daemon picker reachable from sessions
+and chat, showing the selected daemon plus named connection states. Keep app
+settings global, local daemon identity/pairing in named daemon details, real
+daemon-wide configuration at daemon scope, and model/run controls with the chat.
+Move raw node IDs and versions into details; use explicit Retry and Pair again
+actions in recovery. Preserve drafts by daemon/session when switching.
+
+Restore the last explicitly selected daemon and its last working location by
+default, once identity transitions are reliable. Keep that daemon selected while
+offline with visible reconnect/switch actions. Missing chat falls back to its
+daemon's list; removed daemon falls back to the picker; no saved choice with one
+paired daemon opens its list. Explicit alert/picker actions take precedence over
+startup restoration. A new preference toggle is not needed initially.
+
+Removed all temporary audit fixtures. The existing 63 iOS tests pass; they do
+not cover the newly identified defects. Screenshots and attachment-state evidence
+are saved outside the repo under ios-ux-audit. Implementation order proposed:
+identity/pairing correctness, settings ownership and switcher, working-context
+restoration, then remaining discovery/copy refinements and phone verification.
