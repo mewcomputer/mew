@@ -27,6 +27,7 @@ struct ChatView: View {
     // Auto-scroll
     @State private var autoScroll: Bool = true
     @State private var containerHeight: CGFloat = 0
+    @State private var historyAnchor: String?
 
     // Loading state while waiting for session history replay
     @State private var isLoadingSession: Bool = false
@@ -158,7 +159,7 @@ struct ChatView: View {
 
     @ViewBuilder
     private var content: some View {
-        if store.visibleMessages.isEmpty && !store.isStreaming && store.streamingText.isEmpty {
+        if store.visibleMessages.isEmpty && store.historyBefore == nil && !store.isStreaming && store.streamingText.isEmpty {
             if isLoadingSession {
                 ProgressView("Loading session…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -189,7 +190,7 @@ struct ChatView: View {
 
     @ViewBuilder
     private var messageList: some View {
-        if store.messages.isEmpty && !store.isStreaming && store.streamingText.isEmpty {
+        if store.messages.isEmpty && store.historyBefore == nil && !store.isStreaming && store.streamingText.isEmpty {
             emptyState
         } else {
             scrollContent
@@ -205,6 +206,29 @@ struct ChatView: View {
                 // into view. Trades more upfront work in long sessions for
                 // smoother scrolling.
                 VStack(alignment: .leading, spacing: 4) {
+                    if store.historyBefore != nil {
+                        VStack(spacing: 6) {
+                            Button {
+                                historyAnchor = store.visibleMessages.first?.id
+                                autoScroll = false
+                                if !store.loadOlderHistory() { historyAnchor = nil }
+                            } label: {
+                                if store.isLoadingOlderHistory {
+                                    ProgressView("Loading older messages…")
+                                } else {
+                                    Label("Load older messages", systemImage: "arrow.up")
+                                }
+                            }
+                            .disabled(store.isLoadingOlderHistory)
+                            if let error = store.historyError {
+                                Text(error)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                    }
                     ForEach(store.visibleMessages, id: \.id) { message in
                         MessageItemView(message: message, fontChoice: store.fontChoice)
                     }
@@ -236,7 +260,17 @@ struct ChatView: View {
                 // deltas, and growing reasoning/tool output within a message),
                 // not just when the message count changes.
                 .onChange(of: store.visibleMessages) {
-                    scrollToBottom(proxy: proxy)
+                    if let anchor = historyAnchor {
+                        if !store.isLoadingOlderHistory {
+                            proxy.scrollTo(anchor, anchor: .top)
+                            historyAnchor = nil
+                        }
+                    } else {
+                        scrollToBottom(proxy: proxy)
+                    }
+                }
+                .onChange(of: store.historyError) {
+                    if store.historyError != nil { historyAnchor = nil }
                 }
                 // Streaming deltas arrive rapidly; scroll without animation so
                 // the growing text and an animated scroll don't fight (jitter).

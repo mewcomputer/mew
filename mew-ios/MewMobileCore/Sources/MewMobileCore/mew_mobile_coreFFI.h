@@ -349,6 +349,11 @@ void uniffi_mew_mobile_core_fn_method_mobilecore_list_projects(uint64_t ptr, Rus
 void uniffi_mew_mobile_core_fn_method_mobilecore_list_sessions(uint64_t ptr, RustBuffer id, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_LOAD_OLDER_HISTORY
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_LOAD_OLDER_HISTORY
+int8_t uniffi_mew_mobile_core_fn_method_mobilecore_load_older_history(uint64_t ptr, RustBuffer id, RustBuffer session_id, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_NEW_SESSION
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_NEW_SESSION
 void uniffi_mew_mobile_core_fn_method_mobilecore_new_session(uint64_t ptr, RustBuffer id, RustBuffer cwd, RustCallStatus *_Nonnull out_status
@@ -822,6 +827,12 @@ uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_list_projects(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_LIST_SESSIONS
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_LIST_SESSIONS
 uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_list_sessions(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_LOAD_OLDER_HISTORY
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_LOAD_OLDER_HISTORY
+uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_load_older_history(void
     
 );
 #endif

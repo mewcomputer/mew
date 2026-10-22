@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -166,6 +166,7 @@ struct ConnState {
     confirmed_generation: AtomicU64,
     /// Accepted prompts awaiting daemon running activity or rejection.
     pending_submissions: Mutex<HashMap<String, u64>>,
+    history_pending: AtomicBool,
     /// Framework-independent daemon/session state used by desktop and mobile
     /// adapters. The UniFFI projection remains alongside it during migration.
     client_state: Mutex<mew_client_core::ClientState>,
@@ -202,6 +203,7 @@ impl ConnState {
             attachment_generation: AtomicU64::new(0),
             confirmed_generation: AtomicU64::new(u64::MAX),
             pending_submissions: Mutex::new(HashMap::new()),
+            history_pending: AtomicBool::new(false),
             client_state: Mutex::new(mew_client_core::ClientState::default()),
             session_state: Mutex::new(None),
             daemon_version: Mutex::new(None),
@@ -222,6 +224,7 @@ impl ConnState {
     fn invalidate_session_commands(&self) {
         self.attachment_generation.fetch_add(1, Ordering::Relaxed);
         self.pending_submissions.lock().unwrap().clear();
+        self.history_pending.store(false, Ordering::Relaxed);
     }
 
     fn release_submission(&self, session_id: &str, generation: u64) {
@@ -306,6 +309,7 @@ impl DaemonConnection {
                 | ClientMessage::SetAutoTitle { .. }
                 | ClientMessage::SetAutoSummary { .. }
                 | ClientMessage::ReadSessionDiff { .. }
+                | ClientMessage::LoadSessionHistory { .. }
         );
         let (session_id, generation) = if session_scoped {
             let client = self.state.client_state.lock().unwrap();
@@ -316,6 +320,7 @@ impl DaemonConnection {
                 || session_id.is_none()
                 || session_id != *self.state.requested_session.lock().unwrap()
                 || matches!(&message, ClientMessage::ReadSessionDiff { session_id: requested, .. }
+                    | ClientMessage::LoadSessionHistory { session_id: requested, .. }
                     if session_id.as_ref() != Some(requested))
             {
                 return false;
@@ -707,6 +712,36 @@ impl MobileCore {
             })
     }
 
+    /// Request one older page without redirecting an unconfirmed attachment.
+    pub fn load_older_history(&self, id: DaemonId, session_id: String) -> bool {
+        let conns = self.connections.lock().unwrap();
+        let Some(conn) = conns.get(&id.node_id) else {
+            return false;
+        };
+        let before = conn
+            .state
+            .client_state
+            .lock()
+            .unwrap()
+            .session(&session_id)
+            .and_then(|session| session.history_before);
+        let Some(before) = before.filter(|before| *before > 0) else {
+            return false;
+        };
+        if conn.state.history_pending.swap(true, Ordering::Relaxed) {
+            return false;
+        }
+        if !conn.send(ClientMessage::LoadSessionHistory {
+            session_id,
+            before,
+            limit: mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT,
+        }) {
+            conn.state.history_pending.store(false, Ordering::Relaxed);
+            return false;
+        }
+        true
+    }
+
     /// List available models from the daemon.
     pub fn list_models(&self, id: DaemonId) {
         let conns = self.connections.lock().unwrap();
@@ -876,6 +911,7 @@ impl MobileCore {
                 output_tokens: ss.output_tokens,
                 turns: ss.turns,
                 todos: ss.todos.clone(),
+                history_before: ss.shared.history_before.map(|cursor| cursor as u64),
             });
             let client = conn.state.client_state.lock().unwrap();
             if let Some(session) = client.session(&ss.session_id) {
@@ -1259,6 +1295,36 @@ fn translate_message(
     use mew_protocol::ServerMessage;
     let d = daemon_id.to_string();
     let mut events = Vec::new();
+    if let ServerMessage::SessionHistoryPage {
+        session_id,
+        next_cursor,
+        replace: false,
+        ..
+    } = msg
+    {
+        let client = conn_state.client_state.lock().unwrap();
+        let before = client
+            .session(session_id)
+            .and_then(|session| session.history_before);
+        if client.attached_session.as_ref() != Some(session_id)
+            || conn_state.requested_session.lock().unwrap().as_ref() != Some(session_id)
+            || conn_state.confirmed_generation.load(Ordering::Relaxed)
+                != conn_state.attachment_generation.load(Ordering::Relaxed)
+            || before.is_none()
+            || next_cursor.is_some_and(|next| before.is_some_and(|before| next >= before))
+            || !conn_state.history_pending.swap(false, Ordering::Relaxed)
+        {
+            return events;
+        }
+    }
+    if matches!(
+        msg,
+        ServerMessage::SessionReady { .. }
+            | ServerMessage::Error { .. }
+            | ServerMessage::ErrorEvent { .. }
+    ) {
+        conn_state.history_pending.store(false, Ordering::Relaxed);
+    }
     if matches!(msg, ServerMessage::SessionReady { .. }) {
         conn_state
             .confirmed_generation
@@ -1453,7 +1519,11 @@ fn translate_message(
             }
         }
 
-        ServerMessage::SessionHistoryPage { session_id, .. } => {
+        ServerMessage::SessionHistoryPage {
+            session_id,
+            replace,
+            ..
+        } => {
             let attached = conn_state
                 .client_state
                 .lock()
@@ -1461,9 +1531,16 @@ fn translate_message(
                 .attached_session
                 .clone();
             if attached.as_deref() == Some(session_id) {
-                events.push(CoreEvent::SessionReloaded {
-                    daemon: d,
-                    session_id: session_id.clone(),
+                events.push(if *replace {
+                    CoreEvent::SessionReloaded {
+                        daemon: d,
+                        session_id: session_id.clone(),
+                    }
+                } else {
+                    CoreEvent::HistoryExtended {
+                        daemon: d,
+                        session_id: session_id.clone(),
+                    }
                 });
             }
         }
@@ -2177,6 +2254,190 @@ fn rand_jitter() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn history_message(number: u128) -> mew_message::Message {
+        let message_id = ulid::Ulid::from(number + 100);
+        mew_message::Message {
+            id: message_id,
+            session_id: ulid::Ulid::from(1),
+            role: mew_message::Role::User,
+            parts: vec![Part::Text(mew_message::TextPart {
+                base: mew_message::PartBase {
+                    id: ulid::Ulid::from(number + 200),
+                    message_id,
+                    session_id: ulid::Ulid::from(1),
+                },
+                text: format!("message {number}"),
+                synthetic: false,
+            })],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn older_history_preserves_live_state_and_advances_the_cursor_once() {
+        let (core, id, state, mut rx) = connected_core().await;
+        translate_message(
+            &ServerMessage::SessionHistoryPage {
+                session_id: "confirmed".into(),
+                messages: vec![history_message(3)],
+                next_cursor: Some(2),
+                replace: true,
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert_eq!(
+            core.snapshot(id.clone()).unwrap().sessions[0].history_before,
+            Some(2)
+        );
+        translate_message(
+            &ServerMessage::SessionActivityChanged {
+                session_id: "confirmed".into(),
+                activity: mew_protocol::SessionState::Running,
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(core.load_older_history(id.clone(), "confirmed".into()));
+        assert!(!core.load_older_history(id.clone(), "confirmed".into()));
+        let command = rx.try_recv().unwrap();
+        assert!(
+            matches!(command.message, ClientMessage::LoadSessionHistory { before: 2, limit, .. }
+            if limit == mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT)
+        );
+        assert!(rx.try_recv().is_err());
+        let page = ServerMessage::SessionHistoryPage {
+            session_id: "confirmed".into(),
+            messages: vec![history_message(1), history_message(2)],
+            next_cursor: None,
+            replace: false,
+        };
+        let events = translate_message(&page, &state, &mut None, &id.node_id);
+        assert!(
+            matches!(events.as_slice(), [CoreEvent::HistoryExtended { daemon, session_id }]
+            if daemon == &id.node_id && session_id == "confirmed")
+        );
+        let snapshot = core.snapshot(id.clone()).unwrap();
+        let session = &snapshot.sessions[0];
+        assert_eq!(
+            session
+                .messages
+                .iter()
+                .map(|message| message.parts[0].text.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["message 1", "message 2", "message 3"]
+        );
+        assert_eq!(session.history_before, None);
+        assert!(session.running);
+        assert!(!core.load_older_history(id.clone(), "confirmed".into()));
+        assert!(translate_message(&page, &state, &mut None, &id.node_id).is_empty());
+        assert_eq!(core.snapshot(id).unwrap().sessions[0].messages.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn older_history_rejects_unconfirmed_origins_and_recovers_after_send_failure() {
+        let (core, id, state, mut rx) = connected_core().await;
+        translate_message(
+            &ServerMessage::SessionHistoryPage {
+                session_id: "confirmed".into(),
+                messages: vec![],
+                next_cursor: Some(24),
+                replace: true,
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(!core.load_older_history(id.clone(), "other".into()));
+        assert!(core.load_older_history(id.clone(), "confirmed".into()));
+        let queued = rx.try_recv().unwrap();
+        core.attach(id.clone(), "next".into());
+        assert!(!queued.ready(&state));
+        assert!(translate_message(
+            &ServerMessage::SessionHistoryPage {
+                session_id: "confirmed".into(),
+                messages: vec![history_message(1)],
+                next_cursor: None,
+                replace: false,
+            },
+            &state,
+            &mut None,
+            &id.node_id
+        )
+        .is_empty());
+        assert!(!core.load_older_history(id.clone(), "confirmed".into()));
+        drop(rx);
+        translate_message(
+            &ServerMessage::SessionReady {
+                session_id: "next".into(),
+                cwd: None,
+                model: None,
+                provider: None,
+                permission_mode: None,
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        translate_message(
+            &ServerMessage::SessionHistoryPage {
+                session_id: "next".into(),
+                messages: vec![],
+                next_cursor: Some(24),
+                replace: true,
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(!core.load_older_history(id, "next".into()));
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_history_page_cannot_complete_the_next_page_request() {
+        let (core, id, state, _rx) = connected_core().await;
+        translate_message(
+            &ServerMessage::SessionHistoryPage {
+                session_id: "confirmed".into(),
+                messages: vec![history_message(3)],
+                next_cursor: Some(48),
+                replace: true,
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(core.load_older_history(id.clone(), "confirmed".into()));
+        let page = ServerMessage::SessionHistoryPage {
+            session_id: "confirmed".into(),
+            messages: vec![history_message(2)],
+            next_cursor: Some(24),
+            replace: false,
+        };
+        translate_message(&page, &state, &mut None, &id.node_id);
+        assert!(core.load_older_history(id.clone(), "confirmed".into()));
+        assert!(translate_message(&page, &state, &mut None, &id.node_id).is_empty());
+        assert!(!core.load_older_history(id.clone(), "confirmed".into()));
+        translate_message(
+            &ServerMessage::SessionHistoryPage {
+                session_id: "confirmed".into(),
+                messages: vec![history_message(1)],
+                next_cursor: None,
+                replace: false,
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert_eq!(core.snapshot(id).unwrap().sessions[0].messages.len(), 3);
+    }
 
     #[test]
     fn workspace_review_preserves_origin_and_line_details() {

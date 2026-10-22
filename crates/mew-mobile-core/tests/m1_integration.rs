@@ -371,6 +371,80 @@ impl Harness {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn older_history_loads_every_remote_message_in_order() -> Result<()> {
+    let h = Harness::new().await?;
+    let session = h.server.session_manager.create(None).await?;
+    let session_id = session.id.clone();
+    let canonical_session = session_id
+        .trim_start_matches("sess_")
+        .parse::<ulid::Ulid>()?;
+    let messages = (0..61)
+        .map(|number| {
+            let message_id = ulid::Ulid::from(number + 100);
+            mew_message::Message {
+                id: message_id,
+                session_id: canonical_session,
+                role: mew_message::Role::User,
+                parts: vec![mew_message::Part::Text(mew_message::TextPart {
+                    base: mew_message::PartBase {
+                        id: ulid::Ulid::from(number + 200),
+                        message_id,
+                        session_id: canonical_session,
+                    },
+                    text: format!("message {number}"),
+                    synthetic: false,
+                })],
+                time: mew_message::Time {
+                    created: 0,
+                    completed: None,
+                },
+                assistant: None,
+            }
+        })
+        .collect();
+    session.agent.lock().await.load_messages(messages).await;
+    h.events.lock().unwrap().clear();
+    h.core.attach(h.daemon_id.clone(), session_id.clone());
+    wait_for_event(&h.events, 10, |event| {
+        matches!(event, CoreEvent::SessionReloaded { .. })
+            && h.core
+                .snapshot(h.daemon_id.clone())
+                .is_some_and(|snapshot| snapshot.sessions[0].history_before == Some(37))
+    });
+    for expected_count in [48, 61] {
+        h.events.lock().unwrap().clear();
+        assert!(h
+            .core
+            .load_older_history(h.daemon_id.clone(), session_id.clone()));
+        wait_for_event(&h.events, 10, |event| {
+            matches!(event, CoreEvent::HistoryExtended { daemon, session_id: id }
+            if daemon == &h.daemon_id.node_id && id == &session_id)
+        });
+        assert_eq!(
+            h.core.snapshot(h.daemon_id.clone()).unwrap().sessions[0]
+                .messages
+                .len(),
+            expected_count
+        );
+    }
+    let snapshot = h.core.snapshot(h.daemon_id.clone()).unwrap();
+    assert_eq!(
+        snapshot.sessions[0]
+            .messages
+            .iter()
+            .map(|message| message.parts[0].text.clone().unwrap())
+            .collect::<Vec<_>>(),
+        (0..61)
+            .map(|number| format!("message {number}"))
+            .collect::<Vec<_>>()
+    );
+    assert!(snapshot.sessions[0].history_before.is_none());
+    assert!(!h.core.load_older_history(h.daemon_id.clone(), session_id));
+    h.router.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn workspace_review_reads_fresh_remote_files_and_reports_non_repository_errors() -> Result<()>
 {
     let h = Harness::new().await?;

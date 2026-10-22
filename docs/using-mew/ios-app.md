@@ -80,6 +80,9 @@ creating the session, and rejects bad paths with an error.
   inline styles). Reasoning parts render as markdown too. Consecutive
   same-tool calls batch into a single row. Text streams incrementally
   with de-jittered autoscroll.
+- **Older messages**: tap **Load older messages** above the transcript to
+  fetch another page. Loading preserves the current reading position and
+  the live turn state; connection failures offer a retry without clearing chat.
 - **File browser**: tap the **+** button on the chatbar to browse the
   session's working directory. Folders navigate in, files append their
   path to the composer. Defaults to the session cwd (or daemon default).
@@ -146,8 +149,6 @@ and `RequestResolved` dismisses the prompt on all devices.
 
 ## Limitations (v1)
 
-- **Older history**: the app displays the recent history supplied on attach;
-  loading earlier pages is not yet exposed in the iOS UI.
 - **Foreground only**: the app does not receive push notifications
   while backgrounded. When the app is open, in-app alerts fire for
   sessions that need your attention. Background push is planned for a

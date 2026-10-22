@@ -113,6 +113,9 @@ final class AppStore: ObservableObject {
     // Chat state for the active session
     @Published var messages: [ChatMessage] = []
     @Published var review: WorkspaceReview?
+    @Published var historyBefore: UInt64?
+    @Published var isLoadingOlderHistory = false
+    @Published var historyError: String?
 
     /// Messages filtered to exclude empty entries (no visible content).
     var visibleMessages: [ChatMessage] {
@@ -257,6 +260,9 @@ final class AppStore: ObservableObject {
 
     func selectDaemon(_ daemon: DaemonEntry) {
         review = nil
+        historyBefore = nil
+        isLoadingOlderHistory = false
+        historyError = nil
         selectedDaemonId = DaemonId(nodeId: daemon.nodeId)
         if let core {
             core.listSessions(id: selectedDaemonId!)
@@ -273,6 +279,9 @@ final class AppStore: ObservableObject {
     func selectSession(_ sessionId: String) {
         guard let daemonId = selectedDaemonId, let core else { return }
         review = nil
+        historyBefore = nil
+        isLoadingOlderHistory = false
+        historyError = nil
         selectedSessionId = sessionId
         core.attach(id: daemonId, sessionId: sessionId)
 
@@ -322,6 +331,21 @@ final class AppStore: ObservableObject {
             review?.isLoading = false
             review?.error = "Connect to this session before reviewing changes."
         }
+    }
+
+    @discardableResult
+    func loadOlderHistory() -> Bool {
+        guard let daemonId = selectedDaemonId, let sessionId = selectedSessionId,
+              historyBefore != nil, !isLoadingOlderHistory,
+              case .connected? = daemonStatuses[daemonId.nodeId] else { return false }
+        isLoadingOlderHistory = true
+        historyError = nil
+        if core?.loadOlderHistory(id: daemonId, sessionId: sessionId) != true {
+            isLoadingOlderHistory = false
+            historyError = "Couldn't request older messages. Reconnect and try again."
+            return false
+        }
+        return true
     }
 
     private func directoryKey(sessionId: String, path: String?) -> String {
@@ -479,6 +503,10 @@ final class AppStore: ObservableObject {
                 }
             } else {
                 pendingSubmissions.removeValue(forKey: daemon)
+                if selectedDaemonId?.nodeId == daemon, isLoadingOlderHistory {
+                    isLoadingOlderHistory = false
+                    historyError = "Connection lost. Reconnect to load older messages."
+                }
                 if review?.daemon == daemon, review?.isLoading == true {
                     review?.isLoading = false
                     review?.error = "Connection lost. Reconnect and refresh to review changes."
@@ -532,6 +560,17 @@ final class AppStore: ObservableObject {
             pendingPermissions.removeAll { $0.daemon == daemon }
             pendingAskUser.removeAll { $0.daemon == daemon }
             pendingGoals.removeAll { $0.daemon == daemon }
+            if selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId {
+                historyBefore = nil
+                isLoadingOlderHistory = false
+                historyError = nil
+            }
+
+        case .historyExtended(let daemon, let sessionId):
+            guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
+            refreshMessages()
+            isLoadingOlderHistory = false
+            historyError = nil
 
         case .sessionReloaded(let daemon, let sessionId):
             guard selectedDaemonId?.nodeId == daemon else { return }
@@ -660,6 +699,10 @@ final class AppStore: ObservableObject {
             }
             if kind == "error", daemon == selectedDaemonId?.nodeId, sessionId == selectedSessionId {
                 lastTurnFailed[sessionId] = true
+                if isLoadingOlderHistory {
+                    isLoadingOlderHistory = false
+                    historyError = detail ?? title
+                }
             }
 
         case .attentionChanged(let daemon, let sessionId, let permissions, let questions):
@@ -721,6 +764,7 @@ final class AppStore: ObservableObject {
     private func applySnapshot(_ snap: DaemonSnapshot) {
         if let session = snap.sessions.first(where: { $0.sessionId == selectedSessionId }) {
             messages = session.messages
+            historyBefore = session.historyBefore
             isStreaming = session.running
             if let daemon = selectedDaemonId?.nodeId {
                 pendingPermissions.removeAll { $0.daemon == daemon && $0.sessionId == session.sessionId }

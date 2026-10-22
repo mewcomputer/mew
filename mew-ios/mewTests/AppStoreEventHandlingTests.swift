@@ -35,6 +35,61 @@ final class AppStoreEventHandlingTests: XCTestCase {
         XCTAssertEqual(store.review!.files.map(\.path), ["src/main.rs"])
     }
 
+    private func historySnapshot(before: UInt64?, texts: [String], running: Bool = false) -> DaemonSnapshot {
+        let messages = texts.map { text in
+            ChatMessage(id: text, role: "user", parts: [MessagePart(id: text, kind: .text, text: text,
+                toolName: nil, toolState: nil, toolInput: nil, toolOutput: nil, toolError: nil,
+                toolCallId: nil, toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil)], assistantMeta: nil)
+        }
+        return DaemonSnapshot(sessions: [SessionInfo(sessionId: "sess-1", title: "History", messages: messages,
+            running: running, usageCost: 0, pendingPermissions: 0, pendingQuestions: 0,
+            inputTokens: 0, outputTokens: 0, turns: 0, todos: [], historyBefore: before)],
+            attachedSession: "sess-1", pendingPermissions: [], pendingAskUser: [], models: [],
+            daemonVersion: nil, permissionMode: nil, currentModel: nil, currentProvider: nil,
+            thinkingVariant: nil, currentPersona: nil, availablePersonas: [])
+    }
+
+    func testOlderHistoryKeepsMessagesUntilTheSelectedPageArrives() {
+        mock.snapshotResult = historySnapshot(before: 24, texts: ["latest"], running: true)
+        store.handleEvent(.daemonStatusChanged(daemon: "daemon-1", status: .connected))
+        store.handleEvent(.sessionReloaded(daemon: "daemon-1", sessionId: "sess-1"))
+        XCTAssertEqual(store.historyBefore, 24)
+        XCTAssertTrue(store.loadOlderHistory())
+        XCTAssertFalse(store.loadOlderHistory())
+        XCTAssertTrue(store.isLoadingOlderHistory)
+        XCTAssertEqual(store.messages.map(\.id), ["latest"])
+        store.handleEvent(.historyExtended(daemon: "daemon-2", sessionId: "sess-1"))
+        store.handleEvent(.historyExtended(daemon: "daemon-1", sessionId: "other"))
+        XCTAssertTrue(store.isLoadingOlderHistory)
+        mock.snapshotResult = historySnapshot(before: nil, texts: ["older", "latest"], running: true)
+        store.handleEvent(.historyExtended(daemon: "daemon-1", sessionId: "sess-1"))
+        XCTAssertEqual(store.messages.map(\.id), ["older", "latest"])
+        XCTAssertTrue(store.isStreaming)
+        XCTAssertFalse(store.isLoadingOlderHistory)
+        XCTAssertNil(store.historyBefore)
+        XCTAssertFalse(store.loadOlderHistory())
+    }
+
+    func testOlderHistorySendFailuresAndDisconnectsAllowRecovery() {
+        mock.snapshotResult = historySnapshot(before: 24, texts: ["latest"])
+        store.handleEvent(.daemonStatusChanged(daemon: "daemon-1", status: .connected))
+        store.handleEvent(.sessionReloaded(daemon: "daemon-1", sessionId: "sess-1"))
+        mock.historyAccepted = false
+        XCTAssertFalse(store.loadOlderHistory())
+        XCTAssertFalse(store.isLoadingOlderHistory)
+        XCTAssertNotNil(store.historyError)
+        mock.historyAccepted = true
+        XCTAssertTrue(store.loadOlderHistory())
+        XCTAssertNil(store.historyError)
+        store.handleEvent(.daemonStatusChanged(daemon: "daemon-1", status: .disconnected))
+        XCTAssertFalse(store.isLoadingOlderHistory)
+        XCTAssertNotNil(store.historyError)
+        XCTAssertEqual(store.messages.map(\.id), ["latest"])
+        store.selectSession("sess-2")
+        XCTAssertNil(store.historyBefore)
+        XCTAssertNil(store.historyError)
+    }
+
     func testWorkspaceReviewRefreshRejectsLateSuccessAndFailure() {
         store.refreshReview(daemon: "daemon-1", sessionId: "sess-1")
         let first = store.review!.requestId
@@ -195,10 +250,10 @@ final class AppStoreEventHandlingTests: XCTestCase {
     func testSnapshotOnlyRestoresRunningForTheSelectedSession() {
         let other = SessionInfo(sessionId: "sess-2", title: "Other", messages: [],
             running: false, usageCost: 0, pendingPermissions: 0, pendingQuestions: 0,
-            inputTokens: 0, outputTokens: 0, turns: 0, todos: [])
+            inputTokens: 0, outputTokens: 0, turns: 0, todos: [], historyBefore: nil)
         let selected = SessionInfo(sessionId: "sess-1", title: "Selected", messages: [],
             running: true, usageCost: 0, pendingPermissions: 0, pendingQuestions: 0,
-            inputTokens: 0, outputTokens: 0, turns: 0, todos: [])
+            inputTokens: 0, outputTokens: 0, turns: 0, todos: [], historyBefore: nil)
         mock.snapshotResult = DaemonSnapshot(sessions: [other, selected], attachedSession: "sess-1",
             pendingPermissions: [], pendingAskUser: [], models: [], daemonVersion: nil,
             permissionMode: nil, currentModel: nil, currentProvider: nil, thinkingVariant: nil,
@@ -482,7 +537,7 @@ final class AppStoreEventHandlingTests: XCTestCase {
             running: false, usageCost: 0.05,
             pendingPermissions: 0, pendingQuestions: 0,
             inputTokens: 1000, outputTokens: 500, turns: 3,
-            todos: [TodoItem(id: 1, content: "Task", status: "done", dependsOn: [])]
+            todos: [TodoItem(id: 1, content: "Task", status: "done", dependsOn: [])], historyBefore: nil
         )
         let snap = DaemonSnapshot(
             sessions: [session], attachedSession: "sess-1",

@@ -2556,3 +2556,17 @@ walkthrough is not claimed.
 Follow-ups: expose older history pages and richer worker/job details. The existing
 project.yml also differs from the checked-in Xcode project's package pin and test
 target; this pass verified the checked-in project without regenerating it.
+
+# 2026-10-22 — iOS older conversation history
+
+Exposed the shared history cursor through mobile snapshots and added confirmed,
+single-flight older-page requests. Older pages emit a distinct mobile event so
+loading history does not replay attachment actions or persona preferences.
+Duplicate/non-advancing pages and replies after attachment changes are ignored.
+The chat offers older-message loading with progress, retry errors, and an anchor
+to retain the current reading position instead of following the streaming tail.
+
+Verified 47 mobile unit tests, 40 iOS application tests, regenerated matching
+device/simulator/host libraries and Swift bindings, and a real iroh integration
+test loading 61 messages over three pages in exact chronological order. The
+broader verification pass follows worker/job detail implementation.

@@ -61,6 +61,9 @@ pub enum CoreEvent {
     /// Session history was loaded. Swift should pull `snapshot()`.
     SessionReloaded { daemon: String, session_id: String },
 
+    /// Older messages were prepended without restarting session attachment.
+    HistoryExtended { daemon: String, session_id: String },
+
     /// Streaming text delta for a part. Coalesced in Rust before FFI.
     TextDelta {
         daemon: String,

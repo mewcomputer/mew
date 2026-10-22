@@ -37,6 +37,7 @@ pub struct SessionInfo {
     pub output_tokens: u64,
     pub turns: u32,
     pub todos: Vec<crate::events::TodoItem>,
+    pub history_before: Option<u64>,
 }
 
 /// A chat message in the snapshot.
