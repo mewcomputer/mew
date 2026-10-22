@@ -85,6 +85,7 @@ private struct WorkerHistoryView: View {
     let sessionId: String
     let childSessionId: String
     let name: String
+    @State private var toolDisclosures = ToolDisclosures()
     @EnvironmentObject private var store: AppStore
 
     var body: some View {
@@ -94,8 +95,8 @@ private struct WorkerHistoryView: View {
                 if !history.messages.isEmpty {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 4) {
-                            ForEach(history.messages, id: \.id) { message in
-                                MessageItemView(message: message, fontChoice: store.fontChoice)
+                            ForEach(ConversationItem.grouped(messages: history.messages)) { item in
+                                MessageItemView(message: item.message, fontChoice: store.fontChoice, disclosures: $toolDisclosures)
                             }
                         }
                     }

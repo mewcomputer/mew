@@ -28,6 +28,7 @@ struct ChatView: View {
     @State private var autoScroll: Bool = true
     @State private var containerHeight: CGFloat = 0
     @State private var historyAnchor: String?
+    @State private var toolDisclosures = ToolDisclosures()
 
     // Loading state while waiting for session history replay
     @State private var isLoadingSession: Bool = false
@@ -75,7 +76,7 @@ struct ChatView: View {
                 store.listModels()
                 store.listPersonas()
             }
-            .onChange(of: store.visibleMessages.isEmpty) { _, isEmpty in
+            .onChange(of: store.conversationItems.isEmpty) { _, isEmpty in
                 if !isEmpty { isLoadingSession = false }
             }
             .sheet(item: Binding(
@@ -140,8 +141,8 @@ struct ChatView: View {
             }
             .onChange(of: store.availableModels) { initializeModelSelection() }
             .onChange(of: store.currentModel) { updateModelSelection() }
-            .onChange(of: store.visibleMessages) {
-                if !store.visibleMessages.isEmpty {
+            .onChange(of: store.conversationItems) {
+                if !store.conversationItems.isEmpty {
                     isLoadingSession = false
                 }
             }
@@ -163,7 +164,7 @@ struct ChatView: View {
 
     @ViewBuilder
     private var content: some View {
-        if store.visibleMessages.isEmpty && store.historyBefore == nil && !store.isStreaming && store.streamingText.isEmpty {
+        if store.conversationItems.isEmpty && store.historyBefore == nil && !store.isStreaming && store.streamingText.isEmpty {
             if isLoadingSession {
                 ProgressView("Loading session…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -203,6 +204,7 @@ struct ChatView: View {
 
     @ViewBuilder
     private var scrollContent: some View {
+        let items = store.conversationItems
         ScrollView {
             ScrollViewReader { proxy in
                 // Non-lazy so each message's MarkdownView parses once on load and
@@ -213,7 +215,7 @@ struct ChatView: View {
                     if store.historyBefore != nil {
                         VStack(spacing: 6) {
                             Button {
-                                historyAnchor = store.visibleMessages.first?.id
+                                historyAnchor = items.first?.sourceMessageIds.first
                                 autoScroll = false
                                 if !store.loadOlderHistory() { historyAnchor = nil }
                             } label: {
@@ -233,8 +235,8 @@ struct ChatView: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 12)
                     }
-                    ForEach(store.visibleMessages, id: \.id) { message in
-                        MessageItemView(message: message, fontChoice: store.fontChoice)
+                    ForEach(items) { item in
+                        MessageItemView(message: item.message, fontChoice: store.fontChoice, disclosures: $toolDisclosures)
                     }
 
                     if showsStreamingBubble {
@@ -263,10 +265,11 @@ struct ChatView: View {
                 // Auto-scroll on any content change (new messages, streaming
                 // deltas, and growing reasoning/tool output within a message),
                 // not just when the message count changes.
-                .onChange(of: store.visibleMessages) {
+                .onChange(of: store.conversationItems) {
                     if let anchor = historyAnchor {
                         if !store.isLoadingOlderHistory {
-                            proxy.scrollTo(anchor, anchor: .top)
+                            let target = items.first { $0.sourceMessageIds.contains(anchor) }?.id ?? anchor
+                            proxy.scrollTo(target, anchor: .top)
                             historyAnchor = nil
                         }
                     } else {

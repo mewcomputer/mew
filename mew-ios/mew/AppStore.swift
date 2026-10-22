@@ -144,28 +144,9 @@ final class AppStore: ObservableObject {
     @Published var workerHistory: WorkerHistory?
     @Published var jobOutput: JobOutputDetail?
 
-    /// Completed content; the active text part is rendered by StreamingBubble.
-    var visibleMessages: [ChatMessage] {
-        messages.compactMap { msg -> ChatMessage? in
-            var visible = msg
-            if let streamingPartId, !streamingText.isEmpty,
-               msg.parts.contains(where: { $0.id == streamingPartId }) {
-                visible.parts.removeAll { $0.id == streamingPartId }
-            }
-            let hasContent = visible.parts.contains { part in
-                switch part.kind {
-                case .text:
-                    return (part.text?.isEmpty == false)
-                case .reasoning:
-                    return (part.text?.isEmpty == false)
-                case .toolCall:
-                    return part.toolName != nil
-                case .error:
-                    return (part.text?.isEmpty == false)
-                }
-            }
-            return hasContent ? visible : nil
-        }
+    /// Completed content; preserve turn boundaries before hiding non-renderable messages.
+    var conversationItems: [ConversationItem] {
+        ConversationItem.grouped(messages: messages, hidingPartId: streamingText.isEmpty ? nil : streamingPartId)
     }
     @Published var streamingText: String = ""
     @Published var streamingPartId: String?

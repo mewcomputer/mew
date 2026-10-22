@@ -25,11 +25,59 @@ final class AppStoreEventHandlingTests: XCTestCase {
             toolInput: "{}", toolOutput: "file contents", toolError: nil, toolCallId: "call",
             toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil)
         let message = ChatMessage(id: "assistant", role: "assistant", parts: [part], assistantMeta: nil)
-        let controller = UIHostingController(rootView: MessageItemView(message: message, fontChoice: .system)
+        let controller = UIHostingController(rootView: MessageItemView(message: message, fontChoice: .system, disclosures: .constant(ToolDisclosures()))
             .environment(\.dynamicTypeSize, .large))
         let size = controller.sizeThatFits(in: CGSize(width: 393, height: 1_000))
         XCTAssertLessThanOrEqual(size.height, 50, "Tool-only messages should not inherit text-bubble padding")
         XCTAssertGreaterThanOrEqual(size.height, 44)
+    }
+
+    func testMixedToolsCollapseIntoOneActivityRow() {
+        let parts = ["write", "bash", "bash"].enumerated().map { index, name in
+            MessagePart(id: "tool-\(index)", kind: .toolCall, text: nil, toolName: name, toolState: "completed",
+                toolInput: name == "write" ? "{\"path\":\"main.rs\"}" : "{\"command\":\"cargo test\"}",
+                toolOutput: "done", toolError: nil, toolCallId: "call-\(index)",
+                toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil)
+        }
+        let message = ChatMessage(id: "assistant", role: "assistant", parts: parts, assistantMeta: nil)
+        let controller = UIHostingController(rootView: MessageItemView(message: message, fontChoice: .system, disclosures: .constant(ToolDisclosures()))
+            .environment(\.dynamicTypeSize, .large))
+        XCTAssertLessThanOrEqual(controller.sizeThatFits(in: CGSize(width: 393, height: 1_000)).height, 50)
+    }
+
+    func testInvisibleUserTurnsStillSeparateToolActivity() {
+        let part = MessagePart(id: "one", kind: .toolCall, text: nil, toolName: "bash", toolState: "completed",
+            toolInput: "{}", toolOutput: nil, toolError: nil, toolCallId: "one",
+            toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil)
+        var second = part
+        second.id = "two"
+        store.messages = [ChatMessage(id: "first", role: "assistant", parts: [part], assistantMeta: nil),
+            ChatMessage(id: "attachment-only", role: "user", parts: [], assistantMeta: nil),
+            ChatMessage(id: "second", role: "assistant", parts: [second], assistantMeta: nil)]
+        let items = store.conversationItems
+        XCTAssertEqual(items.count, 2, "Hidden user messages must still separate turns")
+        XCTAssertEqual(items.flatMap { $0.message.parts }.map(\.id), ["one", "two"])
+    }
+
+    func testExpandedActivityAndToolDetailsSurviveOlderPageMerge() {
+        let parts = (0..<3).map { index in
+            MessagePart(id: "tool-\(index)", kind: .toolCall, text: nil, toolName: "bash", toolState: "completed",
+                toolInput: "{\"command\":\"cargo test\"}", toolOutput: "tests passed", toolError: nil,
+                toolCallId: "call-\(index)", toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil)
+        }
+        var disclosures = ToolDisclosures()
+        disclosures.setGroupExpanded(true, parts: Array(parts.suffix(2)))
+        disclosures.expandedCalls.insert("tool-2")
+        XCTAssertTrue(disclosures.isGroupExpanded(parts))
+        let message = ChatMessage(id: "older-group", role: "assistant", parts: parts, assistantMeta: nil)
+        let controller = UIHostingController(rootView: MessageItemView(message: message, fontChoice: .system,
+            disclosures: .constant(disclosures)).environment(\.dynamicTypeSize, .large))
+        XCTAssertGreaterThan(controller.sizeThatFits(in: CGSize(width: 393, height: 2_000)).height, 250,
+            "The merged group must retain both its call list and the previously opened output")
+        disclosures.setGroupExpanded(false, parts: parts)
+        XCTAssertFalse(disclosures.isGroupExpanded(parts))
+        disclosures.setGroupExpanded(true, parts: parts)
+        XCTAssertTrue(disclosures.expandedCalls.contains("tool-2"))
     }
 
     func testToolDurationsUseMillisecondsAndHandleClockBoundaries() {
@@ -189,7 +237,7 @@ final class AppStoreEventHandlingTests: XCTestCase {
         mock.snapshotResult = snapshot
 
         store.handleEvent(.historyExtended(daemon: "daemon-1", sessionId: "sess-1"))
-        XCTAssertEqual(store.visibleMessages.flatMap(\.parts).compactMap(\.text), ["older", "latest", "earlier answer"])
+        XCTAssertEqual(store.conversationItems.flatMap { $0.message.parts }.compactMap(\.text), ["older", "latest", "earlier answer"])
         XCTAssertEqual(store.streamingText, "current")
         store.handleEvent(.textDelta(daemon: "daemon-1", sessionId: "sess-1", partId: "active", delta: " reply"))
         XCTAssertEqual(store.streamingText, "current reply")
@@ -197,7 +245,7 @@ final class AppStoreEventHandlingTests: XCTestCase {
         snapshot.sessions[0].messages[2].parts[1].text = "current reply"
         mock.snapshotResult = snapshot
         store.handleEvent(.partUpdated(daemon: "daemon-1", sessionId: "sess-1", partId: "active", partKind: "text", state: "completed"))
-        XCTAssertEqual(store.visibleMessages.flatMap(\.parts).compactMap(\.text), ["older", "latest", "earlier answer", "current reply"])
+        XCTAssertEqual(store.conversationItems.flatMap { $0.message.parts }.compactMap(\.text), ["older", "latest", "earlier answer", "current reply"])
         XCTAssertTrue(store.streamingText.isEmpty)
         XCTAssertNil(store.streamingPartId)
         XCTAssertTrue(store.isStreaming)

@@ -16,6 +16,7 @@ import SwiftStreamingMarkdown
 struct MessageItemView: View {
     let message: ChatMessage
     var fontChoice: MewFontChoice = .miSans
+    @Binding var disclosures: ToolDisclosures
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var isUser: Bool { message.role == "user" }
@@ -63,11 +64,11 @@ struct MessageItemView: View {
     @ViewBuilder
     private var assistantContent: some View {
         VStack(alignment: .leading, spacing: 4) {
-            ForEach(partGroups) { group in
-                if group.parts.count > 1 {
-                    ToolGroupRow(parts: group.parts)
-                } else {
-                    partView(group.parts[0])
+            if !message.parts.isEmpty && message.parts.allSatisfy({ $0.kind == .toolCall }) {
+                ToolGroupRow(parts: message.parts, disclosures: $disclosures)
+            } else {
+                ForEach(message.parts, id: \.id) { part in
+                    partView(part)
                 }
             }
         }
@@ -76,51 +77,6 @@ struct MessageItemView: View {
         .frame(maxWidth: 360, alignment: .leading)
         // Assistant messages render with no background — the chat surface
         // shows through and user bubbles provide the only visual separation.
-    }
-
-    /// Parts to render, with runs of consecutive tool calls at the same
-    /// sensitivity tier collapsed into a single group:
-    /// - `.readOnly` calls (read, grep, glob, …) batch together
-    /// - `.modifiable` calls (write, edit, …) batch together
-    /// - `.dangerous` calls (bash, …) are always shown individually
-    /// A batch may contain mixed tool names (e.g. "2× read · 1× grep").
-    private var partGroups: [PartGroup] {
-        var groups: [PartGroup] = []
-        var run: [MessagePart] = []
-        var runTier: ToolSensitivity?
-
-        func canGroup(_ part: MessagePart) -> Bool {
-            guard part.kind == .toolCall else { return false }
-            return toolSensitivity(for: part) != .dangerous
-        }
-
-        func flushRun() {
-            if !run.isEmpty {
-                groups.append(PartGroup(id: run[0].id, parts: run))
-                run = []
-                runTier = nil
-            }
-        }
-
-        for part in message.parts {
-            if canGroup(part) {
-                let tier = toolSensitivity(for: part)
-                if runTier == tier || run.isEmpty {
-                    run.append(part)
-                    runTier = tier
-                } else {
-                    // Different tier — flush the previous run and start fresh.
-                    flushRun()
-                    run = [part]
-                    runTier = tier
-                }
-            } else {
-                flushRun()
-                groups.append(PartGroup(id: part.id, parts: [part]))
-            }
-        }
-        flushRun()
-        return groups
     }
 
     @ViewBuilder
@@ -162,7 +118,7 @@ struct MessageItemView: View {
 
     @ViewBuilder
     private func toolCallView(_ part: MessagePart) -> some View {
-        ToolCallRow(part: part)
+        ToolCallRow(part: part, expandedCalls: $disclosures.expandedCalls)
     }
 
     // MARK: Helpers
@@ -177,121 +133,76 @@ struct MessageItemView: View {
     }
 }
 
-// MARK: - Part grouping
-
-/// A run of message parts rendered as a unit. A single-element group renders as
-/// its part; a multi-element group is a batch of same-sensitivity-tier tool calls.
-private struct PartGroup: Identifiable {
-    let id: String
-    let parts: [MessagePart]
-}
-
-// MARK: - Tool sensitivity
-
-/// Sensitivity tier for grouping tool calls in the UI.
-/// ReadOnly calls are batched together; Modifiable calls are batched together;
-/// Dangerous calls are always shown individually.
-private enum ToolSensitivity {
-    case readOnly
-    case modifiable
-    case dangerous
-}
-
-/// Reads the sensitivity tier from the wire field stamped by the agent.
-/// Falls back to `.dangerous` (never grouped) if the field is absent — this
-/// happens for old sessions that predate the field or if the agent didn't
-/// stamp it (e.g. unknown MCP tools).
-private func toolSensitivity(for part: MessagePart) -> ToolSensitivity {
-    switch part.toolSensitivity?.lowercased() {
-    case "readonly":  return .readOnly
-    case "mutating":  return .modifiable
-    default:          return .dangerous
-    }
-}
-
 // MARK: - Tool group row
 
-/// A collapsed batch of consecutive tool calls at the same sensitivity tier.
-/// May contain mixed tool names (e.g. "2× read · 1× grep"). Expands to the
-/// individual `ToolCallRow`s.
+/// Consecutive activity at one conversation level, with individual calls inside.
 private struct ToolGroupRow: View {
     let parts: [MessagePart]
+    @Binding var disclosures: ToolDisclosures
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var expanded = false
+    @State private var activityCache = ToolActivity.Cache()
+    private var expanded: Bool { disclosures.isGroupExpanded(parts) }
 
     private var anyActive: Bool {
-        parts.contains { $0.toolState == "running" || $0.toolState == "pending" }
+        parts.contains { $0.toolState != "completed" && $0.toolState != "error" }
     }
     private var anyError: Bool { parts.contains { $0.toolState == "error" } }
 
-    /// Builds a compact summary of the batch, grouping by tool name and
-    /// preserving first-seen order: "2× read · 1× grep".
-    private var summary: String {
-        var counts: [(name: String, count: Int)] = []
-        for part in parts {
-            let name = part.toolName ?? "tool"
-            if let idx = counts.firstIndex(where: { $0.name == name }) {
-                counts[idx].count += 1
-            } else {
-                counts.append((name, 1))
-            }
-        }
-        return counts.map { "\($0.count)× \($0.name)" }.joined(separator: " · ")
-    }
-
     var body: some View {
+        let summary = ToolActivity.summary(parts, cache: activityCache)
         VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 8) {
-                Image(systemName: "wrench.and.screwdriver")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-
-                Text(summary)
-                    .font(.subheadline.weight(.medium))
-                    .lineLimit(1)
-
-                Spacer(minLength: 4)
-
-                aggregateIndicator
-
-                Image(systemName: expanded ? "chevron.up" : "chevron.down")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
-            .contentShape(Rectangle())
-            .onTapGesture {
+            Button {
                 withAnimation(Theme.Motion.value(Theme.Motion.disclosure, reduced: reduceMotion)) {
-                    expanded.toggle()
+                    disclosures.setGroupExpanded(!expanded, parts: parts)
                 }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: ToolActivity.symbol(parts[0]))
+                        .font(.subheadline)
+                    Text(summary)
+                        .font(.subheadline)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                    Spacer(minLength: 4)
+                    aggregateIndicator
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.caption2)
+                }
+                .foregroundStyle(.secondary)
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel(summary)
+            .accessibilityValue(ToolActivity.status(parts))
+            .accessibilityHint(expanded ? "Hide tool calls" : "Show tool calls")
 
             if expanded {
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(parts, id: \.id) { part in
-                        ToolCallRow(part: part)
+                        ToolCallRow(part: part, expandedCalls: $disclosures.expandedCalls)
                     }
                 }
-                .padding(.leading, 8)
+                .padding(.leading, 16)
             }
         }
     }
 
     @ViewBuilder
     private var aggregateIndicator: some View {
-        if anyActive {
-            ProgressView()
-                .controlSize(.small)
-                .tint(.blue)
-        } else if anyError {
-            Image(systemName: "xmark.circle.fill")
-                .foregroundStyle(.red)
-                .font(.caption)
-        } else {
-            Image(systemName: "checkmark.circle.fill")
-                .foregroundStyle(.green)
-                .font(.caption)
+        HStack(spacing: 6) {
+            if anyActive {
+                ProgressView().controlSize(.small).tint(Theme.toolRunning)
+            }
+            if anyError {
+                Image(systemName: "xmark.circle.fill").foregroundStyle(Theme.toolError)
+            } else if !anyActive {
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.toolCompleted)
+            }
         }
+        .font(.caption)
+        .accessibilityHidden(true)
     }
 }
 
@@ -302,6 +213,7 @@ struct ToolHistoryView: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var search = ""
+    @State private var expandedCalls = Set<String>()
 
     var body: some View {
         let tools = Array(messages.lazy.flatMap(\.parts).filter { part in
@@ -320,7 +232,7 @@ struct ToolHistoryView: View {
                         description: Text(search.isEmpty ? "Tool activity from this conversation appears here." : "Try a tool name or text from its input or output."))
                 } else {
                     List(tools, id: \.id) { part in
-                        ToolCallRow(part: part)
+                        ToolCallRow(part: part, expandedCalls: $expandedCalls)
                             .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
                     }
                 }
@@ -340,9 +252,11 @@ struct ToolHistoryView: View {
 /// Compact, expandable row representing a `.toolCall` part.
 private struct ToolCallRow: View {
     let part: MessagePart
+    @Binding var expandedCalls: Set<String>
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var expanded = false
+    @State private var activityCache = ToolActivity.Cache()
+    private var expanded: Bool { expandedCalls.contains(part.id) }
 
     private var state: ToolState {
         switch part.toolState ?? "" {
@@ -358,15 +272,15 @@ private struct ToolCallRow: View {
         VStack(alignment: .leading, spacing: 4) {
             Button {
                 withAnimation(Theme.Motion.value(Theme.Motion.disclosure, reduced: reduceMotion)) {
-                    expanded.toggle()
+                    if expanded { expandedCalls.remove(part.id) } else { expandedCalls.insert(part.id) }
                 }
             } label: {
                 HStack(spacing: 8) {
-                    Image(systemName: "wrench.and.screwdriver")
+                    Image(systemName: ToolActivity.symbol(part))
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
 
-                    Text(part.toolName ?? "tool")
+                    Text(ToolActivity.title(part, cache: activityCache))
                         .font(.subheadline.weight(.medium))
                         .lineLimit(1)
 

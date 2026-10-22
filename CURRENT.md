@@ -2668,3 +2668,23 @@ All 50 iOS tests pass after removing the temporary capture fixture and expansion
 trigger. Inspected seeded conversations in light/dark mode with surrounding user
 and assistant text, collapsed tools and an expanded shell result. Saved context
 screenshots and a six-second disclosure preview outside the repository.
+
+# 2026-10-22 — consolidated iOS tool activity
+
+Consecutive tools at the same transcript level now share a compact disclosure,
+including calls spread across assistant messages. Summaries describe the work,
+such as "Edited 1 file and ran 2 commands" or "Ran 3 commands". Expanded rows
+show actual commands and file names, with input/output available per call.
+Assistant text, reasoning, errors and user/system turns separate groups;
+invisible user turns retain their boundary effect. Worker transcripts group
+independently. Pending and failed calls retain honest status labels.
+
+Group and per-call disclosure state follows tool identities when older pages
+merge into an existing run. Display metadata is cached to avoid repeatedly
+decoding large file-write inputs during live updates. The compact-row and
+invisible-turn regressions failed before their fixes. All 63 iOS tests pass
+after removing the temporary capture fixture and expansion trigger. Inspected
+light/dark collapsed and expanded conversations and saved a disclosure GIF
+outside the repository. Independent breaker, simplifier and operator review
+found no remaining required changes; project validation and whitespace checks
+pass. Physical-phone interaction checks remain on the verification checklist.

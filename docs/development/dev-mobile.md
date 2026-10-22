@@ -220,7 +220,8 @@ These cover attachment and reconnect identities, ordered history pages,
 tool-state projection, worker transcript authorization and size limits,
 UTF-8 output chunks, and workspace review freshness/errors. The iOS suite
 also checks stale reply rejection, output recovery and streaming while
-loading older messages.
+loading older messages, consecutive tool summaries, invisible turn boundaries,
+and expanded tool details surviving history-page merges.
 
 Physical-phone checks remain necessary before release:
 
@@ -230,7 +231,9 @@ Physical-phone checks remain necessary before release:
   leave the app and return. Check reading position, keyboard behavior,
   pending permission/question sheets, and reconnect after a network change.
 - Search and expand completed, running and failed tools. Check VoiceOver
-  labels, large text and reduced motion.
+  labels, large text and reduced motion. Check mixed summaries such as
+  "Edited 1 file and ran 2 commands", expand the individual calls, then load
+  older history and confirm the open group and output remain visible.
 - Open a worker transcript while it runs and keep it open as the worker
   finishes. Read multiple job-output chunks, refresh, and reconnect after
   reading part of the output.
