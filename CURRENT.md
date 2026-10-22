@@ -2796,3 +2796,9 @@ and dark mode, and at accessibility text size. The populated reference now
 fits twelve chats instead of seven at the standard size. Before/after images
 are saved outside the repo under ios-compact-list. Removed the temporary
 capture fixture; all 72 iOS tests pass on the final sources.
+
+# 2026-10-22 — chat-list spacing adjustment
+
+Added two points of inset above and below each chat row in response to the
+compact-list preview feedback. The total four-point increase gives rows a
+little more separation. All 72 iOS tests pass after the adjustment.

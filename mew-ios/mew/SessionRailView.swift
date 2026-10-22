@@ -129,7 +129,7 @@ struct SessionRailView: View {
                     Section {
                         ForEach(section.items) { item in
                             sessionRow(item.session)
-                                .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
+                                .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
                                 .listRowSeparator(.hidden)
                         }
                     } header: {
