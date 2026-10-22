@@ -40,6 +40,21 @@ pub enum CoreEvent {
         entries: Vec<DirEntry>,
     },
 
+    /// Fresh workspace changes, scoped to the originating review request.
+    ReviewLoaded {
+        daemon: String,
+        session_id: String,
+        request_id: String,
+        files: Vec<ReviewFile>,
+    },
+
+    ReviewFailed {
+        daemon: String,
+        session_id: String,
+        request_id: String,
+        message: String,
+    },
+
     /// An attachment was acknowledged; discard cached required actions before replay.
     SessionReady { daemon: String, session_id: String },
 
@@ -187,6 +202,50 @@ pub enum CoreEvent {
 
     /// Persona was switched (via user action, cross-device, or tool call).
     PersonaSwitched { daemon: String, name: String },
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ReviewFile {
+    pub path: String,
+    pub old_path: Option<String>,
+    pub status: ReviewFileStatus,
+    pub hunks: Vec<ReviewHunk>,
+    pub added: u64,
+    pub removed: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ReviewFileStatus {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Unchanged,
+    Binary,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ReviewHunk {
+    pub old_start: u64,
+    pub old_count: u64,
+    pub new_start: u64,
+    pub new_count: u64,
+    pub lines: Vec<ReviewLine>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ReviewLine {
+    pub kind: ReviewLineKind,
+    pub old_line: Option<u64>,
+    pub new_line: Option<u64>,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ReviewLineKind {
+    Context,
+    Addition,
+    Deletion,
 }
 
 /// Connection status for a daemon.

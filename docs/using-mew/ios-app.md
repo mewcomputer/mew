@@ -9,41 +9,42 @@ permissions, send prompts — all from your phone.
 
 The app is in early development. It pairs with any number of daemons,
 shows per-daemon session rails with needs-you ordering, attaches to
-sessions with full history replay + live streaming, and supports
+sessions with recent history replay + live streaming, and supports
 sending prompts, canceling turns, answering permission and ask-user
 requests, and switching models.
 
 ## Pairing with a daemon
 
-1. On your daemon machine, run:
+1. On your daemon machine, start remote access:
 
    ```sh
-   mew pair
+   mew daemon --remote
    ```
 
-   This prints the daemon's Node ID (and a QR code). The daemon waits
-   120 seconds for a phone to connect.
+   In another terminal, run `mew pair`. This prints a QR code containing a
+   single-use invite that expires after 120 seconds.
 
 2. On your phone, open the mew app and tap **+**.
 
-3. Paste the Node ID (or `mew001:` payload) into the text field. You
-   can also scan the QR code if your daemon machine displays one.
+3. Scan the QR code, or paste a complete pairing invite into the text field.
+   The invite includes the credential needed to authorize your phone.
 
 4. Name the daemon (e.g. "Homelab", "Work laptop").
 
-5. Tap **Add**. The app dials the daemon over iroh. `mew pair`
-   allowlists your phone's Node ID and closes with "pairing complete."
-   The app then reconnects — the second successful connection means
-   you're paired and live.
+5. Tap **Add**. The app connects over iroh and the daemon authorizes your
+   phone's identity. Later connections use that identity without another invite.
 
 ### Pairing formats
 
 The app accepts:
 
-- **Raw Node ID** — the z-base-32 string from `mew pair`
-- **`mew001:<node_id>`** — versioned payload (future-proof)
-- **`mew001:{"node_id":"…","name":"…"}`** — JSON payload with a
-  suggested name
+- **`computer.mew.mew://<node_id>?token=<token>`** — the invite in the
+  QR code from `mew pair`.
+- **`mew001:{"node_id":"…","name":"…","token":"…"}`** — a
+  versioned payload with an optional suggested name.
+- **Raw Node ID** or **`mew001:<node_id>`** — supported for previously
+  authorized devices and legacy daemons. A Node ID alone cannot authorize a
+  new device on a daemon running with `--remote`.
 
 Unknown version prefixes (e.g. `mew002:`) are rejected with a clear
 error message.
@@ -98,6 +99,24 @@ creating the session, and rejects bad paths with an error.
 - **Ask-user sheet**: when the agent asks questions, a sheet appears
   with one text field per question. Also un-dismissable while pending.
 
+### Tools and workspace review
+
+Open the chat's **… → Tools** menu to browse tool calls from the loaded
+conversation history. Search by tool name, input, output, or error text.
+Expand a row to inspect its input and result; rows show the tool's state
+and duration when available.
+
+Tap the **Review changes** button in the chat toolbar to load changes from
+that session's workspace on its daemon. The file list includes added,
+modified, deleted, renamed, untracked, and binary files. Tap a text file to
+read line-numbered additions and deletions. Changes are compared with the
+latest commit, including staged and unstaged edits.
+
+Use **Refresh** to read the workspace again. Loading, connection failures,
+and repository errors have distinct states; a failed read does not appear
+as an empty diff. Review replies are scoped to their daemon, session, and
+request, so a late reply cannot replace a newer review.
+
 ### Settings
 
 - **Your Node ID** — copyable. This is what daemons need to allowlist.
@@ -127,6 +146,8 @@ and `RequestResolved` dismisses the prompt on all devices.
 
 ## Limitations (v1)
 
+- **Older history**: the app displays the recent history supplied on attach;
+  loading earlier pages is not yet exposed in the iOS UI.
 - **Foreground only**: the app does not receive push notifications
   while backgrounded. When the app is open, in-app alerts fire for
   sessions that need your attention. Background push is planned for a

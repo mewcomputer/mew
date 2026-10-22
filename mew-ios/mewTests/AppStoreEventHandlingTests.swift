@@ -19,6 +19,77 @@ final class AppStoreEventHandlingTests: XCTestCase {
         store.selectedSessionId = "sess-1"
     }
 
+    func testWorkspaceReviewAcceptsOnlyTheCurrentDaemonSessionAndRequest() {
+        store.refreshReview(daemon: "daemon-1", sessionId: "sess-1")
+        let request = store.review!.requestId
+        XCTAssertTrue(store.review!.isLoading)
+        let file = ReviewFile(path: "src/main.rs", oldPath: nil, status: .modified, hunks: [], added: 1, removed: 1)
+        for (daemon, session, id) in [("daemon-2", "sess-1", request), ("daemon-1", "other", request), ("daemon-1", "sess-1", "old")] {
+            store.handleEvent(.reviewLoaded(daemon: daemon, sessionId: session, requestId: id, files: [file]))
+            XCTAssertTrue(store.review!.isLoading)
+            XCTAssertTrue(store.review!.files.isEmpty)
+        }
+        store.handleEvent(.reviewLoaded(daemon: "daemon-1", sessionId: "sess-1", requestId: request, files: [file]))
+        XCTAssertFalse(store.review!.isLoading)
+        XCTAssertNil(store.review!.error)
+        XCTAssertEqual(store.review!.files.map(\.path), ["src/main.rs"])
+    }
+
+    func testWorkspaceReviewRefreshRejectsLateSuccessAndFailure() {
+        store.refreshReview(daemon: "daemon-1", sessionId: "sess-1")
+        let first = store.review!.requestId
+        store.refreshReview(daemon: "daemon-1", sessionId: "sess-1")
+        let current = store.review!.requestId
+        XCTAssertNotEqual(first, current)
+        store.handleEvent(.reviewFailed(daemon: "daemon-1", sessionId: "sess-1", requestId: first, message: "old error"))
+        store.handleEvent(.reviewLoaded(daemon: "daemon-1", sessionId: "sess-1", requestId: first, files: []))
+        XCTAssertTrue(store.review!.isLoading)
+        XCTAssertNil(store.review!.error)
+        store.handleEvent(.reviewFailed(daemon: "daemon-1", sessionId: "sess-1", requestId: current, message: "not a git repository"))
+        XCTAssertFalse(store.review!.isLoading)
+        XCTAssertEqual(store.review!.error, "not a git repository")
+    }
+
+    func testEmptyWorkspaceReviewIsACompletedResult() {
+        store.refreshReview(daemon: "daemon-1", sessionId: "sess-1")
+        store.handleEvent(.reviewLoaded(daemon: "daemon-1", sessionId: "sess-1", requestId: store.review!.requestId, files: []))
+        XCTAssertFalse(store.review!.isLoading)
+        XCTAssertTrue(store.review!.files.isEmpty)
+        XCTAssertNil(store.review!.error)
+    }
+
+    func testWorkspaceReviewCannotShowResultsAfterSelectionChanges() {
+        store.refreshReview(daemon: "daemon-1", sessionId: "sess-1")
+        let request = store.review!.requestId
+        store.selectedDaemonId = DaemonId(nodeId: "daemon-2")
+        store.handleEvent(.reviewFailed(daemon: "daemon-1", sessionId: "sess-1", requestId: request, message: "wrong workspace"))
+        XCTAssertNil(store.review!.error)
+        store.selectSession("sess-2")
+        XCTAssertNil(store.review)
+    }
+
+    func testWorkspaceReviewDisconnectStopsLoadingAndIgnoresLateReplies() {
+        store.refreshReview(daemon: "daemon-1", sessionId: "sess-1")
+        let request = store.review!.requestId
+        store.handleEvent(.daemonStatusChanged(daemon: "daemon-2", status: .disconnected))
+        XCTAssertTrue(store.review!.isLoading)
+        store.handleEvent(.daemonStatusChanged(daemon: "daemon-1", status: .disconnected))
+        XCTAssertFalse(store.review!.isLoading)
+        XCTAssertNotNil(store.review!.error)
+        store.handleEvent(.reviewLoaded(daemon: "daemon-1", sessionId: "sess-1", requestId: request, files: []))
+        XCTAssertNotNil(store.review!.error)
+    }
+
+    func testRejectedWorkspaceReviewShowsAnErrorAndCannotTargetAnotherSession() {
+        mock.reviewAccepted = false
+        store.refreshReview(daemon: "daemon-1", sessionId: "sess-1")
+        XCTAssertFalse(store.review!.isLoading)
+        XCTAssertNotNil(store.review!.error)
+        store.refreshReview(daemon: "daemon-2", sessionId: "other")
+        XCTAssertEqual(store.review!.daemon, "daemon-1")
+        XCTAssertEqual(store.review!.sessionId, "sess-1")
+    }
+
     func testRejectedPromptPreservesRetryTextAndWaitsForConfirmedAttachment() {
         mock.snapshotResult = DaemonSnapshot(sessions: [], attachedSession: "sess-1", pendingPermissions: [],
             pendingAskUser: [], models: [], daemonVersion: nil, permissionMode: nil,

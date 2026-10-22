@@ -305,6 +305,7 @@ impl DaemonConnection {
                 | ClientMessage::SwitchPersona { .. }
                 | ClientMessage::SetAutoTitle { .. }
                 | ClientMessage::SetAutoSummary { .. }
+                | ClientMessage::ReadSessionDiff { .. }
         );
         let (session_id, generation) = if session_scoped {
             let client = self.state.client_state.lock().unwrap();
@@ -314,6 +315,8 @@ impl DaemonConnection {
                 || client.connection != Some(mew_client_core::ConnectionStatus::Connected)
                 || session_id.is_none()
                 || session_id != *self.state.requested_session.lock().unwrap()
+                || matches!(&message, ClientMessage::ReadSessionDiff { session_id: requested, .. }
+                    if session_id.as_ref() != Some(requested))
             {
                 return false;
             }
@@ -687,6 +690,21 @@ impl MobileCore {
         if let Some(conn) = conns.get(&id.node_id) {
             let _ = conn.send(ClientMessage::ListDir { session_id, path });
         }
+    }
+
+    /// Read changes from the confirmed session's daemon workspace.
+    /// Returns false when the attachment cannot accept the request.
+    pub fn read_session_diff(&self, id: DaemonId, session_id: String, request_id: String) -> bool {
+        self.connections
+            .lock()
+            .unwrap()
+            .get(&id.node_id)
+            .is_some_and(|conn| {
+                conn.send(ClientMessage::ReadSessionDiff {
+                    session_id,
+                    request_id,
+                })
+            })
     }
 
     /// List available models from the daemon.
@@ -1856,6 +1874,73 @@ fn translate_message(
             });
         }
 
+        ServerMessage::SessionDiff {
+            session_id,
+            request_id,
+            files,
+        } => {
+            use events::{ReviewFile, ReviewFileStatus, ReviewHunk, ReviewLine, ReviewLineKind};
+            let files = files
+                .iter()
+                .map(|file| ReviewFile {
+                    path: file.path.clone(),
+                    old_path: file.old_path.clone(),
+                    status: match file.status {
+                        mew_diff::FileStatus::Added => ReviewFileStatus::Added,
+                        mew_diff::FileStatus::Modified => ReviewFileStatus::Modified,
+                        mew_diff::FileStatus::Deleted => ReviewFileStatus::Deleted,
+                        mew_diff::FileStatus::Renamed => ReviewFileStatus::Renamed,
+                        mew_diff::FileStatus::Unchanged => ReviewFileStatus::Unchanged,
+                        mew_diff::FileStatus::Binary => ReviewFileStatus::Binary,
+                    },
+                    hunks: file
+                        .hunks
+                        .iter()
+                        .map(|hunk| ReviewHunk {
+                            old_start: hunk.old_start as u64,
+                            old_count: hunk.old_count as u64,
+                            new_start: hunk.new_start as u64,
+                            new_count: hunk.new_count as u64,
+                            lines: hunk
+                                .lines
+                                .iter()
+                                .map(|line| ReviewLine {
+                                    kind: match line.kind {
+                                        mew_diff::LineKind::Context => ReviewLineKind::Context,
+                                        mew_diff::LineKind::Addition => ReviewLineKind::Addition,
+                                        mew_diff::LineKind::Deletion => ReviewLineKind::Deletion,
+                                    },
+                                    old_line: line.old_line.map(|line| line as u64),
+                                    new_line: line.new_line.map(|line| line as u64),
+                                    text: line.text.clone(),
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                    added: file.added as u64,
+                    removed: file.removed as u64,
+                })
+                .collect();
+            events.push(CoreEvent::ReviewLoaded {
+                daemon: d,
+                session_id: session_id.clone(),
+                request_id: request_id.clone(),
+                files,
+            });
+        }
+        ServerMessage::SessionDiffError {
+            session_id,
+            request_id,
+            message,
+        } => {
+            events.push(CoreEvent::ReviewFailed {
+                daemon: d,
+                session_id: session_id.clone(),
+                request_id: request_id.clone(),
+                message: message.clone(),
+            });
+        }
+
         // Explicit arms for unhandled variants — no silent catch-all.
         // New ServerMessage variants will cause a compile error here,
         // forcing a decision about how to handle them.
@@ -1971,8 +2056,6 @@ fn translate_message(
         | ServerMessage::FilePreview { .. }
         | ServerMessage::FilesystemDirListing { .. }
         | ServerMessage::GitStatusResult { .. }
-        | ServerMessage::SessionDiff { .. }
-        | ServerMessage::SessionDiffError { .. }
         | ServerMessage::SubagentHistory { .. }
         | ServerMessage::JobOutput { .. }
         | ServerMessage::JobOutputError { .. }
@@ -2094,6 +2177,129 @@ fn rand_jitter() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_review_preserves_origin_and_line_details() {
+        let message: ServerMessage = serde_json::from_value(serde_json::json!({
+            "type": "session_diff",
+            "session_id": "remote-session",
+            "request_id": "review-1",
+            "files": [{
+                "path": "src/猫.rs", "old_path": "src/old.rs", "status": "Renamed",
+                "added": 1, "removed": 1,
+                "hunks": [{
+                    "old_start": 7, "old_count": 2, "new_start": 7, "new_count": 2,
+                    "lines": [
+                        {"kind": "Context", "old_line": 7, "new_line": 7, "text": "context\n"},
+                        {"kind": "Deletion", "old_line": 8, "new_line": null, "text": "old\n"},
+                        {"kind": "Addition", "old_line": null, "new_line": 8, "text": "new\n"}
+                    ]
+                }]
+            }]
+        }))
+        .unwrap();
+        let events = translate_message(&message, &Arc::new(ConnState::new()), &mut None, "host");
+        let [CoreEvent::ReviewLoaded {
+            daemon,
+            session_id,
+            request_id,
+            files,
+        }] = events.as_slice()
+        else {
+            panic!("workspace review must reach the phone: {events:?}");
+        };
+        assert_eq!(
+            (daemon.as_str(), session_id.as_str(), request_id.as_str()),
+            ("host", "remote-session", "review-1")
+        );
+        let file = &files[0];
+        assert_eq!(file.path, "src/猫.rs");
+        assert_eq!(file.old_path.as_deref(), Some("src/old.rs"));
+        assert_eq!(file.status, events::ReviewFileStatus::Renamed);
+        assert_eq!((file.added, file.removed), (1, 1));
+        let hunk = &file.hunks[0];
+        assert_eq!(
+            (
+                hunk.old_start,
+                hunk.old_count,
+                hunk.new_start,
+                hunk.new_count
+            ),
+            (7, 2, 7, 2)
+        );
+        assert_eq!(hunk.lines[0].kind, events::ReviewLineKind::Context);
+        assert_eq!(hunk.lines[1].kind, events::ReviewLineKind::Deletion);
+        assert_eq!(
+            (hunk.lines[1].old_line, hunk.lines[1].new_line),
+            (Some(8), None)
+        );
+        assert_eq!(hunk.lines[2].kind, events::ReviewLineKind::Addition);
+        assert_eq!(
+            (hunk.lines[2].old_line, hunk.lines[2].new_line),
+            (None, Some(8))
+        );
+        assert_eq!(hunk.lines[2].text, "new\n");
+    }
+
+    #[test]
+    fn workspace_review_reports_empty_results_binary_files_and_failures() {
+        let conn = Arc::new(ConnState::new());
+        for (files, expected_count) in [
+            (serde_json::json!([]), 0),
+            (
+                serde_json::json!([{
+                    "path": "image.png", "old_path": null, "status": "Binary", "added": 0, "removed": 0, "hunks": []
+                }]),
+                1,
+            ),
+        ] {
+            let message: ServerMessage = serde_json::from_value(serde_json::json!({
+                "type": "session_diff", "session_id": "session", "request_id": "read", "files": files
+            })).unwrap();
+            let events = translate_message(&message, &conn, &mut None, "host");
+            let [CoreEvent::ReviewLoaded { files, .. }] = events.as_slice() else {
+                panic!("{events:?}");
+            };
+            assert_eq!(files.len(), expected_count);
+            if let Some(file) = files.first() {
+                assert_eq!(file.status, events::ReviewFileStatus::Binary);
+                assert!(file.hunks.is_empty());
+            }
+        }
+        let events = translate_message(
+            &ServerMessage::SessionDiffError {
+                session_id: "session".into(),
+                request_id: "read".into(),
+                message: "not a git repository".into(),
+            },
+            &conn,
+            &mut None,
+            "host",
+        );
+        assert!(
+            matches!(events.as_slice(), [CoreEvent::ReviewFailed { daemon, session_id, request_id, message }]
+            if daemon == "host" && session_id == "session" && request_id == "read" && message == "not a git repository")
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_review_requires_the_confirmed_origin_and_expires_on_switch() {
+        let (core, id, state, mut rx) = connected_core().await;
+        assert!(!core.read_session_diff(id.clone(), "other".into(), "wrong".into()));
+        assert!(rx.try_recv().is_err());
+        assert!(core.read_session_diff(id.clone(), "confirmed".into(), "current".into()));
+        let queued = rx.try_recv().unwrap();
+        assert!(
+            matches!(&queued.message, ClientMessage::ReadSessionDiff { session_id, request_id }
+            if session_id == "confirmed" && request_id == "current")
+        );
+        assert!(queued.ready(&state));
+        core.attach(id.clone(), "next".into());
+        assert!(!queued.ready(&state));
+        rx.try_recv().unwrap();
+        assert!(!core.read_session_diff(id, "confirmed".into(), "stale".into()));
+        assert!(rx.try_recv().is_err());
+    }
 
     #[test]
     fn pending_action_frames_leave_attention_counts_authoritative() {

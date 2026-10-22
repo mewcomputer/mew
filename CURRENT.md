@@ -2526,3 +2526,33 @@ observed platform behavior rather than requiring the popup to follow a drag.
 
 Optional follow-up: expose native Edit menu actions for terminal/transcript
 focus; their existing keyboard clipboard shortcuts remain supported.
+
+# 2026-10-22 — iOS tools browsing and remote workspace review
+
+Added a searchable tools sheet to the chat menu, reusing the transcript's
+input/output/error rows. Individual tool disclosures are accessible buttons with
+state and expansion hints. The chat toolbar now opens workspace review: changed
+file summaries, rename origins, binary/empty/error states, and horizontally
+scrollable line-numbered hunks. Review starts at the first line and left edge.
+
+Mobile core exposes the existing daemon diff API through typed UniFFI records
+and origin-preserving events. Requests require the confirmed attachment and
+expire when its generation changes. Swift accepts only the current daemon,
+session and request; disconnects stop loading and late replies cannot replace a
+newer review. Regenerated matching Swift/header bindings and device, simulator
+and host release libraries. Updated iOS docs, including the current single-use
+pairing flow and the existing older-history limitation.
+
+Verified 44 mobile unit tests, all 4 real iroh integration tests, and all 38 iOS
+application tests on iPhone 17 / iOS 26.4. Real-daemon review coverage reads fresh
+remote files after same-line-count edits and preserves non-repository failures.
+Inspected light/dark simulator renders; removed the temporary rendering fixture
+after correcting the initial scroll alignment. Scoped all-target mobile Clippy,
+workspace strict Clippy, formatting and architecture checks pass. The workspace
+still emits its existing future-compatibility notice for the block dependency.
+Native computer-use automation was unavailable, so a paired interactive phone
+walkthrough is not claimed.
+
+Follow-ups: expose older history pages and richer worker/job details. The existing
+project.yml also differs from the checked-in Xcode project's package pin and test
+target; this pass verified the checked-in project without regenerating it.

@@ -371,6 +371,108 @@ impl Harness {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn workspace_review_reads_fresh_remote_files_and_reports_non_repository_errors() -> Result<()>
+{
+    let h = Harness::new().await?;
+    let workspace = h._dir.path().join("review-workspace");
+    std::fs::create_dir(&workspace)?;
+    let init = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&workspace)
+        .output()?;
+    assert!(
+        init.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    std::fs::write(workspace.join("new.txt"), "first version\n")?;
+    let previous = h
+        .core
+        .snapshot(h.daemon_id.clone())
+        .unwrap()
+        .attached_session
+        .unwrap();
+    h.core.new_session(
+        h.daemon_id.clone(),
+        Some(workspace.to_str().unwrap().into()),
+    );
+    wait_for_event(&h.events, 10, |event| {
+        matches!(event,
+        CoreEvent::SessionReloaded { session_id, .. } if session_id != &previous)
+    });
+    let session = h
+        .core
+        .snapshot(h.daemon_id.clone())
+        .unwrap()
+        .attached_session
+        .unwrap();
+
+    for (request, content) in [("first", "first version\n"), ("second", "fresh version\n")] {
+        std::fs::write(workspace.join("new.txt"), content)?;
+        assert!(h
+            .core
+            .read_session_diff(h.daemon_id.clone(), session.clone(), request.into()));
+        wait_for_event(&h.events, 10, |event| {
+            matches!(event,
+            CoreEvent::ReviewLoaded { request_id, .. } if request_id == request)
+        });
+        let events = h.events.lock().unwrap();
+        let files = events
+            .iter()
+            .find_map(|event| match event {
+                CoreEvent::ReviewLoaded {
+                    daemon,
+                    session_id,
+                    request_id,
+                    files,
+                } if daemon == &h.daemon_id.node_id
+                    && session_id == &session
+                    && request_id == request =>
+                {
+                    Some(files)
+                }
+                _ => None,
+            })
+            .expect("review must retain its daemon and session identities");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "new.txt");
+        assert_eq!(
+            files[0].hunks[0].lines[0].text,
+            content.trim_end_matches('\n')
+        );
+    }
+
+    let non_repository = h._dir.path().join("not-a-repository");
+    std::fs::create_dir(&non_repository)?;
+    h.core.new_session(
+        h.daemon_id.clone(),
+        Some(non_repository.to_str().unwrap().into()),
+    );
+    wait_for_event(&h.events, 10, |event| {
+        matches!(event,
+        CoreEvent::SessionReloaded { session_id, .. } if session_id != &previous && session_id != &session)
+    });
+    let non_repo_session = h
+        .core
+        .snapshot(h.daemon_id.clone())
+        .unwrap()
+        .attached_session
+        .unwrap();
+    assert!(h.core.read_session_diff(
+        h.daemon_id.clone(),
+        non_repo_session.clone(),
+        "failure".into()
+    ));
+    wait_for_event(&h.events, 10, |event| {
+        matches!(event,
+        CoreEvent::ReviewFailed { daemon, session_id, request_id, message }
+            if daemon == &h.daemon_id.node_id && session_id == &non_repo_session && request_id == "failure" && message.contains("not a git repository"))
+    });
+    h.router.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn b1_b6_feature_parity_tests() -> Result<()> {
     let h = Harness::new().await?;
 
@@ -476,7 +578,7 @@ async fn b1_b6_feature_parity_tests() -> Result<()> {
             .snapshot(h.daemon_id.clone())
             .expect("snapshot should exist");
         assert!(
-            snapshot.sessions.first().is_some(),
+            !snapshot.sessions.is_empty(),
             "session should still exist after set_thinking_variant"
         );
     }
@@ -492,7 +594,7 @@ async fn b1_b6_feature_parity_tests() -> Result<()> {
             .snapshot(h.daemon_id.clone())
             .expect("snapshot should exist");
         assert!(
-            snapshot.sessions.first().is_some(),
+            !snapshot.sessions.is_empty(),
             "session should still exist after unknown slash command"
         );
     }

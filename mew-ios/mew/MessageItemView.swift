@@ -11,7 +11,7 @@ import SwiftStreamingMarkdown
 /// according to its `kind`:
 /// - `.text`: markdown via `AttributedString(markdown:)`
 /// - `.reasoning`: collapsible muted disclosure group
-/// - `.toolCall`: compact row with a state indicator, expandable to show input
+/// - `.toolCall`: compact row with a state indicator and expandable input/output
 /// - `.error`: red text with a warning icon
 struct MessageItemView: View {
     let message: ChatMessage
@@ -297,6 +297,43 @@ private struct ToolGroupRow: View {
 
 // MARK: - Tool call row
 
+struct ToolHistoryView: View {
+    let messages: [ChatMessage]
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var search = ""
+
+    var body: some View {
+        let tools = messages.flatMap(\.parts).filter { part in
+            guard part.kind == .toolCall else { return false }
+            return search.isEmpty || [part.toolName, part.toolInput, part.toolOutput, part.toolError]
+                .compactMap { $0 }.contains { $0.localizedCaseInsensitiveContains(search) }
+        }
+        NavigationStack {
+            Group {
+                if tools.isEmpty {
+                    ContentUnavailableView(search.isEmpty ? "No tool calls" : "No matching tools",
+                        systemImage: "wrench.and.screwdriver",
+                        description: Text(search.isEmpty ? "Tool activity from this conversation appears here." : "Try a tool name or text from its input or output."))
+                } else {
+                    List(tools, id: \.id) { part in
+                        ToolCallRow(part: part)
+                            .padding(.vertical, 4)
+                    }
+                }
+            }
+            .navigationTitle("Tools")
+            .navigationBarTitleDisplayMode(.inline)
+            .searchable(text: $search, prompt: "Search tools, input, and output")
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
 /// Compact, expandable row representing a `.toolCall` part.
 private struct ToolCallRow: View {
     let part: MessagePart
@@ -316,31 +353,39 @@ private struct ToolCallRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 8) {
-                Image(systemName: "wrench.and.screwdriver")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-
-                Text(part.toolName ?? "tool")
-                    .font(.subheadline.weight(.medium))
-                    .lineLimit(1)
-
-                Spacer(minLength: 4)
-
-                stateIndicator
-
-                if let duration = formattedDuration {
-                    Text(duration)
-                        .font(.caption2.monospaced())
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            .contentShape(Rectangle())
-            .onTapGesture {
+            Button {
                 withAnimation(Theme.Motion.value(Theme.Motion.disclosure, reduced: reduceMotion)) {
                     expanded.toggle()
                 }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "wrench.and.screwdriver")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+
+                    Text(part.toolName ?? "tool")
+                        .font(.subheadline.weight(.medium))
+                        .lineLimit(1)
+
+                    Spacer(minLength: 4)
+
+                    stateIndicator
+
+                    if let duration = formattedDuration {
+                        Text(duration)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.tertiary)
+                    }
+
+                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityValue(part.toolState ?? "pending")
+            .accessibilityHint(expanded ? "Hide input and output" : "Show input and output")
 
             if expanded {
                 detailContent

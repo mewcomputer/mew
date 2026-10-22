@@ -369,6 +369,11 @@ void uniffi_mew_mobile_core_fn_method_mobilecore_pin_session(uint64_t ptr, RustB
 int8_t uniffi_mew_mobile_core_fn_method_mobilecore_prompt(uint64_t ptr, RustBuffer id, RustBuffer text, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_READ_SESSION_DIFF
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_READ_SESSION_DIFF
+int8_t uniffi_mew_mobile_core_fn_method_mobilecore_read_session_diff(uint64_t ptr, RustBuffer id, RustBuffer session_id, RustBuffer request_id, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_REMOVE_DAEMON
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_REMOVE_DAEMON
 void uniffi_mew_mobile_core_fn_method_mobilecore_remove_daemon(uint64_t ptr, RustBuffer id, RustCallStatus *_Nonnull out_status
@@ -841,6 +846,12 @@ uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_pin_session(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_PROMPT
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_PROMPT
 uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_prompt(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_READ_SESSION_DIFF
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_READ_SESSION_DIFF
+uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_read_session_diff(void
     
 );
 #endif

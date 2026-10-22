@@ -72,6 +72,15 @@ struct PendingGoalProposal: Identifiable {
     var id: String { "\(daemon):\(sessionId):\(requestId)" }
 }
 
+struct WorkspaceReview {
+    let daemon: String
+    let sessionId: String
+    let requestId: String
+    var files: [ReviewFile] = []
+    var isLoading = true
+    var error: String?
+}
+
 // MARK: - App Store
 
 /// The single source of truth for the app, mirroring the web UI's session store.
@@ -103,6 +112,7 @@ final class AppStore: ObservableObject {
 
     // Chat state for the active session
     @Published var messages: [ChatMessage] = []
+    @Published var review: WorkspaceReview?
 
     /// Messages filtered to exclude empty entries (no visible content).
     var visibleMessages: [ChatMessage] {
@@ -246,6 +256,7 @@ final class AppStore: ObservableObject {
     // MARK: - Session management
 
     func selectDaemon(_ daemon: DaemonEntry) {
+        review = nil
         selectedDaemonId = DaemonId(nodeId: daemon.nodeId)
         if let core {
             core.listSessions(id: selectedDaemonId!)
@@ -261,6 +272,7 @@ final class AppStore: ObservableObject {
 
     func selectSession(_ sessionId: String) {
         guard let daemonId = selectedDaemonId, let core else { return }
+        review = nil
         selectedSessionId = sessionId
         core.attach(id: daemonId, sessionId: sessionId)
 
@@ -300,6 +312,16 @@ final class AppStore: ObservableObject {
         let key = directoryKey(sessionId: sessionId, path: path)
         directoryLoading.insert(key)
         core.listDir(id: daemonId, sessionId: sessionId, path: path)
+    }
+
+    func refreshReview(daemon: String, sessionId: String) {
+        guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
+        let requestId = UUID().uuidString
+        review = WorkspaceReview(daemon: daemon, sessionId: sessionId, requestId: requestId)
+        if core?.readSessionDiff(id: DaemonId(nodeId: daemon), sessionId: sessionId, requestId: requestId) != true {
+            review?.isLoading = false
+            review?.error = "Connect to this session before reviewing changes."
+        }
     }
 
     private func directoryKey(sessionId: String, path: String?) -> String {
@@ -457,7 +479,25 @@ final class AppStore: ObservableObject {
                 }
             } else {
                 pendingSubmissions.removeValue(forKey: daemon)
+                if review?.daemon == daemon, review?.isLoading == true {
+                    review?.isLoading = false
+                    review?.error = "Connection lost. Reconnect and refresh to review changes."
+                }
             }
+
+        case .reviewLoaded(let daemon, let sessionId, let requestId, let files):
+            guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId,
+                  review?.daemon == daemon, review?.sessionId == sessionId,
+                  review?.requestId == requestId, review?.isLoading == true else { return }
+            review?.files = files
+            review?.isLoading = false
+
+        case .reviewFailed(let daemon, let sessionId, let requestId, let message):
+            guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId,
+                  review?.daemon == daemon, review?.sessionId == sessionId,
+                  review?.requestId == requestId, review?.isLoading == true else { return }
+            review?.isLoading = false
+            review?.error = message
 
         case .daemonVersion(let daemon, let version):
             daemonVersions[daemon] = version

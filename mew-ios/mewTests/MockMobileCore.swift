@@ -25,6 +25,8 @@ final class MockMobileCore: @preconcurrency MobileCoreProtocol {
     var listSessionsCalls: [String] = []
     var listModelsCalls: [String] = []
     var newSessionCalls: [String?] = []
+    var reviewAccepted = true
+    var reviewCalls: [(nodeId: String, sessionId: String, requestId: String)] = []
 
     // Configurable return values
     var snapshotResult: DaemonSnapshot?
@@ -88,6 +90,11 @@ final class MockMobileCore: @preconcurrency MobileCoreProtocol {
     func newSession(id: DaemonId, cwd: String?) { newSessionCalls.append(cwd) }
     func listProjects(id: DaemonId) {}
     func listDir(id: DaemonId, sessionId: String, path: String?) {}
+
+    func readSessionDiff(id: DaemonId, sessionId: String, requestId: String) -> Bool {
+        reviewCalls.append((id.nodeId, sessionId, requestId))
+        return reviewAccepted
+    }
 
     func listModels(id: DaemonId) { listModelsCalls.append(id.nodeId) }
     func switchModel(id: DaemonId, provider: String, model: String) {

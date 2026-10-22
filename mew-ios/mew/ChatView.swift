@@ -32,6 +32,8 @@ struct ChatView: View {
     @State private var isLoadingSession: Bool = false
 
     // Sheets
+    @State private var showsReview = false
+    @State private var showsTools = false
 
     // File browser: nil = closed; non-nil = showing that path. The path
     // is the current directory being browsed; tap a folder to navigate in.
@@ -124,6 +126,12 @@ struct ChatView: View {
                     onClose: { fileBrowserPath = nil }
                 )
                 .presentationDetents([.large])
+            }
+            .sheet(isPresented: $showsReview) {
+                ReviewView(daemon: daemonNodeId, sessionId: sessionId)
+            }
+            .sheet(isPresented: $showsTools) {
+                ToolHistoryView(messages: store.messages)
             }
             .onChange(of: store.availableModels) { initializeModelSelection() }
             .onChange(of: store.currentModel) { updateModelSelection() }
@@ -409,12 +417,21 @@ struct ChatView: View {
         inputText = ""
     }
 
-    // MARK: Toolbar (intentionally empty — model picker lives in the chatbar)
+    // MARK: Toolbar
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .topBarTrailing) {
+            Button("Review changes", systemImage: "doc.text.magnifyingglass") {
+                showsReview = true
+            }
+        }
+        ToolbarItem(placement: .topBarTrailing) {
             Menu {
+                Button("Tools", systemImage: "wrench.and.screwdriver") {
+                    showsTools = true
+                }
+                Divider()
                 Toggle("Auto-title", isOn: Binding(
                     get: { UserDefaults.standard.bool(forKey: "autoTitle_\(sessionId)") },
                     set: { newVal in
