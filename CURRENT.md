@@ -2688,3 +2688,10 @@ light/dark collapsed and expanded conversations and saved a disclosure GIF
 outside the repository. Independent breaker, simplifier and operator review
 found no remaining required changes; project validation and whitespace checks
 pass. Physical-phone interaction checks remain on the verification checklist.
+
+# 2026-10-22 — consistent iOS chat body size
+
+Assistant paragraphs, lists, block quotes and links now use UIFont.systemFontSize,
+matching user messages in both streaming and committed replies. Verified seeded
+light/dark conversation renders with identical user and assistant text, plus list,
+link and quote samples. Removed the capture fixture; all 63 iOS tests pass.

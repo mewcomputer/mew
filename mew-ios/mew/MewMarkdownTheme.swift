@@ -17,15 +17,15 @@ extension MarkdownRenderConfig {
             .withShouldAnimateText(value: true)
             .withBlockSpacing(value: 12)
             .withParagraphStyle(value: MarkdownTextStyle(
-                textFonts: bodyFonts(16, fontName: fontName),
+                textFonts: bodyFonts(UIFont.systemFontSize, fontName: fontName),
                 textColor: .primary
             ))
             .withOrderedListStyle(value: MarkdownTextStyle(
-                textFonts: bodyFonts(16, fontName: fontName),
+                textFonts: bodyFonts(UIFont.systemFontSize, fontName: fontName),
                 textColor: .primary
             ))
             .withBlockQuoteStyle(value: MarkdownTextStyle(
-                textFonts: bodyFonts(16, fontName: fontName),
+                textFonts: bodyFonts(UIFont.systemFontSize, fontName: fontName),
                 textColor: .secondary
             ))
             .withHeadingStyle(value: MarkdownHeadingTextStyle(
@@ -47,7 +47,7 @@ extension MarkdownRenderConfig {
             ))
             .withInlineStyle(value: MarkdownInlineTextStyle(
                 boldTextColor: .primary,
-                linkTextFont: mewUIFont(fontName, 16),
+                linkTextFont: mewUIFont(fontName, UIFont.systemFontSize),
                 linkTextColor: .accentColor,
                 codeTextFont: mewUIFont("Ioskeley-Mono", 15),
                 codeTextColor: .primary,
