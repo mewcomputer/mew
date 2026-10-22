@@ -2802,3 +2802,17 @@ capture fixture; all 72 iOS tests pass on the final sources.
 Added two points of inset above and below each chat row in response to the
 compact-list preview feedback. The total four-point increase gives rows a
 little more separation. All 72 iOS tests pass after the adjustment.
+
+# 2026-10-22 — mobile daemon settings and connection APIs
+
+Added authoritative automation settings reads and setter replies. Auto-title
+retains its connection scope; auto-summary retains daemon-wide scope, with
+change notifications to attached clients. Mobile snapshots retain confirmed
+settings and clear them on disconnect. Added persistent local daemon nickname
+updates with save-failure rollback and a retry action that interrupts backoff
+without discarding the requested chat or cached state.
+
+Verified 120 protocol tests, 84 daemon tests (one existing browser-dependent
+ignore), and 59 mobile-core tests. Rebuilt device, simulator and host core
+artifacts and regenerated the Swift bindings with just ios-core. Swift screen
+and navigation integration follows in the next chunk.

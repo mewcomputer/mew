@@ -99,12 +99,15 @@ pub enum ClientMessage {
         title: String,
     },
 
-    /// Enable or disable auto-generated session titles.
+    /// Read this connection's title preference and the daemon's summary preference.
+    ReadAutomationSettings,
+
+    /// Enable or disable titles generated after prompts from this connection.
     SetAutoTitle {
         enabled: bool,
     },
 
-    /// Enable or disable idle session summaries.
+    /// Enable or disable idle session summaries for the entire daemon.
     SetAutoSummary {
         enabled: bool,
     },
@@ -889,6 +892,19 @@ pub enum ServerMessage {
     /// Response to `ListModels`: the full set of models the daemon can build.
     ModelList {
         models: Vec<ModelInfo>,
+    },
+
+    /// Current values after reading or updating automation settings.
+    AutomationSettings {
+        /// Applies only to prompts submitted through this connection.
+        auto_title_enabled: bool,
+        /// Shared by every connection to this daemon.
+        auto_summary_enabled: bool,
+    },
+
+    /// The daemon-wide summary preference changed through another connection.
+    AutoSummaryChanged {
+        enabled: bool,
     },
 
     /// Response to `SwitchModel`: confirms the switch succeeded.
@@ -3994,6 +4010,34 @@ mod tests {
             "duplicate type tags in DaemonMessage: {:?}",
             tags
         );
+    }
+}
+
+#[cfg(test)]
+mod automation_wire_tests {
+    use super::*;
+
+    #[test]
+    fn automation_settings_messages_roundtrip_both_setting_scopes() {
+        let command = encode_json(&ClientMessage::ReadAutomationSettings).unwrap();
+        assert_eq!(command, r#"{"type":"read_automation_settings"}"#);
+        assert!(matches!(
+            decode_json::<ClientMessage>(&command).unwrap(),
+            ClientMessage::ReadAutomationSettings
+        ));
+        for message in [
+            ServerMessage::AutomationSettings {
+                auto_title_enabled: false,
+                auto_summary_enabled: true,
+            },
+            ServerMessage::AutoSummaryChanged { enabled: false },
+        ] {
+            let decoded: ServerMessage = decode_json(&encode_json(&message).unwrap()).unwrap();
+            assert_eq!(
+                serde_json::to_value(decoded).unwrap(),
+                serde_json::to_value(message).unwrap()
+            );
+        }
     }
 }
 

@@ -105,6 +105,23 @@ impl DaemonRegistry {
         let _ = self.save();
     }
 
+    /// Update a saved nickname without changing the daemon identity or credentials.
+    pub fn rename(&mut self, id: &DaemonId, name: String) -> anyhow::Result<()> {
+        let name = name.trim();
+        anyhow::ensure!(!name.is_empty(), "daemon nickname cannot be empty");
+        let index = self
+            .entries
+            .iter()
+            .position(|entry| entry.node_id == id.node_id)
+            .ok_or_else(|| anyhow::anyhow!("saved daemon was not found"))?;
+        let previous = std::mem::replace(&mut self.entries[index].name, name.to_owned());
+        if let Err(error) = self.save() {
+            self.entries[index].name = previous;
+            return Err(error.context("could not save daemon nickname"));
+        }
+        Ok(())
+    }
+
     /// Get a daemon entry by ID.
     pub fn get(&self, id: &DaemonId) -> Option<&DaemonEntry> {
         self.entries.iter().find(|e| e.node_id == id.node_id)
@@ -151,6 +168,76 @@ impl DaemonRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renaming_a_daemon_persists_only_its_local_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemons.json");
+        let mut registry = DaemonRegistry::load(path.clone()).unwrap();
+        let id = registry.add_with_token("node1".into(), "Original".into(), "credential".into());
+        registry.add("node2".into(), "Other".into());
+        let entry = registry.get_mut(&id).unwrap();
+        entry.last_connected_at = Some(123);
+        entry.last_known_version = Some("1.2.3".into());
+        entry.keep_connected = true;
+        let added_at = entry.added_at;
+
+        registry
+            .rename(&id, "  Montréal workstation  ".into())
+            .unwrap();
+
+        let saved = DaemonRegistry::load(path).unwrap();
+        let entry = saved.get(&id).unwrap();
+        assert_eq!(entry.name, "Montréal workstation");
+        assert_eq!(entry.node_id, "node1");
+        assert_eq!(entry.added_at, added_at);
+        assert_eq!(entry.last_connected_at, Some(123));
+        assert_eq!(entry.last_known_version.as_deref(), Some("1.2.3"));
+        assert!(entry.keep_connected);
+        assert_eq!(entry.pairing_token.as_deref(), Some("credential"));
+        assert_eq!(saved.list().len(), 2);
+        assert_eq!(saved.list()[1].name, "Other");
+    }
+
+    #[test]
+    fn invalid_daemon_renames_leave_the_registry_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemons.json");
+        let mut registry = DaemonRegistry::load(path.clone()).unwrap();
+        let id = registry.add("node1".into(), "Original".into());
+        let before = std::fs::read(&path).unwrap();
+
+        assert!(registry.rename(&id, " \n\t ".into()).is_err());
+        assert!(registry
+            .rename(
+                &DaemonId {
+                    node_id: "missing".into()
+                },
+                "New".into()
+            )
+            .is_err());
+
+        assert_eq!(registry.get(&id).unwrap().name, "Original");
+        assert_eq!(registry.list().len(), 1);
+        assert_eq!(std::fs::read(path).unwrap(), before);
+    }
+
+    #[test]
+    fn a_failed_daemon_rename_preserves_the_saved_and_in_memory_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemons.json");
+        let mut registry = DaemonRegistry::load(path.clone()).unwrap();
+        let id = registry.add("node1".into(), "Original".into());
+        std::fs::create_dir(path.with_extension("json.tmp")).unwrap();
+
+        assert!(registry.rename(&id, "Unsaved".into()).is_err());
+
+        assert_eq!(registry.get(&id).unwrap().name, "Original");
+        assert_eq!(
+            DaemonRegistry::load(path).unwrap().get(&id).unwrap().name,
+            "Original"
+        );
+    }
 
     #[test]
     fn test_registry_add_get_remove() {

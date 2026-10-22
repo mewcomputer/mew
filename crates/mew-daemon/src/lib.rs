@@ -373,6 +373,7 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
                 | ClientMessage::ListSessions
                 | ClientMessage::DeleteSession { .. }
                 | ClientMessage::RenameSession { .. }
+                | ClientMessage::ReadAutomationSettings
                 | ClientMessage::SetAutoTitle { .. }
                 | ClientMessage::SetAutoSummary { .. }
                 | ClientMessage::Prompt { .. }
@@ -433,6 +434,7 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
             | ClientMessage::ListSessions
             | ClientMessage::ListProjects
             | ClientMessage::ListModels
+            | ClientMessage::ReadAutomationSettings
             | ClientMessage::Ping
             | ClientMessage::ListDir { .. }
             | ClientMessage::ListFilesystemDir { .. }
@@ -1474,13 +1476,32 @@ where
                     }
                 }
             }
+            ClientMessage::ReadAutomationSettings => {
+                reply(ServerMessage::AutomationSettings {
+                    auto_title_enabled,
+                    auto_summary_enabled: auto_summary_enabled
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                });
+            }
             ClientMessage::SetAutoTitle { enabled } => {
                 auto_title_enabled = enabled;
                 tracing::info!(auto_title = enabled, "auto-title setting changed");
+                reply(ServerMessage::AutomationSettings {
+                    auto_title_enabled,
+                    auto_summary_enabled: auto_summary_enabled
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                });
             }
             ClientMessage::SetAutoSummary { enabled } => {
                 auto_summary_enabled.store(enabled, std::sync::atomic::Ordering::Relaxed);
                 tracing::info!(auto_summary = enabled, "auto-summary setting changed");
+                reply(ServerMessage::AutomationSettings {
+                    auto_title_enabled,
+                    auto_summary_enabled: enabled,
+                });
+                session_manager
+                    .broadcast_all(ServerMessage::AutoSummaryChanged { enabled })
+                    .await;
             }
             ClientMessage::ReadPromptReceipt {
                 session_id,

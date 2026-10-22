@@ -99,6 +99,107 @@ fn hook_call() -> mew_hooks::ToolCall {
 }
 
 #[tokio::test]
+async fn automation_settings_are_readable_before_attachment_and_acknowledge_updates() {
+    let directory = tempfile::tempdir().unwrap();
+    let server = test_server(directory.path().to_path_buf());
+    let mut socket = connect(&server).await;
+    send(&mut socket, ClientMessage::ReadAutomationSettings).await;
+    assert!(matches!(
+        flush(&mut socket).await.as_slice(),
+        [ServerMessage::AutomationSettings {
+            auto_title_enabled: true,
+            auto_summary_enabled: true
+        }]
+    ));
+
+    send(&mut socket, ClientMessage::SetAutoTitle { enabled: false }).await;
+    assert!(matches!(
+        flush(&mut socket).await.as_slice(),
+        [ServerMessage::AutomationSettings {
+            auto_title_enabled: false,
+            auto_summary_enabled: true
+        }]
+    ));
+    send(
+        &mut socket,
+        ClientMessage::SetAutoSummary { enabled: false },
+    )
+    .await;
+    assert!(matches!(
+        flush(&mut socket).await.as_slice(),
+        [ServerMessage::AutomationSettings {
+            auto_title_enabled: false,
+            auto_summary_enabled: false
+        }]
+    ));
+
+    let mut reconnected = connect(&server).await;
+    send(&mut reconnected, ClientMessage::ReadAutomationSettings).await;
+    assert!(matches!(
+        flush(&mut reconnected).await.as_slice(),
+        [ServerMessage::AutomationSettings {
+            auto_title_enabled: true,
+            auto_summary_enabled: false
+        }]
+    ));
+}
+
+#[tokio::test]
+async fn shared_summary_changes_notify_other_clients_without_changing_their_title_preference() {
+    let directory = tempfile::tempdir().unwrap();
+    let server = test_server(directory.path().to_path_buf());
+    let mut writer = connect(&server).await;
+    let mut observer = connect(&server).await;
+    send(
+        &mut observer,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: ClientKind::Mobile,
+        },
+    )
+    .await;
+    flush(&mut observer).await;
+    send(
+        &mut observer,
+        ClientMessage::SetAutoTitle { enabled: false },
+    )
+    .await;
+    flush(&mut observer).await;
+
+    for enabled in [false, true] {
+        send(&mut writer, ClientMessage::SetAutoSummary { enabled }).await;
+        flush(&mut writer).await;
+        assert!(flush(&mut observer).await.iter().any(|message|
+            matches!(message, ServerMessage::AutoSummaryChanged { enabled: value } if *value == enabled)));
+        send(&mut observer, ClientMessage::ReadAutomationSettings).await;
+        assert!(matches!(flush(&mut observer).await.as_slice(),
+            [ServerMessage::AutomationSettings { auto_title_enabled: false, auto_summary_enabled }] if *auto_summary_enabled == enabled));
+    }
+}
+
+#[test]
+fn automation_reads_respect_remote_scope_without_granting_write_access() {
+    for scope in [
+        RemoteScope::Observe,
+        RemoteScope::Collaborate,
+        RemoteScope::Control,
+    ] {
+        assert!(remote_message_allowed(
+            scope,
+            &ClientMessage::ReadAutomationSettings
+        ));
+        assert_eq!(
+            remote_message_allowed(scope, &ClientMessage::SetAutoTitle { enabled: false }),
+            scope == RemoteScope::Control
+        );
+        assert_eq!(
+            remote_message_allowed(scope, &ClientMessage::SetAutoSummary { enabled: false }),
+            scope == RemoteScope::Control
+        );
+    }
+}
+
+#[tokio::test]
 async fn history_pages_preserve_messages_before_compaction_and_live_updates() {
     let directory = tempfile::tempdir().unwrap();
     let server = test_server(directory.path().to_path_buf());

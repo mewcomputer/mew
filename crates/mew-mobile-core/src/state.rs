@@ -5,6 +5,14 @@
 //! `PartUpdated` is authoritative — when it arrives for a part built from
 //! accumulated deltas, replace the accumulated state wholesale.
 
+#[derive(Debug, Clone, Copy, uniffi::Record)]
+pub struct AutomationSettings {
+    /// Generates titles for prompts submitted through this connection.
+    pub auto_title_enabled: bool,
+    /// Enables idle summaries for every session on the daemon.
+    pub auto_summary_enabled: bool,
+}
+
 /// A snapshot of a daemon's state — the full mirror that Swift pulls
 /// after reconnect or attach instead of replaying deltas.
 #[derive(Debug, Clone, Default, uniffi::Record)]
@@ -21,6 +29,7 @@ pub struct DaemonSnapshot {
     pub thinking_variant: Option<String>,
     pub current_persona: Option<String>,
     pub available_personas: Vec<crate::events::PersonaInfo>,
+    pub automation_settings: Option<AutomationSettings>,
 }
 
 /// A session in the snapshot.

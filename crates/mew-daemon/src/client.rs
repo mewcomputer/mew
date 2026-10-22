@@ -972,6 +972,8 @@ async fn translate_server_message(
         ServerMessage::BrowserPageRegistration { .. }
         | ServerMessage::PromptReceipt { .. }
         | ServerMessage::ModelList { .. }
+        | ServerMessage::AutomationSettings { .. }
+        | ServerMessage::AutoSummaryChanged { .. }
         | ServerMessage::ModelSwitched { .. }
         | ServerMessage::RequestResolved { .. }
         | ServerMessage::SessionCleared

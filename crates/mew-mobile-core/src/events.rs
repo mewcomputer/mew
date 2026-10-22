@@ -20,6 +20,16 @@ pub enum CoreEvent {
         status: DaemonStatus,
     },
 
+    AutomationSettings {
+        daemon: String,
+        settings: crate::state::AutomationSettings,
+    },
+
+    AutoSummaryChanged {
+        daemon: String,
+        enabled: bool,
+    },
+
     /// Full or updated session list for a daemon.
     SessionList {
         daemon: String,
@@ -56,13 +66,22 @@ pub enum CoreEvent {
     },
 
     /// An attachment was acknowledged; discard cached required actions before replay.
-    SessionReady { daemon: String, session_id: String },
+    SessionReady {
+        daemon: String,
+        session_id: String,
+    },
 
     /// Session history was loaded. Swift should pull `snapshot()`.
-    SessionReloaded { daemon: String, session_id: String },
+    SessionReloaded {
+        daemon: String,
+        session_id: String,
+    },
 
     /// Older messages were prepended without restarting session attachment.
-    HistoryExtended { daemon: String, session_id: String },
+    HistoryExtended {
+        daemon: String,
+        session_id: String,
+    },
 
     ActivityUpdated {
         daemon: String,
@@ -175,7 +194,10 @@ pub enum CoreEvent {
     },
 
     /// A request was resolved (by this device or another). Dismiss the sheet.
-    RequestResolved { daemon: String, request_id: String },
+    RequestResolved {
+        daemon: String,
+        request_id: String,
+    },
 
     /// Cross-session alert from the daemon.
     Alert {
@@ -202,7 +224,10 @@ pub enum CoreEvent {
     },
 
     /// Permission mode changed (via cross-device or local action).
-    PermissionModeChanged { daemon: String, mode: String },
+    PermissionModeChanged {
+        daemon: String,
+        mode: String,
+    },
 
     /// Model was switched (via cross-device or local action).
     ModelSwitched {
@@ -231,7 +256,10 @@ pub enum CoreEvent {
     },
 
     /// Daemon version from Pong.
-    DaemonVersion { daemon: String, version: String },
+    DaemonVersion {
+        daemon: String,
+        version: String,
+    },
 
     /// Available personas from the daemon.
     PersonaList {
@@ -240,7 +268,10 @@ pub enum CoreEvent {
     },
 
     /// Persona was switched (via user action, cross-device, or tool call).
-    PersonaSwitched { daemon: String, name: String },
+    PersonaSwitched {
+        daemon: String,
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, uniffi::Record)]

@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
 use iroh::{Endpoint, SecretKey};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tokio_tungstenite::client_async_with_config;
 use tokio_tungstenite::tungstenite::{
     client::ClientRequestBuilder, protocol::WebSocketConfig, Message,
@@ -32,7 +32,7 @@ pub mod state;
 pub use codec::decode_server_message_lenient;
 pub use events::{CoreEvent, CoreListener, DaemonStatus, Decision, TodoItem};
 pub use registry::{DaemonEntry, DaemonId, DaemonRegistry};
-pub use state::{DaemonSnapshot, SessionState};
+pub use state::{AutomationSettings, DaemonSnapshot, SessionState};
 
 /// The ALPN used by the mew daemon's iroh listener.
 pub const MEW_ALPN: &[u8] = b"mew/wire/0";
@@ -45,6 +45,7 @@ pub enum CoreError {
     InvalidSecretKey,
     EndpointBindFailed { reason: String },
     RegistryLoadFailed { reason: String },
+    RegistryUpdateFailed { reason: String },
     InvalidNodeId { reason: String },
     ParseFailed { reason: String },
 }
@@ -58,6 +59,9 @@ impl std::fmt::Display for CoreError {
             }
             CoreError::RegistryLoadFailed { reason } => {
                 write!(f, "failed to load daemon registry: {reason}")
+            }
+            CoreError::RegistryUpdateFailed { reason } => {
+                write!(f, "failed to update saved daemon: {reason}")
             }
             CoreError::InvalidNodeId { reason } => write!(f, "invalid NodeId: {reason}"),
             CoreError::ParseFailed { reason } => write!(f, "parse failed: {reason}"),
@@ -193,6 +197,7 @@ struct ConnState {
     current_persona: Mutex<Option<String>>,
     /// Available personas from last PersonaList.
     available_personas: Mutex<Vec<crate::events::PersonaInfo>>,
+    automation_settings: Mutex<Option<AutomationSettings>>,
     #[cfg(test)]
     shared_events: Mutex<Vec<mew_client_core::ClientEvent>>,
 }
@@ -217,6 +222,7 @@ impl ConnState {
             thinking_variant: Mutex::new(None),
             current_persona: Mutex::new(None),
             available_personas: Mutex::new(Vec::new()),
+            automation_settings: Mutex::new(None),
             #[cfg(test)]
             shared_events: Mutex::new(Vec::new()),
         }
@@ -263,6 +269,7 @@ struct DaemonConnection {
     tx: mpsc::UnboundedSender<QueuedCommand>,
     /// Shared state between the background task and the foreground API.
     state: Arc<ConnState>,
+    retry: Arc<Notify>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -295,6 +302,16 @@ impl QueuedCommand {
 
 impl DaemonConnection {
     fn send(&self, message: ClientMessage) -> bool {
+        if matches!(
+            &message,
+            ClientMessage::ReadAutomationSettings
+                | ClientMessage::SetAutoTitle { .. }
+                | ClientMessage::SetAutoSummary { .. }
+        ) && self.state.client_state.lock().unwrap().connection
+            != Some(mew_client_core::ConnectionStatus::Connected)
+        {
+            return false;
+        }
         let session_scoped = matches!(
             &message,
             ClientMessage::Cancel
@@ -307,8 +324,6 @@ impl DaemonConnection {
                 | ClientMessage::SetThinkingVariant { .. }
                 | ClientMessage::ListPersonas
                 | ClientMessage::SwitchPersona { .. }
-                | ClientMessage::SetAutoTitle { .. }
-                | ClientMessage::SetAutoSummary { .. }
                 | ClientMessage::ReadSessionDiff { .. }
                 | ClientMessage::LoadSessionHistory { .. }
                 | ClientMessage::ReadSubagentHistory { .. }
@@ -419,6 +434,38 @@ impl MobileCore {
         self.registry.lock().unwrap().list()
     }
 
+    /// Persist a local nickname without contacting or reconnecting the daemon.
+    pub fn rename_daemon(&self, id: DaemonId, name: String) -> Result<(), CoreError> {
+        self.registry
+            .lock()
+            .unwrap()
+            .rename(&id, name)
+            .map_err(|error| CoreError::RegistryUpdateFailed {
+                reason: format!("{error:#}"),
+            })
+    }
+
+    /// Retry a saved daemon immediately while retaining its requested session.
+    pub fn retry_connection(&self, id: DaemonId) -> bool {
+        if self.registry.lock().unwrap().get(&id).is_none() {
+            return false;
+        }
+        {
+            let connections = self.connections.lock().unwrap();
+            if let Some(connection) = connections.get(&id.node_id) {
+                if matches!(
+                    connection.state.client_state.lock().unwrap().connection,
+                    Some(mew_client_core::ConnectionStatus::Backoff { .. })
+                ) {
+                    connection.retry.notify_one();
+                }
+                return true;
+            }
+        }
+        self.connect(id);
+        true
+    }
+
     /// Connect to a daemon. Connection progress is reported via events.
     pub fn connect(&self, id: DaemonId) {
         let entry = match self.registry.lock().unwrap().get(&id) {
@@ -432,6 +479,7 @@ impl MobileCore {
         }
         let (tx, rx) = mpsc::unbounded_channel::<QueuedCommand>();
         let conn_state = Arc::new(ConnState::new());
+        let retry = Arc::new(Notify::new());
 
         let endpoint = self.endpoint.clone();
         let daemon_id = id.node_id.clone();
@@ -447,6 +495,7 @@ impl MobileCore {
 
         // Spawn the background connection task.
         let conn_state_for_task = conn_state.clone();
+        let retry_for_task = retry.clone();
         let task = self.runtime.spawn(async move {
             // Reconnect loop with exponential backoff (spec: 1s, 2s, 4s… cap 30s).
             let mut attempt: u32 = 0;
@@ -492,8 +541,10 @@ impl MobileCore {
                 }
 
                 info!(daemon = %daemon_id, attempt, delay_ms = delay.as_millis(), "reconnecting after backoff");
-                tokio::time::sleep(delay).await;
-                attempt += 1;
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => attempt += 1,
+                    _ = retry_for_task.notified() => attempt = 0,
+                }
             }
 
             conn_state_for_task.push_shared_event(
@@ -515,6 +566,7 @@ impl MobileCore {
             DaemonConnection {
                 tx,
                 state: conn_state,
+                retry,
                 task,
             },
         );
@@ -806,20 +858,31 @@ impl MobileCore {
         }
     }
 
-    /// Enable or disable auto-generated session titles.
-    pub fn set_auto_title(&self, id: DaemonId, enabled: bool) {
-        let conns = self.connections.lock().unwrap();
-        if let Some(conn) = conns.get(&id.node_id) {
-            let _ = conn.send(ClientMessage::SetAutoTitle { enabled });
-        }
+    /// Read automation values without requiring an attached session.
+    pub fn read_automation_settings(&self, id: DaemonId) -> bool {
+        self.connections
+            .lock()
+            .unwrap()
+            .get(&id.node_id)
+            .is_some_and(|conn| conn.send(ClientMessage::ReadAutomationSettings))
     }
 
-    /// Enable or disable idle session summaries.
-    pub fn set_auto_summary(&self, id: DaemonId, enabled: bool) {
-        let conns = self.connections.lock().unwrap();
-        if let Some(conn) = conns.get(&id.node_id) {
-            let _ = conn.send(ClientMessage::SetAutoSummary { enabled });
-        }
+    /// Enable or disable titles for prompts from this connection.
+    pub fn set_auto_title(&self, id: DaemonId, enabled: bool) -> bool {
+        self.connections
+            .lock()
+            .unwrap()
+            .get(&id.node_id)
+            .is_some_and(|conn| conn.send(ClientMessage::SetAutoTitle { enabled }))
+    }
+
+    /// Enable or disable idle summaries across the daemon.
+    pub fn set_auto_summary(&self, id: DaemonId, enabled: bool) -> bool {
+        self.connections
+            .lock()
+            .unwrap()
+            .get(&id.node_id)
+            .is_some_and(|conn| conn.send(ClientMessage::SetAutoSummary { enabled }))
     }
 
     /// Rename a session.
@@ -901,6 +964,7 @@ impl MobileCore {
             thinking_variant,
             current_persona,
             available_personas,
+            automation_settings: *conn.state.automation_settings.lock().unwrap(),
             ..Default::default()
         };
         if let Some(ss) = session_state.as_ref() {
@@ -1035,6 +1099,7 @@ fn set_shared_connection_status(
     if status != mew_client_core::ConnectionStatus::Connected {
         conn_state.invalidate_session_commands();
         client.attached_session = None;
+        *conn_state.automation_settings.lock().unwrap() = None;
     }
     let event = client.set_connection_status(status);
     drop(client);
@@ -1799,6 +1864,30 @@ fn translate_message(
             });
         }
 
+        ServerMessage::AutomationSettings {
+            auto_title_enabled,
+            auto_summary_enabled,
+        } => {
+            let settings = AutomationSettings {
+                auto_title_enabled: *auto_title_enabled,
+                auto_summary_enabled: *auto_summary_enabled,
+            };
+            *conn_state.automation_settings.lock().unwrap() = Some(settings);
+            events.push(CoreEvent::AutomationSettings {
+                daemon: d,
+                settings,
+            });
+        }
+        ServerMessage::AutoSummaryChanged { enabled } => {
+            if let Some(settings) = conn_state.automation_settings.lock().unwrap().as_mut() {
+                settings.auto_summary_enabled = *enabled;
+            }
+            events.push(CoreEvent::AutoSummaryChanged {
+                daemon: d,
+                enabled: *enabled,
+            });
+        }
+
         ServerMessage::ModelList { models } => {
             let summaries = models
                 .iter()
@@ -2338,6 +2427,95 @@ fn rand_jitter() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summary_updates_do_not_invent_connection_title_settings() {
+        let state = Arc::new(ConnState::new());
+        let events = translate_message(
+            &ServerMessage::AutoSummaryChanged { enabled: false },
+            &state,
+            &mut None,
+            "daemon",
+        );
+        assert!(state.automation_settings.lock().unwrap().is_none());
+        assert!(
+            matches!(events.as_slice(), [CoreEvent::AutoSummaryChanged { daemon, enabled: false }] if daemon == "daemon")
+        );
+    }
+
+    #[tokio::test]
+    async fn automation_settings_use_confirmed_daemon_values_without_requiring_a_session() {
+        let (core, id, state, mut rx) = connected_core().await;
+        *state.requested_session.lock().unwrap() = None;
+        state.client_state.lock().unwrap().attached_session = None;
+        *state.session_state.lock().unwrap() = None;
+        assert!(core
+            .snapshot(id.clone())
+            .unwrap()
+            .automation_settings
+            .is_none());
+        assert!(core.read_automation_settings(id.clone()));
+        assert!(core.set_auto_title(id.clone(), false));
+        assert!(core.set_auto_summary(id.clone(), false));
+        assert!(matches!(
+            rx.try_recv().unwrap().message,
+            ClientMessage::ReadAutomationSettings
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap().message,
+            ClientMessage::SetAutoTitle { enabled: false }
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap().message,
+            ClientMessage::SetAutoSummary { enabled: false }
+        ));
+        assert!(core
+            .snapshot(id.clone())
+            .unwrap()
+            .automation_settings
+            .is_none());
+
+        let events = translate_message(
+            &ServerMessage::AutomationSettings {
+                auto_title_enabled: false,
+                auto_summary_enabled: true,
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(
+            matches!(events.as_slice(), [CoreEvent::AutomationSettings { daemon, settings }]
+            if daemon == &id.node_id && !settings.auto_title_enabled && settings.auto_summary_enabled)
+        );
+        let events = translate_message(
+            &ServerMessage::AutoSummaryChanged { enabled: false },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(
+            matches!(events.as_slice(), [CoreEvent::AutoSummaryChanged { daemon, enabled: false }] if daemon == &id.node_id)
+        );
+        let settings = core
+            .snapshot(id.clone())
+            .unwrap()
+            .automation_settings
+            .unwrap();
+        assert!(!settings.auto_title_enabled);
+        assert!(!settings.auto_summary_enabled);
+
+        set_shared_connection_status(&state, mew_client_core::ConnectionStatus::Disconnected);
+        assert!(core
+            .snapshot(id.clone())
+            .unwrap()
+            .automation_settings
+            .is_none());
+        assert!(!core.read_automation_settings(id.clone()));
+        assert!(!core.set_auto_title(id.clone(), true));
+        assert!(!core.set_auto_summary(id, true));
+        assert!(rx.try_recv().is_err());
+    }
 
     #[tokio::test]
     async fn tool_states_keep_stable_names_in_live_updates_and_history() {
@@ -2997,6 +3175,7 @@ mod tests {
             DaemonConnection {
                 tx,
                 state: state.clone(),
+                retry: Arc::new(Notify::new()),
                 task: tokio::spawn(std::future::pending()),
             },
         );
@@ -3013,6 +3192,111 @@ mod tests {
             &id.node_id,
         );
         (core, id, state, rx)
+    }
+
+    #[tokio::test]
+    async fn daemon_rename_reports_persistence_failures_through_the_mobile_api() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = MobileCore::new(vec![7; 32], dir.path().to_str().unwrap().into())
+            .await
+            .unwrap();
+        let id = core.add_daemon("saved-node".into(), "Original".into());
+        core.rename_daemon(id.clone(), "Renamed".into()).unwrap();
+        assert_eq!(core.list_daemons()[0].name, "Renamed");
+        std::fs::create_dir(dir.path().join("daemons.json.tmp")).unwrap();
+
+        let error = core.rename_daemon(id, "Unsaved".into()).unwrap_err();
+
+        assert!(error.to_string().contains("could not save daemon nickname"));
+        assert!(matches!(error, CoreError::RegistryUpdateFailed { .. }));
+        assert_eq!(core.list_daemons()[0].name, "Renamed");
+        core.endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn retry_now_interrupts_backoff_without_discarding_the_requested_session() {
+        struct StatusListener(mpsc::UnboundedSender<DaemonStatus>);
+        impl CoreListener for StatusListener {
+            fn on_event(&self, event: CoreEvent) {
+                if let CoreEvent::DaemonStatusChanged { status, .. } = event {
+                    let _ = self.0.send(status);
+                }
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let core = MobileCore::new(vec![7; 32], dir.path().to_str().unwrap().into())
+            .await
+            .unwrap();
+        let (tx, mut statuses) = mpsc::unbounded_channel();
+        core.set_listener(Arc::new(StatusListener(tx)));
+        let id = core.add_daemon("invalid-node".into(), "Offline".into());
+        assert!(core.retry_connection(id.clone()));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let status = statuses.recv().await.expect("connection listener closed");
+                if matches!(status, DaemonStatus::Backoff { .. }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("a retry must start a disconnected saved daemon");
+        core.attach(id.clone(), "keep-this-session".into());
+
+        assert!(core.retry_connection(id.clone()));
+        tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                let status = statuses.recv().await.expect("connection listener closed");
+                if matches!(status, DaemonStatus::Connecting) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("manual retry must interrupt the existing one-second backoff");
+        assert_eq!(
+            core.connections.lock().unwrap()[&id.node_id]
+                .state
+                .requested_session
+                .lock()
+                .unwrap()
+                .as_deref(),
+            Some("keep-this-session")
+        );
+
+        core.disconnect(id);
+        core.endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn retry_now_preserves_a_connected_daemon_and_rejects_unknown_daemons() {
+        let (core, id, state, mut outbound) = connected_core().await;
+        let dir = tempfile::tempdir().unwrap();
+        *core.registry.lock().unwrap() =
+            DaemonRegistry::load(dir.path().join("daemons.json")).unwrap();
+        core.add_daemon(id.node_id.clone(), "Connected".into());
+
+        assert!(core.retry_connection(id.clone()));
+        assert!(!core.retry_connection(DaemonId {
+            node_id: "unknown".into()
+        }));
+
+        assert_eq!(core.connections.lock().unwrap().len(), 1);
+        assert!(Arc::ptr_eq(
+            &state,
+            &core.connections.lock().unwrap()[&id.node_id].state
+        ));
+        assert_eq!(
+            core.snapshot(id.clone())
+                .unwrap()
+                .attached_session
+                .as_deref(),
+            Some("confirmed")
+        );
+        assert!(outbound.try_recv().is_err());
+        core.disconnect(id);
+        core.endpoint.close().await;
     }
 
     #[tokio::test]
@@ -3281,6 +3565,7 @@ mod tests {
             DaemonConnection {
                 tx,
                 state: conn.clone(),
+                retry: Arc::new(Notify::new()),
                 task: tokio::spawn(std::future::pending()),
             },
         );
