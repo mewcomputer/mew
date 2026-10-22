@@ -124,18 +124,24 @@ final class AppStore: ObservableObject {
 
     // Navigation stack, driven both by NavigationLinks and programmatically
     // (e.g. to push a freshly created session).
-    @Published var path: [NavigationRoute] = []
+    @Published var path: [NavigationRoute] = [] {
+        didSet {
+            if path != oldValue { pendingNewSessionDaemon = nil }
+            synchronizeNavigation()
+        }
+    }
 
     // Active daemon + session
     @Published var selectedDaemonId: DaemonId?
     @Published var selectedSessionId: String?
 
-    // Node id of the daemon we just asked for a new session on, so the
-    // resulting SessionReloaded can navigate into it. Cleared once consumed.
+    // Creation results navigate only while the originating location is still open.
     private var pendingNewSessionDaemon: String?
 
     // Chat state for the active session
     @Published var messages: [ChatMessage] = []
+    @Published var isLoadingSession = false
+    @Published var sessionLoadError: String?
     @Published var review: WorkspaceReview?
     @Published var historyBefore: UInt64?
     @Published var isLoadingOlderHistory = false
@@ -159,7 +165,14 @@ final class AppStore: ObservableObject {
     @Published var pendingGoals: [PendingGoalProposal] = []
 
     // Models
-    @Published var availableModels: [ModelSummary] = []
+    @Published var modelsByDaemon: [String: [ModelSummary]] = [:]
+    @Published var daemonSettings: [String: AutomationSettings] = [:]
+    @Published var daemonSettingsErrors: [String: String] = [:]
+    @Published var drafts: [NavigationRoute: String] = [:]
+    private var settingsRequests: [String: Task<Void, Never>] = [:]
+    private var removedDaemons: Set<String> = []
+    let preferences: UserDefaults
+    var pendingRestoredChat: NavigationRoute?
 
     // Permission mode, current model, thinking variant (per daemon)
     @Published var permissionMode: [String: String] = [:]
@@ -191,9 +204,9 @@ final class AppStore: ObservableObject {
     @Published var isConnecting: Bool = false
 
     // Font preference (persisted to UserDefaults)
-    @Published var fontChoice: MewFontChoice = MewFontChoice(rawValue: UserDefaults.standard.string(forKey: "mew.fontChoice") ?? "Mi Sans") ?? .miSans {
+    @Published var fontChoice: MewFontChoice {
         didSet {
-            UserDefaults.standard.set(fontChoice.rawValue, forKey: "mew.fontChoice")
+            preferences.set(fontChoice.rawValue, forKey: "mew.fontChoice")
         }
     }
 
@@ -202,6 +215,11 @@ final class AppStore: ObservableObject {
     private var listener: CoreListenerBridge?
 
     // MARK: - Lifecycle
+
+    init(defaults: UserDefaults = .standard) {
+        preferences = defaults
+        fontChoice = MewFontChoice(rawValue: defaults.string(forKey: "mew.fontChoice") ?? "Mi Sans") ?? .miSans
+    }
 
     func start() {
         guard core == nil else { return }
@@ -236,6 +254,13 @@ final class AppStore: ObservableObject {
                 let id = DaemonId(nodeId: daemon.nodeId)
                 self.connect(daemonId: id)
             }
+            if !path.isEmpty {
+                synchronizeNavigation()
+                if let daemon = selectedDaemonId, let session = selectedSessionId {
+                    core.attach(id: daemon, sessionId: session)
+                }
+            }
+            restoreWorkingLocation()
         } catch {
             print("Failed to initialize mobile core: \(error)")
         }
@@ -247,18 +272,66 @@ final class AppStore: ObservableObject {
         core?.nodeId() ?? ""
     }
 
-    func addDaemon(nodeId: String, name: String) {
-        guard let core else { return }
-        let id = core.addDaemon(nodeId: nodeId, name: name)
+    @discardableResult
+    func addDaemon(info: DialInfo, name: String, replacingDaemonNodeId: String? = nil) -> String? {
+        if let replacingDaemonNodeId, info.nodeId != replacingDaemonNodeId {
+            return "This invite is for a different machine. Use a new invite from the machine you're pairing again."
+        }
+        guard let core else { return "Connection storage is unavailable. Try again shortly." }
+        let wasSaved = daemons.contains { $0.nodeId == info.nodeId }
+        let id: DaemonId
+        if let token = info.pairingToken {
+            id = core.addDaemonWithToken(nodeId: info.nodeId, name: name, token: token)
+        } else {
+            id = core.addDaemon(nodeId: info.nodeId, name: name)
+        }
         daemons = core.listDaemons()
+        removedDaemons.remove(info.nodeId)
+        if wasSaved { core.disconnect(id: id) }
         connect(daemonId: id)
+        if wasSaved, selectedDaemonId?.nodeId == id.nodeId, let session = selectedSessionId {
+            retrySessionAttachment(daemonNodeId: id.nodeId, sessionId: session)
+        }
+        return nil
     }
 
     func removeDaemon(_ daemon: DaemonEntry) {
         guard let core else { return }
+        if pendingNewSessionDaemon == daemon.nodeId { pendingNewSessionDaemon = nil }
         let id = DaemonId(nodeId: daemon.nodeId)
         core.removeDaemon(id: id)
+        removedDaemons.insert(daemon.nodeId)
         daemons = core.listDaemons()
+        forgetWorkingLocation(daemonNodeId: daemon.nodeId)
+        daemonStatuses.removeValue(forKey: daemon.nodeId)
+        sessionLists.removeValue(forKey: daemon.nodeId)
+        modelsByDaemon.removeValue(forKey: daemon.nodeId)
+        daemonSettings.removeValue(forKey: daemon.nodeId)
+        settingsRequests.removeValue(forKey: daemon.nodeId)?.cancel()
+        pendingPermissions.removeAll { $0.daemon == daemon.nodeId }
+        pendingAskUser.removeAll { $0.daemon == daemon.nodeId }
+        pendingGoals.removeAll { $0.daemon == daemon.nodeId }
+        alerts.removeAll { $0.daemon == daemon.nodeId }
+        if activeBanner?.daemon == daemon.nodeId { activeBanner = nil }
+    }
+
+    func renameDaemon(_ daemon: DaemonEntry, name: String) -> String? {
+        guard let core else { return "Connection storage is unavailable. Try again shortly." }
+        do {
+            try core.renameDaemon(id: DaemonId(nodeId: daemon.nodeId), name: name)
+            daemons = core.listDaemons()
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    func retryConnection(daemonNodeId: String) {
+        let id = DaemonId(nodeId: daemonNodeId)
+        if core?.retryConnection(id: id) == true,
+           selectedDaemonId?.nodeId == daemonNodeId, let session = selectedSessionId {
+            core?.attach(id: id, sessionId: session)
+        }
     }
 
     func connect(daemonId: DaemonId) {
@@ -284,7 +357,13 @@ final class AppStore: ObservableObject {
         return SessionTimelineSection.grouped(items, now: now, calendar: calendar)
     }
 
-    func selectDaemon(_ daemon: DaemonEntry) {
+    private func clearChat() {
+        messages = []
+        streamingText = ""
+        streamingPartId = nil
+        isStreaming = false
+        isLoadingSession = false
+        sessionLoadError = nil
         subagents = []
         jobs = []
         workerHistory = nil
@@ -293,10 +372,21 @@ final class AppStore: ObservableObject {
         historyBefore = nil
         isLoadingOlderHistory = false
         historyError = nil
-        selectedDaemonId = DaemonId(nodeId: daemon.nodeId)
-        if let core {
-            core.listSessions(id: selectedDaemonId!)
+    }
+
+    func selectDaemon(nodeId: String) {
+        if selectedDaemonId?.nodeId != nodeId || selectedSessionId != nil {
+            clearChat()
         }
+        selectedDaemonId = DaemonId(nodeId: nodeId)
+        selectedSessionId = nil
+        core?.listSessions(id: DaemonId(nodeId: nodeId))
+    }
+
+    func clearSelection() {
+        clearChat()
+        selectedSessionId = nil
+        selectedDaemonId = nil
     }
 
     func refreshSessions(daemonNodeId: String) {
@@ -304,29 +394,37 @@ final class AppStore: ObservableObject {
     }
 
     func openAlertSession(_ alert: AlertItem) {
-        guard !alert.sessionId.isEmpty,
+        guard daemons.contains(where: { $0.nodeId == alert.daemon }), !alert.sessionId.isEmpty,
               alert.daemon != selectedDaemonId?.nodeId || alert.sessionId != selectedSessionId else { return }
-        selectedDaemonId = DaemonId(nodeId: alert.daemon)
         path.append(.chat(daemonNodeId: alert.daemon, sessionId: alert.sessionId))
     }
 
-    func selectSession(_ sessionId: String) {
-        guard let daemonId = selectedDaemonId, let core else { return }
-        subagents = []
-        jobs = []
-        workerHistory = nil
-        jobOutput = nil
-        review = nil
-        historyBefore = nil
-        isLoadingOlderHistory = false
-        historyError = nil
+    func selectSession(_ sessionId: String, daemonNodeId: String? = nil) {
+        guard let nodeId = daemonNodeId ?? selectedDaemonId?.nodeId else { return }
+        let daemonId = DaemonId(nodeId: nodeId)
+        let changed = selectedDaemonId?.nodeId != nodeId || selectedSessionId != sessionId
+        if changed {
+            clearChat()
+            isLoadingSession = true
+        }
+        selectedDaemonId = daemonId
         selectedSessionId = sessionId
-        core.attach(id: daemonId, sessionId: sessionId)
+        if changed {
+            core?.attach(id: daemonId, sessionId: sessionId)
+        }
 
         // Pull snapshot for initial state
-        if let snap = core.snapshot(id: daemonId) {
+        if changed || sessionLoadError == nil, let snap = core?.snapshot(id: daemonId) {
             applySnapshot(snap)
         }
+    }
+
+    func retrySessionAttachment(daemonNodeId: String, sessionId: String) {
+        guard selectedDaemonId?.nodeId == daemonNodeId, selectedSessionId == sessionId,
+              let core else { return }
+        sessionLoadError = nil
+        isLoadingSession = true
+        core.attach(id: DaemonId(nodeId: daemonNodeId), sessionId: sessionId)
     }
 
     func newSession(cwd: String? = nil) {
@@ -334,15 +432,15 @@ final class AppStore: ObservableObject {
         let nodeId = daemonId.nodeId
         pendingNewSessionDaemon = nodeId
         core.newSession(id: daemonId, cwd: cwd)
-        // Safety net: if the session never comes back (e.g. the daemon rejects
-        // the cwd), clear the flag so a later reload for this daemon doesn't
-        // spuriously navigate.
-        Task { [weak self] in
-            try? await Task.sleep(for: .seconds(10))
-            if self?.pendingNewSessionDaemon == nodeId {
-                self?.pendingNewSessionDaemon = nil
-            }
-        }
+    }
+
+    private func failSessionCreation(daemon: String, message: String) {
+        guard pendingNewSessionDaemon == daemon else { return }
+        pendingNewSessionDaemon = nil
+        let item = AlertItem(daemon: daemon, sessionId: "", kind: "error",
+            title: "Couldn't create conversation", detail: message)
+        alerts.append(item)
+        activeBanner = item
     }
 
     func fetchProjects() {
@@ -437,7 +535,7 @@ final class AppStore: ObservableObject {
     }
 
     var canSendPrompt: Bool {
-        guard !isStreaming, let daemonId = selectedDaemonId,
+        guard sessionLoadError == nil, !isLoadingSession, !isStreaming, let daemonId = selectedDaemonId,
               let sessionId = selectedSessionId,
               case .connected? = daemonStatuses[daemonId.nodeId],
               let snapshot = core?.snapshot(id: daemonId) else { return false }
@@ -511,6 +609,12 @@ final class AppStore: ObservableObject {
         core.listModels(id: daemonId)
     }
 
+    func selectedModel(daemonNodeId: String) -> ModelSummary? {
+        guard !isLoadingSession, let model = currentModel[daemonNodeId],
+              let provider = currentProvider[daemonNodeId] else { return nil }
+        return modelsByDaemon[daemonNodeId]?.first { $0.provider == provider && $0.model == model }
+    }
+
     func switchModel(provider: String, model: String) {
         guard let daemonId = selectedDaemonId, let core else { return }
         core.switchModel(id: daemonId, provider: provider, model: model)
@@ -542,14 +646,33 @@ final class AppStore: ObservableObject {
         core.switchPersona(id: daemonId, name: name)
     }
 
-    func setAutoTitle(enabled: Bool) {
-        guard let daemonId = selectedDaemonId, let core else { return }
-        core.setAutoTitle(id: daemonId, enabled: enabled)
+    func readDaemonSettings(daemonNodeId: String) {
+        beginSettingsRequest(daemonNodeId: daemonNodeId,
+            accepted: core?.readAutomationSettings(id: DaemonId(nodeId: daemonNodeId)) == true)
     }
 
-    func setAutoSummary(enabled: Bool) {
-        guard let daemonId = selectedDaemonId, let core else { return }
-        core.setAutoSummary(id: daemonId, enabled: enabled)
+    func setAutoTitle(daemonNodeId: String, enabled: Bool) {
+        beginSettingsRequest(daemonNodeId: daemonNodeId,
+            accepted: core?.setAutoTitle(id: DaemonId(nodeId: daemonNodeId), enabled: enabled) == true)
+    }
+
+    func setAutoSummary(daemonNodeId: String, enabled: Bool) {
+        beginSettingsRequest(daemonNodeId: daemonNodeId,
+            accepted: core?.setAutoSummary(id: DaemonId(nodeId: daemonNodeId), enabled: enabled) == true)
+    }
+
+    private func beginSettingsRequest(daemonNodeId: String, accepted: Bool) {
+        settingsRequests.removeValue(forKey: daemonNodeId)?.cancel()
+        daemonSettingsErrors.removeValue(forKey: daemonNodeId)
+        guard accepted else {
+            daemonSettingsErrors[daemonNodeId] = "Couldn't send the request. Reconnect and try again."
+            return
+        }
+        settingsRequests[daemonNodeId] = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(5)) } catch { return }
+            self?.daemonSettingsErrors[daemonNodeId] = "The daemon didn't confirm its settings. Update the daemon and try again."
+            self?.settingsRequests.removeValue(forKey: daemonNodeId)
+        }
     }
 
     func archiveSession(_ sessionId: String, archived: Bool) {
@@ -585,6 +708,11 @@ final class AppStore: ObservableObject {
                     core.listSessions(id: id)
                 }
             } else {
+                failSessionCreation(daemon: daemon,
+                    message: "Connection lost before the conversation was created. Reconnect and try again.")
+                settingsRequests.removeValue(forKey: daemon)?.cancel()
+                daemonSettings.removeValue(forKey: daemon)
+                daemonSettingsErrors.removeValue(forKey: daemon)
                 pendingSubmissions.removeValue(forKey: daemon)
                 if workerHistory?.daemon == daemon, workerHistory?.isLoading == true {
                     workerHistory?.isLoading = false
@@ -662,6 +790,7 @@ final class AppStore: ObservableObject {
 
         case .sessionList(let daemon, let sessions):
             sessionLists[daemon] = sessions
+            validateRestoredChat(daemonNodeId: daemon, sessions: sessions)
             // Seed per-session turn-failure state from the rail summaries so
             // the ChatView retry banner is correct on fresh attach (before any
             // providerMessageEnded event fires for this session).
@@ -702,16 +831,22 @@ final class AppStore: ObservableObject {
             isLoadingOlderHistory = false
             historyError = nil
 
+        case .sessionCreated(let daemon, let sessionId):
+            guard pendingNewSessionDaemon == daemon else { return }
+            pendingNewSessionDaemon = nil
+            guard selectedDaemonId?.nodeId == daemon else { return }
+            path.append(.chat(daemonNodeId: daemon, sessionId: sessionId))
+
+        case .sessionCreationFailed(let daemon, let message):
+            failSessionCreation(daemon: daemon, message: message)
+
+        case .sessionAttachmentFailed(let daemon, let sessionId, let message):
+            guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
+            isLoadingSession = false
+            sessionLoadError = message
+
         case .sessionReloaded(let daemon, let sessionId):
             guard selectedDaemonId?.nodeId == daemon else { return }
-            // A newly created session becomes selected before its snapshot is applied.
-            if pendingNewSessionDaemon == daemon {
-                pendingNewSessionDaemon = nil
-                selectedSessionId = sessionId
-                path.append(.chat(daemonNodeId: daemon, sessionId: sessionId))
-            } else if selectedSessionId == nil {
-                selectedSessionId = sessionId
-            }
             guard selectedSessionId == sessionId else { return }
             // Pull snapshot after reload
             if let snap = core?.snapshot(id: DaemonId(nodeId: daemon)) {
@@ -719,11 +854,6 @@ final class AppStore: ObservableObject {
             }
             // Re-fetch persona list — it may have changed during disconnection.
             listPersonas()
-            // Re-send auto-title/summary settings (daemon resets on reconnect).
-            let autoTitle = UserDefaults.standard.bool(forKey: "autoTitle_\(sessionId)")
-            if autoTitle { setAutoTitle(enabled: true) }
-            let autoSummary = UserDefaults.standard.bool(forKey: "autoSummary_\(sessionId)")
-            if autoSummary { setAutoSummary(enabled: true) }
         case .textDelta(let daemon, let sessionId, let partId, let delta):
             guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
             if streamingPartId == partId {
@@ -814,6 +944,7 @@ final class AppStore: ObservableObject {
             pendingAskUser.removeAll { $0.daemon == daemon && $0.requestId == requestId }
 
         case .alert(let daemon, let sessionId, let kind, let title, let detail):
+            guard !removedDaemons.contains(daemon) else { return }
             if !sessionId.isEmpty {
                 let timestamp = Int64(receivedAt.timeIntervalSince1970 * 1_000)
                 sessionAlertTimes[daemon, default: [:]][sessionId] = max(
@@ -840,6 +971,7 @@ final class AppStore: ObservableObject {
                 activeBanner = item
             }
             if kind == "error", daemon == selectedDaemonId?.nodeId, sessionId == selectedSessionId {
+                isLoadingSession = false
                 lastTurnFailed[sessionId] = true
                 if isLoadingOlderHistory {
                     isLoadingOlderHistory = false
@@ -856,10 +988,19 @@ final class AppStore: ObservableObject {
         case .todosUpdated(_, let sessionId, let todoItems):
             todos[sessionId] = todoItems
 
-        case .modelList(_, let models):
-            availableModels = models
+        case .modelList(let daemon, let models):
+            modelsByDaemon[daemon] = models
 
-        case .slashResult(_, _, let text):
+        case .automationSettings(let daemon, let settings):
+            daemonSettings[daemon] = settings
+            daemonSettingsErrors.removeValue(forKey: daemon)
+            settingsRequests.removeValue(forKey: daemon)?.cancel()
+
+        case .autoSummaryChanged(let daemon, let enabled):
+            daemonSettings[daemon]?.autoSummaryEnabled = enabled
+
+        case .slashResult(let daemon, let sessionId, let text):
+            guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
             // Append the slash result as a synthetic assistant message so it
             // appears inline in the chat transcript.
             messages.append(ChatMessage(
@@ -905,6 +1046,8 @@ final class AppStore: ObservableObject {
 
     private func applySnapshot(_ snap: DaemonSnapshot) {
         if let session = snap.sessions.first(where: { $0.sessionId == selectedSessionId }) {
+            isLoadingSession = false
+            sessionLoadError = nil
             messages = session.messages
             historyBefore = session.historyBefore
             subagents = session.subagents

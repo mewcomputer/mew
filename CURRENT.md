@@ -2833,3 +2833,29 @@ listener/streaming round trip includes creation confirmation. Strict all-target
 Clippy and formatting pass. Rebuilt all iOS core slices from frozen sources and
 regenerated bindings. Disk exhaustion interrupted the final gate; removing only
 the rebuildable host incremental cache allowed the checks to finish.
+
+# 2026-10-22 — iOS settings ownership and working-location restoration
+
+Separated app preferences from saved-machine details. Daemon screens expose
+persisted local nicknames, retry and re-pair actions, confirmed automation
+settings with explicit connection/daemon scope, and accurate removal wording.
+Chat and list headers open a machine switcher with connection and attention
+state. Navigation restores the last explicitly selected machine and chat/list,
+retains offline selections, and falls back when saved targets disappear.
+
+Drafts and model selection remain scoped to their daemon/chat. Pairing preserves
+invite credentials, re-pair replaces the live connection, and attachment failures
+offer scoped retry while disabling sending. Delayed creation, history, slash
+replies and removed-machine alerts cannot select or populate another chat.
+
+All 101 iOS tests pass on both simulator and the paired iPhone 17 Pro with the
+final sources. Fixed physical test-target signing using the existing team and
+device signing identity; the normal phone app launch also succeeded. The Rust
+gates and real iroh creation/streaming smoke passed in the preceding chunk.
+Inspected seeded simulator screenshots in light/dark and accessibility sizes,
+plus a switching GIF showing independent drafts; captures live outside the repo.
+Removed all temporary capture fixtures and updated mobile/user documentation.
+
+New settings and typed attachment recovery require an updated daemon. Physical
+behavior tests passed, but a complete hands-on live-phone gesture/reconnect
+walkthrough remains outstanding.

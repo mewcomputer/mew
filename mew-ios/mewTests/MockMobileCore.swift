@@ -19,6 +19,12 @@ final class MockMobileCore: @preconcurrency MobileCoreProtocol {
     var switchPersonaCalls: [(nodeId: String, name: String)] = []
     var switchModelCalls: [(nodeId: String, provider: String, model: String)] = []
     var connectCalls: [String] = []
+    var addedDaemons: [(nodeId: String, name: String, token: String?)] = []
+    var disconnectCalls: [String] = []
+    var settingsAccepted = true
+    var settingsReadCalls: [String] = []
+    var autoTitleCalls: [(nodeId: String, enabled: Bool)] = []
+    var autoSummaryCalls: [(nodeId: String, enabled: Bool)] = []
     var askUserCancelCalls: [(nodeId: String, requestId: String)] = []
     var cancelCalls: [String] = []
     var attachCalls: [(nodeId: String, sessionId: String)] = []
@@ -33,6 +39,7 @@ final class MockMobileCore: @preconcurrency MobileCoreProtocol {
 
     // Configurable return values
     var snapshotResult: DaemonSnapshot?
+    var snapshotsByDaemon: [String: DaemonSnapshot] = [:]
     var daemonsResult: [DaemonEntry] = []
     var nodeIdResult: String = "mock-node-id"
 
@@ -49,25 +56,38 @@ final class MockMobileCore: @preconcurrency MobileCoreProtocol {
     // MARK: - MobileCoreProtocol conformance
 
     func addDaemon(nodeId: String, name: String) -> DaemonId {
-        DaemonId(nodeId: nodeId)
+        addedDaemons.append((nodeId, name, nil))
+        return DaemonId(nodeId: nodeId)
     }
 
     func addDaemonWithToken(nodeId: String, name: String, token: String) -> DaemonId {
-        DaemonId(nodeId: nodeId)
+        addedDaemons.append((nodeId, name, token))
+        return DaemonId(nodeId: nodeId)
     }
 
-    func removeDaemon(id: DaemonId) {}
+    func removeDaemon(id: DaemonId) { daemonsResult.removeAll { $0.nodeId == id.nodeId } }
+
+    func renameDaemon(id: DaemonId, name: String) throws {
+        if let index = daemonsResult.firstIndex(where: { $0.nodeId == id.nodeId }) {
+            daemonsResult[index].name = name
+        }
+    }
+
+    func retryConnection(id: DaemonId) -> Bool {
+        connectCalls.append(id.nodeId)
+        return daemonsResult.contains { $0.nodeId == id.nodeId }
+    }
 
     func listDaemons() -> [DaemonEntry] { daemonsResult }
 
     func connect(id: DaemonId) { connectCalls.append(id.nodeId) }
-    func disconnect(id: DaemonId) {}
+    func disconnect(id: DaemonId) { disconnectCalls.append(id.nodeId) }
 
     func attach(id: DaemonId, sessionId: String) {
         attachCalls.append((id.nodeId, sessionId))
     }
 
-    func snapshot(id: DaemonId) -> DaemonSnapshot? { snapshotResult }
+    func snapshot(id: DaemonId) -> DaemonSnapshot? { snapshotsByDaemon[id.nodeId] ?? snapshotResult }
 
     func prompt(id: DaemonId, text: String) -> Bool {
         promptCalls.append((id.nodeId, text))
@@ -122,8 +142,18 @@ final class MockMobileCore: @preconcurrency MobileCoreProtocol {
         switchPersonaCalls.append((id.nodeId, name))
     }
 
-    func setAutoTitle(id: DaemonId, enabled: Bool) {}
-    func setAutoSummary(id: DaemonId, enabled: Bool) {}
+    func readAutomationSettings(id: DaemonId) -> Bool {
+        settingsReadCalls.append(id.nodeId)
+        return settingsAccepted
+    }
+    func setAutoTitle(id: DaemonId, enabled: Bool) -> Bool {
+        autoTitleCalls.append((id.nodeId, enabled))
+        return settingsAccepted
+    }
+    func setAutoSummary(id: DaemonId, enabled: Bool) -> Bool {
+        autoSummaryCalls.append((id.nodeId, enabled))
+        return settingsAccepted
+    }
 
     func setPermissionMode(id: DaemonId, mode: String) {
         setPermissionModeCalls.append((id.nodeId, mode))

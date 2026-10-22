@@ -7,6 +7,16 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		4CFE382411B9F5B29F73BC98 /* AppNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDD7B0882730ED265818ED48 /* AppNavigation.swift */; };
+		131D41ACE02C395317398AAE /* AppNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDD7B0882730ED265818ED48 /* AppNavigation.swift */; };
+
+		B67F88A1A1044574B031AE42 /* AppNavigationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE41 /* AppNavigationTests.swift */; };
+		5C7D24B1EBAC33F8B2279C2E /* DaemonSwitcherView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A44A9BFA7CFE8448B21F957E /* DaemonSwitcherView.swift */; };
+		27199C28F262F5ED6AE56F91 /* DaemonSwitcherView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A44A9BFA7CFE8448B21F957E /* DaemonSwitcherView.swift */; };
+
+		6B87AA3C0D94EE9A1983E487 /* DaemonDetailsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2ED23958F3FFAEDE3D1467D /* DaemonDetailsView.swift */; };
+		F787F3C1C2446A4795E64361 /* DaemonDetailsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2ED23958F3FFAEDE3D1467D /* DaemonDetailsView.swift */; };
+
 		B67F88A1A1044574B031AE34 /* SessionTimeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE33 /* SessionTimeline.swift */; };
 		B67F88A1A1044574B031AE35 /* SessionTimeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE33 /* SessionTimeline.swift */; };
 		B67F88A1A1044574B031AE32 /* SessionTimelineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE31 /* SessionTimelineTests.swift */; };
@@ -82,6 +92,10 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		BDD7B0882730ED265818ED48 /* AppNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppNavigation.swift; sourceTree = "<group>"; };
+		B67F88A1A1044574B031AE41 /* AppNavigationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppNavigationTests.swift; sourceTree = "<group>"; };
+		A44A9BFA7CFE8448B21F957E /* DaemonSwitcherView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonSwitcherView.swift; sourceTree = "<group>"; };
+		E2ED23958F3FFAEDE3D1467D /* DaemonDetailsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonDetailsView.swift; sourceTree = "<group>"; };
 		B67F88A1A1044574B031AE33 /* SessionTimeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionTimeline.swift; sourceTree = "<group>"; };
 		B67F88A1A1044574B031AE31 /* SessionTimelineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionTimelineTests.swift; sourceTree = "<group>"; };
 		B67F88A1A1044574B031AE21 /* ConversationActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationActivity.swift; sourceTree = "<group>"; };
@@ -197,6 +211,7 @@
 				3FD7A599A73C712D62E6DF76 /* AppStoreEventHandlingTests.swift */,
 				B67F88A1A1044574B031AE24 /* ConversationActivityTests.swift */,
 				B67F88A1A1044574B031AE31 /* SessionTimelineTests.swift */,
+				B67F88A1A1044574B031AE41 /* AppNavigationTests.swift */,
 			);
 			path = mewTests;
 			sourceTree = "<group>";
@@ -232,6 +247,9 @@
 				85285983639DD6D24B4F80F5 /* RootView.swift */,
 				DB7E2A7290847C1C578F63BE /* SessionRailView.swift */,
 				1F9000A5647A1E452404A0D2 /* SettingsView.swift */,
+				BDD7B0882730ED265818ED48 /* AppNavigation.swift */,
+				A44A9BFA7CFE8448B21F957E /* DaemonSwitcherView.swift */,
+				E2ED23958F3FFAEDE3D1467D /* DaemonDetailsView.swift */,
 				7648D55347F186781EF8A218 /* Theme.swift */,
 				FB769C03A8D2DF7E375E9D64 /* Fonts */,
 				23A7B897CE17092834C10641 /* TodoPanelView.swift */,
@@ -382,11 +400,15 @@
 				9D5BA18F06248ABAE6792CEC /* RootView.swift in Sources */,
 				30F3E4E8667773758FDF1426 /* SessionRailView.swift in Sources */,
 				42F4BD23A9EEF6038F6DEDEB /* SettingsView.swift in Sources */,
+				131D41ACE02C395317398AAE /* AppNavigation.swift in Sources */,
+				27199C28F262F5ED6AE56F91 /* DaemonSwitcherView.swift in Sources */,
+				F787F3C1C2446A4795E64361 /* DaemonDetailsView.swift in Sources */,
 				B25B0163985FCF517BEB359E /* Theme.swift in Sources */,
 				CF7A311BE95F8E5D561A24A6 /* MockMobileCore.swift in Sources */,
 				8C656AA687DF734C8FC3B3FC /* AppStoreEventHandlingTests.swift in Sources */,
 				B67F88A1A1044574B031AE25 /* ConversationActivityTests.swift in Sources */,
 				B67F88A1A1044574B031AE32 /* SessionTimelineTests.swift in Sources */,
+				B67F88A1A1044574B031AE42 /* AppNavigationTests.swift in Sources */,
 				9D4F7BBD61F807B2EF078A4B /* TodoPanelView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -414,6 +436,9 @@
 				16BC594BD342DCA17509E2CF /* RootView.swift in Sources */,
 				0DD408C829CFAE400C464C3A /* SessionRailView.swift in Sources */,
 				F9D40665D15C1FD5BE9B29A6 /* SettingsView.swift in Sources */,
+				4CFE382411B9F5B29F73BC98 /* AppNavigation.swift in Sources */,
+				5C7D24B1EBAC33F8B2279C2E /* DaemonSwitcherView.swift in Sources */,
+				6B87AA3C0D94EE9A1983E487 /* DaemonDetailsView.swift in Sources */,
 				F92E765C3BD2C9CFF5239DDE /* Theme.swift in Sources */,
 				41E46AF0BE5C2433FF568197 /* TodoPanelView.swift in Sources */,
 			);
@@ -453,6 +478,8 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_IDENTITY = "-";
+				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "Apple Development";
+				DEVELOPMENT_TEAM = P2B3GABB6H;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -477,6 +504,8 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_IDENTITY = "-";
+				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "Apple Development";
+				DEVELOPMENT_TEAM = P2B3GABB6H;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;

@@ -31,6 +31,11 @@ struct SessionRailView: View {
         return false
     }
 
+    private var needsPairing: Bool {
+        if case .pairedLost = status { return true }
+        return false
+    }
+
     var body: some View {
         Group {
             if isConnected {
@@ -42,6 +47,9 @@ struct SessionRailView: View {
         .navigationTitle(navigationTitle)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .principal) {
+                DaemonSwitcherButton(daemonNodeId: daemonNodeId)
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
                     showingProjectPicker = true
@@ -53,9 +61,6 @@ struct SessionRailView: View {
                 }
                 .disabled(!isConnected)
             }
-        }
-        .onAppear {
-            ensureDaemonSelected()
         }
         .alert("Delete Session", isPresented: Binding(
             get: { sessionToDelete != nil },
@@ -179,21 +184,23 @@ struct SessionRailView: View {
                             .multilineTextAlignment(.center)
                             .padding(.horizontal)
                     }
+                    NavigationLink(value: NavigationRoute.daemonDetails(daemonNodeId: daemonNodeId)) {
+                        Text("Connection details")
+                            .frame(minHeight: 44)
+                    }
+                    if !needsPairing {
+                        Button("Retry connection") {
+                            store.retryConnection(daemonNodeId: daemonNodeId)
+                        }
+                        .frame(minHeight: 44)
+                    }
                 }
             }
             .frame(maxWidth: .infinity)
             .padding(.top, 80)
         }
         .refreshable {
-            // Force a reconnect attempt
-            if let id = store.selectedDaemonId {
-                store.connect(daemonId: id)
-            } else {
-                ensureDaemonSelected()
-                if let id = store.selectedDaemonId {
-                    store.connect(daemonId: id)
-                }
-            }
+            store.retryConnection(daemonNodeId: daemonNodeId)
         }
     }
 
@@ -439,7 +446,7 @@ struct SessionRailView: View {
 
     private func contextWindow(for session: SessionSummary) -> Int64? {
         guard let model = session.model else { return nil }
-        return store.availableModels.first { m in
+        return store.modelsByDaemon[daemonNodeId]?.first { m in
             if let provider = session.provider {
                 return m.provider == provider && m.model == model
             }
@@ -447,13 +454,6 @@ struct SessionRailView: View {
         }?.contextWindow
     }
 
-    /// Ensure the store's `selectedDaemonId` matches this rail so that
-    /// `newSession` / `selectSession` / archive / pin / delete succeed.
-    private func ensureDaemonSelected() {
-        if store.selectedDaemonId?.nodeId != daemonNodeId {
-            store.selectedDaemonId = DaemonId(nodeId: daemonNodeId)
-        }
-    }
 }
 
 // MARK: - Project picker sheet

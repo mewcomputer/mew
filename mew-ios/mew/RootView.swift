@@ -18,6 +18,8 @@ struct RootView: View {
                         ChatView(daemonNodeId: daemonNodeId, sessionId: sessionId)
                     case .settings:
                         SettingsView()
+                    case .daemonDetails(let daemonNodeId):
+                        DaemonDetailsView(daemonNodeId: daemonNodeId)
                     }
                 }
         }
@@ -96,4 +98,5 @@ enum NavigationRoute: Hashable {
     case sessions(daemonNodeId: String)
     case chat(daemonNodeId: String, sessionId: String)
     case settings
+    case daemonDetails(daemonNodeId: String)
 }

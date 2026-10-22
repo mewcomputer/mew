@@ -9,15 +9,24 @@ final class AppStoreEventHandlingTests: XCTestCase {
     private var store: AppStore!
     private var mock: MockMobileCore!
     private var daemonId: DaemonId!
+    private var suiteName: String!
 
     override func setUp() {
         super.setUp()
         mock = MockMobileCore()
-        store = AppStore()
+        suiteName = "mew.store-tests.\(UUID().uuidString)"
+        store = AppStore(defaults: UserDefaults(suiteName: suiteName)!)
         store.injectCore(mock)
         daemonId = DaemonId(nodeId: "daemon-1")
         store.selectedDaemonId = daemonId
         store.selectedSessionId = "sess-1"
+    }
+
+    override func tearDown() {
+        UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName)
+        store = nil
+        mock = nil
+        super.tearDown()
     }
 
     func testToolOnlyMessagesStayCompactInConversation() {
@@ -179,7 +188,7 @@ final class AppStoreEventHandlingTests: XCTestCase {
             inputTokens: 0, outputTokens: 0, turns: 0, todos: [], historyBefore: before, subagents: [], jobs: [])],
             attachedSession: "sess-1", pendingPermissions: [], pendingAskUser: [], models: [],
             daemonVersion: nil, permissionMode: nil, currentModel: nil, currentProvider: nil,
-            thinkingVariant: nil, currentPersona: nil, availablePersonas: [])
+            thinkingVariant: nil, currentPersona: nil, availablePersonas: [], automationSettings: nil)
     }
 
     func testOlderHistoryKeepsMessagesUntilTheSelectedPageArrives() {
@@ -391,7 +400,7 @@ final class AppStoreEventHandlingTests: XCTestCase {
         mock.snapshotResult = DaemonSnapshot(sessions: [], attachedSession: "sess-1", pendingPermissions: [],
             pendingAskUser: [], models: [], daemonVersion: nil, permissionMode: nil,
             currentModel: nil, currentProvider: nil, thinkingVariant: nil,
-            currentPersona: nil, availablePersonas: [])
+            currentPersona: nil, availablePersonas: [], automationSettings: nil)
         store.daemonStatuses["daemon-1"] = .connected
         mock.promptAccepted = false
         store.lastPrompt["sess-1"] = "previous"
@@ -413,7 +422,7 @@ final class AppStoreEventHandlingTests: XCTestCase {
         mock.snapshotResult = DaemonSnapshot(sessions: [], attachedSession: "sess-1", pendingPermissions: [],
             pendingAskUser: [], models: [], daemonVersion: nil, permissionMode: nil,
             currentModel: nil, currentProvider: nil, thinkingVariant: nil,
-            currentPersona: nil, availablePersonas: [])
+            currentPersona: nil, availablePersonas: [], automationSettings: nil)
         store.daemonStatuses["daemon-1"] = .connected
         XCTAssertTrue(store.sendPrompt("first"))
         XCTAssertFalse(store.isStreaming)
@@ -489,6 +498,14 @@ final class AppStoreEventHandlingTests: XCTestCase {
         XCTAssertEqual(store.streamingPartId, "own")
     }
 
+    func testLateSlashRepliesCannotEnterAnotherConversation() {
+        store.handleEvent(.slashResult(daemon: "daemon-2", sessionId: "sess-1", text: "other machine"))
+        store.handleEvent(.slashResult(daemon: "daemon-1", sessionId: "sess-2", text: "previous chat"))
+        XCTAssertTrue(store.messages.isEmpty)
+        store.handleEvent(.slashResult(daemon: "daemon-1", sessionId: "sess-1", text: "current reply"))
+        XCTAssertEqual(store.messages.flatMap(\.parts).compactMap(\.text), ["current reply"])
+    }
+
     func testSnapshotOnlyRestoresRunningForTheSelectedSession() {
         let other = SessionInfo(sessionId: "sess-2", title: "Other", messages: [],
             running: false, usageCost: 0, pendingPermissions: 0, pendingQuestions: 0,
@@ -499,11 +516,230 @@ final class AppStoreEventHandlingTests: XCTestCase {
         mock.snapshotResult = DaemonSnapshot(sessions: [other, selected], attachedSession: "sess-1",
             pendingPermissions: [], pendingAskUser: [], models: [], daemonVersion: nil,
             permissionMode: nil, currentModel: nil, currentProvider: nil, thinkingVariant: nil,
-            currentPersona: nil, availablePersonas: [])
+            currentPersona: nil, availablePersonas: [], automationSettings: nil)
         store.handleEvent(.sessionReloaded(daemon: "daemon-2", sessionId: "sess-1"))
         XCTAssertFalse(store.isStreaming)
         store.handleEvent(.sessionReloaded(daemon: "daemon-1", sessionId: "sess-1"))
         XCTAssertTrue(store.isStreaming)
+    }
+
+    func testPendingNewSessionCannotBeCompletedByAnOlderHistoryReload() {
+        let destination = [NavigationRoute.sessions(daemonNodeId: "daemon-1")]
+        store.path = destination
+        store.newSession(cwd: "/work/new")
+
+        store.handleEvent(.sessionReloaded(daemon: "daemon-1", sessionId: "old-session"))
+
+        XCTAssertEqual(store.path, destination)
+        XCTAssertNil(store.selectedSessionId)
+
+        store.handleEvent(.sessionCreated(daemon: "daemon-2", sessionId: "other-machine"))
+        XCTAssertEqual(store.path, destination)
+        store.handleEvent(.sessionCreated(daemon: "daemon-1", sessionId: "new-session"))
+        XCTAssertEqual(store.path.last, .chat(daemonNodeId: "daemon-1", sessionId: "new-session"))
+        XCTAssertEqual(store.selectedSessionId, "new-session")
+        store.handleEvent(.sessionCreated(daemon: "daemon-1", sessionId: "duplicate"))
+        XCTAssertEqual(store.selectedSessionId, "new-session")
+    }
+
+    func testCreationResultsCannotHijackNavigationAwayFromTheRequest() {
+        store.path = [.sessions(daemonNodeId: "daemon-1")]
+        store.newSession()
+        let destination = [NavigationRoute.sessions(daemonNodeId: "daemon-1"),
+                           .chat(daemonNodeId: "daemon-1", sessionId: "chosen-chat")]
+        store.path = destination
+
+        store.handleEvent(.sessionCreated(daemon: "daemon-1", sessionId: "late-created-chat"))
+        store.handleEvent(.sessionCreationFailed(daemon: "daemon-1", message: "late failure"))
+
+        XCTAssertEqual(store.path, destination)
+        XCTAssertEqual(store.selectedSessionId, "chosen-chat")
+        XCTAssertTrue(store.alerts.isEmpty)
+    }
+
+    func testCreationFailureReleasesOnlyItsOwnReservationAndAllowsRetry() {
+        let destination = [NavigationRoute.sessions(daemonNodeId: "daemon-1")]
+        store.path = destination
+        store.newSession(cwd: "/missing")
+        store.handleEvent(.sessionCreationFailed(daemon: "daemon-2", message: "unrelated failure"))
+        XCTAssertTrue(store.alerts.isEmpty)
+
+        store.handleEvent(.sessionCreationFailed(daemon: "daemon-1", message: "Workspace is unavailable"))
+
+        XCTAssertEqual(store.activeBanner?.daemon, "daemon-1")
+        XCTAssertEqual(store.activeBanner?.detail, "Workspace is unavailable")
+        XCTAssertEqual(store.activeBanner?.sessionId, "")
+        store.handleEvent(.sessionCreated(daemon: "daemon-1", sessionId: "late-result"))
+        XCTAssertEqual(store.path, destination)
+        store.newSession(cwd: "/available")
+        store.handleEvent(.sessionCreated(daemon: "daemon-1", sessionId: "retry-result"))
+        XCTAssertEqual(mock.newSessionCalls, ["/missing", "/available"])
+        XCTAssertEqual(store.selectedSessionId, "retry-result")
+    }
+
+    func testDisconnectAbandonsOnlyTheOriginatingPendingCreation() {
+        let destination = [NavigationRoute.sessions(daemonNodeId: "daemon-1")]
+        store.path = destination
+        store.newSession()
+        store.handleEvent(.daemonStatusChanged(daemon: "daemon-2", status: .disconnected))
+        XCTAssertTrue(store.alerts.isEmpty)
+
+        store.handleEvent(.daemonStatusChanged(daemon: "daemon-1", status: .backoff(attempt: 1, error: "Connection lost")))
+
+        XCTAssertEqual(store.activeBanner?.daemon, "daemon-1")
+        XCTAssertNotNil(store.activeBanner?.detail)
+        store.handleEvent(.sessionCreated(daemon: "daemon-1", sessionId: "late-result"))
+        XCTAssertEqual(store.path, destination)
+    }
+
+    func testAttachmentFailuresAndRetriesStayWithTheActiveConversation() {
+        store.isLoadingSession = true
+        store.drafts[.chat(daemonNodeId: "daemon-1", sessionId: "sess-1")] = "unsent question"
+        for (daemon, session) in [("daemon-2", "sess-1"), ("daemon-1", "other")] {
+            store.handleEvent(.sessionAttachmentFailed(daemon: daemon, sessionId: session, message: "unrelated failure"))
+            XCTAssertTrue(store.isLoadingSession)
+            XCTAssertNil(store.sessionLoadError)
+        }
+
+        store.handleEvent(.sessionAttachmentFailed(daemon: "daemon-1", sessionId: "sess-1", message: "Conversation is unavailable"))
+        XCTAssertFalse(store.isLoadingSession)
+        XCTAssertEqual(store.sessionLoadError, "Conversation is unavailable")
+        store.retrySessionAttachment(daemonNodeId: "daemon-2", sessionId: "sess-1")
+        store.retrySessionAttachment(daemonNodeId: "daemon-1", sessionId: "other")
+        XCTAssertTrue(mock.attachCalls.isEmpty)
+
+        store.retrySessionAttachment(daemonNodeId: "daemon-1", sessionId: "sess-1")
+
+        XCTAssertTrue(store.isLoadingSession)
+        XCTAssertNil(store.sessionLoadError)
+        XCTAssertEqual(mock.attachCalls.count, 1)
+        XCTAssertEqual(mock.attachCalls.first?.nodeId, "daemon-1")
+        XCTAssertEqual(mock.attachCalls.first?.sessionId, "sess-1")
+        XCTAssertEqual(store.drafts[.chat(daemonNodeId: "daemon-1", sessionId: "sess-1")], "unsent question")
+    }
+
+    func testAttachmentErrorsClearOnSuccessfulHistoryAndConversationChanges() {
+        store.handleEvent(.sessionAttachmentFailed(daemon: "daemon-1", sessionId: "sess-1", message: "Try again"))
+        XCTAssertNotNil(store.sessionLoadError)
+        mock.snapshotResult = historySnapshot(before: nil, texts: ["restored history"])
+
+        store.handleEvent(.sessionReloaded(daemon: "daemon-1", sessionId: "sess-1"))
+
+        XCTAssertNil(store.sessionLoadError)
+        XCTAssertFalse(store.isLoadingSession)
+        XCTAssertEqual(store.messages.map(\.id), ["restored history"])
+        store.handleEvent(.sessionAttachmentFailed(daemon: "daemon-1", sessionId: "sess-1", message: "Another failure"))
+        store.selectSession("another-chat")
+        XCTAssertNil(store.sessionLoadError)
+        XCTAssertTrue(store.isLoadingSession)
+    }
+
+    func testSwitchingChatsClearsThePreviousTranscriptWhileAttachmentIsPending() {
+        mock.snapshotResult = historySnapshot(before: 24, texts: ["previous chat"], running: true)
+        store.selectSession("sess-1")
+        store.streamingPartId = "old-part"
+        store.streamingText = "old streaming text"
+        store.selectSession("sess-2")
+        XCTAssertEqual(store.selectedSessionId, "sess-2")
+        XCTAssertTrue(store.messages.isEmpty)
+        XCTAssertFalse(store.isStreaming)
+        XCTAssertNil(store.streamingPartId)
+        XCTAssertTrue(store.streamingText.isEmpty)
+        XCTAssertNil(store.historyBefore)
+        XCTAssertFalse(store.canSendPrompt)
+        store.handleEvent(.sessionReloaded(daemon: "daemon-1", sessionId: "sess-1"))
+        XCTAssertTrue(store.messages.isEmpty, "A delayed reload from the previous chat must not restore its content")
+    }
+
+    func testReturningFromACrossDaemonAlertRestoresTheRouteOwner() {
+        store.daemons = [DaemonEntry(nodeId: "daemon-2", name: "Server", addedAt: 0, lastConnectedAt: nil, lastKnownVersion: nil, keepConnected: true, pairingToken: nil)]
+        store.path = [.sessions(daemonNodeId: "daemon-1"), .chat(daemonNodeId: "daemon-1", sessionId: "sess-1")]
+        store.openAlertSession(AlertItem(daemon: "daemon-2", sessionId: "sess-2", kind: "question", title: "Input", detail: nil))
+        store.path.removeLast()
+        XCTAssertEqual(store.selectedDaemonId?.nodeId, "daemon-1")
+        XCTAssertEqual(store.selectedSessionId, "sess-1")
+        XCTAssertEqual(mock.attachCalls.last?.nodeId, "daemon-1")
+        XCTAssertEqual(mock.attachCalls.last?.sessionId, "sess-1")
+    }
+
+    func testPairingPreservesTheParsedInviteCredential() throws {
+        let info = try MewMobileCore.parseDialInfo(payload: "mew001:{\"node_id\":\"invite-daemon\",\"name\":\"Homelab\",\"token\":\"invite-credential\"}")
+        store.addDaemon(info: info, name: "My server")
+        XCTAssertEqual(mock.addedDaemons.last?.nodeId, "invite-daemon")
+        XCTAssertEqual(mock.addedDaemons.last?.name, "My server")
+        XCTAssertEqual(mock.addedDaemons.last?.token, "invite-credential")
+        XCTAssertEqual(mock.connectCalls, ["invite-daemon"])
+    }
+
+    func testLegacyPairingStillUsesTheTokenlessPath() throws {
+        let info = try MewMobileCore.parseDialInfo(payload: "mew001:legacy-daemon")
+        store.addDaemon(info: info, name: "Legacy")
+        XCTAssertEqual(mock.addedDaemons.last?.nodeId, "legacy-daemon")
+        XCTAssertNil(mock.addedDaemons.last?.token)
+    }
+
+    func testPairAgainRejectsAnInviteForAnotherMachineWithoutAddingIt() {
+        let info = DialInfo(nodeId: "other-machine", name: nil, pairingToken: "credential")
+        XCTAssertNotNil(store.addDaemon(info: info, name: "Saved machine", replacingDaemonNodeId: "saved-machine"))
+        XCTAssertTrue(mock.addedDaemons.isEmpty)
+        XCTAssertTrue(mock.connectCalls.isEmpty)
+    }
+
+    func testPairAgainReplacesTheLiveConnectionsPreviousCredential() {
+        let daemon = DaemonEntry(nodeId: "saved-machine", name: "Server", addedAt: 1, lastConnectedAt: nil,
+            lastKnownVersion: nil, keepConnected: true, pairingToken: "old-credential")
+        store.daemons = [daemon]
+        mock.daemonsResult = [daemon]
+        store.path = [.sessions(daemonNodeId: daemon.nodeId), .chat(daemonNodeId: daemon.nodeId, sessionId: "sess-1")]
+        mock.attachCalls = []
+        let invite = DialInfo(nodeId: "saved-machine", name: nil, pairingToken: "new-credential")
+        XCTAssertNil(store.addDaemon(info: invite, name: daemon.name, replacingDaemonNodeId: daemon.nodeId))
+        XCTAssertEqual(mock.addedDaemons.last?.token, "new-credential")
+        XCTAssertEqual(mock.disconnectCalls, ["saved-machine"])
+        XCTAssertEqual(mock.connectCalls, ["saved-machine"])
+        XCTAssertEqual(mock.attachCalls.last?.nodeId, "saved-machine")
+        XCTAssertEqual(mock.attachCalls.last?.sessionId, "sess-1")
+        mock.snapshotsByDaemon["saved-machine"] = historySnapshot(before: nil, texts: ["recovered"])
+        store.handleEvent(.daemonStatusChanged(daemon: "saved-machine", status: .connected))
+        store.handleEvent(.sessionReloaded(daemon: "saved-machine", sessionId: "sess-1"))
+        XCTAssertEqual(store.messages.first?.parts.first?.text, "recovered")
+        XCTAssertTrue(store.canSendPrompt)
+    }
+
+    func testOpeningDetailsCannotEraseAnAttachmentErrorWithCachedHistory() {
+        store.path = [.sessions(daemonNodeId: "daemon-1"), .chat(daemonNodeId: "daemon-1", sessionId: "sess-1")]
+        mock.snapshotResult = historySnapshot(before: nil, texts: ["cached history"])
+        store.daemonStatuses["daemon-1"] = .connected
+        store.handleEvent(.sessionAttachmentFailed(daemon: "daemon-1", sessionId: "sess-1", message: "Resume failed"))
+        store.path.append(.daemonDetails(daemonNodeId: "daemon-1"))
+        store.path.removeLast()
+        XCTAssertEqual(store.sessionLoadError, "Resume failed")
+        XCTAssertFalse(store.canSendPrompt)
+    }
+
+    func testAutomationSettingsStayWithTheirDaemonAndWaitForConfirmation() {
+        store.handleEvent(.automationSettings(daemon: "daemon-2", settings: AutomationSettings(autoTitleEnabled: true, autoSummaryEnabled: false)))
+        XCTAssertNil(store.daemonSettings["daemon-1"])
+        XCTAssertEqual(store.daemonSettings["daemon-2"]?.autoSummaryEnabled, false)
+        store.setAutoSummary(daemonNodeId: "daemon-2", enabled: true)
+        XCTAssertEqual(store.daemonSettings["daemon-2"]?.autoSummaryEnabled, false)
+        XCTAssertEqual(mock.autoSummaryCalls.last?.nodeId, "daemon-2")
+        store.handleEvent(.autoSummaryChanged(daemon: "daemon-2", enabled: true))
+        XCTAssertEqual(store.daemonSettings["daemon-2"]?.autoSummaryEnabled, true)
+        store.handleEvent(.daemonStatusChanged(daemon: "daemon-2", status: .disconnected))
+        XCTAssertNil(store.daemonSettings["daemon-2"])
+    }
+
+    func testAutomationSettingsDoNotInventDefaultsOrReplaySessionPreferences() {
+        store.readDaemonSettings(daemonNodeId: "daemon-2")
+        XCTAssertNil(store.daemonSettings["daemon-2"])
+        XCTAssertEqual(mock.settingsReadCalls, ["daemon-2"])
+        mock.settingsAccepted = false
+        store.readDaemonSettings(daemonNodeId: "daemon-2")
+        XCTAssertNotNil(store.daemonSettingsErrors["daemon-2"])
+        store.handleEvent(.sessionReloaded(daemon: "daemon-1", sessionId: "sess-1"))
+        XCTAssertTrue(mock.autoTitleCalls.isEmpty)
+        XCTAssertTrue(mock.autoSummaryCalls.isEmpty)
     }
 
     func testGoalProposalPreservesIdentityAndRespondsOnOriginatingDaemon() {
@@ -652,7 +888,7 @@ final class AppStoreEventHandlingTests: XCTestCase {
             models: [], daemonVersion: nil,
             permissionMode: "standard",
             currentModel: nil, currentProvider: nil, thinkingVariant: nil,
-            currentPersona: nil, availablePersonas: []
+            currentPersona: nil, availablePersonas: [], automationSettings: nil
         )
         mock.snapshotResult = snap
         store.handleEvent(.sessionReloaded(daemon: "daemon-1", sessionId: "sess-1"))
@@ -754,6 +990,7 @@ final class AppStoreEventHandlingTests: XCTestCase {
     }
 
     func testOpeningAnAlertNavigatesOnItsOriginatingDaemon() {
+        store.daemons = [DaemonEntry(nodeId: "daemon-2", name: "Server", addedAt: 0, lastConnectedAt: nil, lastKnownVersion: nil, keepConnected: true, pairingToken: nil)]
         store.handleEvent(.alert(daemon: "daemon-2", sessionId: "sess-2",
             kind: "error", title: "Other daemon", detail: nil))
         let alert = store.activeBanner!
@@ -788,7 +1025,7 @@ final class AppStoreEventHandlingTests: XCTestCase {
             permissionMode: "standard",
             currentModel: "gpt-4", currentProvider: "openai",
             thinkingVariant: "high", currentPersona: nil,
-            availablePersonas: []
+            availablePersonas: [], automationSettings: nil
         )
         mock.snapshotResult = snap
         store.handleEvent(.sessionReloaded(daemon: "daemon-1", sessionId: "sess-1"))

@@ -73,6 +73,32 @@ Use the checked-in Xcode project for builds and tests. `project.yml` does
 not yet describe its test target or current package pin; regenerating the
 project would discard those settings.
 
+### Navigation and daemon settings
+
+The root navigation path owns the selected daemon and chat. Appearance
+callbacks fetch catalogs; they do not select another connection. Working
+locations persist in phone preferences, while drafts remain in memory keyed
+by daemon and session. Session lists validate restored chat identities before
+falling back to the corresponding machine's list.
+
+`ReadAutomationSettings` and setter acknowledgments return confirmed values.
+Auto-title is connection-local; auto-summary uses one shared watch value and
+notifies authenticated websocket clients, including clients without an
+attached chat. Mobile caches are cleared on disconnect. Queued settings
+mutations expire with the originating connection.
+
+The mobile core tracks actually sent create/attach operations so delayed
+history does not complete a new-chat request. Typed `SessionOperationFailed`
+replies retain operation and target identity before attachment; legacy error
+replies remain available to older clients. Swift handles distinct creation
+and attachment events and offers a scoped retry after an opening failure.
+Reliable typed failure recovery requires an updated daemon.
+
+`AppNavigationTests` and `AppStoreEventHandlingTests` cover restoration,
+cross-daemon ownership, drafts, confirmed settings, invite credentials and
+recovery races. Their phone preferences use isolated suites. Simulator
+capture fixtures are temporary and are removed after visual verification.
+
 ## Crate structure
 
 ```

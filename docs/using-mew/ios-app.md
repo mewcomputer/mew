@@ -143,9 +143,31 @@ completed read, including jobs with no captured output.
 
 ### Settings
 
-- **Your Node ID** — copyable. This is what daemons need to allowlist.
-- **Daemon management** — rename or remove paired daemons.
-- **About** — app version.
+**App settings** contains the chat font, this phone's copyable connection
+identity, saved-machine links, and app information. Use the complete invite
+from `mew pair` when pairing, including its authorization credential.
+
+Tap the machine name in a chat or conversation list to open the switcher.
+It shows connection state, the selected machine, and pending requests. Tap
+the information button for that machine's details:
+
+- **Nickname** changes the saved name on this phone.
+- **Connection** offers Retry connection or Pair again when needed.
+- **Auto-title** affects prompts sent through this phone's current connection.
+- **Auto-summary** affects every session and client on the daemon.
+- **Advanced** contains the daemon version and copyable Node ID.
+
+Automation controls display values confirmed by the daemon. Update the daemon
+to use these controls and scoped chat-opening errors; older versions show
+settings as unavailable rather than assuming they are off. Removing a saved
+connection disconnects this phone and removes its local entry. It keeps the
+daemon's conversations and does not revoke the phone's authorization.
+
+The app reopens the last explicitly selected machine and its working chat or
+list. An offline machine stays selected while it reconnects. A missing chat
+falls back to its machine's list; a removed machine falls back to the picker.
+With no saved choice, one machine opens directly and several show the picker.
+Each chat retains its own draft while switching within the app.
 
 ## Connection lifecycle
 
