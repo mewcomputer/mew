@@ -105,6 +105,7 @@ struct ReviewView: View {
 
 private struct FileReviewView: View {
     let file: ReviewFile
+    @EnvironmentObject private var store: AppStore
 
     var body: some View {
         Group {
@@ -115,25 +116,7 @@ private struct FileReviewView: View {
                 ContentUnavailableView(file.status.label, systemImage: "doc",
                     description: Text("No text changes to display."))
             } else {
-                ScrollView([.horizontal, .vertical]) {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(file.hunks.indices, id: \.self) { index in
-                            let hunk = file.hunks[index]
-                            Text("@@ −\(hunk.oldStart),\(hunk.oldCount) +\(hunk.newStart),\(hunk.newCount) @@")
-                                .foregroundStyle(.secondary)
-                                .padding(8)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(Color(.secondarySystemBackground))
-                            ForEach(hunk.lines.indices, id: \.self) { lineIndex in
-                                ReviewLineView(line: hunk.lines[lineIndex])
-                            }
-                        }
-                    }
-                    .font(.caption.monospaced())
-                    .padding(.vertical, 8)
-                }
-                .defaultScrollAnchor(.topLeading)
-                .textSelection(.enabled)
+                ReviewDiffView(file: file, settings: store.phoneSettings)
             }
         }
         .navigationTitle(file.path.components(separatedBy: "/").last ?? file.path)
@@ -141,8 +124,47 @@ private struct FileReviewView: View {
     }
 }
 
-private struct ReviewLineView: View {
+struct ReviewDiffView: View {
+    let file: ReviewFile
+    let settings: PhoneSettings
+    @ScaledMetric(relativeTo: .caption) private var baseTextSize = 13
+
+    private var fontSize: CGFloat { baseTextSize * settings.reviewTextSize.scale }
+    private var gutterWidth: CGFloat {
+        let lastLine = file.hunks.lazy.flatMap(\.lines).reduce(UInt64(0)) { max($0, $1.oldLine ?? 0, $1.newLine ?? 0) }
+        return CGFloat(max(2, String(lastLine).count)) * fontSize * 0.65
+    }
+
+    var body: some View {
+        ScrollView(settings.reviewWrapLines ? .vertical : [.horizontal, .vertical]) {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                ForEach(file.hunks.indices, id: \.self) { index in
+                    let hunk = file.hunks[index]
+                    Text("@@ −\(hunk.oldStart),\(hunk.oldCount) +\(hunk.newStart),\(hunk.newCount) @@")
+                        .foregroundStyle(.secondary)
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color(.secondarySystemBackground))
+                    ForEach(hunk.lines.indices, id: \.self) { lineIndex in
+                        ReviewLineView(line: hunk.lines[lineIndex], wrapLines: settings.reviewWrapLines,
+                            showLineNumbers: settings.reviewLineNumbers, fontSize: fontSize, gutterWidth: gutterWidth)
+                    }
+                }
+            }
+            .font(.system(size: fontSize, design: .monospaced))
+            .padding(.vertical, 8)
+        }
+        .defaultScrollAnchor(.topLeading)
+        .textSelection(.enabled)
+    }
+}
+
+struct ReviewLineView: View {
     let line: ReviewLine
+    let wrapLines: Bool
+    let showLineNumbers: Bool
+    let fontSize: CGFloat
+    let gutterWidth: CGFloat
 
     private var color: Color {
         switch line.kind {
@@ -162,18 +184,22 @@ private struct ReviewLineView: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            Text(line.oldLine.map(String.init) ?? "")
-                .foregroundStyle(.secondary)
-                .frame(width: 42, alignment: .trailing)
-            Text(line.newLine.map(String.init) ?? "")
-                .foregroundStyle(.secondary)
-                .frame(width: 42, alignment: .trailing)
+            if showLineNumbers {
+                Text(line.oldLine.map(String.init) ?? "")
+                    .foregroundStyle(.secondary)
+                    .frame(width: gutterWidth, alignment: .trailing)
+                Text(line.newLine.map(String.init) ?? "")
+                    .foregroundStyle(.secondary)
+                    .frame(width: gutterWidth, alignment: .trailing)
+            }
             Text(marker)
                 .foregroundStyle(color)
-                .frame(width: 10)
+                .frame(width: fontSize * 0.65)
             Text(line.text.hasSuffix("\n") ? String(line.text.dropLast()) : line.text)
-                .fixedSize(horizontal: true, vertical: false)
+                .fixedSize(horizontal: !wrapLines, vertical: true)
+                .frame(maxWidth: wrapLines ? .infinity : nil, alignment: .leading)
         }
+        .font(.system(size: fontSize, design: .monospaced))
         .padding(.horizontal, 8)
         .padding(.vertical, 2)
         .frame(maxWidth: .infinity, alignment: .leading)

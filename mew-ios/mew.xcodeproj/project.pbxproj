@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		B67F88A1A1044574B031AE54 /* PhoneSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE53 /* PhoneSettings.swift */; };
+		B67F88A1A1044574B031AE55 /* PhoneSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE53 /* PhoneSettings.swift */; };
+		B67F88A1A1044574B031AE52 /* PhoneSettingsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE51 /* PhoneSettingsTests.swift */; };
 		4CFE382411B9F5B29F73BC98 /* AppNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDD7B0882730ED265818ED48 /* AppNavigation.swift */; };
 		131D41ACE02C395317398AAE /* AppNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDD7B0882730ED265818ED48 /* AppNavigation.swift */; };
 
@@ -92,6 +95,8 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		B67F88A1A1044574B031AE53 /* PhoneSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneSettings.swift; sourceTree = "<group>"; };
+		B67F88A1A1044574B031AE51 /* PhoneSettingsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneSettingsTests.swift; sourceTree = "<group>"; };
 		BDD7B0882730ED265818ED48 /* AppNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppNavigation.swift; sourceTree = "<group>"; };
 		B67F88A1A1044574B031AE41 /* AppNavigationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppNavigationTests.swift; sourceTree = "<group>"; };
 		A44A9BFA7CFE8448B21F957E /* DaemonSwitcherView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonSwitcherView.swift; sourceTree = "<group>"; };
@@ -212,6 +217,7 @@
 				B67F88A1A1044574B031AE24 /* ConversationActivityTests.swift */,
 				B67F88A1A1044574B031AE31 /* SessionTimelineTests.swift */,
 				B67F88A1A1044574B031AE41 /* AppNavigationTests.swift */,
+				B67F88A1A1044574B031AE51 /* PhoneSettingsTests.swift */,
 			);
 			path = mewTests;
 			sourceTree = "<group>";
@@ -228,6 +234,7 @@
 			isa = PBXGroup;
 			children = (
 				545CECE3392D12E734D9A133 /* AppStore.swift */,
+				B67F88A1A1044574B031AE53 /* PhoneSettings.swift */,
 				B88D5B96B52F24E2D3C0DD85 /* ChatView.swift */,
 				B67F88A1A1044574B031AE21 /* ConversationActivity.swift */,
 				B67F88A1A1044574B031AE33 /* SessionTimeline.swift */,
@@ -382,6 +389,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				36E2687C83C9A15519FBB164 /* AppStore.swift in Sources */,
+				B67F88A1A1044574B031AE54 /* PhoneSettings.swift in Sources */,
 				64FF009410027CFE96073711 /* ChatView.swift in Sources */,
 				B67F88A1A1044574B031AE23 /* ConversationActivity.swift in Sources */,
 				B67F88A1A1044574B031AE35 /* SessionTimeline.swift in Sources */,
@@ -409,6 +417,7 @@
 				B67F88A1A1044574B031AE25 /* ConversationActivityTests.swift in Sources */,
 				B67F88A1A1044574B031AE32 /* SessionTimelineTests.swift in Sources */,
 				B67F88A1A1044574B031AE42 /* AppNavigationTests.swift in Sources */,
+				B67F88A1A1044574B031AE52 /* PhoneSettingsTests.swift in Sources */,
 				9D4F7BBD61F807B2EF078A4B /* TodoPanelView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -418,6 +427,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				0BAEB661227D370ACEAB5007 /* AppStore.swift in Sources */,
+				B67F88A1A1044574B031AE55 /* PhoneSettings.swift in Sources */,
 				FDEC179FCD1D0B1F5CA253E1 /* ChatView.swift in Sources */,
 				B67F88A1A1044574B031AE22 /* ConversationActivity.swift in Sources */,
 				B67F88A1A1044574B031AE34 /* SessionTimeline.swift in Sources */,

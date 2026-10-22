@@ -16,6 +16,7 @@ final class AppStoreEventHandlingTests: XCTestCase {
         mock = MockMobileCore()
         suiteName = "mew.store-tests.\(UUID().uuidString)"
         store = AppStore(defaults: UserDefaults(suiteName: suiteName)!)
+        store.isAppActive = true
         store.injectCore(mock)
         daemonId = DaemonId(nodeId: "daemon-1")
         store.selectedDaemonId = daemonId
@@ -405,9 +406,11 @@ final class AppStoreEventHandlingTests: XCTestCase {
         mock.promptAccepted = false
         store.lastPrompt["sess-1"] = "previous"
         XCTAssertFalse(store.sendPrompt("new text"))
+        XCTAssertNil(store.feedback)
         XCTAssertEqual(store.lastPrompt["sess-1"], "previous")
         mock.promptAccepted = true
         XCTAssertTrue(store.sendPrompt("accepted"))
+        XCTAssertEqual(store.feedback?.kind, .sent)
         XCTAssertEqual(store.lastPrompt["sess-1"], "accepted")
         store.selectedSessionId = "sess-2"
         XCTAssertFalse(store.canSendPrompt)
@@ -970,7 +973,7 @@ final class AppStoreEventHandlingTests: XCTestCase {
         store.selectedSessionId = "sess-1"
         store.handleEvent(.alert(
             daemon: "daemon-1", sessionId: "sess-2",
-            kind: "permission", title: "Permission needed", detail: nil
+            kind: "permissionneeded", title: "Permission needed", detail: nil
         ))
         XCTAssertNotNil(store.activeBanner)
         XCTAssertEqual(store.activeBanner?.sessionId, "sess-2")
@@ -1003,7 +1006,7 @@ final class AppStoreEventHandlingTests: XCTestCase {
         store.selectedSessionId = "sess-1"
         store.handleEvent(.alert(
             daemon: "daemon-1", sessionId: "sess-1",
-            kind: "permission", title: "Permission needed", detail: nil
+            kind: "permissionneeded", title: "Permission needed", detail: nil
         ))
         XCTAssertNil(store.activeBanner)
     }

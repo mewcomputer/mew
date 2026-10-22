@@ -224,11 +224,15 @@ struct AddDaemonView: View {
 /// Scanner sheet wrapping the camera view with a dismiss button.
 struct QRScannerSheet: View {
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var store: AppStore
     let onScan: (String) -> Void
 
     var body: some View {
         NavigationStack {
             QRScannerView { payload in
+                if store.phoneSettings.haptics {
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                }
                 onScan(payload)
             }
             .ignoresSafeArea()

@@ -147,6 +147,20 @@ completed read, including jobs with no captured output.
 identity, saved-machine links, and app information. Use the complete invite
 from `mew pair` when pairing, including its authorization credential.
 
+Appearance follows iOS by default, with light and dark overrides. Haptic
+feedback acknowledges accepted messages (including retries), completed turns,
+and requests or errors. Foreground alert preferences control completion,
+turn/delivery errors, and requests, with individual machine mutes. These affect
+banners and alert haptics on this phone while the app is open. Requests and
+conversation activity remain visible when alerts are muted; direct action
+errors still appear. Background events do not replay banners on reopening.
+
+Review readability controls line wrapping, line numbers, and diff text size,
+with a live preview. Diff text also follows iOS text size; these controls do
+not change conversation text. About contains a shareable connection diagnostic
+report with versions and connection states. The report excludes names, Node
+IDs, credentials, raw errors, paths, and conversation content.
+
 Tap the machine name in a chat or conversation list to open the switcher.
 It shows connection state, the selected machine, and pending requests. Tap
 the information button for that machine's details:

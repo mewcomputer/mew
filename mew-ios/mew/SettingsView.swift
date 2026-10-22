@@ -12,8 +12,16 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            fontSection
-            phoneSection
+            appearanceSection
+            feedbackSection
+            reviewSection
+            Section("This phone") {
+                NavigationLink("Connection identity") {
+                    Form { phoneSection }
+                        .navigationTitle("Connection identity")
+                        .navigationBarTitleDisplayMode(.inline)
+                }
+            }
             daemonsSection
             aboutSection
         }
@@ -22,6 +30,99 @@ struct SettingsView: View {
     }
 
     // MARK: - Font
+
+    private var appearanceSection: some View {
+        Section("Appearance") {
+            Picker("Theme", selection: $store.phoneSettings.appearance) {
+                ForEach(PhoneAppearance.allCases, id: \.self) { choice in
+                    Text(choice.label).tag(choice)
+                }
+            }
+            NavigationLink {
+                Form { fontSection }
+                    .navigationTitle("Chat font")
+                    .navigationBarTitleDisplayMode(.inline)
+            } label: {
+                LabeledContent("Chat font", value: store.fontChoice.displayName)
+            }
+        }
+    }
+
+    private var feedbackSection: some View {
+        Section {
+            Toggle("Haptic feedback", isOn: $store.phoneSettings.haptics)
+            NavigationLink("Foreground alerts") {
+                Form {
+                    Section {
+                        Toggle("Completed turns", isOn: $store.phoneSettings.completionAlerts)
+                        Toggle("Turn and delivery errors", isOn: $store.phoneSettings.errorAlerts)
+                        Toggle("Requests needing attention", isOn: $store.phoneSettings.requestAlerts)
+                    } footer: {
+                        Text("Banners and alert haptics appear while the app is open. Pending requests and conversation activity stay visible when alerts are off. Errors from actions you take are always shown.")
+                    }
+                    if !store.daemons.isEmpty {
+                        Section {
+                            ForEach(store.daemons, id: \.nodeId) { daemon in
+                                Toggle(daemon.name, isOn: Binding(
+                                    get: { !store.phoneSettings.mutedMachines.contains(daemon.nodeId) },
+                                    set: { enabled in
+                                        if enabled { store.phoneSettings.mutedMachines.remove(daemon.nodeId) }
+                                        else { store.phoneSettings.mutedMachines.insert(daemon.nodeId) }
+                                    }
+                                ))
+                            }
+                        } header: {
+                            Text("Alerts from machines")
+                        } footer: {
+                            Text("These preferences affect only this phone.")
+                        }
+                    }
+                }
+                .navigationTitle("Foreground alerts")
+                .navigationBarTitleDisplayMode(.inline)
+            }
+        } header: {
+            Text("Feedback")
+        } footer: {
+            Text("Haptics acknowledge sent messages, completed turns, errors, and requests needing attention.")
+        }
+    }
+
+    private var reviewSection: some View {
+        Section {
+            NavigationLink("Review readability") {
+                Form {
+                    Section {
+                        Toggle("Wrap long lines", isOn: $store.phoneSettings.reviewWrapLines)
+                        Toggle("Line numbers", isOn: $store.phoneSettings.reviewLineNumbers)
+                        Picker("Text size", selection: $store.phoneSettings.reviewTextSize) {
+                            ForEach(ReviewTextSize.allCases, id: \.self) { size in
+                                Text(size.label).tag(size)
+                            }
+                        }
+                    } footer: {
+                        Text("Applies to file diffs on this phone. Text also follows your iOS text size. Conversation text keeps its current size.")
+                    }
+                    Section("Preview") {
+                        ReviewDiffView(file: Self.previewFile, settings: store.phoneSettings)
+                            .frame(height: 170)
+                            .listRowInsets(EdgeInsets())
+                    }
+                }
+                .navigationTitle("Review readability")
+                .navigationBarTitleDisplayMode(.inline)
+            }
+        } header: {
+            Text("Review")
+        }
+    }
+
+    private static let previewFile = ReviewFile(path: "src/main.rs", oldPath: nil, status: .modified,
+        hunks: [ReviewHunk(oldStart: 12, oldCount: 2, newStart: 12, newCount: 2, lines: [
+            ReviewLine(kind: .context, oldLine: 12, newLine: 12, text: "fn greeting(name: &str) -> String {"),
+            ReviewLine(kind: .deletion, oldLine: 13, newLine: nil, text: "    format!(\"Hello, {}\", name)"),
+            ReviewLine(kind: .addition, oldLine: nil, newLine: 13, text: "    format!(\"Hello, {name}. Your workspace is ready.\")")
+        ])], added: 1, removed: 1)
 
     @ViewBuilder
     private var fontSection: some View {
@@ -129,6 +230,22 @@ struct SettingsView: View {
     @ViewBuilder
     private var aboutSection: some View {
         Section("About") {
+            NavigationLink("Connection diagnostics") {
+                Form {
+                    Section {
+                        Text(store.connectionDiagnostics)
+                            .font(.callout.monospaced())
+                            .textSelection(.enabled)
+                        ShareLink(item: store.connectionDiagnostics) {
+                            Label("Share diagnostics", systemImage: "square.and.arrow.up")
+                        }
+                    } footer: {
+                        Text("Includes app, iOS, and daemon versions and connection states. Excludes names, identities, credentials, error details, paths, and conversation content.")
+                    }
+                }
+                .navigationTitle("Diagnostics")
+                .navigationBarTitleDisplayMode(.inline)
+            }
             LabeledContent {
                 Text(appVersionString)
                     .foregroundStyle(.secondary)

@@ -5,6 +5,7 @@ import MewMobileCore
 struct RootView: View {
     @EnvironmentObject var store: AppStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
     @State private var bannerTask: Task<Void, Never>?
 
     var body: some View {
@@ -24,6 +25,18 @@ struct RootView: View {
                 }
         }
         .tint(.accentColor)
+        .preferredColorScheme(store.phoneSettings.appearance.colorScheme)
+        .onAppear { store.isAppActive = scenePhase == .active }
+        .onChange(of: scenePhase) { _, phase in store.isAppActive = phase == .active }
+        .onChange(of: store.feedback) { _, feedback in
+            guard store.isAppActive, store.phoneSettings.haptics, let feedback else { return }
+            switch feedback.kind {
+            case .sent: UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            case .completed: UINotificationFeedbackGenerator().notificationOccurred(.success)
+            case .attention: UINotificationFeedbackGenerator().notificationOccurred(.warning)
+            case .failed: UINotificationFeedbackGenerator().notificationOccurred(.error)
+            }
+        }
         .overlay(alignment: .top) {
             if let banner = store.activeBanner {
                 alertBanner(banner)
@@ -86,9 +99,9 @@ struct RootView: View {
 
     private func iconForAlertKind(_ kind: String) -> String {
         switch kind {
-        case "permission":     return "hand.raised.fill"
-        case "ask_user":       return "questionmark.bubble.fill"
-        case "error":          return "exclamationmark.triangle.fill"
+        case "permissionneeded": return "hand.raised.fill"
+        case "inputneeded": return "questionmark.bubble.fill"
+        case "error", "turnfailed": return "exclamationmark.triangle.fill"
         default:               return "bell.fill"
         }
     }

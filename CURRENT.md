@@ -2859,3 +2859,27 @@ Removed all temporary capture fixtures and updated mobile/user documentation.
 New settings and typed attachment recovery require an updated daemon. Physical
 behavior tests passed, but a complete hands-on live-phone gesture/reconnect
 walkthrough remains outstanding.
+
+# 2026-10-22 — local iOS presentation and feedback settings
+
+Added persisted phone-only appearance, haptic feedback, foreground alert
+categories and machine mutes, plus review line wrapping, line numbers and
+independent text size. Review preferences have a live diff preview and follow
+Dynamic Type. Font and connection identity details are one tap from the main
+settings page. Diagnostic sharing exports only versions and connection states;
+names, identities, credentials, raw errors, paths and conversation content are
+excluded. Corrected banner icons to match the mobile core's actual alert kinds.
+
+Muted alerts retain request queues, conversation activity and submission/error
+state. Background events do not present or replay feedback. Accepted sends and
+retries share feedback behavior; rejected sends remain silent. Direct action
+failures remain visible while the app is active. The QR scanner also respects
+the haptic preference.
+
+All 116 tests pass on simulator and physical iPhone, including preference
+restoration/isolation, invalid-value fallbacks, alert scopes and lifecycle,
+request retention, failed-delivery recovery, retry feedback and accessible
+wrapped review layout. Inspected seeded light/dark simulator settings and
+scrolling/wrapped diff captures; saved a comparison GIF outside the repo and
+removed the temporary fixture. Physical haptic feel and a complete hands-on
+gesture walkthrough remain manual verification work.

@@ -193,6 +193,25 @@ final class AppStore: ObservableObject {
     // Alerts
     @Published var alerts: [AlertItem] = []
     @Published var activeBanner: AlertItem?
+    @Published private(set) var feedback: PhoneFeedback?
+    var isAppActive = false {
+        didSet {
+            if !isAppActive {
+                activeBanner = nil
+                feedback = nil
+            }
+        }
+    }
+    @Published var phoneSettings: PhoneSettings {
+        didSet {
+            phoneSettings.save(to: preferences)
+            if !phoneSettings.haptics { feedback = nil }
+            if let banner = activeBanner,
+               !phoneSettings.allowsAlert(kind: banner.kind, daemon: banner.daemon) {
+                activeBanner = nil
+            }
+        }
+    }
 
     @Published private var pendingSubmissions: [String: Set<String>] = [:]
 
@@ -218,6 +237,7 @@ final class AppStore: ObservableObject {
 
     init(defaults: UserDefaults = .standard) {
         preferences = defaults
+        phoneSettings = PhoneSettings(defaults: defaults)
         fontChoice = MewFontChoice(rawValue: defaults.string(forKey: "mew.fontChoice") ?? "Mi Sans") ?? .miSans
     }
 
@@ -301,6 +321,7 @@ final class AppStore: ObservableObject {
         let id = DaemonId(nodeId: daemon.nodeId)
         core.removeDaemon(id: id)
         removedDaemons.insert(daemon.nodeId)
+        phoneSettings.mutedMachines.remove(daemon.nodeId)
         daemons = core.listDaemons()
         forgetWorkingLocation(daemonNodeId: daemon.nodeId)
         daemonStatuses.removeValue(forKey: daemon.nodeId)
@@ -440,7 +461,7 @@ final class AppStore: ObservableObject {
         let item = AlertItem(daemon: daemon, sessionId: "", kind: "error",
             title: "Couldn't create conversation", detail: message)
         alerts.append(item)
-        activeBanner = item
+        if isAppActive { activeBanner = item }
     }
 
     func fetchProjects() {
@@ -550,18 +571,17 @@ final class AppStore: ObservableObject {
             pendingSubmissions[daemonId.nodeId, default: []].insert(sessionId)
             lastPrompt[sessionId] = text
         }
+        emitFeedback(.sent)
         return true
     }
 
     /// Re-send the last prompt for the selected session (retry after a failed
     /// turn). No-op if there's no stored prompt to retry.
     func retryLastTurn() {
-        guard let daemonId = selectedDaemonId, let core else { return }
         guard let sessionId = selectedSessionId,
               let prompt = lastPrompt[sessionId],
               !prompt.isEmpty else { return }
-        if canSendPrompt, core.prompt(id: daemonId, text: prompt) {
-            pendingSubmissions[daemonId.nodeId, default: []].insert(sessionId)
+        if sendPrompt(prompt) {
             lastTurnFailed[sessionId] = false
         }
     }
@@ -967,8 +987,15 @@ final class AppStore: ObservableObject {
                 detail: detail
             )
             alerts.append(item)
-            if kind == "error" || daemon != selectedDaemonId?.nodeId || sessionId != selectedSessionId {
-                activeBanner = item
+            if isAppActive, phoneSettings.allowsAlert(kind: kind, daemon: daemon) {
+                if kind == "error" || kind == "turnfailed" || daemon != selectedDaemonId?.nodeId || sessionId != selectedSessionId {
+                    activeBanner = item
+                }
+                switch kind {
+                case "turncomplete": emitFeedback(.completed)
+                case "error", "turnfailed": emitFeedback(.failed)
+                default: emitFeedback(.attention)
+                }
             }
             if kind == "error", daemon == selectedDaemonId?.nodeId, sessionId == selectedSessionId {
                 isLoadingSession = false
@@ -1043,6 +1070,41 @@ final class AppStore: ObservableObject {
     }
 
     // MARK: - Helpers
+
+    private func emitFeedback(_ kind: PhoneFeedback.Kind) {
+        guard isAppActive, phoneSettings.haptics else { return }
+        feedback = PhoneFeedback(kind: kind)
+    }
+
+    /// Export an allowlist of connection metadata, excluding free-form names and errors.
+    var connectionDiagnostics: String {
+        func version(_ value: String?) -> String {
+            guard let value else { return "unknown" }
+            let core = value.split(separator: "-", maxSplits: 1).first.map(String.init) ?? ""
+            let parts = core.split(separator: ".", omittingEmptySubsequences: false)
+            guard (2...4).contains(parts.count), parts.allSatisfy({ !$0.isEmpty && $0.count <= 5 && $0.allSatisfy(\.isNumber) }) else {
+                return "unknown"
+            }
+            return core
+        }
+        let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+        var lines = ["mew connection diagnostics",
+            "App: \(version(appVersion))",
+            "iOS: \(version(UIDevice.current.systemVersion))",
+            "Saved machines: \(daemons.count)"]
+        for (index, daemon) in daemons.enumerated() {
+            let status: String
+            switch daemonStatuses[daemon.nodeId] ?? .disconnected {
+            case .connected: status = "connected"
+            case .connecting: status = "connecting"
+            case .disconnected: status = "disconnected"
+            case .backoff: status = "retrying"
+            case .pairedLost: status = "pairing required"
+            }
+            lines.append("Machine \(index + 1): \(status); daemon \(version(daemonVersions[daemon.nodeId] ?? daemon.lastKnownVersion))")
+        }
+        return lines.joined(separator: "\n")
+    }
 
     private func applySnapshot(_ snap: DaemonSnapshot) {
         if let session = snap.sessions.first(where: { $0.sessionId == selectedSessionId }) {
