@@ -1,6 +1,16 @@
 use super::*;
 
 impl DesktopShell {
+    pub(super) fn set_sidebar_filter(&mut self, filter: SidebarFilter, cx: &mut Context<Self>) {
+        self.sidebar_filter = filter;
+        self.sidebar_keyboard_session = None;
+        self.session_menu_session = None;
+        self.workspace_open_menu = None;
+        self.rebuild_sidebar_rows();
+        self.sidebar_list.reset(self.sidebar_rows.len());
+        cx.notify();
+    }
+
     fn render_sidebar_filters(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         div()
             .flex()
@@ -51,13 +61,7 @@ impl DesktopShell {
                         .aria_label(SharedString::from(title.clone()))
                         .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
                         .on_click(cx.listener(move |shell, _, _, cx| {
-                            shell.sidebar_filter = filter;
-                            shell.sidebar_keyboard_session = None;
-                            shell.session_menu_session = None;
-                            shell.workspace_open_menu = None;
-                            shell.rebuild_sidebar_rows();
-                            shell.sidebar_list.reset(shell.sidebar_rows.len());
-                            cx.notify();
+                            shell.set_sidebar_filter(filter, cx);
                         }))
                         .child(SharedString::from(title))
                 }),
@@ -71,6 +75,15 @@ impl DesktopShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if event.keystroke.key == "escape"
+            && (self.session_menu_session.is_some() || self.workspace_open_menu.is_some())
+        {
+            self.close_shell_popovers();
+            window.focus(&self.sidebar_focus_handle, cx);
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
         let session_indices: Vec<usize> = self
             .sidebar_rows
             .iter()
@@ -108,6 +121,13 @@ impl DesktopShell {
             "down" => (session_position + 1).min(session_indices.len() - 1),
             "home" => 0,
             "end" => session_indices.len() - 1,
+            "f10" if event.keystroke.modifiers.shift => {
+                if let SidebarRow::Session(conversation) = &self.sidebar_rows[current_index] {
+                    self.toggle_session_menu(conversation.session_id.clone(), cx);
+                    cx.stop_propagation();
+                }
+                return;
+            }
             "enter" | "return" | "space" => {
                 if let SidebarRow::Session(conversation) = &self.sidebar_rows[current_index] {
                     self.sidebar_keyboard_session = Some(conversation.session_id.clone());
@@ -222,7 +242,7 @@ impl DesktopShell {
     pub(super) fn render_session_rows(
         &mut self,
         range: Range<usize>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<gpui::AnyElement> {
         range
@@ -237,7 +257,13 @@ impl DesktopShell {
                         .px(px(4.))
                         .text_xs()
                         .text_color(theme_rgb(&self.theme, "text.muted"))
-                        .child("WORKSPACES")
+                        .child(if self.sidebar_filter == SidebarFilter::Inbox {
+                            "UNREAD & REQUESTS"
+                        } else if self.sidebar_filter == SidebarFilter::Archived {
+                            "ARCHIVED CHATS"
+                        } else {
+                            "WORKSPACES"
+                        })
                         .into_any_element(),
                 ),
                 SidebarRow::Workspace {
@@ -427,11 +453,20 @@ impl DesktopShell {
                 SidebarRow::Archived { count } => Some(
                     div()
                         .id("sidebar-archived")
+                        .debug_selector(|| "sidebar-archived".into())
                         .h(px(30.))
                         .px(px(10.))
                         .flex()
                         .items_center()
                         .gap(px(7.))
+                        .cursor_pointer()
+                        .role(Role::Button)
+                        .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+                        .aria_label(SharedString::from(format!("Archived chats, {count}")))
+                        .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
+                        .on_click(cx.listener(|shell, _, _, cx| {
+                            shell.set_sidebar_filter(SidebarFilter::Archived, cx);
+                        }))
                         .text_xs()
                         .text_color(theme_rgb(&self.theme, "text.muted"))
                         .child(tabler_icon(
@@ -730,8 +765,7 @@ impl DesktopShell {
                         .filter(|path| !path.is_empty())
                         .map(display_session_path)
                         .map(SharedString::from);
-                    let path_label = path.clone();
-                    let path = path.filter(|_| conversation.cwd != conversation.workspace_path);
+
                     let session_time =
                         session_time_label(conversation.last_message_at).map(SharedString::from);
                     let status_color = if conversation.needs_attention {
@@ -758,13 +792,21 @@ impl DesktopShell {
                     } else {
                         None
                     };
-                    let has_meta = path.is_some() || status_label.is_some();
-                    let row_height = if has_meta { 46. } else { 30. };
+                    let status_icon = if conversation.needs_attention {
+                        Some(TablerIcon::MessageCircle)
+                    } else if conversation.state == mew_protocol::SessionState::Running {
+                        Some(TablerIcon::Square)
+                    } else if conversation.last_turn_failed && conversation.unread_completion {
+                        Some(TablerIcon::X)
+                    } else {
+                        None
+                    };
+                    let unread_dot = conversation.unread_completion && status_icon.is_none();
+                    let row_height = 30.;
                     let details: SharedString = format!(
                         "Chat: {}{}{}{}",
                         title,
-                        path_label
-                            .as_deref()
+                        path.as_deref()
                             .map(|path| format!(" · {path}"))
                             .unwrap_or_default(),
                         status_label
@@ -776,71 +818,95 @@ impl DesktopShell {
                             .unwrap_or_default(),
                     )
                     .into();
-                    let tooltip_details = details.clone();
                     let tooltip_background = theme_rgb(&self.theme, "panel.background");
                     let tooltip_foreground = theme_rgb(&self.theme, "text.body");
+                    let tooltip_muted = theme_rgb(&self.theme, "text.muted");
+                    let tooltip_border = theme_rgb(&self.theme, "divider");
                     let menu_open = self.session_menu_session.as_deref() == Some(&session_id);
                     let renaming = self.rename_session_id.as_deref() == Some(&session_id);
                     let pinned = conversation.pinned;
                     let archived = conversation.archived;
                     let current_group_id = conversation.group_id.clone();
-                    let menu_session_id = session_id.clone();
+                    let unread_completion = conversation.unread_completion;
+                    let tooltip_conversation = conversation;
                     let session_for_menu = session_id.clone();
                     let session_group = SharedString::from(format!("sidebar-session-{session_id}"));
-                    let move_control = div()
+                    let show_actions = !renaming
+                        && (menu_open
+                            || self.sidebar_keyboard_session.as_deref()
+                                == Some(session_id.as_str())
+                                && self.sidebar_focus_handle.contains_focused(window, cx));
+                    let actions = div()
                         .absolute()
-                        .top_0()
-                        .right_0()
-                        .h(px(28.))
-                        .w(px(48.))
+                        .inset_0()
                         .flex()
                         .items_center()
                         .justify_end()
-                        .pr(px(4.))
-                        .bg(linear_gradient(
-                            90.,
-                            linear_color_stop(
-                                theme_rgb(&self.theme, "sidebar.background").opacity(0.),
-                                0.,
-                            ),
-                            linear_color_stop(
-                                theme_rgb(&self.theme, "sidebar.background").opacity(0.96),
-                                1.,
-                            ),
-                        ))
                         .invisible()
-                        .group_hover(session_group.clone(), |style| style.visible())
-                        .when(menu_open, |element| element.visible())
-                        .child(
-                            div()
-                                .id(format!("session-menu-trigger-{menu_session_id}"))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .size(px(22.))
-                                .rounded(px(5.))
-                                .cursor_pointer()
-                                .role(Role::Button)
-                                .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                                .aria_label(SharedString::from(format!(
-                                    "Conversation options: {}",
-                                    title
-                                )))
-                                .text_color(theme_rgb(&self.theme, "text.body"))
-                                .hover(|element| element.bg(theme_rgb(&self.theme, "divider")))
-                                .on_click(cx.listener(move |shell, _, _, cx| {
-                                    cx.stop_propagation();
-                                    shell.toggle_session_menu(menu_session_id.clone(), cx);
-                                }))
-                                .child(tabler_icon(
-                                    TablerIcon::Dots,
-                                    theme_rgb(&self.theme, "text.body"),
-                                    px(13.),
-                                )),
+                        .when(!renaming, |element| {
+                            element.group_hover(session_group.clone(), |style| style.visible())
+                        })
+                        .when(show_actions, |element| element.visible())
+                        .children(
+                            [
+                                (
+                                    "pin",
+                                    TablerIcon::Pin,
+                                    if pinned {
+                                        "Unpin conversation"
+                                    } else {
+                                        "Pin conversation"
+                                    },
+                                ),
+                                (
+                                    "archive",
+                                    TablerIcon::Archive,
+                                    if archived {
+                                        "Unarchive conversation"
+                                    } else {
+                                        "Archive conversation"
+                                    },
+                                ),
+                            ]
+                            .into_iter()
+                            .map(|(action, icon, label)| {
+                                let target = session_id.clone();
+                                div()
+                                    .id(format!("session-{action}-trigger-{session_id}"))
+                                    .debug_selector({
+                                        let session_id = session_id.clone();
+                                        move || format!("sidebar-{action}-{session_id}")
+                                    })
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .size(px(22.))
+                                    .rounded(px(5.))
+                                    .cursor_pointer()
+                                    .role(Role::Button)
+                                    .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+                                    .aria_label(SharedString::from(format!("{label}: {title}")))
+                                    .hover(|element| element.bg(theme_rgb(&self.theme, "divider")))
+                                    .on_click(cx.listener(move |shell, _, _, cx| {
+                                        cx.stop_propagation();
+                                        match action {
+                                            "pin" => shell.pin_session(target.clone(), !pinned, cx),
+                                            _ => {
+                                                shell.archive_session(target.clone(), !archived, cx)
+                                            }
+                                        }
+                                    }))
+                                    .child(tabler_icon(
+                                        icon,
+                                        theme_rgb(&self.theme, "text.muted"),
+                                        px(13.),
+                                    ))
+                            }),
                         );
                     let rename_input_id = session_id.clone();
                     let rename_focus_handle = self.rename_focus_handle.clone();
                     let select_session_id = session_id.clone();
+                    let context_session_id = session_id.clone();
                     let row = div()
                         .id(format!("session-{session_id}"))
                         .debug_selector({
@@ -859,10 +925,12 @@ impl DesktopShell {
                         .relative()
                         .group(session_group.clone())
                         .tooltip(move |_, cx| {
-                            cx.new(|_| TooltipLabel {
-                                text: tooltip_details.clone(),
+                            cx.new(|_| SidebarChatPreview {
+                                conversation: tooltip_conversation.clone(),
                                 background: tooltip_background,
                                 foreground: tooltip_foreground,
+                                muted: tooltip_muted,
+                                border: tooltip_border,
                             })
                             .into()
                         })
@@ -896,6 +964,17 @@ impl DesktopShell {
                                     |element| element.aria_active_descendant(),
                                 )
                                 .aria_label(details)
+                                .aria_keyshortcuts("Shift+F10")
+                                .on_mouse_down(
+                                    gpui::MouseButton::Right,
+                                    cx.listener(move |shell, _, window, cx| {
+                                        cx.stop_propagation();
+                                        window.focus(&shell.sidebar_focus_handle, cx);
+                                        shell.sidebar_keyboard_session =
+                                            Some(context_session_id.clone());
+                                        shell.toggle_session_menu(context_session_id.clone(), cx);
+                                    }),
+                                )
                                 .on_drag(
                                     SessionDrag::new(
                                         session_id.clone(),
@@ -923,40 +1002,36 @@ impl DesktopShell {
                                         .min_w_0()
                                         .child(
                                             div()
-                                                .relative()
+                                                .flex_none()
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
                                                 .size(px(12.))
-                                                .child(
-                                                    div()
-                                                        .absolute()
-                                                        .top(px(3.))
-                                                        .left(px(3.))
-                                                        .size(px(6.))
-                                                        .rounded_full()
-                                                        .bg(status_color),
-                                                )
-                                                .when(!renaming, |element| {
+                                                .when_some(status_icon, |element, icon| {
+                                                    element.child(tabler_icon(
+                                                        icon,
+                                                        status_color,
+                                                        px(12.),
+                                                    ))
+                                                })
+                                                .when(unread_dot, |element| {
                                                     element.child(
                                                         div()
-                                                            .absolute()
-                                                            .inset_0()
-                                                            .flex()
-                                                            .items_center()
-                                                            .justify_center()
-                                                            .invisible()
-                                                            .group_hover(
-                                                                session_group.clone(),
-                                                                |style| style.visible(),
-                                                            )
-                                                            .child(tabler_icon(
-                                                                TablerIcon::GripVertical,
-                                                                theme_rgb(
-                                                                    &self.theme,
-                                                                    "text.muted",
-                                                                ),
-                                                                px(12.),
-                                                            )),
+                                                            .size(px(5.))
+                                                            .rounded_full()
+                                                            .bg(status_color),
                                                     )
-                                                }),
+                                                })
+                                                .when(
+                                                    status_icon.is_none() && !unread_dot && pinned,
+                                                    |element| {
+                                                        element.child(tabler_icon(
+                                                            TablerIcon::Pin,
+                                                            theme_rgb(&self.theme, "text.muted"),
+                                                            px(11.),
+                                                        ))
+                                                    },
+                                                ),
                                         )
                                         .child(if renaming {
                                             div()
@@ -1000,70 +1075,50 @@ impl DesktopShell {
                                                 .flex_1()
                                                 .min_w_0()
                                                 .w_full()
-                                                .pr(px(30.))
                                                 .overflow_hidden()
                                                 .whitespace_nowrap()
                                                 .text_ellipsis()
-                                                .text_xs()
+                                                .text_size(px(13.))
+                                                .when(unread_completion, |element| {
+                                                    element.font_weight(gpui::FontWeight::MEDIUM)
+                                                })
                                                 .child(title)
                                                 .into_any_element()
                                         })
-                                        .when(pinned && !renaming, |element| {
-                                            element.child(tabler_icon(
-                                                TablerIcon::Pin,
-                                                theme_rgb(&self.theme, "text.muted"),
-                                                px(11.),
-                                            ))
-                                        }),
-                                )
-                                .when(has_meta, |element| {
-                                    element.child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(8.))
-                                            .pl(px(13.))
-                                            .min_w_0()
-                                            .text_xs()
-                                            .opacity(0.82)
-                                            .text_color(theme_rgb(&self.theme, "text.muted"))
-                                            .when_some(status_label, |element, status| {
-                                                element.child(
-                                                    div()
-                                                        .flex_none()
-                                                        .text_color(theme_rgb(
-                                                            &self.theme,
-                                                            "text.body",
-                                                        ))
-                                                        .child(status),
-                                                )
-                                            })
-                                            .when_some(path, |element, path| {
-                                                element.child(
-                                                    div()
-                                                        .flex_1()
-                                                        .min_w_0()
-                                                        .overflow_hidden()
-                                                        .whitespace_nowrap()
-                                                        .text_ellipsis()
-                                                        .child(path),
-                                                )
-                                            })
-                                            .when_some(session_time, |element, time| {
-                                                element.child(
-                                                    div()
-                                                        .flex_none()
-                                                        .text_color(theme_rgb(
-                                                            &self.theme,
-                                                            "text.muted",
-                                                        ))
-                                                        .child(time),
-                                                )
-                                            }),
-                                    )
-                                }),
-                        )
-                        .child(move_control);
+                                        .child(
+                                            div()
+                                                .relative()
+                                                .flex_none()
+                                                .w(px(44.))
+                                                .h(px(22.))
+                                                .when_some(session_time, |element, time| {
+                                                    element.child(
+                                                        div()
+                                                            .absolute()
+                                                            .inset_0()
+                                                            .flex()
+                                                            .items_center()
+                                                            .justify_end()
+                                                            .text_xs()
+                                                            .text_color(theme_rgb(
+                                                                &self.theme,
+                                                                "text.muted",
+                                                            ))
+                                                            .group_hover(
+                                                                session_group.clone(),
+                                                                |style| style.invisible(),
+                                                            )
+                                                            .when(
+                                                                show_actions || renaming,
+                                                                |element| element.invisible(),
+                                                            )
+                                                            .child(time),
+                                                    )
+                                                })
+                                                .child(actions),
+                                        ),
+                                ),
+                        );
                     Some(
                         row.when(menu_open, |element| {
                             let groups = self.model.ui.groups.clone();
@@ -1088,6 +1143,10 @@ impl DesktopShell {
                                         .bg(theme_rgb(&self.theme, "panel.background"))
                                         .role(Role::Menu)
                                         .aria_label("Conversation options")
+                                        .on_mouse_down_out(cx.listener(|shell, _, _, cx| {
+                                            shell.session_menu_session = None;
+                                            cx.notify();
+                                        }))
                                         .child(session_menu_item(
                                             &self.theme,
                                             format!("rename-option-{session_for_menu}"),
@@ -1429,6 +1488,19 @@ impl DesktopShell {
             self.rebuild_sidebar_rows();
         }
         self.sync_sidebar_list();
+        let inbox_count = self
+            .model
+            .ui
+            .conversations
+            .iter()
+            .filter(|conversation| SidebarFilter::Inbox.matches(conversation))
+            .count();
+        let inbox_selected = self.sidebar_filter == SidebarFilter::Inbox;
+        let inbox_empty = inbox_selected
+            && !self
+                .sidebar_rows
+                .iter()
+                .any(|row| matches!(row, SidebarRow::Session(_)));
 
         let sidebar = if self.layout.sidebar_collapsed {
             div()
@@ -1591,11 +1663,63 @@ impl DesktopShell {
                         ))
                         .child("New chat"),
                 )
+                .child(
+                    div()
+                        .id("sidebar-inbox")
+                        .debug_selector(|| "sidebar-inbox".into())
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .h(px(30.))
+                        .px(px(8.))
+                        .rounded(px(6.))
+                        .text_sm()
+                        .cursor_pointer()
+                        .role(Role::Button)
+                        .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+                        .aria_selected(inbox_selected)
+                        .aria_label(SharedString::from(format!(
+                            "Inbox, {inbox_count} unread replies and requests"
+                        )))
+                        .when(inbox_selected, |element| {
+                            element.bg(theme_rgb(&self.theme, "accent"))
+                        })
+                        .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
+                        .on_click(cx.listener(|shell, _, _, cx| {
+                            let filter = if shell.sidebar_filter == SidebarFilter::Inbox {
+                                SidebarFilter::All
+                            } else {
+                                SidebarFilter::Inbox
+                            };
+                            shell.set_sidebar_filter(filter, cx);
+                        }))
+                        .child(tabler_icon(
+                            TablerIcon::MessageCircle,
+                            theme_rgb(&self.theme, "text.muted"),
+                            px(15.),
+                        ))
+                        .child(div().flex_1().child("Inbox"))
+                        .when(inbox_count > 0, |element| {
+                            element.child(
+                                div()
+                                    .debug_selector(move || {
+                                        format!("sidebar-inbox-count-{inbox_count}")
+                                    })
+                                    .text_xs()
+                                    .text_color(theme_rgb(&self.theme, "text.muted"))
+                                    .child(SharedString::from(if inbox_count > 99 {
+                                        "99+".into()
+                                    } else {
+                                        inbox_count.to_string()
+                                    })),
+                            )
+                        }),
+                )
                 .when(
                     self.sidebar_search_open
                         || self.sidebar_search_focus_handle.is_focused(window)
                         || !self.sidebar_search.is_empty()
-                        || self.sidebar_filter != SidebarFilter::All,
+                        || self.sidebar_filter != SidebarFilter::All && !inbox_selected,
                     |element| {
                         element
                             .child(self.render_sidebar_search(cx))
@@ -1612,6 +1736,7 @@ impl DesktopShell {
                             div()
                                 .id("sidebar-session-list")
                                 .flex()
+                                .when(inbox_empty, |element| element.hidden())
                                 .flex_col()
                                 .flex_1()
                                 .min_h_0()
@@ -1630,9 +1755,32 @@ impl DesktopShell {
                                     .min_h_0(),
                                 ),
                         )
+                        .when(inbox_empty, |element| {
+                            element.child(
+                                div()
+                                    .debug_selector(|| "sidebar-inbox-empty".into())
+                                    .p(px(12.))
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(6.))
+                                    .text_sm()
+                                    .child(if self.sidebar_search.trim().is_empty() {
+                                        "You're all caught up"
+                                    } else {
+                                        "No matching notifications"
+                                    })
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme_rgb(&self.theme, "text.muted"))
+                                            .child("Unread replies and requests will appear here."),
+                                    ),
+                            )
+                        })
                         .when(
-                            (!self.sidebar_search.trim().is_empty()
-                                || self.sidebar_filter != SidebarFilter::All)
+                            !inbox_empty
+                                && (!self.sidebar_search.trim().is_empty()
+                                    || self.sidebar_filter != SidebarFilter::All)
                                 && !self
                                     .sidebar_rows
                                     .iter()
@@ -1648,6 +1796,8 @@ impl DesktopShell {
                                             "No matching sessions"
                                         } else if self.sidebar_filter == SidebarFilter::Running {
                                             "No running tasks"
+                                        } else if self.sidebar_filter == SidebarFilter::Archived {
+                                            "No archived chats"
                                         } else {
                                             "No tasks need attention"
                                         }),
@@ -1729,6 +1879,97 @@ impl DesktopShell {
                 },
             )
             .into_any_element()
+    }
+}
+
+struct SidebarChatPreview {
+    conversation: ConversationItem,
+    background: gpui::Rgba,
+    foreground: gpui::Rgba,
+    muted: gpui::Rgba,
+    border: gpui::Rgba,
+}
+
+impl Render for SidebarChatPreview {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let conversation = &self.conversation;
+        let workspace = conversation.workspace_path.as_deref();
+        let status = if conversation.needs_attention {
+            Some("Needs input")
+        } else if conversation.state == mew_protocol::SessionState::Running {
+            Some("Working")
+        } else if conversation.last_turn_failed {
+            Some("Last turn failed")
+        } else if conversation.unread_completion {
+            Some("Unread reply")
+        } else {
+            None
+        };
+        div()
+            .id("sidebar-chat-preview")
+            .debug_selector(|| "sidebar-chat-preview".into())
+            .w(px(320.))
+            .p(px(10.))
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .rounded(px(8.))
+            .border_1()
+            .border_color(self.border)
+            .bg(self.background)
+            .text_size(px(13.))
+            .text_color(self.foreground)
+            .role(Role::Tooltip)
+            .aria_label(SharedString::from(conversation.title.clone()))
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(px(8.))
+                    .child(div().flex_1().min_w_0().child(SharedString::from(
+                        compact_session_title(&conversation.title),
+                    )))
+                    .when_some(
+                        session_time_label(conversation.last_message_at),
+                        |element, time| {
+                            element.child(
+                                div()
+                                    .flex_none()
+                                    .text_xs()
+                                    .text_color(self.muted)
+                                    .child(SharedString::from(time)),
+                            )
+                        },
+                    ),
+            )
+            .when_some(workspace, |element, path| {
+                element.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .text_color(self.muted)
+                        .child(tabler_icon(TablerIcon::Folder, self.muted, px(13.)))
+                        .child(SharedString::from(
+                            Path::new(path)
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or(path)
+                                .to_owned(),
+                        )),
+                )
+            })
+            .when_some(conversation.cwd.as_deref(), |element, path| {
+                element.child(
+                    div()
+                        .text_xs()
+                        .text_color(self.muted)
+                        .child(SharedString::from(display_session_path(path))),
+                )
+            })
+            .when_some(status, |element, status| {
+                element.child(div().text_xs().text_color(self.muted).child(status))
+            })
     }
 }
 

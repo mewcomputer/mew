@@ -3321,3 +3321,41 @@ completion. The real daemon's fake-provider turn was briefly paused after an
 actual text delta for inspection, then resumed. Test drafts were cleared,
 appearance/layout restored and owned QA processes stopped. Production provider
 latency, VoiceOver and physical IME remain unverified.
+
+# 2026-10-24 - sidebar inbox and consistent chat rows
+
+Inbox is a permanent sidebar entry for nonarchived requests and unread finished
+results, with a live count and an empty state. Its flat list puts requests first,
+then recency and stable session identity, independent of pins, workspace collapse
+and recent-chat limits. Search covers complete titles, working directories and
+workspace names/paths. Shared-client read acknowledgement removes opened results;
+requests remain until answered. Existing Running and Attention filters remain.
+
+Chat rows stay 30 px tall across working folders and activity states. Titles
+retain their complete normalized text and truncate to measured space. Age and
+pin/archive actions share a fixed trailing slot, preserving the title's width on
+hover. Read failures no longer add a second line or a persistent colored marker.
+The hover preview shows full title, workspace, working directory, age and status.
+Right-click and Shift-F10 expose the remaining chat actions; Escape and outside
+clicks dismiss the menu. Hover uses visibility changes because changing display
+between GPUI prepaint and paint reproduced a framework panic.
+
+The Archived entry now opens recoverable chats and exposes Unarchive. Starting a
+chat leaves Inbox or Archived so the workspace list can reveal the new task.
+Pin/archive controls preserve selection and disappear when writing resumes.
+
+All 275 desktop tests pass, including failing-first row geometry, action routing,
+hover/focus transitions, menu dismissal, inbox state/count/order/search, read
+updates, empty states, new-chat navigation and archive recovery. Actual GPUI
+timers verify preview appearance/removal and unchanged row geometry. Strict
+all-target desktop Clippy, native build/packaging, formatting, architecture and
+generated-theme checks pass. The final allocation-only cleanup also passes the
+18 sidebar regressions.
+
+Isolated native QA confirms dark/light and 264/344 px sidebar layouts, pin/unpin,
+archive/restore and context-menu dismissal. Two actual daemon/fake-provider
+background turns entered Inbox; opening them reduced its count from two to zero.
+Native hover could not be reliably sustained with the inspection tool; the
+preview is covered by the GPUI hover/timer test. Test drafts are empty, appearance
+and width restored, and owned QA processes stopped. VoiceOver and physical IME
+remain unverified.

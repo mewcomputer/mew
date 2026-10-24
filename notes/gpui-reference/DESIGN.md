@@ -44,11 +44,26 @@ hidden input fields or editing actions.
 
 New chat sits above the workspace list and inherits the selected workspace.
 Search and task filters open through the sidebar search control or Command-K.
-Keep idle workspace-root chats compact; expose their path and age through
-accessible labels and tooltips. Nested working directories and attention states
-remain visible. Selecting a chat reveals its workspace, and selecting the
+Chat rows keep a fixed 30 px height across activity states and working folders.
+Let layout truncate the normalized full title, with age at the right. Reserve a
+44 px trailing slot so pin/archive actions replace the age on hover or keyboard
+focus without moving the title. Those actions preserve the current selection.
+Right-click or Shift-F10 opens rename, pin, archive and group actions; Escape and
+outside clicks dismiss the menu. Full titles, working directories, workspace and
+status remain available through accessible labels and a hover preview. Read
+failures stay quiet in the list; unread failures and current requests retain
+distinct markers. Selecting a chat reveals its workspace, and selecting the
 already-attached chat preserves its loaded content. Closing a chat returns to
 the unbound composer while retaining its draft and view state for later use.
+
+Inbox is a permanent sidebar entry with a live count of nonarchived requests and
+unread finished results. Its flat list puts requests first, then recent results,
+independent of workspace collapse, pins and recent-chat limits. Reading uses the
+shared client's acknowledgement state; opening a request does not answer it.
+Search also matches workspace identity. Keep a clear empty state and retain the
+workspace collapse state when leaving Inbox. The Archived entry opens archived
+chats with the same row actions for restoring them. Starting a chat returns
+either mode to the workspace list.
 
 Use shared neutral surfaces and semantic accents from the theme manifest in both
 light and dark modes. Existing desktop typography uses the platform UI font for

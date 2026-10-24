@@ -902,6 +902,31 @@ pub(super) fn build_workspace_sidebar_rows(
             });
     }
 
+    if filter == SidebarFilter::Inbox {
+        let mut sessions = conversations
+            .iter()
+            .filter(|conversation| filter.matches(conversation))
+            .filter(|conversation| {
+                conversation_matches_query(conversation, &query)
+                    || conversation
+                        .workspace_path
+                        .as_ref()
+                        .and_then(|path| project_by_path.get(path))
+                        .is_some_and(|project| project_matches_query(project, &query))
+            })
+            .collect::<Vec<_>>();
+        sessions.sort_by(|a, b| {
+            b.needs_attention
+                .cmp(&a.needs_attention)
+                .then_with(|| b.last_message_at.cmp(&a.last_message_at))
+                .then_with(|| a.session_id.cmp(&b.session_id))
+        });
+        let mut rows = Vec::with_capacity(sessions.len() + 1);
+        rows.push(SidebarRow::Toolbar);
+        rows.extend(sessions.into_iter().cloned().map(SidebarRow::Session));
+        return rows;
+    }
+
     let mut workspace_projects = project_by_path.into_values().collect::<Vec<_>>();
     workspace_projects.sort_by(|a, b| {
         b.pinned
@@ -1334,6 +1359,148 @@ mod workspace_tests {
     }
 
     #[test]
+    fn inbox_contains_unarchived_requests_and_unread_finished_turns() {
+        for archived in [false, true] {
+            for running in [false, true] {
+                for needs_attention in [false, true] {
+                    for unread_completion in [false, true] {
+                        for last_turn_failed in [false, true] {
+                            let mut conversation = task(1, None, false);
+                            conversation.archived = archived;
+                            conversation.state = if running {
+                                SessionState::Running
+                            } else {
+                                SessionState::Idle
+                            };
+                            conversation.needs_attention = needs_attention;
+                            conversation.unread_completion = unread_completion;
+                            conversation.last_turn_failed = last_turn_failed;
+                            assert_eq!(
+                                SidebarFilter::Inbox.matches(&conversation),
+                                !archived && (needs_attention || !running && unread_completion),
+                                "{conversation:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inbox_is_flat_uncapped_and_prioritizes_requests_over_recency_and_pins() {
+        let mut tasks = (0..8)
+            .map(|id| {
+                let mut conversation = task(id, Some("/work/app"), id == 0);
+                conversation.unread_completion = true;
+                conversation
+            })
+            .collect::<Vec<_>>();
+        let mut older_request = task(20, Some("/work/pinned"), false);
+        older_request.needs_attention = true;
+        older_request.state = SessionState::Running;
+        older_request.last_message_at = None;
+        tasks.push(older_request);
+        let mut newer_request = task(21, None, false);
+        newer_request.needs_attention = true;
+        newer_request.last_message_at = Some(1);
+        tasks.push(newer_request);
+        let mut tied_result = task(10, Some("/work/pinned"), false);
+        tied_result.unread_completion = true;
+        tied_result.last_message_at = Some(7);
+        tasks.push(tied_result);
+        let mut archived_request = task(30, None, true);
+        archived_request.needs_attention = true;
+        archived_request.archived = true;
+        tasks.push(archived_request);
+        let mut read_failure = task(31, None, true);
+        read_failure.last_turn_failed = true;
+        tasks.push(read_failure);
+        let mut running_result = task(32, None, true);
+        running_result.state = SessionState::Running;
+        running_result.unread_completion = true;
+        tasks.push(running_result);
+        tasks.reverse();
+
+        let rows = build_workspace_sidebar_rows(
+            &tasks,
+            &[project("/work/app", false), project("/work/pinned", true)],
+            &BTreeSet::from(["/work/app".into(), "/work/pinned".into()]),
+            &BTreeSet::new(),
+            "",
+            Some("session-0"),
+            SidebarFilter::Inbox,
+        );
+        assert_eq!(rows.first(), Some(&SidebarRow::Toolbar));
+        let ids = rows[1..]
+            .iter()
+            .map(|row| match row {
+                SidebarRow::Session(conversation) => conversation.session_id.as_str(),
+                row => panic!("unexpected inbox row: {row:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            [
+                "session-21",
+                "session-20",
+                "session-10",
+                "session-7",
+                "session-6",
+                "session-5",
+                "session-4",
+                "session-3",
+                "session-2",
+                "session-1",
+                "session-0",
+            ]
+        );
+    }
+
+    #[test]
+    fn inbox_search_matches_full_title_cwd_and_workspace_identity() {
+        let mut conversation = task(1, Some("/work/checkouts/project-root"), false);
+        conversation.title = "A long conversation title with a distinctive ending".into();
+        conversation.cwd = Some("/work/checkouts/project-root/nested/package".into());
+        conversation.unread_completion = true;
+        let mut workspace = project("/work/checkouts/project-root", false);
+        workspace.display_name = "Desktop Studio".into();
+        let mut inferred = task(2, Some("/external/inferred-project"), false);
+        inferred.cwd = None;
+        inferred.needs_attention = true;
+        let mut other = task(3, None, false);
+        other.title = "Unrelated unread result".into();
+        other.unread_completion = true;
+        let tasks = [conversation, inferred, other];
+        for (query, expected) in [
+            (" DISTINCTIVE ENDING ", vec!["session-1"]),
+            ("nested/package", vec!["session-1"]),
+            ("Desktop Studio", vec!["session-1"]),
+            ("checkouts/project-root", vec!["session-1"]),
+            ("inferred-project", vec!["session-2"]),
+            ("missing", vec![]),
+        ] {
+            let rows = build_workspace_sidebar_rows(
+                &tasks,
+                std::slice::from_ref(&workspace),
+                &BTreeSet::new(),
+                &BTreeSet::new(),
+                query,
+                None,
+                SidebarFilter::Inbox,
+            );
+            let ids = rows[1..]
+                .iter()
+                .map(|row| match row {
+                    SidebarRow::Session(conversation) => conversation.session_id.as_str(),
+                    row => panic!("unexpected inbox search row: {row:?}"),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(ids, expected, "query: {query}");
+        }
+    }
+
+    #[test]
     fn workspace_collapse_controls_are_only_available_in_the_all_view() {
         let mut conversation = task(1, Some("/work/app"), false);
         conversation.state = SessionState::Running;
@@ -1544,8 +1711,6 @@ pub(super) fn display_path_from_home(path: &str, home: Option<&Path>) -> String 
 }
 
 pub(super) fn compact_session_title(title: &str) -> String {
-    const MAX_TITLE_CHARS: usize = 28;
-
     let mut normalized = String::with_capacity(title.len());
     for word in title.split_whitespace() {
         if !normalized.is_empty() {
@@ -1553,13 +1718,7 @@ pub(super) fn compact_session_title(title: &str) -> String {
         }
         normalized.push_str(word);
     }
-    let mut chars = normalized.chars();
-    let compact = chars.by_ref().take(MAX_TITLE_CHARS).collect::<String>();
-    if chars.next().is_some() {
-        format!("{compact}…")
-    } else {
-        compact
-    }
+    normalized
 }
 
 #[cfg(test)]

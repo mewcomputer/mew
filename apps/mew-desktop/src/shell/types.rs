@@ -359,25 +359,6 @@ pub(super) struct BrowserPumpView {
     shell: WeakEntity<DesktopShell>,
 }
 
-pub(super) struct TooltipLabel {
-    pub(super) text: SharedString,
-    pub(super) background: gpui::Rgba,
-    pub(super) foreground: gpui::Rgba,
-}
-
-impl Render for TooltipLabel {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px(px(8.))
-            .py(px(5.))
-            .rounded(px(6.))
-            .bg(self.background)
-            .text_xs()
-            .text_color(self.foreground)
-            .child(self.text.clone())
-    }
-}
-
 impl BrowserPumpView {
     pub(super) fn new(shell: WeakEntity<DesktopShell>, cx: &mut Context<Self>) -> Self {
         let shell_for_task = shell.clone();
@@ -550,6 +531,8 @@ pub(super) struct TranscriptTextEntry {
 pub(super) enum SidebarFilter {
     #[default]
     All,
+    Inbox,
+    Archived,
     Running,
     Attention,
 }
@@ -559,6 +542,11 @@ impl SidebarFilter {
         let running = conversation.state == mew_protocol::SessionState::Running;
         match self {
             Self::All => true,
+            Self::Inbox => {
+                !conversation.archived
+                    && (conversation.needs_attention || !running && conversation.unread_completion)
+            }
+            Self::Archived => conversation.archived,
             Self::Running => running && !conversation.needs_attention,
             Self::Attention => {
                 conversation.needs_attention

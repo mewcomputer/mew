@@ -42,6 +42,12 @@ impl DesktopShell {
             cx.notify();
             return;
         }
+        if matches!(
+            self.sidebar_filter,
+            SidebarFilter::Inbox | SidebarFilter::Archived
+        ) {
+            self.set_sidebar_filter(SidebarFilter::All, cx);
+        }
         if let Some(workspace) = cwd.as_ref() {
             self.collapsed_groups.remove(workspace);
             self.rebuild_sidebar_rows();

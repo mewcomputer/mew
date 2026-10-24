@@ -1749,6 +1749,320 @@ mod shell_tests {
     }
 
     #[gpui::test]
+    fn sidebar_chat_rows_keep_one_height_across_activity_and_nested_paths(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        shell.update(cx, |shell, cx| {
+            let mut chats = (0..5)
+                .map(|id| navigation_conversation(&id.to_string()))
+                .collect::<Vec<_>>();
+            chats[0].cwd = chats[0].workspace_path.clone();
+            chats[1].state = mew_protocol::SessionState::Running;
+            chats[2].last_turn_failed = true;
+            chats[3].unread_completion = true;
+            chats[4].needs_attention = true;
+            shell.model.ui.conversations = chats;
+            shell.collapsed_groups.clear();
+            shell.layout.sidebar_collapsed = false;
+            shell.rebuild_sidebar_rows();
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(1100.), px(800.)));
+        cx.run_until_parked();
+        for selector in [
+            "sidebar-chat-0",
+            "sidebar-chat-1",
+            "sidebar-chat-2",
+            "sidebar-chat-3",
+            "sidebar-chat-4",
+        ] {
+            let row = cx.debug_bounds(selector).unwrap();
+            assert_eq!(row.size.height, px(30.), "{selector} stays on one line");
+        }
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn sidebar_quick_actions_preserve_selection_and_send_the_target_chat(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        shell.update(cx, |shell, cx| {
+            shell.command_tx = Some(sender);
+            shell.model.ui.conversations = vec![navigation_conversation("a")];
+            shell.model.ui.selected_session = Some("other".into());
+            shell.sidebar_keyboard_session = Some("a".into());
+            shell.collapsed_groups.clear();
+            shell.layout.sidebar_collapsed = false;
+            shell.rebuild_sidebar_rows();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let sidebar = shell.read(cx).sidebar_focus_handle.clone();
+            window.focus(&sidebar, cx);
+        });
+        cx.run_until_parked();
+        let pin = cx
+            .debug_bounds("sidebar-pin-a")
+            .expect("focused chats expose pin");
+        cx.simulate_click(pin.center(), gpui::Modifiers::none());
+        assert!(
+            matches!(commands.try_recv().unwrap(), ClientMessage::PinSession { session_id, pinned: true } if session_id == "a")
+        );
+        cx.run_until_parked();
+        let archive = cx.debug_bounds("sidebar-archive-a").unwrap();
+        cx.simulate_click(archive.center(), gpui::Modifiers::none());
+        assert!(
+            matches!(commands.try_recv().unwrap(), ClientMessage::ArchiveSession { session_id, archived: true } if session_id == "a")
+        );
+        cx.update(|window, cx| {
+            let composer = shell.read(cx).composer_focus_handle.clone();
+            window.focus(&composer, cx);
+        });
+        cx.simulate_event(gpui::MouseMoveEvent {
+            position: gpui::point(px(800.), px(700.)),
+            pressed_button: None,
+            modifiers: gpui::Modifiers::none(),
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("sidebar-pin-a").is_none(),
+            "secondary actions hide when writing resumes"
+        );
+        let row = cx.debug_bounds("sidebar-chat-a").unwrap();
+        cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        let pin = cx
+            .debug_bounds("sidebar-pin-a")
+            .expect("hover exposes the same actions");
+        assert_eq!(cx.debug_bounds("sidebar-chat-a").unwrap(), row);
+        cx.simulate_click(pin.center(), gpui::Modifiers::none());
+        assert!(
+            matches!(commands.try_recv().unwrap(), ClientMessage::PinSession { session_id, pinned: true } if session_id == "a")
+        );
+        cx.update(|window, cx| {
+            let sidebar = shell.read(cx).sidebar_focus_handle.clone();
+            window.focus(&sidebar, cx);
+        });
+        let keystroke = gpui::Keystroke::parse("shift-f10").unwrap();
+        cx.simulate_event(gpui::KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        cx.simulate_event(gpui::KeyUpEvent { keystroke });
+        cx.run_until_parked();
+        shell.update(cx, |shell, _| {
+            assert_eq!(shell.model.ui.selected_session.as_deref(), Some("other"));
+            assert_eq!(shell.session_menu_session.as_deref(), Some("a"));
+        });
+        let keystroke = gpui::Keystroke::parse("escape").unwrap();
+        cx.simulate_event(gpui::KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        cx.simulate_event(gpui::KeyUpEvent { keystroke });
+        cx.run_until_parked();
+        shell.update(cx, |shell, _| {
+            assert!(
+                shell.session_menu_session.is_none(),
+                "Escape dismisses the chat menu"
+            );
+        });
+        let row = cx.debug_bounds("sidebar-chat-a").unwrap();
+        cx.simulate_mouse_down(
+            row.center(),
+            gpui::MouseButton::Right,
+            gpui::Modifiers::none(),
+        );
+        cx.simulate_mouse_up(
+            row.center(),
+            gpui::MouseButton::Right,
+            gpui::Modifiers::none(),
+        );
+        cx.run_until_parked();
+        shell.update(cx, |shell, _| {
+            assert_eq!(shell.session_menu_session.as_deref(), Some("a"));
+            assert_eq!(shell.model.ui.selected_session.as_deref(), Some("other"));
+        });
+        cx.simulate_click(gpui::point(px(800.), px(700.)), gpui::Modifiers::none());
+        cx.run_until_parked();
+        shell.update(cx, |shell, _| {
+            assert!(
+                shell.session_menu_session.is_none(),
+                "outside clicks dismiss the chat menu"
+            );
+            shell.quitting = true;
+        });
+    }
+
+    #[gpui::test]
+    fn sidebar_inbox_is_available_without_search_and_tracks_unread_and_requests(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        shell.update(cx, |shell, cx| {
+            let mut chats = (0..4)
+                .map(|id| navigation_conversation(&id.to_string()))
+                .collect::<Vec<_>>();
+            chats[0].unread_completion = true;
+            chats[1].needs_attention = true;
+            chats[2].last_turn_failed = true;
+            chats[3].unread_completion = true;
+            chats[3].archived = true;
+            shell.model.ui.conversations = chats;
+            shell.model.ui.composer = "keep this draft".into();
+            shell.collapsed_groups.insert("/workspace/mew".into());
+            shell.layout.sidebar_collapsed = false;
+            shell.rebuild_sidebar_rows();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let inbox = cx
+            .debug_bounds("sidebar-inbox")
+            .expect("inbox is a permanent navigation entry");
+        assert!(cx.debug_bounds("sidebar-inbox-count-2").is_some());
+        cx.simulate_click(inbox.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-chat-0").is_some());
+        assert!(cx.debug_bounds("sidebar-chat-1").is_some());
+        assert!(cx.debug_bounds("sidebar-chat-2").is_none());
+        assert!(cx.debug_bounds("sidebar-chat-3").is_none());
+        assert!(cx.debug_bounds("sidebar-search-frame").is_none());
+        shell.update(cx, |shell, cx| {
+            assert_eq!(shell.sidebar_filter, SidebarFilter::Inbox);
+            assert_eq!(shell.model.ui.composer, "keep this draft");
+            shell.model.ui.conversations[0].unread_completion = false;
+            shell.rebuild_sidebar_rows();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-inbox-count-1").is_some());
+        assert!(cx.debug_bounds("sidebar-chat-0").is_none());
+        shell.update(cx, |shell, cx| {
+            shell.model.ui.conversations[1].needs_attention = false;
+            shell.rebuild_sidebar_rows();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-inbox-empty").is_some());
+        assert!(cx.debug_bounds("sidebar-inbox-count-1").is_none());
+        let inbox = cx.debug_bounds("sidebar-inbox").unwrap();
+        cx.simulate_click(inbox.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        shell.update(cx, |shell, _| {
+            assert_eq!(shell.sidebar_filter, SidebarFilter::All);
+            assert!(shell.collapsed_groups.contains("/workspace/mew"));
+            shell.quitting = true;
+        });
+    }
+
+    #[gpui::test]
+    fn a_new_chat_leaves_inbox_so_its_workspace_can_reveal_it(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        shell.update(cx, |shell, cx| {
+            shell.sidebar_filter = SidebarFilter::Inbox;
+            shell.new_conversation(cx);
+            assert_eq!(shell.sidebar_filter, SidebarFilter::All);
+            shell.quitting = true;
+        });
+    }
+
+    #[gpui::test]
+    fn hovering_a_chat_reveals_its_full_title_and_workspace_preview(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        shell.update(cx, |shell, cx| {
+            let mut chat = navigation_conversation("a");
+            chat.title = "Investigate why long conversation titles were truncated before the row could measure them é🙂".into();
+            shell.model.ui.conversations = vec![chat];
+            shell.collapsed_groups.clear();
+            shell.layout.sidebar_collapsed = false;
+            shell.rebuild_sidebar_rows();
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(1100.), px(800.)));
+        cx.run_until_parked();
+        let row = cx.debug_bounds("sidebar-chat-a").unwrap();
+        cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.dispatcher.advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        let preview = cx
+            .debug_bounds("sidebar-chat-preview")
+            .expect("chat hover reveals its preview");
+        assert_eq!(preview.size.width, px(320.));
+        assert_eq!(
+            cx.debug_bounds("sidebar-chat-a").unwrap(),
+            row,
+            "hover preserves row geometry"
+        );
+        cx.simulate_mouse_move(
+            gpui::point(px(800.), px(500.)),
+            None,
+            gpui::Modifiers::none(),
+        );
+        cx.run_until_parked();
+        cx.dispatcher.advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-chat-preview").is_none());
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn archived_chats_can_be_found_and_restored_from_the_sidebar(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        shell.update(cx, |shell, cx| {
+            let mut archived = navigation_conversation("a");
+            archived.archived = true;
+            shell.model.ui.conversations = vec![archived, navigation_conversation("b")];
+            shell.command_tx = Some(sender);
+            shell.layout.sidebar_collapsed = false;
+            shell.collapsed_groups.clear();
+            shell.rebuild_sidebar_rows();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let archive = cx
+            .debug_bounds("sidebar-archived")
+            .expect("archived chats have a navigation entry");
+        cx.simulate_click(archive.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-chat-a").is_some());
+        assert!(cx.debug_bounds("sidebar-chat-b").is_none());
+        shell.update(cx, |shell, cx| {
+            shell.sidebar_keyboard_session = Some("a".into());
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            let sidebar = shell.read(cx).sidebar_focus_handle.clone();
+            window.focus(&sidebar, cx);
+        });
+        cx.run_until_parked();
+        let restore = cx.debug_bounds("sidebar-archive-a").unwrap();
+        cx.simulate_click(restore.center(), gpui::Modifiers::none());
+        assert!(
+            matches!(commands.try_recv().unwrap(), ClientMessage::ArchiveSession { session_id, archived: false } if session_id == "a")
+        );
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
     fn selecting_a_chat_reveals_its_collapsed_workspace(cx: &mut gpui::TestAppContext) {
         let (shell, cx) =
             cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
@@ -2304,14 +2618,16 @@ mod shell_tests {
     }
 
     #[test]
-    fn session_titles_are_normalized_and_capped_with_an_ellipsis() {
+    fn session_titles_are_normalized_without_discarding_the_full_title() {
         assert_eq!(compact_session_title("  short   title "), "short title");
 
         let title = compact_session_title(
             "The user asked about a repository and the requested changes are extensive",
         );
-        assert_eq!(title.chars().count(), 29);
-        assert!(title.ends_with('…'));
+        assert_eq!(
+            title,
+            "The user asked about a repository and the requested changes are extensive"
+        );
     }
 
     #[test]

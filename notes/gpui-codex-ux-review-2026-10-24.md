@@ -565,3 +565,28 @@ to inspect partial replies, then resumed to verify status removal on completion.
 This checks native presentation and state transitions, not production provider
 latency. VoiceOver and physical IME remain unverified. Composer hierarchy and
 the edited-files handoff keep their existing priority.
+
+## Sidebar inbox and chat rows follow-up, 2026-10-24
+
+The supplied sidebar references exposed two remaining presentation problems:
+rows grew for status or nested working folders, and a 28-character title cap
+discarded content before layout could measure it. Chat rows now keep one 30 px
+line and retain complete normalized titles. Age and pin/archive controls share
+a fixed trailing slot, so hovering preserves text geometry. Idle dots and read
+failure markers are quiet; full title, workspace, working directory and status
+are available in the preview and accessible labels. Right-click or Shift-F10
+opens further actions. Menu Escape/outside dismissal is directly tested.
+
+The requested notification mode is a sidebar Inbox for unread results and
+requests. It has a permanent entry/count and a flat list across workspaces,
+prioritizing requests before recent results. Archived chats and read failures
+alone do not qualify. Read acknowledgement comes from the shared client; opening
+a request leaves it pending. The existing archive count now opens recoverable
+chats with Unarchive, and new chats leave either filtered mode.
+
+All 275 desktop tests and strict lint/build gates pass. Native dark/light and
+narrower/wider sidebar checks confirm layout, pin/archive/restore and menu
+dismissal. Two real daemon/fake-provider background turns exercised unread
+arrival, reading and the empty inbox. Actual GPUI hover/timer tests verify the
+full-title preview and stable row bounds; native inspection could not reliably
+sustain hover. VoiceOver and physical IME remain unverified.
