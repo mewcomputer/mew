@@ -148,51 +148,36 @@ pub(super) fn sidebar_transition_width(collapsed: bool, delta: f32, expanded_wid
     from + (to - from) * delta
 }
 
-pub(super) fn sidebar_transition_offset(collapsed: bool, delta: f32, expanded_width: f32) -> f32 {
-    if collapsed {
-        -expanded_width * delta
-    } else {
-        -expanded_width * (1. - delta)
-    }
+pub(super) fn sidebar_width_from_pointer(pointer_x: f32, window_width: f32) -> f32 {
+    let max_width = (window_width - CHAT_MIN_WIDTH).clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+    pointer_x.clamp(SIDEBAR_MIN_WIDTH, max_width)
 }
 
-pub(super) fn sidebar_width_from_pointer(pointer_x: f32) -> f32 {
-    pointer_x.clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH)
-}
-
-pub(super) fn workbench_transition_width(collapsed: bool, delta: f32) -> f32 {
+pub(super) fn workbench_transition_width(collapsed: bool, delta: f32, expanded_width: f32) -> f32 {
     let (from, to) = if collapsed {
-        (WORKBENCH_EXPANDED_WIDTH, WORKBENCH_COLLAPSED_WIDTH)
+        (expanded_width, WORKBENCH_COLLAPSED_WIDTH)
     } else {
-        (WORKBENCH_COLLAPSED_WIDTH, WORKBENCH_EXPANDED_WIDTH)
+        (WORKBENCH_COLLAPSED_WIDTH, expanded_width)
     };
     from + (to - from) * delta
 }
 
-pub(super) fn workbench_transition_offset(collapsed: bool, delta: f32, expanded_width: f32) -> f32 {
-    if collapsed {
-        -expanded_width * delta
-    } else {
-        -expanded_width * (1. - delta)
-    }
-}
-
 pub(super) fn workbench_max_width(window_width: f32, sidebar_width: f32) -> f32 {
-    (window_width - sidebar_width - CHAT_MIN_WIDTH).max(0.)
+    (window_width - sidebar_width - CHAT_MIN_WIDTH - PANE_DIVIDER_WIDTH).max(0.)
 }
 
 pub(super) fn workbench_fits_window(window_width: f32, sidebar_width: f32) -> bool {
-    window_width >= sidebar_width + CHAT_MIN_WIDTH + WORKBENCH_MIN_WIDTH
+    window_width >= sidebar_width + CHAT_MIN_WIDTH + WORKBENCH_MIN_WIDTH + PANE_DIVIDER_WIDTH
 }
 
-pub(super) fn workbench_width_from_pointer(
+pub(super) fn conversation_width_from_pointer(
     window_width: f32,
     pointer_x: f32,
     sidebar_width: f32,
 ) -> f32 {
-    let max_width = workbench_max_width(window_width, sidebar_width);
-    let min_width = WORKBENCH_MIN_WIDTH.min(max_width);
-    (window_width - pointer_x - SHELL_GUTTER).clamp(min_width, max_width)
+    let max_width = (window_width - sidebar_width - WORKBENCH_MIN_WIDTH - PANE_DIVIDER_WIDTH)
+        .max(CHAT_MIN_WIDTH);
+    (pointer_x - sidebar_width).clamp(CHAT_MIN_WIDTH, max_width)
 }
 pub(super) fn byte_offset_for_utf16(text: &str, utf16_offset: usize) -> usize {
     let mut byte_offset = 0;

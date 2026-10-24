@@ -34,7 +34,6 @@ impl Render for DesktopShell {
         }
         div()
             .flex()
-            .flex_col()
             .size_full()
             .bg(theme_rgb(&self.theme, "background"))
             .text_color(theme_rgb(&self.theme, "text.body"))
@@ -50,28 +49,39 @@ impl Render for DesktopShell {
             .on_action(cx.listener(Self::action_toggle_workbench))
             .on_action(cx.listener(Self::action_focus_sidebar_search))
             .on_action(cx.listener(Self::action_dismiss_popovers))
-            .child(self.render_topbar(cx))
+            .child(self.render_sidebar(window, cx))
             .child(if self.settings_open {
-                self.render_settings(window, cx)
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .child(self.render_conversation_header(cx))
+                    .child(self.render_settings(window, cx))
+                    .into_any_element()
             } else {
                 div()
                     .flex()
                     .flex_1()
                     .min_h_0()
                     .min_w_0()
-                    .child(self.render_sidebar(window, cx))
                     .child(
                         div()
+                            .id("conversation-pane")
+                            .debug_selector(|| "conversation-pane".into())
                             .flex()
+                            .flex_col()
                             .flex_1()
                             .min_h_0()
                             .min_w_0()
-                            .child(self.render_center(window, cx))
-                            .when(!self.layout.workbench_collapsed, |element| {
-                                element.child(self.render_workbench_divider(cx))
-                            })
-                            .child(self.render_workbench(window, cx)),
+                            .child(self.render_conversation_header(cx))
+                            .child(self.render_center(window, cx)),
                     )
+                    .when(!self.layout.workbench_collapsed, |element| {
+                        element.child(self.render_workbench_divider(cx))
+                    })
+                    .child(self.render_workbench(window, cx))
                     .into_any_element()
             })
             .when_some(self.browser_pump.clone(), |element, pump| {

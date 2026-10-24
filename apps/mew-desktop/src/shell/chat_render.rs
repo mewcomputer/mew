@@ -2120,45 +2120,6 @@ impl DesktopShell {
                     ),
             );
 
-        let terminal_expanded = !self.layout.terminal_collapsed;
-        let terminal_animation_id = self.terminal_animation_id;
-        let terminal_surface = div()
-            .id("terminal-surface")
-            .flex()
-            .flex_col()
-            .flex_none()
-            .min_w_0()
-            .rounded(px(12.))
-            .border_1()
-            .border_color(theme_rgb(&self.theme, "divider"))
-            .overflow_hidden()
-            .bg(theme_rgb(&self.theme, "panel.background"))
-            .child(self.render_remote_terminal_strip(cx));
-        let terminal_surface = if terminal_animation_id == 0 {
-            terminal_surface
-                .h(px(if terminal_expanded {
-                    TERMINAL_EXPANDED_HEIGHT
-                } else {
-                    0.
-                }))
-                .into_any_element()
-        } else {
-            terminal_surface
-                .with_animation(
-                    ElementId::Name(format!("terminal-transition-{terminal_animation_id}").into()),
-                    Animation::new(Duration::from_millis(180)).with_easing(gpui::ease_out_quint()),
-                    move |element, delta| {
-                        let progress = if terminal_expanded { delta } else { 1. - delta };
-                        element
-                            .h(px(TERMINAL_EXPANDED_HEIGHT * progress))
-                            .opacity(progress)
-                            .relative()
-                            .top(px((1. - progress) * 10.))
-                    },
-                )
-                .into_any_element()
-        };
-
         div()
             .id("center-workspace")
             .flex()
@@ -2166,9 +2127,10 @@ impl DesktopShell {
             .flex_1()
             .min_w_0()
             .min_h_0()
-            .gap(px(if terminal_expanded { SHELL_GUTTER } else { 0. }))
             .child(conversation)
-            .child(terminal_surface)
+            .when(self.layout.workbench_collapsed, |element| {
+                element.child(self.render_terminal_dock(cx))
+            })
     }
 
     pub(super) fn render_picker_overlays(

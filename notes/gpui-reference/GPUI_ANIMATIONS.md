@@ -33,9 +33,12 @@ mew. Use our existing element wrappers and helpers.
 
 Sidebar and workbench transitions live in `shell/sidebar.rs`,
 `shell/workbench.rs` and the transition helpers in `shell/helpers.rs`.
-They retain the surface while it closes and use a changing animation ID.
-Preserve endpoint geometry, width limits and interruption behavior when changing
-them. Do not unmount the closing surface before its exit completes.
+They animate pane widths and use a changing animation ID. Work transitions use
+the actual available width, including widths above the old auxiliary-panel cap.
+Keep pane edges flush while their widths change; positional offsets leave gaps
+between panes. Preserve endpoint geometry, width limits and interruption behavior
+when changing transitions. Do not unmount the closing wrapper before its exit
+completes.
 
 The transcript limits animated activity to the last visible row. Keep history
 and completed rows quiet. Composer blink uses a weak shell and an epoch so

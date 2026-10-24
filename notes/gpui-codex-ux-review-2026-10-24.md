@@ -277,3 +277,32 @@ in their existing layers. The resize short-circuit identified above is fixed.
 Actual GPUI entity and painted-geometry regression tests cover these behaviors.
 The user screenshot establishes the Codex reference; native mew appearance and
 motion still require a live pass because computer use remains unavailable.
+
+## Pane layout implementation follow-up
+
+The user clarified that the reference calls for three full-height panes, with a
+larger work area beside the conversation. The earlier sidebar styling pass did
+not establish that structure. The shell now gives navigation, conversation and
+work content their own aligned top headers and continuous resize boundaries.
+There is no global header spanning their content.
+
+Navigation remains the sole chat switcher. Conversation width starts at 480 px;
+the work pane fills the rest of the window and receives additional space when
+the window grows. The divider changes the conversation width and retains that
+preference per chat. Older saved layouts adopt the new conversation default.
+The 420 px conversation and 360 px work minima include divider accounting.
+Navigation width also clamps when the window narrows, preserving chat usability.
+
+The work pane uses horizontal Browser, Changes, Files and Activity tabs instead
+of a vertical icon rail. Changes lets the diff fill the document area, with
+changed files beside it in wide panes and above it in narrower panes. The
+terminal sits below work content in split view and below the conversation when
+work is folded. Existing draft, browser-page, request and terminal ownership
+remain in place.
+
+GPUI tests exercise actual pane/header geometry, divider dragging, wide-window
+growth, tab clicks, terminal docking, narrow collapse, binary/text diff layout
+and reduced-motion pane toggles. Config tests cover legacy layout loading and
+new sizing persistence. Native inspection was retried and still fails with the
+OS permission error above; these tests do not establish live appearance,
+VoiceOver behavior or motion quality.

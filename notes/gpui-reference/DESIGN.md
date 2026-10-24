@@ -5,15 +5,30 @@ mew product conventions, not GPUI framework requirements.
 
 ## Existing composition
 
-The shell combines a sessions sidebar, conversation surface, optional terminal
-and workbench. Layout constants live in `shell/types.rs`; width constraints and
-transition math live in `shell/helpers.rs`. Preserve the minimum usable chat
-width when opening auxiliary panels and verify the narrow-window behavior.
+The shell has three full-height panes: workspace/chat navigation, conversation,
+and work content. Each owns its 38 px top header. Dividers continue through the
+headers and content; avoid a global titlebar row spanning the three owners.
+Layout constants live in `shell/types.rs`; width constraints and transition math
+live in `shell/helpers.rs`.
 
-The workspace-grouped sidebar owns chat navigation. The titlebar shows the
-selected workspace and chat; conversation tabs are not a second navigation
-surface. Keep the sidebar flush with its titlebar segment and use a shared
-vertical divider instead of an enclosing rounded panel.
+The workspace-grouped navigation pane owns chat navigation. The conversation
+header shows the selected workspace and chat; conversation tabs are not a second
+navigation surface. Reserve native window controls in the navigation header, or
+in the conversation header while navigation is hidden. Use shared vertical
+dividers instead of enclosing rounded panels.
+
+Conversation width starts at 480 px and is retained per chat. Work content fills
+the remaining width, including space gained when the window grows. Dragging the
+conversation/work divider changes the conversation width. Preserve the 420 px
+conversation and 360 px work minima, including the divider. Narrow windows fold
+work content; navigation resizing also preserves the conversation minimum.
+Legacy saved workbench widths use the new conversation default.
+
+Work content has named horizontal Browser, Changes, Files and Activity tabs.
+Changes gives the diff the flexible area, with changed files at the right of a
+wide work pane or above the diff in a narrower one. The terminal docks beneath
+work content in split view and beneath the conversation when work is folded.
+Keep its retained entity and daemon session ownership across that move.
 
 New chat sits above the workspace list and inherits the selected workspace.
 Search and task filters open through the sidebar search control or Command-K.

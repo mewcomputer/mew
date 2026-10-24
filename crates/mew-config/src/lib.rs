@@ -618,8 +618,8 @@ pub struct DesktopSessionViewState {
     pub activity_expanded: bool,
     #[serde(default = "default_auxiliary_view")]
     pub auxiliary_view: String,
-    #[serde(default = "default_workbench_width")]
-    pub workbench_width: f32,
+    #[serde(default = "default_conversation_width")]
+    pub conversation_width: f32,
     #[serde(default)]
     pub expanded_chat_parts: Vec<String>,
     #[serde(default)]
@@ -640,8 +640,8 @@ fn default_auxiliary_view() -> String {
     "changes".into()
 }
 
-fn default_workbench_width() -> f32 {
-    360.
+fn default_conversation_width() -> f32 {
+    480.
 }
 
 /// Reads state from the standard location.
@@ -1123,6 +1123,23 @@ values = ["sk_test_deadbeef"]
     }
 
     #[test]
+    fn desktop_pane_layout_uses_a_conversation_width_for_legacy_sessions() {
+        let legacy: DesktopSessionViewState = toml::from_str("workbench_width = 360.0").unwrap();
+        let serialized = serde_json::to_value(legacy).unwrap();
+        assert_eq!(serialized["conversation_width"], 480.);
+        assert!(serialized.get("workbench_width").is_none());
+
+        let resized: DesktopSessionViewState =
+            toml::from_str("conversation_width = 612.0").unwrap();
+        let serialized = toml::to_string(&resized).unwrap();
+        let restored: DesktopSessionViewState = toml::from_str(&serialized).unwrap();
+        assert_eq!(
+            serde_json::to_value(restored).unwrap()["conversation_width"],
+            612.
+        );
+    }
+
+    #[test]
     fn test_state_desktop_window_roundtrip() {
         let mut session_views = HashMap::new();
         session_views.insert(
@@ -1135,7 +1152,7 @@ values = ["sk_test_deadbeef"]
                 local_expanded: false,
                 activity_expanded: true,
                 auxiliary_view: "activity".into(),
-                workbench_width: 420.,
+                conversation_width: 420.,
                 expanded_chat_parts: vec!["chat-part-1-0".into()],
                 browser_panel_open: false,
                 browser_url: "https://example.com".into(),

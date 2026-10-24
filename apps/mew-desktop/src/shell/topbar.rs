@@ -7,7 +7,7 @@ impl DesktopShell {
         div()
             .id("connection-profile-picker")
             .absolute()
-            .bottom(px(34.))
+            .top(px(30.))
             .right(px(0.))
             .w(px(300.))
             .flex()
@@ -85,9 +85,49 @@ impl DesktopShell {
             .into_any_element()
     }
 
-    pub(super) fn render_topbar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_sidebar_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = theme_rgb(&self.theme, "text.muted");
-        let body = theme_rgb(&self.theme, "text.body");
+        div()
+            .id("sidebar-toggle")
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .size(px(26.))
+            .rounded(px(6.))
+            .cursor_pointer()
+            .role(Role::Button)
+            .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+            .aria_label("Toggle chats sidebar")
+            .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
+            .on_click(cx.listener(|shell, _, _, cx| {
+                shell.dispatch_shell_command(ShellCommand::ToggleSidebar, cx);
+            }))
+            .child(tabler_icon(TablerIcon::PanelLeft, muted, px(14.)))
+    }
+
+    pub(super) fn render_navigation_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("navigation-header")
+            .debug_selector(|| "navigation-header".into())
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_end()
+            .w_full()
+            .h(px(PANE_HEADER_HEIGHT))
+            .pl(px(72.))
+            .pr(px(8.))
+            .border_b_1()
+            .border_color(theme_rgb(&self.theme, "divider"))
+            .child(self.render_sidebar_toggle(cx))
+    }
+
+    pub(super) fn render_conversation_header(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let muted = theme_rgb(&self.theme, "text.muted");
         let background = theme_rgb(&self.theme, "background");
         let active_icon = theme_rgb(&self.theme, "text.accent");
         let connection_icon = match self.model.connection.label() {
@@ -128,57 +168,21 @@ impl DesktopShell {
                     }),
             )
         });
-        let sidebar_visible = !self.layout.sidebar_collapsed && !self.settings_open;
         div()
-            .id("shell-header")
+            .id("conversation-header")
+            .debug_selector(|| "conversation-header".into())
             .flex()
             .items_center()
-            .h(px(38.))
+            .h(px(PANE_HEADER_HEIGHT))
             .flex_none()
             .bg(background)
-            .pr(px(8.))
+            .px(px(8.))
             .gap(px(8.))
-            .child(
-                div()
-                    .id("sidebar-titlebar")
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_end()
-                    .h_full()
-                    .w(px(if sidebar_visible {
-                        self.sidebar_width
-                    } else {
-                        112.
-                    }))
-                    .pl(px(72.))
-                    .pr(px(8.))
-                    .when(sidebar_visible, |element| {
-                        element
-                            .bg(theme_rgb(&self.theme, "sidebar.background"))
-                            .border_r_1()
-                            .border_color(theme_rgb(&self.theme, "divider"))
-                    })
-                    .child(
-                        div()
-                            .id("sidebar-toggle")
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .size(px(26.))
-                            .rounded(px(6.))
-                            .cursor_pointer()
-                            .role(Role::Button)
-                            .desktop_focus(active_icon)
-                            .aria_label("Toggle chats sidebar")
-                            .text_color(muted)
-                            .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
-                            .on_click(cx.listener(|shell, _, _, cx| {
-                                shell.dispatch_shell_command(ShellCommand::ToggleSidebar, cx);
-                            }))
-                            .child(tabler_icon(TablerIcon::PanelLeft, muted, px(14.))),
-                    ),
-            )
+            .border_b_1()
+            .border_color(theme_rgb(&self.theme, "divider"))
+            .when(self.layout.sidebar_collapsed, |element| {
+                element.pl(px(72.)).child(self.render_sidebar_toggle(cx))
+            })
             .child(
                 div()
                     .id("conversation-context")
@@ -195,7 +199,7 @@ impl DesktopShell {
                                 .child(tabler_icon(TablerIcon::Folder, muted, px(14.)))
                                 .child(
                                     div()
-                                        .max_w(px(120.))
+                                        .max_w(px(80.))
                                         .min_w_0()
                                         .truncate()
                                         .text_color(muted)
@@ -217,10 +221,10 @@ impl DesktopShell {
                 div()
                     .id("connection-profile-control")
                     .flex()
+                    .flex_none()
                     .items_center()
-                    .gap(px(5.))
-                    .h(px(26.))
-                    .px(px(7.))
+                    .justify_center()
+                    .size(px(26.))
                     .rounded(px(6.))
                     .relative()
                     .text_xs()
@@ -228,13 +232,15 @@ impl DesktopShell {
                     .cursor_pointer()
                     .role(Role::Button)
                     .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                    .aria_label("Connection profile")
+                    .aria_label(SharedString::from(format!(
+                        "Connection profile: {}",
+                        self.model.connection.label()
+                    )))
                     .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
                     .on_click(cx.listener(|shell, _, _, cx| {
                         shell.toggle_connection_picker(cx);
                     }))
                     .child(tabler_icon(TablerIcon::GitBranch, connection_icon, px(13.)))
-                    .child(SharedString::from(self.model.connection.label().to_owned()))
                     .when(self.connection_picker_open, |element| {
                         element.child(deferred(self.render_connection_picker(cx)).with_priority(3))
                     }),
@@ -251,10 +257,10 @@ impl DesktopShell {
                         div()
                             .id("review-changes")
                             .flex()
+                            .flex_none()
                             .items_center()
-                            .gap(px(5.))
-                            .h(px(26.))
-                            .px(px(7.))
+                            .justify_center()
+                            .size(px(26.))
                             .rounded(px(6.))
                             .text_xs()
                             .text_color(muted)
@@ -264,8 +270,7 @@ impl DesktopShell {
                             .aria_label("Review changes in this conversation")
                             .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
                             .on_click(cx.listener(|shell, _, _, cx| shell.open_review(cx)))
-                            .child(tabler_icon(TablerIcon::FileCode, muted, px(13.)))
-                            .child("Review changes"),
+                            .child(tabler_icon(TablerIcon::FileCode, muted, px(13.))),
                     )
                 },
             )
@@ -273,6 +278,7 @@ impl DesktopShell {
                 div()
                     .id("workbench-toggle")
                     .flex()
+                    .flex_none()
                     .items_center()
                     .justify_center()
                     .size(px(26.))
@@ -281,9 +287,9 @@ impl DesktopShell {
                     .role(Role::Button)
                     .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                     .aria_label(if self.layout.workbench_collapsed {
-                        "Show workbench"
+                        "Show work pane"
                     } else {
-                        "Hide workbench"
+                        "Hide work pane"
                     })
                     .text_color(muted)
                     .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
@@ -304,40 +310,49 @@ impl DesktopShell {
                         px(14.),
                     )),
             )
-            .child(
-                div()
-                    .id("terminal-toggle")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(26.))
-                    .rounded(px(6.))
-                    .cursor_pointer()
-                    .role(Role::Button)
-                    .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                    .aria_label(if self.layout.terminal_collapsed {
-                        "Show terminal"
-                    } else {
-                        "Hide terminal"
-                    })
-                    .text_color(if self.layout.terminal_collapsed {
-                        muted
-                    } else {
-                        body
-                    })
-                    .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
-                    .on_click(cx.listener(|shell, _, _, cx| {
-                        shell.toggle_terminal(cx);
-                    }))
-                    .child(tabler_icon(
-                        TablerIcon::Terminal2,
-                        if self.layout.terminal_collapsed {
-                            muted
-                        } else {
-                            active_icon
-                        },
-                        px(14.),
-                    )),
+            .when(
+                self.layout.workbench_collapsed || self.settings_open,
+                |element| element.child(self.render_terminal_toggle(cx)),
             )
+    }
+
+    pub(super) fn render_terminal_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let muted = theme_rgb(&self.theme, "text.muted");
+        let active_icon = theme_rgb(&self.theme, "text.accent");
+        div()
+            .id("terminal-toggle")
+            .debug_selector(|| "terminal-toggle".into())
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .size(px(26.))
+            .rounded(px(6.))
+            .cursor_pointer()
+            .role(Role::Button)
+            .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+            .aria_label(if self.layout.terminal_collapsed {
+                "Show terminal"
+            } else {
+                "Hide terminal"
+            })
+            .text_color(if self.layout.terminal_collapsed {
+                muted
+            } else {
+                active_icon
+            })
+            .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
+            .on_click(cx.listener(|shell, _, _, cx| {
+                shell.toggle_terminal(cx);
+            }))
+            .child(tabler_icon(
+                TablerIcon::Terminal2,
+                if self.layout.terminal_collapsed {
+                    muted
+                } else {
+                    active_icon
+                },
+                px(14.),
+            ))
     }
 }

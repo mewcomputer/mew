@@ -82,6 +82,295 @@ mod shell_tests {
     }
 
     #[gpui::test]
+    fn workspace_panes_have_full_height_owners_and_aligned_headers(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.simulate_resize(gpui::size(px(1600.), px(900.)));
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = false;
+            shell.layout.workbench_collapsed = false;
+            shell.layout.terminal_collapsed = true;
+            shell.sidebar_animation_id = 0;
+            shell.workbench_animation_id = 0;
+            shell.model.ui.composer = "a draft that stays in the conversation".into();
+            cx.notify();
+        });
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+
+        let navigation = cx.debug_bounds("navigation-pane").unwrap();
+        let conversation = cx.debug_bounds("conversation-pane").unwrap();
+        let work = cx.debug_bounds("work-pane").unwrap();
+        for (pane, header) in [
+            (navigation, "navigation-header"),
+            (conversation, "conversation-header"),
+            (work, "work-header"),
+        ] {
+            let header = cx.debug_bounds(header).unwrap();
+            assert_eq!(pane.origin.y, px(0.));
+            assert_eq!(pane.size.height, px(900.));
+            assert_eq!(header.origin, pane.origin);
+            assert_eq!(header.size.width, pane.size.width);
+            assert_eq!(header.size.height, px(38.));
+        }
+        let divider = cx.debug_bounds("work-divider").unwrap();
+        assert_eq!(conversation.origin.x, navigation.right());
+        assert_eq!(divider.origin.x, conversation.right());
+        assert_eq!(divider.right(), work.origin.x);
+        assert_eq!(divider.size.height, px(900.));
+        assert_eq!(work.right(), px(1600.));
+        assert!(work.size.width > conversation.size.width);
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn window_growth_goes_to_work_content_and_drag_resizes_the_conversation(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.simulate_resize(gpui::size(px(1440.), px(900.)));
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = false;
+            shell.layout.workbench_collapsed = false;
+            shell.layout.terminal_collapsed = true;
+            shell.sidebar_animation_id = 0;
+            shell.workbench_animation_id = 0;
+            cx.notify();
+        });
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+        let conversation = cx.debug_bounds("conversation-pane").unwrap();
+        let work = cx.debug_bounds("work-pane").unwrap();
+        assert_eq!(conversation.size.width, px(480.));
+
+        cx.simulate_resize(gpui::size(px(2240.), px(900.)));
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("conversation-pane").unwrap().size.width,
+            conversation.size.width
+        );
+        assert_eq!(
+            cx.debug_bounds("work-pane").unwrap().size.width,
+            work.size.width + px(800.)
+        );
+
+        let grip = cx.debug_bounds("work-resize-grip").unwrap().center();
+        cx.simulate_mouse_down(grip, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_move(
+            grip + gpui::point(px(20.), px(0.)),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        cx.simulate_mouse_move(
+            gpui::point(px(900.), grip.y),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        cx.simulate_mouse_up(
+            gpui::point(px(900.), grip.y),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        cx.run_until_parked();
+        let resized = cx.debug_bounds("conversation-pane").unwrap();
+        assert!(resized.size.width > conversation.size.width);
+        assert_eq!(cx.debug_bounds("work-pane").unwrap().right(), px(2240.));
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn pane_toggles_keep_boundaries_flush_and_restore_the_conversation_width(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        cx.simulate_resize(gpui::size(px(1440.), px(900.)));
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = false;
+            shell.layout.workbench_collapsed = false;
+            shell.layout.terminal_collapsed = true;
+            shell.conversation_width = 540.;
+            cx.notify();
+        });
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+        shell.update(cx, |shell, cx| shell.toggle_workbench(cx));
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("conversation-pane").unwrap().right(),
+            px(1440.)
+        );
+        shell.update(cx, |shell, cx| shell.toggle_workbench(cx));
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("conversation-pane").unwrap().size.width,
+            px(540.)
+        );
+        shell.update(cx, |shell, cx| shell.toggle_sidebar(cx));
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("conversation-pane").unwrap().origin.x,
+            px(0.)
+        );
+        shell.update(cx, |shell, cx| shell.toggle_sidebar(cx));
+        cx.run_until_parked();
+        let navigation = cx.debug_bounds("navigation-pane").unwrap();
+        assert_eq!(
+            cx.debug_bounds("conversation-pane").unwrap().origin.x,
+            navigation.right()
+        );
+        assert_eq!(
+            cx.debug_bounds("conversation-pane").unwrap().size.width,
+            px(540.)
+        );
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn work_tabs_switch_content_without_changing_the_chat(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.simulate_resize(gpui::size(px(1440.), px(900.)));
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = false;
+            shell.layout.workbench_collapsed = false;
+            shell.layout.terminal_collapsed = true;
+            shell.workbench_animation_id = 0;
+            shell.model.ui.composer = "retain this draft".into();
+            cx.notify();
+        });
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+        let browser = cx.debug_bounds("work-tab-browser").unwrap();
+        let changes = cx.debug_bounds("work-tab-changes").unwrap();
+        let files = cx.debug_bounds("work-tab-files").unwrap();
+        let activity = cx.debug_bounds("work-tab-activity").unwrap();
+        for tab in [changes, files, activity] {
+            assert_eq!(tab.origin.y, browser.origin.y);
+        }
+        assert!(browser.right() <= changes.origin.x);
+        assert!(changes.right() <= files.origin.x);
+        assert!(files.right() <= activity.origin.x);
+        for (tab, view) in [
+            (files, AuxiliaryView::Local),
+            (activity, AuxiliaryView::Activity),
+            (changes, AuxiliaryView::Changes),
+        ] {
+            cx.simulate_click(tab.center(), gpui::Modifiers::none());
+            cx.run_until_parked();
+            shell.update(cx, |shell, _| {
+                assert_eq!(shell.auxiliary_view, view);
+                assert_eq!(shell.model.ui.composer, "retain this draft");
+                assert!(shell.model.ui.selected_session.is_none());
+            });
+        }
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn review_uses_the_work_pane_for_the_diff_and_adapts_its_file_list(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.simulate_resize(gpui::size(px(1800.), px(900.)));
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = false;
+            shell.layout.workbench_collapsed = false;
+            shell.layout.terminal_collapsed = true;
+            shell.layout.changes_expanded = true;
+            shell.auxiliary_view = AuxiliaryView::Changes;
+            shell.sidebar_animation_id = 0;
+            shell.workbench_animation_id = 0;
+            shell.review_diffs = vec![mew_diff::FileDiff::binary("image.png", None)];
+            shell.select_review_file(0, cx);
+            cx.notify();
+        });
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+        let work = cx.debug_bounds("work-pane").unwrap();
+        let diff = cx.debug_bounds("review-document").unwrap();
+        let files = cx.debug_bounds("review-files").unwrap();
+        assert_eq!(diff.origin.x, work.origin.x);
+        assert_eq!(diff.right(), files.origin.x);
+        assert_eq!(files.right(), work.right());
+        assert_eq!(diff.origin.y, files.origin.y);
+        assert_eq!(diff.bottom(), work.bottom());
+        assert!(diff.size.width > files.size.width);
+
+        shell.update(cx, |shell, cx| {
+            shell.review_diffs = vec![mew_diff::diff_file(
+                "src/main.rs",
+                None,
+                Some("old\n"),
+                Some("new\n"),
+            )];
+            shell.select_review_file(0, cx);
+        });
+        cx.run_until_parked();
+        let viewport = cx.debug_bounds("diff-viewport").unwrap();
+        assert_eq!(viewport.origin, diff.origin);
+        assert_eq!(viewport.size, diff.size);
+
+        cx.simulate_resize(gpui::size(px(1200.), px(900.)));
+        cx.run_until_parked();
+        let work = cx.debug_bounds("work-pane").unwrap();
+        let diff = cx.debug_bounds("review-document").unwrap();
+        let files = cx.debug_bounds("review-files").unwrap();
+        assert_eq!(files.origin.x, work.origin.x);
+        assert_eq!(files.size.width, work.size.width);
+        assert_eq!(files.bottom(), diff.origin.y);
+        assert_eq!(diff.bottom(), work.bottom());
+        assert!(diff.size.height > files.size.height);
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn terminal_docks_in_work_content_and_remains_available_in_a_narrow_window(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.simulate_resize(gpui::size(px(1440.), px(900.)));
+        shell.update(cx, |shell, cx| {
+            shell.sidebar_width = SIDEBAR_MAX_WIDTH;
+            shell.layout.sidebar_collapsed = false;
+            shell.layout.workbench_collapsed = false;
+            shell.layout.terminal_collapsed = false;
+            shell.sidebar_animation_id = 0;
+            shell.workbench_animation_id = 0;
+            shell.terminal_animation_id = 0;
+            cx.notify();
+        });
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+        let terminal = cx.debug_bounds("terminal-dock").unwrap();
+        let work = cx.debug_bounds("work-pane").unwrap();
+        assert_eq!(terminal.origin.x, work.origin.x);
+        assert_eq!(terminal.size.width, work.size.width);
+        assert_eq!(terminal.bottom(), work.bottom());
+
+        cx.simulate_resize(gpui::size(px(720.), px(900.)));
+        cx.run_until_parked();
+        shell.update(cx, |shell, cx| {
+            assert!(shell.layout.workbench_collapsed);
+            shell.workbench_animation_id = 0;
+            cx.notify();
+        });
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+        let conversation = cx.debug_bounds("conversation-pane").unwrap();
+        let terminal = cx.debug_bounds("terminal-dock").unwrap();
+        assert!(conversation.size.width >= px(CHAT_MIN_WIDTH));
+        assert_eq!(terminal.origin.x, conversation.origin.x);
+        assert_eq!(terminal.size.width, conversation.size.width);
+        assert_eq!(terminal.bottom(), conversation.bottom());
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
     fn sidebar_surface_continues_into_the_titlebar(cx: &mut gpui::TestAppContext) {
         let (shell, cx) =
             cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
@@ -1076,82 +1365,54 @@ mod shell_tests {
     }
 
     #[test]
-    fn sidebar_transition_moves_the_surface_offscreen() {
-        assert_eq!(sidebar_transition_offset(true, 0.0, 312.), 0.);
-        assert_eq!(sidebar_transition_offset(true, 1.0, 312.), -312.);
-        assert_eq!(sidebar_transition_offset(false, 0.0, 312.), -312.);
-        assert_eq!(sidebar_transition_offset(false, 1.0, 312.), 0.);
-    }
-
-    #[test]
     fn sidebar_width_stays_within_rail_bounds() {
-        assert_eq!(sidebar_width_from_pointer(0.), SIDEBAR_MIN_WIDTH);
+        assert_eq!(sidebar_width_from_pointer(0., 1440.), SIDEBAR_MIN_WIDTH);
         assert_eq!(
-            sidebar_width_from_pointer(SIDEBAR_MAX_WIDTH + 80.),
+            sidebar_width_from_pointer(SIDEBAR_MAX_WIDTH + 80., 1440.),
             SIDEBAR_MAX_WIDTH
         );
-        assert_eq!(sidebar_width_from_pointer(312.), 312.);
+        assert_eq!(sidebar_width_from_pointer(312., 1440.), 312.);
+        assert_eq!(sidebar_width_from_pointer(360., 720.), 300.);
     }
 
     #[test]
     fn workbench_transition_reaches_both_panel_widths() {
         assert_eq!(WORKBENCH_COLLAPSED_WIDTH, 0.);
+        assert_eq!(workbench_transition_width(true, 0.0, 712.), 712.);
         assert_eq!(
-            workbench_transition_width(true, 0.0),
-            WORKBENCH_EXPANDED_WIDTH
-        );
-        assert_eq!(
-            workbench_transition_width(true, 1.0),
+            workbench_transition_width(true, 1.0, 712.),
             WORKBENCH_COLLAPSED_WIDTH
         );
         assert_eq!(
-            workbench_transition_width(false, 0.0),
+            workbench_transition_width(false, 0.0, 712.),
             WORKBENCH_COLLAPSED_WIDTH
         );
-        assert_eq!(
-            workbench_transition_width(false, 1.0),
-            WORKBENCH_EXPANDED_WIDTH
-        );
-    }
-
-    #[test]
-    fn workbench_transition_moves_the_surface_offscreen() {
-        let expanded_width = 512.;
-        assert_eq!(workbench_transition_offset(true, 0.0, expanded_width), 0.);
-        assert_eq!(
-            workbench_transition_offset(true, 1.0, expanded_width),
-            -expanded_width
-        );
-        assert_eq!(
-            workbench_transition_offset(false, 0.0, expanded_width),
-            -expanded_width
-        );
-        assert_eq!(workbench_transition_offset(false, 1.0, expanded_width), 0.);
+        assert_eq!(workbench_transition_width(false, 1.0, 712.), 712.);
     }
 
     #[test]
     fn workbench_resize_stays_within_usable_width_bounds() {
-        assert_eq!(workbench_max_width(1440., SIDEBAR_EXPANDED_WIDTH), 756.);
+        assert_eq!(workbench_max_width(1440., SIDEBAR_EXPANDED_WIDTH), 755.);
         assert_eq!(
-            workbench_width_from_pointer(1440., 1072., SIDEBAR_EXPANDED_WIDTH),
-            360.
+            conversation_width_from_pointer(1440., 1072., SIDEBAR_EXPANDED_WIDTH),
+            808.
         );
         assert_eq!(
-            workbench_width_from_pointer(1440., 0., SIDEBAR_EXPANDED_WIDTH),
-            756.
+            conversation_width_from_pointer(1440., 0., SIDEBAR_EXPANDED_WIDTH),
+            CHAT_MIN_WIDTH
         );
         assert_eq!(
-            workbench_width_from_pointer(1440., 1400., SIDEBAR_EXPANDED_WIDTH),
-            WORKBENCH_MIN_WIDTH
+            conversation_width_from_pointer(1440., 1400., SIDEBAR_EXPANDED_WIDTH),
+            815.
         );
     }
 
     #[test]
     fn workbench_resize_respects_the_available_width_on_narrow_windows() {
-        assert_eq!(workbench_max_width(720., SIDEBAR_EXPANDED_WIDTH), 36.);
+        assert_eq!(workbench_max_width(720., SIDEBAR_EXPANDED_WIDTH), 35.);
         assert_eq!(
-            workbench_width_from_pointer(720., 500., SIDEBAR_EXPANDED_WIDTH),
-            36.
+            conversation_width_from_pointer(720., 500., SIDEBAR_EXPANDED_WIDTH),
+            CHAT_MIN_WIDTH
         );
     }
 
@@ -1159,7 +1420,8 @@ mod shell_tests {
     fn workbench_only_opens_when_the_chat_can_keep_its_minimum_width() {
         assert!(!workbench_fits_window(720., SIDEBAR_EXPANDED_WIDTH));
         assert!(workbench_fits_window(1_240., SIDEBAR_EXPANDED_WIDTH));
-        assert!(workbench_fits_window(720., SIDEBAR_COLLAPSED_WIDTH));
+        assert!(!workbench_fits_window(780., SIDEBAR_COLLAPSED_WIDTH));
+        assert!(workbench_fits_window(781., SIDEBAR_COLLAPSED_WIDTH));
     }
 
     #[test]
@@ -1416,7 +1678,7 @@ mod shell_tests {
             workbench_collapsed: true,
             ..Default::default()
         };
-        assert!(layout.reveal_workbench(720., SIDEBAR_EXPANDED_WIDTH));
+        assert!(layout.reveal_workbench(900., SIDEBAR_EXPANDED_WIDTH));
         assert!(layout.sidebar_collapsed);
         assert!(!layout.workbench_collapsed);
         let mut layout = ShellLayoutState {
@@ -1425,13 +1687,14 @@ mod shell_tests {
         };
         let original = layout;
         assert!(!layout.reveal_workbench(
-            CHAT_MIN_WIDTH + WORKBENCH_MIN_WIDTH - 1.,
+            CHAT_MIN_WIDTH + WORKBENCH_MIN_WIDTH + PANE_DIVIDER_WIDTH - 1.,
             SIDEBAR_EXPANDED_WIDTH
         ));
         assert_eq!(layout, original);
-        assert!(
-            layout.reveal_workbench(CHAT_MIN_WIDTH + WORKBENCH_MIN_WIDTH, SIDEBAR_EXPANDED_WIDTH)
-        );
+        assert!(layout.reveal_workbench(
+            CHAT_MIN_WIDTH + WORKBENCH_MIN_WIDTH + PANE_DIVIDER_WIDTH,
+            SIDEBAR_EXPANDED_WIDTH
+        ));
     }
 
     #[test]

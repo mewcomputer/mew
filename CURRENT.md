@@ -3012,3 +3012,33 @@ installed CEF SDK. The compiler-cache wrapper failed with an OS permission error
 running rustc directly completed the same checks. Updated desktop design guidance
 and the review follow-up after verification. Live native visual, pointer, and
 motion checks remain blocked by the computer-use OS permission error.
+
+# 2026-10-24 - rebuild the native desktop as three full-height panes
+
+Rebuilt the GPUI shell around the user's confirmed Codex reference: navigation,
+conversation and a larger work pane, each with its own aligned top header and
+continuous divider. Navigation keeps sole ownership of chat switching. The
+conversation starts at 480 px; work content receives the remaining width and
+additional space when the window grows. Divider dragging retains conversation
+width per chat. Legacy saved workbench widths adopt the new conversation default.
+
+Replaced the work pane's vertical icon rail with horizontal Browser, Changes,
+Files and Activity tabs. Changes uses the available document area for the diff,
+with changed files beside it in wide panes and above it in narrower panes. The
+terminal docks below work content in split view and below the conversation when
+work is folded. Navigation width also clamps on resize to preserve the minimum
+usable conversation width. Removed obsolete slide offsets and the work pane's
+clipped collapsed rail. Draft, browser, request and terminal ownership remain
+in their existing layers.
+
+Reproduced layout and legacy-sizing gaps before implementation. All 203 desktop
+and 131 config tests pass, including actual GPUI pane/header geometry, divider
+dragging, window growth, tab clicks, reduced-motion toggles, terminal docking,
+narrow-window minima and binary/text diff geometry. Strict desktop/config
+all-target Clippy, native desktop build, formatting, architecture and generated
+theme checks pass. Tests use isolated settings/session directories; the real
+local transport tests require sandbox permission for listeners/subprocesses.
+Updated design, animation and comparison notes after verification. Native
+inspection was retried and still fails with the computer-use OS permission
+error, so live appearance, motion, VoiceOver and packaged CEF smoke remain
+unverified.

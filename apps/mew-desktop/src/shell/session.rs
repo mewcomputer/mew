@@ -237,7 +237,7 @@ impl DesktopShell {
     }
 
     pub(super) fn resize_sidebar(&mut self, pointer_x: f32, cx: &mut Context<Self>) {
-        let width = sidebar_width_from_pointer(pointer_x);
+        let width = sidebar_width_from_pointer(pointer_x, self.window_width);
         if (self.sidebar_width - width).abs() > 0.5 {
             self.sidebar_width = width;
             self.collapse_workbench_if_needed();
@@ -270,9 +270,12 @@ impl DesktopShell {
 
     pub(super) fn update_window_width(&mut self, width: f32) -> bool {
         let width_changed = (self.window_width - width).abs() > 0.5;
+        let sidebar_width = sidebar_width_from_pointer(self.sidebar_width, width);
+        let sidebar_changed = (self.sidebar_width - sidebar_width).abs() > 0.5;
+        self.sidebar_width = sidebar_width;
         self.window_width = width;
         let collapsed = self.collapse_workbench_if_needed();
-        width_changed || collapsed
+        width_changed || sidebar_changed || collapsed
     }
 
     fn collapse_workbench_if_needed(&mut self) -> bool {
@@ -588,7 +591,7 @@ impl DesktopShell {
         SessionViewState {
             layout: self.layout,
             auxiliary_view: self.auxiliary_view,
-            workbench_width: self.workbench_width,
+            conversation_width: self.conversation_width,
             expanded_chat_parts: self.expanded_chat_parts.clone(),
             browser_panel_open: self.browser_panel_open,
             browser_url: self.browser_url.clone(),
@@ -629,7 +632,7 @@ impl DesktopShell {
         );
         restore_session_layout(&mut self.layout, view_state.layout);
         self.auxiliary_view = view_state.auxiliary_view;
-        self.workbench_width = view_state.workbench_width;
+        self.conversation_width = view_state.conversation_width;
         self.expanded_chat_parts = view_state.expanded_chat_parts;
         self.pending_transcript_scroll_anchor = view_state.transcript_scroll_anchor;
         self.transcript_scrolled_away = self.pending_transcript_scroll_anchor.is_some();
@@ -1547,7 +1550,7 @@ mod tests {
                 activity_expanded: false,
             },
             auxiliary_view: AuxiliaryView::Activity,
-            workbench_width: 420.,
+            conversation_width: 420.,
             expanded_chat_parts: BTreeSet::from(["tool-1".into()]),
             browser_panel_open: true,
             browser_url: "https://example.com".into(),

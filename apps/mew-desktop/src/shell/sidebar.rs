@@ -1394,12 +1394,12 @@ impl DesktopShell {
             .cursor(gpui::CursorStyle::ResizeColumn)
             .role(Role::Splitter)
             .aria_label("Resize sessions sidebar")
+            .justify_end()
             .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
             .child(
                 div()
                     .w(px(1.))
-                    .h(px(36.))
-                    .rounded_full()
+                    .h_full()
                     .bg(theme_rgb(&self.theme, "divider")),
             )
             .on_drag(SidebarResizeDrag, |_, _, _, cx| {
@@ -1519,7 +1519,7 @@ impl DesktopShell {
                 .flex()
                 .flex_col()
                 .w(px(self.sidebar_width))
-                .h_full()
+                .flex_1()
                 .min_h_0()
                 .gap(px(10.))
                 .p(px(12.))
@@ -1696,14 +1696,15 @@ impl DesktopShell {
         };
         let sidebar = div()
             .id("sidebar-transition-wrapper")
+            .debug_selector(|| "navigation-pane".into())
             .flex()
+            .flex_col()
             .flex_none()
             .relative()
             .h_full()
             .overflow_hidden()
-            .border_r_1()
-            .border_color(theme_rgb(&self.theme, "divider"))
             .bg(theme_rgb(&self.theme, "sidebar.background"))
+            .child(self.render_navigation_header(cx))
             .child(sidebar);
         let sidebar = sidebar.when(!self.layout.sidebar_collapsed, |element| {
             element.child(self.render_sidebar_resize_handle(cx))
@@ -1720,17 +1721,11 @@ impl DesktopShell {
                 ElementId::Name(format!("sidebar-transition-{animation_id}").into()),
                 Animation::new(Duration::from_millis(220)).with_easing(gpui::ease_out_quint()),
                 move |element, delta| {
-                    element
-                        .w(px(sidebar_transition_width(
-                            collapsed,
-                            delta,
-                            expanded_width,
-                        )))
-                        .left(px(sidebar_transition_offset(
-                            collapsed,
-                            delta,
-                            expanded_width,
-                        )))
+                    element.w(px(sidebar_transition_width(
+                        collapsed,
+                        delta,
+                        expanded_width,
+                    )))
                 },
             )
             .into_any_element()

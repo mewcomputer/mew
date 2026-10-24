@@ -70,11 +70,13 @@ impl DesktopShell {
             .collect();
         let expanded_workspaces = BTreeSet::new();
         let workspace_open_destinations = detect_workspace_open_destinations();
-        let sidebar_width = persisted_state
-            .desktop_sidebar_width
-            .unwrap_or(SIDEBAR_EXPANDED_WIDTH)
-            .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
         let window_width = f32::from(window.bounds().size.width);
+        let sidebar_width = sidebar_width_from_pointer(
+            persisted_state
+                .desktop_sidebar_width
+                .unwrap_or(SIDEBAR_EXPANDED_WIDTH),
+            window_width,
+        );
         if !persisted_layout.sidebar_collapsed
             && !workbench_fits_window(window_width, sidebar_width)
         {
@@ -307,7 +309,7 @@ impl DesktopShell {
             workbench_animation_id: 0,
             terminal_animation_id: 0,
             window_width,
-            workbench_width: WORKBENCH_EXPANDED_WIDTH,
+            conversation_width: CHAT_DEFAULT_WIDTH,
             auxiliary_view: AuxiliaryView::Changes,
             transcript_list,
             transcript_scrolled_away: false,

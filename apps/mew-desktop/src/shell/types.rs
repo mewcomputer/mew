@@ -89,7 +89,7 @@ pub(super) struct DesktopShell {
     pub(super) workbench_animation_id: u64,
     pub(super) terminal_animation_id: u64,
     pub(super) window_width: f32,
-    pub(super) workbench_width: f32,
+    pub(super) conversation_width: f32,
     pub(super) auxiliary_view: AuxiliaryView,
     pub(super) transcript_list: gpui::ListState,
     pub(super) transcript_scrolled_away: bool,
@@ -450,7 +450,7 @@ impl Drop for DesktopShell {
 pub(super) struct SessionViewState {
     pub(super) layout: ShellLayoutState,
     pub(super) auxiliary_view: AuxiliaryView,
-    pub(super) workbench_width: f32,
+    pub(super) conversation_width: f32,
     pub(super) expanded_chat_parts: BTreeSet<String>,
     pub(super) browser_panel_open: bool,
     pub(super) browser_url: String,
@@ -475,9 +475,7 @@ impl SessionViewState {
                 "activity" => AuxiliaryView::Activity,
                 _ => AuxiliaryView::Changes,
             },
-            workbench_width: state
-                .workbench_width
-                .clamp(WORKBENCH_MIN_WIDTH, WORKBENCH_MAX_WIDTH),
+            conversation_width: state.conversation_width.max(CHAT_MIN_WIDTH),
             expanded_chat_parts: state.expanded_chat_parts.iter().cloned().collect(),
             browser_panel_open: state.browser_panel_open,
             browser_url: state.browser_url.clone(),
@@ -501,7 +499,7 @@ impl SessionViewState {
                 AuxiliaryView::Activity => "activity",
             }
             .into(),
-            workbench_width: self.workbench_width,
+            conversation_width: self.conversation_width,
             expanded_chat_parts: self.expanded_chat_parts.iter().cloned().collect(),
             browser_panel_open: self.browser_panel_open,
             browser_url: self.browser_url.clone(),
@@ -920,14 +918,13 @@ pub(super) const SIDEBAR_MIN_WIDTH: f32 = 232.;
 pub(super) const SIDEBAR_MAX_WIDTH: f32 = 360.;
 pub(super) const SIDEBAR_EXPANDED_WIDTH: f32 = 264.;
 pub(super) const WORKBENCH_COLLAPSED_WIDTH: f32 = 0.;
-pub(super) const WORKBENCH_EXPANDED_WIDTH: f32 = 360.;
-pub(super) const SHELL_GUTTER: f32 = 8.;
-pub(super) const SHELL_SURFACE_RADIUS: f32 = 14.;
+pub(super) const PANE_HEADER_HEIGHT: f32 = 38.;
+pub(super) const PANE_DIVIDER_WIDTH: f32 = 1.;
+pub(super) const CHAT_DEFAULT_WIDTH: f32 = 480.;
 pub(super) const CHAT_CONTENT_MAX_WIDTH: f32 = 760.;
 pub(super) const CHAT_TRANSCRIPT_PADDING: f32 = 24.;
 pub(super) const CHAT_MIN_WIDTH: f32 = 420.;
-pub(super) const WORKBENCH_MIN_WIDTH: f32 = 280.;
-pub(super) const WORKBENCH_MAX_WIDTH: f32 = 960.;
+pub(super) const WORKBENCH_MIN_WIDTH: f32 = 360.;
 pub(super) const EFFORT_TRACK_MAX_INSET: f32 = 38.;
 pub(super) const RECENT_MODEL_LIMIT: usize = 6;
 pub(super) const TERMINAL_EXPANDED_ROWS: u16 = 7;
