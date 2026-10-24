@@ -3293,3 +3293,31 @@ selection/copy and split-to-wide layout in dark and light modes. Test drafts
 were cleared, theme/layout restored, and owned QA processes stopped. VoiceOver
 and physical IME remain unverified. Nested block-level content and interactive
 task checkboxes were not added in this pass.
+
+# 2026-10-24 - quiet completed desktop tools and retain working feedback
+
+Completed single tools now use one muted 20 px action row with the command or
+path on the same line and no completed badge. Visual summaries flatten explicit
+newlines while accessible labels retain the full command. Disclosure and complete
+input/output/diff copying remain available. Active calls retain their explicit
+state, and collapsed failures expose their first nonempty error line.
+
+Working is now a compact status line above the composer with a synchronized,
+12 FPS opacity pulse. It stays mounted through partial assistant replies, tool
+updates and running metadata arriving before history. Reduced motion keeps a
+visible static dot. Stop remains in the composer; required actions replace the
+working row, and failed/waiting turns retain retry cards.
+
+All 266 desktop tests pass. New failing-first tests cover one-line long/Unicode
+and multiline summaries, pointer/keyboard disclosure, complete output copy,
+active/error/completed transitions, stable working geometry through streaming,
+empty history, cancellation, required actions and retry after a partial reply.
+Strict all-target desktop Clippy, native build/packaging, formatting, architecture
+and generated-theme checks pass.
+
+Isolated native QA confirms dark/light and split/wide presentation, failure
+excerpts, expanded output copy, working through partial text and removal on
+completion. The real daemon's fake-provider turn was briefly paused after an
+actual text delta for inspection, then resumed. Test drafts were cleared,
+appearance/layout restored and owned QA processes stopped. Production provider
+latency, VoiceOver and physical IME remain unverified.

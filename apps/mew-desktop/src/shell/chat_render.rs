@@ -45,7 +45,7 @@ pub(super) fn transcript_scrollbar_metrics(
 pub(super) fn tool_display_label(tool_name: &str) -> String {
     let name = tool_name.rsplit(['.', ':']).next().unwrap_or(tool_name);
     match name {
-        "bash" | "sh" | "shell" | "exec" | "run_command" => "Terminal".into(),
+        "bash" | "sh" | "shell" | "exec" | "exec_command" | "run_command" => "Terminal".into(),
         name if name.starts_with("browser") => "Browser".into(),
         name if name.contains("plan") => "Plan".into(),
         name if name.contains("handoff") => "Handoff".into(),
@@ -122,15 +122,7 @@ fn tool_value_text(value: &serde_json::Value) -> Option<String> {
     if text.is_empty() {
         return None;
     }
-    const MAX_SUMMARY_CHARS: usize = 120;
-    Some(if text.chars().count() > MAX_SUMMARY_CHARS {
-        format!(
-            "{}…",
-            text.chars().take(MAX_SUMMARY_CHARS - 1).collect::<String>()
-        )
-    } else {
-        text.to_owned()
-    })
+    Some(text.to_owned())
 }
 
 pub(super) fn formatted_tool_input(input: &str) -> String {
@@ -835,7 +827,13 @@ impl DesktopShell {
                 theme_rgb(&self.theme, "text.muted"),
                 px(13.),
             ))
-            .child(div().min_w_0().truncate().child(SharedString::from(label)))
+            .child(div().min_w_0().truncate().child(SharedString::from(
+                if label.contains(['\r', '\n']) {
+                    label.replace(['\r', '\n'], " ")
+                } else {
+                    label
+                },
+            )))
             .when_some(status, |element, (label, color)| {
                 element.child(div().text_color(color).child(SharedString::from(label)))
             })
@@ -932,34 +930,61 @@ impl DesktopShell {
         let key = Self::chat_part_key(message_index, part_index);
         let collapsed = !self.expanded_chat_parts.contains(&key);
         let compact = collapsed && status == ToolStatus::Completed;
-        let (status_label, status_color) = match status {
-            ToolStatus::Pending => ("pending", theme_rgb(&self.theme, "text.muted")),
-            ToolStatus::Running => ("running", theme_rgb(&self.theme, "yellow.fg")),
-            ToolStatus::Completed => ("completed", theme_rgb(&self.theme, "green.fg")),
-            ToolStatus::Error => ("failed", theme_rgb(&self.theme, "red.fg")),
+        let status_indicator = match status {
+            ToolStatus::Pending => Some(("pending".into(), theme_rgb(&self.theme, "text.muted"))),
+            ToolStatus::Running => Some(("running".into(), theme_rgb(&self.theme, "yellow.fg"))),
+            ToolStatus::Completed => None,
+            ToolStatus::Error => Some(("failed".into(), theme_rgb(&self.theme, "red.fg"))),
         };
-        let display_name = tool_display_label(tool_name);
         let summary = tool_summary(input);
+        let display_name = if status == ToolStatus::Completed {
+            let action = match tool_activity(tool_name).0 {
+                "Read files" => "Read file".into(),
+                "Edited files" => "Edited file".into(),
+                "Ran commands" => "Ran command".into(),
+                "Searched files" => "Searched files".into(),
+                "Browsed pages" => "Browsed page".into(),
+                _ => tool_display_label(tool_name),
+            };
+            summary
+                .as_ref()
+                .map(|summary| format!("{action} · {summary}"))
+                .unwrap_or(action)
+        } else {
+            tool_display_label(tool_name)
+        };
         let header = self.render_part_header(
             key,
             tool_activity(tool_name).1,
             display_name,
-            Some((status_label.into(), status_color)),
+            status_indicator,
             collapsed,
             cx,
         );
-        let summary_view = summary.map(|summary| {
-            div()
-                .pl(px(20.))
-                .min_w_0()
-                .truncate()
-                .text_xs()
-                .text_color(theme_rgb(
-                    &self.theme,
-                    if compact { "text.muted" } else { "text.body" },
-                ))
-                .child(SharedString::from(summary))
-        });
+        let summary_view = summary
+            .filter(|_| status != ToolStatus::Completed)
+            .map(|summary| {
+                div()
+                    .pl(px(20.))
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .text_color(theme_rgb(&self.theme, "text.body"))
+                    .child(SharedString::from(summary))
+            });
+        let error_preview = error
+            .filter(|_| collapsed && status == ToolStatus::Error)
+            .and_then(|error| error.lines().map(str::trim).find(|line| !line.is_empty()))
+            .map(|error| {
+                div()
+                    .debug_selector(move || format!("tool-error-{message_index}-{part_index}"))
+                    .pl(px(20.))
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .text_color(theme_rgb(&self.theme, "red.fg"))
+                    .child(SharedString::from(error.to_owned()))
+            });
         let body = (!collapsed).then(|| {
             let mut body = div()
                 .id(format!("tool-body-{message_index}-{part_index}"))
@@ -1093,6 +1118,8 @@ impl DesktopShell {
             .id(format!("tool-part-{message_index}-{part_index}-{call_id}"))
             .flex()
             .flex_col()
+            .w_full()
+            .min_w_0()
             .gap(px(4.))
             .line_height(px(20.))
             .when(!compact, |element| {
@@ -1105,6 +1132,7 @@ impl DesktopShell {
             })
             .child(header)
             .when_some(summary_view, |element, summary| element.child(summary))
+            .when_some(error_preview, |element, error| element.child(error))
             .when_some(body, |element, body| element.child(body))
             .into_any_element()
     }
@@ -1522,12 +1550,41 @@ impl DesktopShell {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let (title, detail, color, icon) = match attention {
-            TranscriptAttention::Running => (
-                "Working",
-                "The assistant is processing this turn.",
-                theme_rgb(&self.theme, "yellow.fg"),
-                TablerIcon::Square,
-            ),
+            TranscriptAttention::Running => {
+                let muted = theme_rgb(&self.theme, "text.muted");
+                return div()
+                    .id("conversation-working")
+                    .debug_selector(|| "conversation-working".into())
+                    .role(Role::Status)
+                    .aria_label("Working")
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .w_full()
+                    .py(px(2.))
+                    .text_xs()
+                    .line_height(px(20.))
+                    .text_color(muted)
+                    .child(
+                        div()
+                            .size(px(6.))
+                            .flex_shrink_0()
+                            .rounded_full()
+                            .bg(muted)
+                            .with_animation(
+                                "working-pulse",
+                                Animation::new(Duration::from_millis(1800))
+                                    .repeat_synced()
+                                    .with_max_fps(12.),
+                                |element, phase| {
+                                    element
+                                        .opacity(0.65 + 0.35 * (phase * std::f32::consts::PI).sin())
+                                },
+                            ),
+                    )
+                    .child("Working")
+                    .into_any_element();
+            }
             TranscriptAttention::Failed => (
                 "Last turn failed",
                 "Retry to send the last prompt again.",
@@ -1560,8 +1617,9 @@ impl DesktopShell {
             );
         }
 
-        let mut card = div()
+        let card = div()
             .id("conversation-attention")
+            .debug_selector(|| "conversation-attention".into())
             .flex()
             .items_start()
             .gap(px(8.))
@@ -1575,54 +1633,30 @@ impl DesktopShell {
             .child(tabler_icon(icon, color, px(14.)))
             .child(copy);
 
-        if matches!(attention, TranscriptAttention::Running) {
-            card = card.child(
-                div()
-                    .id("cancel-attention-turn")
-                    .px(px(7.))
-                    .py(px(4.))
-                    .rounded(px(5.))
-                    .bg(theme_rgb(&self.theme, "card"))
-                    .text_xs()
-                    .text_color(body)
-                    .cursor_pointer()
-                    .role(Role::Button)
-                    .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                    .aria_label("Cancel current turn")
-                    .on_click(cx.listener(|shell, _, _, cx| {
-                        shell.cancel_turn(cx);
-                    }))
-                    .child("cancel"),
-            );
-        } else if matches!(
-            attention,
-            TranscriptAttention::Failed | TranscriptAttention::Waiting
-        ) {
-            card = card.child(
-                div()
-                    .id("retry-attention-turn")
-                    .px(px(7.))
-                    .py(px(4.))
-                    .rounded(px(5.))
-                    .bg(theme_rgb(&self.theme, "card"))
-                    .text_xs()
-                    .text_color(body)
-                    .cursor_pointer()
-                    .role(Role::Button)
-                    .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                    .aria_label(if matches!(attention, TranscriptAttention::Failed) {
-                        "Retry last turn"
-                    } else {
-                        "Retry waiting turn"
-                    })
-                    .on_click(cx.listener(|shell, _, _, cx| {
-                        shell.retry_last_turn(cx);
-                    }))
-                    .child("retry"),
-            );
-        }
-
-        card.into_any_element()
+        card.child(
+            div()
+                .id("retry-attention-turn")
+                .debug_selector(|| "retry-attention-turn".into())
+                .px(px(7.))
+                .py(px(4.))
+                .rounded(px(5.))
+                .bg(theme_rgb(&self.theme, "card"))
+                .text_xs()
+                .text_color(body)
+                .cursor_pointer()
+                .role(Role::Button)
+                .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+                .aria_label(if matches!(attention, TranscriptAttention::Failed) {
+                    "Retry last turn"
+                } else {
+                    "Retry waiting turn"
+                })
+                .on_click(cx.listener(|shell, _, _, cx| {
+                    shell.retry_last_turn(cx);
+                }))
+                .child("retry"),
+        )
+        .into_any_element()
     }
 
     pub(super) fn render_center(
@@ -1675,21 +1709,24 @@ impl DesktopShell {
                 .items_center()
                 .justify_center()
                 .gap(px(8.))
-                .child(div().text_xl().child(if selected_session {
-                    "ready when you are"
-                } else {
-                    "start a coding session"
-                }))
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(theme_rgb(&self.theme, "text.muted"))
-                        .child(if selected_session {
-                            "Send a message to begin this conversation."
+                .when(!self.model.ui.running, |element| {
+                    element
+                        .child(div().text_xl().child(if selected_session {
+                            "ready when you are"
                         } else {
-                            "Choose a chat in the sidebar, or start a new chat."
-                        }),
-                )
+                            "start a coding session"
+                        }))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(theme_rgb(&self.theme, "text.muted"))
+                                .child(if selected_session {
+                                    "Send a message to begin this conversation."
+                                } else {
+                                    "Choose a chat in the sidebar, or start a new chat."
+                                }),
+                        )
+                })
                 .into_any_element()
         } else {
             div()
@@ -1722,26 +1759,32 @@ impl DesktopShell {
                             |element, scrollbar| element.child(scrollbar),
                         ),
                 )
-                .when_some(transcript_attention_state, |element, attention| {
-                    element.child(
-                        div()
-                            .w_full()
-                            .max_w(px(CHAT_CONTENT_MAX_WIDTH + CHAT_TRANSCRIPT_PADDING * 2.))
-                            .px(px(CHAT_TRANSCRIPT_PADDING))
-                            .self_center()
-                            .child(self.render_transcript_attention(
-                                attention,
-                                if matches!(attention, TranscriptAttention::Failed) {
-                                    failure_detail.as_deref()
-                                } else {
-                                    None
-                                },
-                                cx,
-                            )),
-                    )
-                })
                 .into_any_element()
         };
+        let transcript = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(transcript)
+            .when_some(transcript_attention_state, |element, attention| {
+                element.child(
+                    div()
+                        .w_full()
+                        .max_w(px(CHAT_CONTENT_MAX_WIDTH + CHAT_TRANSCRIPT_PADDING * 2.))
+                        .px(px(CHAT_TRANSCRIPT_PADDING))
+                        .self_center()
+                        .child(self.render_transcript_attention(
+                            attention,
+                            if matches!(attention, TranscriptAttention::Failed) {
+                                failure_detail.as_deref()
+                            } else {
+                                None
+                            },
+                            cx,
+                        )),
+                )
+            });
         let model_display_label = non_empty_label(self.model.ui.model.as_deref(), "choose a model");
         let thinking_label = self.model.ui.thinking_variant.as_deref().unwrap_or("");
         let model_display = if thinking_label.is_empty() {
@@ -2370,6 +2413,7 @@ impl DesktopShell {
                                     .child(if turn_is_running {
                                         div()
                                             .id("cancel-turn")
+                                            .debug_selector(|| "cancel-turn".into())
                                             .flex_none()
                                             .size(px(28.))
                                             .rounded_full()
@@ -2803,6 +2847,13 @@ mod tests {
         );
         assert_eq!(tool_summary(r#"{"plan":["one"]}"#), None);
         assert_eq!(tool_summary("not json"), None);
+    }
+
+    #[test]
+    fn tool_summary_keeps_complete_unicode_commands_for_accessible_labels() {
+        let command = format!("cargo test {}末尾", "very_long_package_name/".repeat(18));
+        let input = serde_json::json!({ "command": &command }).to_string();
+        assert_eq!(tool_summary(&input).as_deref(), Some(command.as_str()));
     }
 
     #[test]

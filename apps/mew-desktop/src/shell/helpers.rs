@@ -1619,12 +1619,12 @@ pub(super) fn transcript_attention(
     if has_pending_action {
         return None;
     }
-    if !running && last_turn_failed {
+    if running {
+        Some(TranscriptAttention::Running)
+    } else if last_turn_failed {
         Some(TranscriptAttention::Failed)
     } else if !last_message_is_user {
         None
-    } else if running {
-        Some(TranscriptAttention::Running)
     } else {
         Some(TranscriptAttention::Waiting)
     }

@@ -540,3 +540,28 @@ aligned wrapping tables and Unicode row copy in dark/light themes. The requested
 three markdown gaps are addressed. VoiceOver and physical IME remain unverified;
 full nested block content and interactive task checkboxes remain outside this
 pass. Activity/progress and composer hierarchy keep their existing priority.
+
+## Activity and progress follow-up, 2026-10-24
+
+Single completed tools now match grouped activity with one muted action row,
+including the command or path, and no completed badge. Long and multiline
+commands remain one visual line with complete accessible labels. Expansion,
+keyboard disclosure and complete input/output/diff copying remain available.
+Collapsed failures expose the first useful error line. Expanded details retain
+their existing input/output ordering; changing that inspection flow remains open.
+
+The bordered Working card is replaced by a small status line above the composer
+with a gentle muted pulse. It stays visible through partial assistant replies
+and tool activity, and works when running metadata precedes history. Stop lives
+in the composer. Required actions replace the working line; partial failures
+retain a retry card with the original prompt.
+
+All 266 desktop tests pass, including failing-first geometry and transition
+coverage, plus strict Clippy, native build/packaging, formatting, architecture
+and generated-theme checks. Isolated native QA confirms quiet completed rows,
+visible failure excerpts and output copy in dark/light and split/wide layouts.
+Real daemon/fake-provider turns were briefly paused after an actual text delta
+to inspect partial replies, then resumed to verify status removal on completion.
+This checks native presentation and state transitions, not production provider
+latency. VoiceOver and physical IME remain unverified. Composer hierarchy and
+the edited-files handoff keep their existing priority.

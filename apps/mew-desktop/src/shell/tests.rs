@@ -1,4 +1,138 @@
 #[cfg(test)]
+mod quiet_tools_tests {
+    use super::super::*;
+
+    fn tool(status: ToolStatus) -> TranscriptPart {
+        TranscriptPart::ToolCall {
+            tool_name: "shell".into(),
+            call_id: "quiet-call".into(),
+            status,
+            input: serde_json::json!({
+                "command": format!("cargo test {}末尾", "very_long_package_name/".repeat(18)),
+            })
+            .to_string(),
+            output: Some("complete output é🙂\nsecond line\n".into()),
+            error: (status == ToolStatus::Error)
+                .then(|| "\n  permission denied: src/main.rs\nfull error details".into()),
+            diff: Some("-before\n+after".into()),
+        }
+    }
+
+    #[gpui::test]
+    fn quiet_completed_tool_uses_one_line_and_keeps_disclosure_and_copy(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            shell.model.ui.transcript = vec![TranscriptItem {
+                role: TranscriptRole::Assistant,
+                text: String::new(),
+                parts: vec![tool(ToolStatus::Completed)],
+            }];
+            shell.sync_markdown_cache();
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(420.), px(900.)));
+        cx.run_until_parked();
+        let content = cx.debug_bounds("transcript-content-0").unwrap();
+        let header = cx.debug_bounds("chat-part-0-0-header").unwrap();
+        assert_eq!(
+            content.size.height,
+            px(20.),
+            "completed activity is one line"
+        );
+        assert!(header.left() >= content.left() && header.right() <= content.right());
+        shell.update(cx, |shell, cx| {
+            let TranscriptPart::ToolCall { input, .. } = &mut shell.model.ui.transcript[0].parts[0]
+            else {
+                unreachable!()
+            };
+            *input = serde_json::json!({ "command": "cargo test\nprintf 'done'" }).to_string();
+            shell.sync_markdown_cache();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("transcript-content-0").unwrap().size.height,
+            px(20.),
+            "multiline commands also keep one summary line"
+        );
+        let header = cx.debug_bounds("chat-part-0-0-header").unwrap();
+        cx.simulate_click(header.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("tool-input-0-0-line-0").is_some());
+        assert!(cx.debug_bounds("tool-diff-0-0-line-0").is_some());
+        let copy = cx.debug_bounds("copy-tool-output-0-0").unwrap();
+        cx.simulate_click(copy.center(), gpui::Modifiers::none());
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().as_deref(),
+            Some("complete output é🙂\nsecond line\n")
+        );
+        let header = cx.debug_bounds("chat-part-0-0-header").unwrap();
+        cx.simulate_click(header.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("tool-input-0-0-line-0").is_none());
+        for (key, expanded) in [("enter", true), ("space", false)] {
+            let keystroke = gpui::Keystroke::parse(key).unwrap();
+            cx.simulate_event(gpui::KeyDownEvent {
+                keystroke: keystroke.clone(),
+                is_held: false,
+                prefer_character_input: false,
+            });
+            cx.simulate_event(gpui::KeyUpEvent { keystroke });
+            cx.run_until_parked();
+            assert_eq!(cx.debug_bounds("tool-input-0-0-line-0").is_some(), expanded);
+        }
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn quiet_tool_completion_preserves_visible_failure_and_distinct_active_states(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        for status in [
+            ToolStatus::Pending,
+            ToolStatus::Running,
+            ToolStatus::Error,
+            ToolStatus::Completed,
+        ] {
+            shell.update(cx, |shell, cx| {
+                shell.layout.sidebar_collapsed = true;
+                shell.layout.workbench_collapsed = true;
+                shell.model.ui.transcript = vec![TranscriptItem {
+                    role: TranscriptRole::Assistant,
+                    text: String::new(),
+                    parts: vec![tool(status)],
+                }];
+                shell.sync_markdown_cache();
+                cx.notify();
+            });
+            cx.simulate_resize(gpui::size(px(420.), px(900.)));
+            cx.run_until_parked();
+            let content = cx.debug_bounds("transcript-content-0").unwrap();
+            if status == ToolStatus::Completed {
+                assert_eq!(content.size.height, px(20.));
+            } else {
+                assert!(content.size.height > px(20.));
+            }
+            assert_eq!(
+                cx.debug_bounds("tool-error-0-0").is_some(),
+                status == ToolStatus::Error,
+                "collapsed failure exposes the cause and clears it after completion"
+            );
+        }
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+}
+
+#[cfg(test)]
 mod shell_tests {
     use super::super::browser::replace_browser_event_value;
     use super::super::composer::composer_input_height;
@@ -2241,7 +2375,10 @@ mod shell_tests {
             transcript_attention(true, false, false, false),
             Some(TranscriptAttention::Waiting)
         );
-        assert_eq!(transcript_attention(false, true, false, false), None);
+        assert_eq!(
+            transcript_attention(false, true, false, false),
+            Some(TranscriptAttention::Running)
+        );
     }
 
     #[test]
@@ -2256,7 +2393,10 @@ mod shell_tests {
             transcript_attention(false, false, true, false),
             Some(TranscriptAttention::Failed)
         );
-        assert_eq!(transcript_attention(false, true, true, false), None);
+        assert_eq!(
+            transcript_attention(false, true, true, false),
+            Some(TranscriptAttention::Running)
+        );
         assert_eq!(transcript_attention(false, false, true, true), None);
     }
 
@@ -3621,6 +3761,172 @@ mod markdown_content_tests {
             scrolled_first.left() - first.left(),
             scrolled_last.left() - last.left(),
             "all table chunks share the horizontal position"
+        );
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::super::*;
+
+    #[gpui::test]
+    fn working_status_stays_compact_through_streaming_and_keeps_stop_available(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            shell.command_tx = Some(sender);
+            shell.model.ui.running = true;
+            shell.model.ui.transcript = vec![TranscriptItem {
+                role: TranscriptRole::User,
+                text: "check the layout".into(),
+                parts: Vec::new(),
+            }];
+            shell.sync_markdown_cache();
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(480.), px(760.)));
+        cx.run_until_parked();
+        let before = cx
+            .debug_bounds("conversation-working")
+            .expect("an active turn has a working line");
+        assert!(
+            before.size.height <= px(24.),
+            "working fits a single quiet line"
+        );
+        assert!(cx.debug_bounds("conversation-attention").is_none());
+        shell.update(cx, |shell, cx| {
+            shell.model.ui.transcript.push(TranscriptItem {
+                role: TranscriptRole::Assistant,
+                text: "checking the first part".into(),
+                parts: Vec::new(),
+            });
+            shell.sync_markdown_cache();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("conversation-working").unwrap(),
+            before,
+            "the status does not jump or disappear when assistant text arrives"
+        );
+        let stop = cx
+            .debug_bounds("cancel-turn")
+            .expect("the composer retains Stop");
+        cx.simulate_click(stop.center(), gpui::Modifiers::none());
+        assert!(matches!(
+            commands.try_recv().unwrap(),
+            ClientMessage::Cancel
+        ));
+        shell.update(cx, |shell, cx| {
+            shell.model.ui.running = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("conversation-working").is_none());
+        shell.update(cx, |shell, cx| {
+            shell.model.ui.running = true;
+            shell.model.ui.transcript.clear();
+            shell.sync_markdown_cache();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("conversation-working").is_some(),
+            "running metadata can arrive before history"
+        );
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn required_actions_replace_working_and_partial_failures_keep_retry(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            shell.command_tx = Some(sender);
+            shell.model.ui.selected_session = Some("test".into());
+            shell.model.attached_session = Some("test".into());
+            shell.model.ui.running = true;
+            shell.model.ui.transcript = vec![
+                TranscriptItem {
+                    role: TranscriptRole::User,
+                    text: "please check".into(),
+                    parts: Vec::new(),
+                },
+                TranscriptItem {
+                    role: TranscriptRole::Assistant,
+                    text: "partial response".into(),
+                    parts: Vec::new(),
+                },
+            ];
+            shell.sync_markdown_cache();
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(480.), px(760.)));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("conversation-working").is_some());
+        shell.update(cx, |shell, cx| {
+            shell.model.ui.pending_actions.push(PendingAction {
+                request_id: "permission".into(),
+                kind: ActionKind::Permission {
+                    tool_name: "shell".into(),
+                    input: serde_json::json!({"command":"cargo test"}),
+                },
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("conversation-working").is_none());
+        shell.update(cx, |shell, cx| {
+            shell.model.ui.pending_actions.clear();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("conversation-working").is_some());
+        shell.update(cx, |shell, cx| {
+            shell.model.ui.running = false;
+            shell.model.ui.conversations = vec![ConversationItem {
+                session_id: "test".into(),
+                title: "test".into(),
+                cwd: None,
+                workspace_path: None,
+                last_message_at: None,
+                state: mew_protocol::SessionState::Idle,
+                last_turn_failed: true,
+                failure_detail: Some("connection interrupted".into()),
+                unread_completion: false,
+                needs_attention: false,
+                archived: false,
+                pinned: false,
+                group_id: None,
+            }];
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("conversation-working").is_none());
+        assert!(
+            cx.debug_bounds("conversation-attention")
+                .unwrap()
+                .size
+                .height
+                > px(24.)
+        );
+        let retry = cx.debug_bounds("retry-attention-turn").unwrap();
+        cx.simulate_click(retry.center(), gpui::Modifiers::none());
+        assert!(
+            matches!(commands.try_recv().unwrap(), ClientMessage::Prompt { text, .. } if text == "please check")
         );
         shell.update(cx, |shell, _| shell.quitting = true);
     }

@@ -104,11 +104,20 @@ visible when a group forms. Keep reading anchors stable as calls finish and
 history loads. A replacement summary starts at its top rather than retaining
 an offset into a taller call.
 
-Collapsed completed tools use quiet rows; expanded, running and failed tools
-keep a distinct surface. Tool text and diff lists infer their content height
-inside bounded preview areas. Composer settings may wrap when labels need more
-space; send keeps its size, and long workspace paths truncate while preserving
-the full accessible label.
+Single completed tools use one muted 20 px action row with the command or path
+on the same line. Omit the completed badge, retain the full accessible label,
+and flatten explicit newlines only in the visual summary. Expanded, running and
+failed tools keep a distinct surface. Collapsed failures expose their first
+nonempty error line; expanded details retain the complete error and copy actions.
+Tool text and diff lists infer their content height inside bounded preview areas.
+
+Running turns use a 24 px status line above the composer, aligned with the
+reading column. Keep it mounted through assistant text and tool updates, even
+when running metadata arrives before history. The composer owns Stop. Required
+actions replace the working line; waiting and failed turns retain their retry
+cards. Composer settings may wrap when labels need more space; send keeps its
+size, and long workspace paths truncate while preserving the full accessible
+label.
 
 Display connection and browser failures through the existing stateful surfaces.
 A deferred failure must request a redraw immediately. Use the existing native

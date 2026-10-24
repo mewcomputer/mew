@@ -44,6 +44,12 @@ The transcript limits animated activity to the last visible row. Keep history
 and completed rows quiet. Composer blink uses a weak shell and an epoch so
 an obsolete timer cannot restart after focus changes.
 
+The separate working status uses a stable `working-pulse` identity, a synchronized
+1.8-second opacity cycle and a 12 FPS cap. Mount it only for an active turn with
+no required action. Its initial opacity remains visible when reduced motion
+freezes repeating animations. The cap limits scheduling frequency; it does not
+establish isolated shell or transcript repaint cost.
+
 Prefer `repeat_synced()` for repeating indicators that should share a phase.
 Use an FPS cap where a slowly changing indicator needs fewer frames. Only mount
 repeating animations while their state is active.
