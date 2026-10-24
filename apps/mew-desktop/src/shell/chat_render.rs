@@ -1785,10 +1785,22 @@ impl DesktopShell {
                         )),
                 )
             });
-        let model_display_label = non_empty_label(self.model.ui.model.as_deref(), "Model");
+        let model_display_label = self
+            .model
+            .ui
+            .models
+            .iter()
+            .find(|model| {
+                self.model.ui.current_provider.as_deref() == Some(model.provider.as_str())
+                    && self.model.ui.model.as_deref() == Some(model.model.as_str())
+            })
+            .map(model_display_name)
+            .or(self.model.ui.model.as_deref())
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or("Model");
         let thinking_label = self.model.ui.thinking_variant.as_deref().unwrap_or("");
         let model_display = if thinking_label.is_empty() {
-            model_display_label
+            model_display_label.to_owned()
         } else {
             format!("{model_display_label} · {thinking_label}")
         };
@@ -2583,15 +2595,7 @@ impl DesktopShell {
             .ui
             .models
             .iter()
-            .filter(|model| {
-                model_matches_query(
-                    &model.id,
-                    &model.provider,
-                    &model.model,
-                    model.description.as_deref(),
-                    &self.model_picker_query,
-                )
-            })
+            .filter(|model| model_matches_query(model, &self.model_picker_query))
             .count();
         let model_effort_option_count = {
             let count = thinking_variants_for_model(

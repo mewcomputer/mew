@@ -2152,6 +2152,7 @@ mod tests {
                 id: "fake/fake".into(),
                 provider: "fake".into(),
                 model: "fake".into(),
+                display_name: Some("Local Model".into()),
                 description: Some("local test model".into()),
                 thinking_variants: Vec::new(),
                 thinking_budget: None,
@@ -2161,6 +2162,7 @@ mod tests {
 
         assert!(matches!(events.as_slice(), [ClientEvent::ModelListChanged]));
         assert_eq!(state.models[0].id, "fake/fake");
+        assert_eq!(state.models[0].display_name.as_deref(), Some("Local Model"));
     }
 
     #[test]

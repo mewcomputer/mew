@@ -499,6 +499,88 @@ mod shell_tests {
     }
 
     #[gpui::test]
+    fn composer_uses_current_provider_display_name_and_refreshes_catalog_labels(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            shell.model.ui.current_provider = Some("second".into());
+            shell.model.ui.model = Some("internal-model-snapshot-20261024".into());
+            shell.model.ui.models = serde_json::from_value(serde_json::json!([
+                {"id":"first/internal-model-snapshot-20261024", "provider":"first",
+                 "model":"internal-model-snapshot-20261024", "display_name":"A different provider with a long name"},
+                {"id":"second/internal-model-snapshot-20261024", "provider":"second",
+                 "model":"internal-model-snapshot-20261024", "display_name":"Swift"}
+            ])).unwrap();
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(680.), px(760.)));
+        cx.run_until_parked();
+        let named_width = cx.debug_bounds("model-picker-trigger").unwrap().size.width;
+        assert!(
+            named_width < px(100.),
+            "the selected provider's short name replaces its long raw ID"
+        );
+
+        for name in [Some("A renamed catalog model"), Some(" \t"), None] {
+            shell.update(cx, |shell, cx| {
+                let mut model = serde_json::to_value(&shell.model.ui.models[1]).unwrap();
+                model["display_name"] = serde_json::json!(name);
+                shell.model.ui.models[1] = serde_json::from_value(model).unwrap();
+                cx.notify();
+            });
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("model-picker-trigger").unwrap().size.width > named_width);
+        }
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn model_picker_searches_display_names_and_selects_original_identity(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            shell.model.ui.models = serde_json::from_value(serde_json::json!([
+                {"id":"first/snapshot", "provider":"first", "model":"snapshot", "display_name":"Aurora"},
+                {"id":"second/snapshot", "provider":"second", "model":"snapshot", "display_name":"Swift"}
+            ])).unwrap();
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(420.), px(760.)));
+        cx.run_until_parked();
+        let trigger = cx.debug_bounds("model-picker-trigger").unwrap();
+        cx.simulate_click(trigger.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_input("aUrOrA");
+        cx.run_until_parked();
+        shell.update(cx, |shell, _| {
+            assert_eq!(shell.model_picker_filtered_indices, vec![0])
+        });
+        assert!(cx.debug_bounds("model-option-all-1").is_none());
+        let option = cx
+            .debug_bounds("model-option-all-0")
+            .expect("search matches the display name");
+        cx.simulate_click(option.center(), gpui::Modifiers::none());
+        shell.update(cx, |shell, _| {
+            assert_eq!(
+                shell.pending_model,
+                Some(("first".into(), "snapshot".into()))
+            );
+            assert!(!shell.model_picker_open);
+            shell.quitting = true;
+        });
+    }
+
+    #[gpui::test]
     fn content_copy_code_button_copies_the_complete_fence(cx: &mut gpui::TestAppContext) {
         let (shell, cx) =
             cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
@@ -2502,28 +2584,35 @@ mod shell_tests {
     }
 
     #[test]
-    fn model_picker_query_matches_ids_and_descriptions() {
-        assert!(model_matches_query(
-            "openai/gpt-5",
-            "openai",
-            "gpt-5",
-            Some("fast coding model"),
-            "coding"
-        ));
-        assert!(model_matches_query(
-            "anthropic/claude",
-            "anthropic",
-            "claude",
-            None,
-            "ANTHROPIC"
-        ));
-        assert!(!model_matches_query(
-            "openai/gpt-5",
-            "openai",
-            "gpt-5",
-            Some("fast coding model"),
-            "vision"
-        ));
+    fn model_picker_query_matches_names_ids_providers_and_descriptions() {
+        let model = serde_json::from_value(serde_json::json!({
+            "id":"openai/gpt-5", "provider":"openai", "model":"gpt-5",
+            "display_name":"Aurora", "description":"fast coding model"
+        }))
+        .unwrap();
+        for query in ["coding", "OPENAI", "gpt-5", "openai/gpt-5", " aUrOrA ", ""] {
+            assert!(model_matches_query(&model, query), "{query}");
+        }
+        assert!(!model_matches_query(&model, "vision"));
+    }
+
+    #[test]
+    fn model_display_names_trim_catalog_labels_and_fall_back_to_exact_ids() {
+        for name in [Some(" Aurora "), Some(" \t"), Some(""), None] {
+            let model = serde_json::from_value(serde_json::json!({
+                "id":"local/org/model-v2", "provider":"local", "model":"org/model-v2",
+                "display_name": name
+            }))
+            .unwrap();
+            assert_eq!(
+                model_display_name(&model),
+                if name == Some(" Aurora ") {
+                    "Aurora"
+                } else {
+                    "org/model-v2"
+                }
+            );
+        }
     }
 
     #[test]
@@ -2533,6 +2622,7 @@ mod shell_tests {
                 id: "openai/gpt-5".into(),
                 provider: "openai".into(),
                 model: "gpt-5".into(),
+                display_name: None,
                 description: None,
                 thinking_variants: Vec::new(),
                 thinking_budget: None,
@@ -2542,6 +2632,7 @@ mod shell_tests {
                 id: "anthropic/claude".into(),
                 provider: "anthropic".into(),
                 model: "claude".into(),
+                display_name: None,
                 description: None,
                 thinking_variants: Vec::new(),
                 thinking_budget: None,
@@ -2551,6 +2642,7 @@ mod shell_tests {
                 id: "z-ai/glm".into(),
                 provider: "z-ai".into(),
                 model: "glm".into(),
+                display_name: None,
                 description: None,
                 thinking_variants: Vec::new(),
                 thinking_budget: None,
@@ -2575,6 +2667,7 @@ mod shell_tests {
                 id: "openai/gpt-5".into(),
                 provider: "openai".into(),
                 model: "gpt-5".into(),
+                display_name: None,
                 description: None,
                 thinking_variants: Vec::new(),
                 thinking_budget: None,
@@ -2584,6 +2677,7 @@ mod shell_tests {
                 id: "anthropic/claude".into(),
                 provider: "anthropic".into(),
                 model: "claude".into(),
+                display_name: None,
                 description: None,
                 thinking_variants: Vec::new(),
                 thinking_budget: None,
@@ -2625,6 +2719,7 @@ mod shell_tests {
             id: "openai/gpt-5".into(),
             provider: "openai".into(),
             model: "gpt-5".into(),
+            display_name: None,
             description: None,
             thinking_variants: Vec::new(),
             thinking_budget: None,
@@ -3479,6 +3574,7 @@ mod shell_tests {
                 id: "deepseek/deepseek-v4-flash".into(),
                 provider: "deepseek".into(),
                 model: "deepseek-v4-flash".into(),
+                display_name: None,
                 description: None,
                 thinking_variants: vec![
                     mew_protocol::ThinkingVariantInfo {
@@ -3493,6 +3589,7 @@ mod shell_tests {
                 id: "z-ai/glm-5".into(),
                 provider: "z-ai".into(),
                 model: "glm-5".into(),
+                display_name: None,
                 description: None,
                 thinking_variants: Vec::new(),
                 thinking_budget: None,
@@ -3515,6 +3612,7 @@ mod shell_tests {
             id: "alibaba-token-plan/qwen3.8-max-preview".into(),
             provider: "alibaba-token-plan".into(),
             model: "qwen3.8-max-preview".into(),
+            display_name: None,
             description: None,
             thinking_variants: vec![
                 mew_protocol::ThinkingVariantInfo { name: "low".into() },

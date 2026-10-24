@@ -3386,3 +3386,32 @@ confirms the 420 px split pane and wide conversation, dark/light appearance,
 all three dropdowns and a long scrolling Unicode draft. Test drafts were cleared,
 the initial theme/layout restored, and owned QA processes stopped. Physical IME
 and VoiceOver remain unverified.
+
+
+# 2026-10-24 - show catalog model names in the desktop composer
+
+The catalog now retains models.dev names and Umans/Codex display names. Optional
+`display_name` metadata travels through the existing daemon model list and shared
+client state. The TypeScript client type and generated distribution include it;
+older wire payloads and unnamed catalog entries still work without the field.
+
+The desktop composer resolves the selected provider/model pair to its catalog
+name. The model picker uses the same label, keeps the fully qualified ID in its
+secondary details and accessible label, and searches both names and identifiers.
+Switching, recent choices and saved policy retain their original routing IDs.
+Blank names fall back to the exact model ID, and catalog updates refresh labels.
+
+Failing-first checks reproduced dropped catalog/wire names, the long raw ID in
+the composer, name searches returning no rows, and names lost by the daemon
+lister. Verification passes: all 279 desktop tests, complete catalog/protocol/
+shared-client/UI-model suites, the isolated daemon lister regression, 12 related
+TUI tests and 31 TypeScript client tests. Strict all-target Clippy for affected
+crates, native build/packaging, formatting, architecture and generated-theme
+checks pass.
+
+Isolated native QA used a real daemon with a local catalog fixture and loopback
+provider endpoints. Dark/light and narrow/wide views show readable names;
+searching by name, pointer selection and keyboard selection of an unnamed model
+work. Saved policy confirms the original raw model identity. The QA app and its
+daemon are stopped. No provider turn was submitted. Physical IME and VoiceOver
+remain unverified.

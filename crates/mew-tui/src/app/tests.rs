@@ -2294,6 +2294,7 @@ fn test_model_list_populates_picker_state() {
                 id: "kimi/k3".into(),
                 provider: "kimi".into(),
                 model: "k3".into(),
+                display_name: None,
                 description: Some("256k ctx · reasoning".into()),
                 thinking_variants: vec![
                     mew_protocol::ThinkingVariantInfo {
@@ -2308,6 +2309,7 @@ fn test_model_list_populates_picker_state() {
                 id: "deepseek/deepseek-v4-flash".into(),
                 provider: "deepseek".into(),
                 model: "deepseek-v4-flash".into(),
+                display_name: None,
                 description: None,
                 thinking_variants: vec![],
                 thinking_budget: None,
@@ -3521,6 +3523,7 @@ fn test_model_list_populates_thinking_budget() {
                 id: "qwen/qwen3.8-max".into(),
                 provider: "qwen".into(),
                 model: "qwen3.8-max".into(),
+                display_name: None,
                 description: None,
                 thinking_variants: vec![],
                 thinking_budget: Some(qwen_budget()),
@@ -3530,6 +3533,7 @@ fn test_model_list_populates_thinking_budget() {
                 id: "deepseek/deepseek-v4-flash".into(),
                 provider: "deepseek".into(),
                 model: "deepseek-v4-flash".into(),
+                display_name: None,
                 description: None,
                 thinking_variants: vec![],
                 thinking_budget: None,

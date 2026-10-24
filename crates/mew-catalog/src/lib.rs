@@ -53,6 +53,9 @@ pub struct Pricing {
 pub struct Model {
     pub id: String,
     pub provider: String,
+    /// Catalog-provided name for display; IDs retain their routing meaning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     #[serde(rename = "context_window", default)]
     pub context_window: i64,
     #[serde(rename = "max_output", default)]
@@ -755,6 +758,7 @@ fn parse_models_dev_model(val: &serde_json::Value, provider_id: &str) -> Option<
     Some(Model {
         id,
         provider: provider_id.to_string(),
+        display_name: val.get("name").and_then(|v| v.as_str()).map(str::to_owned),
         context_window,
         max_output,
         tool_call,
@@ -990,6 +994,8 @@ fn parse_umans(data: &[u8]) -> Result<Vec<Model>, CatalogError> {
     #[derive(serde::Deserialize)]
     struct UmansEntry {
         name: String,
+        #[serde(default)]
+        display_name: Option<String>,
         capabilities: UmansCapabilities,
     }
 
@@ -1004,6 +1010,7 @@ fn parse_umans(data: &[u8]) -> Result<Vec<Model>, CatalogError> {
         let model = Model {
             id: entry.name.clone(),
             provider: "umans".into(),
+            display_name: entry.display_name,
             context_window: entry.capabilities.context_window,
             max_output: entry.capabilities.max_completion_tokens,
             tool_call: entry.capabilities.supports_tools,
@@ -1201,6 +1208,7 @@ pub fn parse_codex(data: &[u8]) -> Result<Vec<Model>, CatalogError> {
         out.push(Model {
             id: m.slug,
             provider: "codex".into(),
+            display_name: m.display_name,
             context_window: m.context_window,
             max_output: 0,
             tool_call: m.supports_parallel_tool_calls,
@@ -1228,6 +1236,8 @@ struct CodexModelsResponse {
 #[derive(serde::Deserialize)]
 struct CodexModelInfo {
     slug: String,
+    #[serde(default)]
+    display_name: Option<String>,
     #[serde(default)]
     context_window: i64,
     #[serde(default)]
@@ -1363,6 +1373,7 @@ mod tests {
 
         let coder = models.iter().find(|m| m.id == "umans-coder").unwrap();
         assert_eq!(coder.provider, "umans");
+        assert_eq!(coder.display_name.as_deref(), Some("Umans Coder"));
         assert_eq!(coder.context_window, 262_144);
         assert_eq!(coder.max_output, 262_144);
         assert!(coder.tool_call);
@@ -1373,6 +1384,7 @@ mod tests {
         assert!(coder.thinking_variants.is_empty());
 
         let glm = models.iter().find(|m| m.id == "umans-glm-5.2").unwrap();
+        assert!(glm.display_name.is_none());
         assert_eq!(glm.context_window, 405_504);
         assert!(
             glm.vision,
@@ -1705,6 +1717,40 @@ mod tests {
     }
 
     #[test]
+    fn catalog_preserves_provider_specific_display_names_and_unnamed_entries() {
+        let cat = parse(
+            br#"{
+            "first": {"models": {
+                "shared": {"id": "shared", "name": "First Model"},
+                "legacy": {"id": "legacy"}
+            }},
+            "second": {"models": {
+                "shared": {"id": "shared", "name": "Second Model"}
+            }}
+        }"#,
+        )
+        .unwrap();
+        for (provider, expected) in [("first", "First Model"), ("second", "Second Model")] {
+            let model = &cat.providers[provider]["shared"];
+            assert_eq!(model.display_name.as_deref(), Some(expected));
+            assert_eq!(model.id, "shared");
+        }
+        let legacy = &cat.providers["first"]["legacy"];
+        assert!(legacy.display_name.is_none());
+
+        let flat = parse(
+            br#"{"models":[
+            {"id":"custom", "provider":"local", "display_name":"Local Model"}
+        ]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            flat.lookup("custom").unwrap().display_name.as_deref(),
+            Some("Local Model")
+        );
+    }
+
+    #[test]
     fn test_parse_models_dev_text_output() {
         // models.dev nested format: image/video/audio generation models
         // (modalities.output without "text") must be flagged so the picker
@@ -1833,6 +1879,7 @@ mod tests {
         assert_eq!(models.len(), 1);
         let m = &models[0];
         assert_eq!(m.id, "gpt-5.6-sol");
+        assert_eq!(m.display_name.as_deref(), Some("GPT-5.6-Sol"));
         assert_eq!(m.provider, "codex");
         assert_eq!(m.shape, "responses");
         assert_eq!(m.context_window, 372_000);
@@ -1865,6 +1912,7 @@ mod tests {
         let models = parse_codex(json).unwrap();
         let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, vec!["visible"]);
+        assert!(models[0].display_name.is_none());
     }
 
     #[test]

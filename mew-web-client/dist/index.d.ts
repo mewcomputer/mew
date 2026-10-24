@@ -3,6 +3,25 @@ export interface Attachment {
     mime?: string;
 }
 export type PermissionDecision = "allow_once" | "allow_session" | "deny";
+export interface NewChatDefaults {
+    model: string | null;
+    provider: string | null;
+    persona: string | null;
+    thinking_variant: string | null;
+    permission_mode: string;
+}
+export interface PairedDevice {
+    id: string;
+    name: string;
+    node_id: string;
+    scope: "observe" | "collaborate" | "control" | null;
+    paired_at: number | null;
+}
+export interface DaemonSettings {
+    request_id: string | null;
+    defaults: NewChatDefaults | null;
+    devices: PairedDevice[] | null;
+}
 export type ClientMessage = {
     type: "remote_hello";
     token?: string;
@@ -43,6 +62,20 @@ export type ClientMessage = {
 } | {
     type: "set_auto_title";
     enabled: boolean;
+} | {
+    type: "read_daemon_settings";
+    request_id: string;
+} | {
+    type: "save_session_defaults";
+    session_id: string;
+    request_id: string;
+} | {
+    type: "reset_session_defaults";
+    request_id: string;
+} | {
+    type: "revoke_device";
+    device_id: string;
+    request_id: string;
 } | {
     type: "set_auto_summary";
     enabled: boolean;
@@ -369,6 +402,8 @@ export interface ModelInfo {
     provider: string;
     /** Model ID within the provider (e.g. "deepseek-v4-flash"). */
     model: string;
+    /** Catalog-provided display name; absent for unnamed models and older daemons. */
+    display_name?: string;
     /** Human-readable description for the picker UI. */
     description?: string;
     /** Available thinking/reasoning variants for this model. */
@@ -541,7 +576,13 @@ export interface Segment {
     tokens_scaled: number;
     children: Segment[];
 }
-export type ServerMessage = {
+export type ServerMessage = ({
+    type: "daemon_settings";
+} & DaemonSettings) | {
+    type: "daemon_settings_failed";
+    request_id: string;
+    message: string;
+} | {
     type: "remote_ready";
     scope: "observe" | "collaborate" | "control";
 } | {
@@ -818,6 +859,11 @@ export interface MewWebSocket {
 }
 export type SocketFactory = (url: string) => MewWebSocket;
 export interface MewClientEvents {
+    "daemon-settings": (data: DaemonSettings) => void;
+    "daemon-settings-failed": (data: {
+        request_id: string;
+        message: string;
+    }) => void;
     open: () => void;
     close: (code: number, reason: string) => void;
     error: (err: unknown) => void;
@@ -1150,6 +1196,10 @@ export declare class MewClient {
     renameSession(session_id: string, title: string): void;
     /** Enable or disable auto-generated session titles. */
     setAutoTitle(enabled: boolean): void;
+    readDaemonSettings(requestId: string): void;
+    saveSessionDefaults(sessionId: string, requestId: string): void;
+    resetSessionDefaults(requestId: string): void;
+    revokeDevice(deviceId: string, requestId: string): void;
     setAutoSummary(enabled: boolean): void;
     /** List available models from all configured providers. */
     listModels(): Promise<ModelInfo[]>;

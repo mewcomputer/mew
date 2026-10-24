@@ -463,12 +463,21 @@ impl DesktopShell {
         let model_id = model.model.clone();
         let selected = self.model.ui.current_provider.as_deref() == Some(model.provider.as_str())
             && self.model.ui.model.as_deref() == Some(model.model.as_str());
-        let label = SharedString::from(model.id.clone());
-        let description = model.description.clone();
+        let label = SharedString::from(model_display_name(model).to_owned());
+        let accessible_label = format!("{label} ({})", model.id);
+        let description = match model
+            .description
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+        {
+            Some(description) => format!("{} · {description}", model.id),
+            None => model.id.clone(),
+        };
         let section = if recent { "recent" } else { "all" };
         Some(
             div()
                 .id(format!("model-option-{section}-{}", model.id))
+                .debug_selector(move || format!("model-option-{section}-{index}"))
                 .flex()
                 .flex_col()
                 .justify_center()
@@ -482,7 +491,7 @@ impl DesktopShell {
                 .cursor_pointer()
                 .role(Role::MenuItem)
                 .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                .aria_label(label.clone())
+                .aria_label(accessible_label)
                 .aria_selected(selected)
                 .when(selected, |element| {
                     element.bg(theme_rgb(&self.theme, "accent"))
@@ -500,20 +509,15 @@ impl DesktopShell {
                         .text_xs()
                         .child(label),
                 )
-                .when_some(
-                    description.map(SharedString::from),
-                    |element, description| {
-                        element.child(
-                            div()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .text_xs()
-                                .text_color(theme_rgb(&self.theme, "text.muted"))
-                                .child(description),
-                        )
-                    },
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_xs()
+                        .text_color(theme_rgb(&self.theme, "text.muted"))
+                        .child(description),
                 )
                 .into_any_element(),
         )

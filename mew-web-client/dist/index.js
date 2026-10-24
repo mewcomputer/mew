@@ -321,6 +321,18 @@ export class MewClient {
     setAutoTitle(enabled) {
         this.send({ type: "set_auto_title", enabled });
     }
+    readDaemonSettings(requestId) {
+        this.send({ type: "read_daemon_settings", request_id: requestId });
+    }
+    saveSessionDefaults(sessionId, requestId) {
+        this.send({ type: "save_session_defaults", session_id: sessionId, request_id: requestId });
+    }
+    resetSessionDefaults(requestId) {
+        this.send({ type: "reset_session_defaults", request_id: requestId });
+    }
+    revokeDevice(deviceId, requestId) {
+        this.send({ type: "revoke_device", device_id: deviceId, request_id: requestId });
+    }
     setAutoSummary(enabled) {
         this.send({ type: "set_auto_summary", enabled });
     }
@@ -510,6 +522,12 @@ export class MewClient {
     // -------------------------------------------------------------------------
     dispatch(msg) {
         switch (msg.type) {
+            case "daemon_settings":
+                this.emit("daemon-settings", { request_id: msg.request_id, defaults: msg.defaults, devices: msg.devices });
+                break;
+            case "daemon_settings_failed":
+                this.emit("daemon-settings-failed", { request_id: msg.request_id, message: msg.message });
+                break;
             case "session_ready":
                 this.sessionId = msg.session_id;
                 this.emit("session-ready", {

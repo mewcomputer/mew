@@ -326,6 +326,15 @@ pub(super) fn non_empty_label(value: Option<&str>, fallback: &str) -> String {
         .to_owned()
 }
 
+pub(super) fn model_display_name(model: &mew_protocol::ModelInfo) -> &str {
+    model
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(&model.model)
+}
+
 pub(super) fn model_picker_list_height(option_count: usize) -> Pixels {
     px((option_count.clamp(1, 5) as f32 * 64.).min(320.))
 }
@@ -363,15 +372,7 @@ pub(super) fn build_model_picker_rows(
     let filtered_indices = models
         .iter()
         .enumerate()
-        .filter(|(_, model)| {
-            model_matches_query(
-                &model.id,
-                &model.provider,
-                &model.model,
-                model.description.as_deref(),
-                query,
-            )
-        })
+        .filter(|(_, model)| model_matches_query(model, query))
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
 
@@ -493,19 +494,18 @@ pub(super) fn persona_picker_height(option_count: usize) -> Pixels {
     persona_picker_list_height(option_count) + px(16.)
 }
 
-pub(super) fn model_matches_query(
-    id: &str,
-    provider: &str,
-    model: &str,
-    description: Option<&str>,
-    query: &str,
-) -> bool {
+pub(super) fn model_matches_query(model: &mew_protocol::ModelInfo, query: &str) -> bool {
     let query = query.trim().to_lowercase();
     query.is_empty()
-        || id.to_lowercase().contains(&query)
-        || provider.to_lowercase().contains(&query)
-        || model.to_lowercase().contains(&query)
-        || description.is_some_and(|description| description.to_lowercase().contains(&query))
+        || [
+            model.id.as_str(),
+            model.provider.as_str(),
+            model.model.as_str(),
+        ]
+        .into_iter()
+        .chain(model.display_name.as_deref())
+        .chain(model.description.as_deref())
+        .any(|value| value.to_lowercase().contains(&query))
 }
 
 pub(super) fn should_animate_transcript_row(row_index: usize, row_count: usize) -> bool {

@@ -480,6 +480,9 @@ pub struct ModelInfo {
     pub provider: String,
     /// Model ID within the provider (e.g. "deepseek-v4-flash").
     pub model: String,
+    /// Catalog-provided name for display. Absent for unnamed models and older daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     /// Human-readable description for the picker UI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -3482,6 +3485,7 @@ mod tests {
             id: "deepseek/deepseek-v4-flash".into(),
             provider: "deepseek".into(),
             model: "deepseek-v4-flash".into(),
+            display_name: None,
             description: Some("Fast model".into()),
             thinking_variants: vec![
                 ThinkingVariantInfo {
@@ -3501,11 +3505,27 @@ mod tests {
     }
 
     #[test]
+    fn model_list_preserves_optional_display_names_without_changing_identity() {
+        for display_name in [Some("GPT-5.2"), None] {
+            let mut json = serde_json::json!({
+                "type": "model_list",
+                "models": [{"id":"openai/gpt-5.2", "provider":"openai", "model":"gpt-5.2"}]
+            });
+            if let Some(name) = display_name {
+                json["models"][0]["display_name"] = name.into();
+            }
+            let message: ServerMessage = serde_json::from_value(json.clone()).unwrap();
+            assert_eq!(serde_json::to_value(message).unwrap(), json);
+        }
+    }
+
+    #[test]
     fn test_model_info_with_thinking_budget() {
         let m = ModelInfo {
             id: "qwen/qwen3.8-max".into(),
             provider: "qwen".into(),
             model: "qwen3.8-max".into(),
+            display_name: None,
             description: None,
             thinking_variants: vec![
                 ThinkingVariantInfo { name: "low".into() },
@@ -3542,6 +3562,7 @@ mod tests {
             id: "test/model".into(),
             provider: "test".into(),
             model: "model".into(),
+            display_name: None,
             description: None,
             thinking_variants: vec![],
             thinking_budget: None,

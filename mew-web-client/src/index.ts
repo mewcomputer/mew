@@ -317,6 +317,8 @@ export interface ModelInfo {
   provider: string;
   /** Model ID within the provider (e.g. "deepseek-v4-flash"). */
   model: string;
+  /** Catalog-provided display name; absent for unnamed models and older daemons. */
+  display_name?: string;
   /** Human-readable description for the picker UI. */
   description?: string;
   /** Available thinking/reasoning variants for this model. */

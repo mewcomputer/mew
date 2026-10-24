@@ -139,6 +139,9 @@ an empty button. Persona/model controls use their selected text without a
 redundant leading icon. Unset values use concise Model/Persona placeholders.
 Composer footer labels are also 11 px; draft text remains 15 px with 24 px leading.
 Long workspace paths truncate while preserving the full accessible label.
+Use provider-scoped catalog model names in the composer and picker, falling back
+to the raw model ID when no name is supplied. Search matches names and IDs;
+picker details retain the fully qualified identity used for switching models.
 
 Display connection and browser failures through the existing stateful surfaces.
 A deferred failure must request a redraw immediately. Use the existing native
