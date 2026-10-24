@@ -280,10 +280,6 @@ pub(super) fn escape_dismisses_shell_popover(
             || connection_open)
 }
 
-pub(super) fn is_copy_keystroke(event: &gpui::KeyDownEvent) -> bool {
-    event.keystroke.key == "c" && event.keystroke.modifiers.platform
-}
-
 pub(super) fn client_event_is_text_delta(event: &ClientEvent) -> bool {
     matches!(event, ClientEvent::TextDelta { .. })
 }

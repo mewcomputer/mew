@@ -1,3 +1,4 @@
+use super::chat::{ToolTextSection, TranscriptCopySource};
 use super::*;
 
 const TRANSCRIPT_SCROLLBAR_MIN_THUMB: f32 = 28.;
@@ -960,14 +961,31 @@ impl DesktopShell {
                 .pl(px(20.))
                 .child(
                     div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
                         .text_xs()
                         .text_color(theme_rgb(&self.theme, "text.muted"))
-                        .child("input"),
+                        .child("input")
+                        .child(self.render_content_copy_button(
+                            format!("copy-tool-input-{message_index}-{part_index}"),
+                            "Copy tool input",
+                            TranscriptCopySource::Tool {
+                                message_index,
+                                part_index,
+                                section: ToolTextSection::Input,
+                            },
+                            cx,
+                        )),
                 )
                 .child(self.render_tool_text(
                     format!("tool-input-{message_index}-{part_index}"),
                     &formatted_tool_input(input),
                     false,
+                    message_index,
+                    part_index,
+                    ToolTextSection::Input,
+                    cx,
                 ));
             if let Some(output) = output.filter(|output| !output.is_empty()) {
                 let output_key = format!("tool-output-{message_index}-{part_index}");
@@ -979,7 +997,17 @@ impl DesktopShell {
                         .justify_between()
                         .text_xs()
                         .text_color(theme_rgb(&self.theme, "text.muted"))
-                        .child("output")
+                        .child(div().flex_1().child("output"))
+                        .child(self.render_content_copy_button(
+                            format!("copy-tool-output-{message_index}-{part_index}"),
+                            "Copy tool output",
+                            TranscriptCopySource::Tool {
+                                message_index,
+                                part_index,
+                                section: ToolTextSection::Output,
+                            },
+                            cx,
+                        ))
                         .when(
                             output.lines().count() > TOOL_OUTPUT_LINES_FOR_DISCLOSURE,
                             |element| {
@@ -993,7 +1021,15 @@ impl DesktopShell {
                             },
                         ),
                 );
-                body = body.child(self.render_tool_text(output_key, output, output_expanded));
+                body = body.child(self.render_tool_text(
+                    output_key,
+                    output,
+                    output_expanded,
+                    message_index,
+                    part_index,
+                    ToolTextSection::Output,
+                    cx,
+                ));
             }
             if let Some(diff) = diff.filter(|diff| !diff.is_empty()) {
                 let diff_key = format!("tool-diff-{message_index}-{part_index}");
@@ -1005,7 +1041,17 @@ impl DesktopShell {
                         .justify_between()
                         .text_xs()
                         .text_color(theme_rgb(&self.theme, "text.muted"))
-                        .child("diff")
+                        .child(div().flex_1().child("diff"))
+                        .child(self.render_content_copy_button(
+                            format!("copy-tool-diff-{message_index}-{part_index}"),
+                            "Copy tool diff",
+                            TranscriptCopySource::Tool {
+                                message_index,
+                                part_index,
+                                section: ToolTextSection::Diff,
+                            },
+                            cx,
+                        ))
                         .when(diff.lines().count() > TOOL_DIFF_LINES_MAX, |element| {
                             element.child(self.render_tool_toggle(
                                 format!("{diff_key}-toggle"),
@@ -1016,7 +1062,14 @@ impl DesktopShell {
                             ))
                         }),
                 );
-                body = body.child(self.render_tool_diff(diff_key, diff, diff_expanded));
+                body = body.child(self.render_tool_diff(
+                    diff_key,
+                    diff,
+                    diff_expanded,
+                    message_index,
+                    part_index,
+                    cx,
+                ));
             }
             if let Some(error) = error {
                 body = body.child(
@@ -1079,22 +1132,37 @@ impl DesktopShell {
             .into_any_element()
     }
 
-    fn render_tool_text(&self, id: String, text: &str, expanded: bool) -> gpui::AnyElement {
+    #[allow(clippy::too_many_arguments)]
+    fn render_tool_text(
+        &self,
+        id: String,
+        text: &str,
+        expanded: bool,
+        message_index: usize,
+        part_index: usize,
+        section: ToolTextSection,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let source_identity = text.as_ptr() as usize;
         let source_len = text.len();
-        let lines = {
+        let (lines, line_offsets) = {
             let mut cache = self.tool_text_cache.borrow_mut();
-            let cached = cache.entry(id.clone()).or_insert_with(|| ToolTextCache {
-                source_identity,
-                source_len,
-                lines: Arc::new(split_tool_text_lines(text)),
+            let cached = cache.entry(id.clone()).or_insert_with(|| {
+                let lines = split_tool_text_lines(text);
+                ToolTextCache {
+                    source_identity,
+                    source_len,
+                    line_offsets: Arc::new(tool_line_offsets(&lines)),
+                    lines: Arc::new(lines),
+                }
             });
             if cached.source_identity != source_identity || cached.source_len != source_len {
                 cached.source_identity = source_identity;
                 cached.source_len = source_len;
                 cached.lines = Arc::new(split_tool_text_lines(text));
+                cached.line_offsets = Arc::new(tool_line_offsets(&cached.lines));
             }
-            cached.lines.clone()
+            (cached.lines.clone(), cached.line_offsets.clone())
         };
         let line_count = lines.len();
         let state = {
@@ -1117,36 +1185,72 @@ impl DesktopShell {
             .rounded(px(6.))
             .p(px(8.))
             .child(
-                gpui::list(state, move |index, _, _| {
-                    div()
-                        .id(format!("{id}-line-{index}"))
-                        .debug_selector(|| format!("{id}-line-{index}"))
-                        .w_full()
-                        .min_w_0()
-                        .text_xs()
-                        .line_height(px(18.))
-                        .font_family(DEFAULT_FONT_FAMILY)
-                        .text_color(text_color)
-                        .whitespace_nowrap()
-                        .child(lines.get(index).cloned().unwrap_or_default())
-                        .into_any_element()
-                })
+                gpui::list(
+                    state,
+                    cx.processor(move |shell, index: usize, _, cx| {
+                        let Some(line) = lines.get(index) else {
+                            return div().into_any_element();
+                        };
+                        let block_index = part_index
+                            .saturating_mul(1_000_000)
+                            .saturating_add(section.index());
+                        let source_offset = line_offsets[index];
+                        let highlights = shell.transcript_text_highlights(
+                            message_index,
+                            block_index,
+                            source_offset,
+                            line.len(),
+                            Vec::new(),
+                        );
+                        div()
+                            .id(format!("{id}-line-{index}"))
+                            .debug_selector(|| format!("{id}-line-{index}"))
+                            .w_full()
+                            .min_w_0()
+                            .text_xs()
+                            .line_height(px(18.))
+                            .font_family(DEFAULT_FONT_FAMILY)
+                            .text_color(text_color)
+                            .whitespace_nowrap()
+                            .child(shell.render_selectable_transcript_text(
+                                message_index,
+                                block_index,
+                                source_offset,
+                                line,
+                                &[],
+                                gpui::StyledText::new(line.clone()).with_highlights(highlights),
+                                cx,
+                            ))
+                            .into_any_element()
+                    }),
+                )
                 .with_sizing_behavior(gpui::ListSizingBehavior::Infer),
             )
             .into_any_element()
     }
 
-    fn render_tool_diff(&self, id: String, diff: &str, expanded: bool) -> gpui::AnyElement {
+    fn render_tool_diff(
+        &self,
+        id: String,
+        diff: &str,
+        expanded: bool,
+        message_index: usize,
+        part_index: usize,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let line_count = diff.lines().count();
         let truncated = !expanded && line_count > TOOL_DIFF_LINES_MAX;
+        let mut source_offset = 0;
         let lines = diff
-            .lines()
+            .split('\n')
             .take(if expanded {
                 line_count
             } else {
                 TOOL_DIFF_LINES_MAX
             })
             .map(|line| {
+                let offset = source_offset;
+                source_offset += line.len() + 1;
                 let color = if line.starts_with('+') {
                     theme_rgb(&self.theme, "green.fg")
                 } else if line.starts_with('-') {
@@ -1154,7 +1258,7 @@ impl DesktopShell {
                 } else {
                     theme_rgb(&self.theme, "text.muted")
                 };
-                (SharedString::from(line.to_owned()), color)
+                (SharedString::from(line.to_owned()), color, offset)
             })
             .collect::<Arc<[_]>>();
         let visible_line_count = lines.len();
@@ -1177,22 +1281,44 @@ impl DesktopShell {
             .rounded(px(6.))
             .p(px(8.))
             .child(
-                gpui::list(state, move |index, _, _| {
-                    let Some((line, color)) = lines.get(index) else {
-                        return div().into_any_element();
-                    };
-                    div()
-                        .id(format!("{id}-line-{index}"))
-                        .debug_selector(|| format!("{id}-line-{index}"))
-                        .w_full()
-                        .min_w_0()
-                        .text_xs()
-                        .font_family(DEFAULT_FONT_FAMILY)
-                        .text_color(*color)
-                        .whitespace_nowrap()
-                        .child(line.clone())
-                        .into_any_element()
-                })
+                gpui::list(
+                    state,
+                    cx.processor(move |shell, index: usize, _, cx| {
+                        let Some((line, color, source_offset)) = lines.get(index) else {
+                            return div().into_any_element();
+                        };
+                        let block_index = part_index
+                            .saturating_mul(1_000_000)
+                            .saturating_add(ToolTextSection::Diff.index());
+                        let highlights = shell.transcript_text_highlights(
+                            message_index,
+                            block_index,
+                            *source_offset,
+                            line.len(),
+                            Vec::new(),
+                        );
+                        div()
+                            .id(format!("{id}-line-{index}"))
+                            .debug_selector(|| format!("{id}-line-{index}"))
+                            .w_full()
+                            .min_w_0()
+                            .text_xs()
+                            .line_height(px(18.))
+                            .font_family(DEFAULT_FONT_FAMILY)
+                            .text_color(*color)
+                            .whitespace_nowrap()
+                            .child(shell.render_selectable_transcript_text(
+                                message_index,
+                                block_index,
+                                *source_offset,
+                                line,
+                                &[],
+                                gpui::StyledText::new(line.clone()).with_highlights(highlights),
+                                cx,
+                            ))
+                            .into_any_element()
+                    }),
+                )
                 .with_sizing_behavior(gpui::ListSizingBehavior::Infer),
             )
             .when(truncated, |element| {
@@ -1651,6 +1777,11 @@ impl DesktopShell {
             .child(
                 div()
                     .id("conversation-transcript")
+                    .track_focus(&self.transcript_focus_handle)
+                    .key_context("Transcript")
+                    .when(self.transcript_selected_text.is_some(), |element| {
+                        element.on_action(cx.listener(Self::copy_selected_transcript_text))
+                    })
                     .flex()
                     .flex_col()
                     .flex_1()
@@ -2589,6 +2720,18 @@ fn split_tool_text_lines(text: &str) -> Vec<SharedString> {
     } else {
         text.split('\n').map(SharedString::from).collect()
     }
+}
+
+fn tool_line_offsets(lines: &[SharedString]) -> Vec<usize> {
+    let mut offset = 0;
+    lines
+        .iter()
+        .map(|line| {
+            let start = offset;
+            offset += line.len() + 1;
+            start
+        })
+        .collect()
 }
 
 #[cfg(test)]

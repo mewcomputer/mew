@@ -15,6 +15,7 @@ fn set_app_menus(cx: &mut App) {
         gpui::KeyBinding::new("escape", DismissPopovers, None),
         gpui::KeyBinding::new("cmd-x", TextCut, text_input),
         gpui::KeyBinding::new("cmd-c", TextCopy, text_input),
+        gpui::KeyBinding::new("cmd-c", TextCopy, Some("Transcript")),
         gpui::KeyBinding::new("cmd-v", TextPaste, text_input),
         gpui::KeyBinding::new("cmd-a", TextSelectAll, text_input),
         gpui::KeyBinding::new("backspace", ComposerBackspace, Some("Composer")),

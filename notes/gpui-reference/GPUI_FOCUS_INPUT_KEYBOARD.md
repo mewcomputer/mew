@@ -99,6 +99,14 @@ the highlight changes. Handle `on_mouse_up_out` as well as release inside the
 field, and check whether the pointer is still dragging before extending selection.
 Releasing over another panel must not leave a stuck drag.
 
+Transcript selection takes its own focus handle and typed Copy action so an old
+composer selection cannot win Cmd-C or the native Edit menu. Code fences and
+tool input/output/diffs use the same selectable surface as prose. Register text
+layouts after child prepaint, because virtual lists can measure unpainted rows.
+Keep source byte offsets for tool lines and reconstruct virtual code chunks
+from retained markdown when copying across offscreen content. Copy buttons use
+the complete section or fence source, including preview-hidden lines.
+
 ## Verification
 
 Exercise each field's focus independently, including switching from CEF back to

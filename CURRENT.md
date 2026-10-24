@@ -3202,3 +3202,23 @@ controls follow. The edited-files result handoff is recorded as a product
 opportunity. Clipboard focus routing and source-file link handling remain
 source-supported candidates requiring behavior tests. No HTML detector scan,
 new automated test run, native streaming or VoiceOver check is claimed.
+
+# 2026-10-24 - select and copy desktop chat content
+
+Code fences and tool input/output/diffs now share the transcript selection
+surface. Dedicated copy controls copy the complete fence or section, including
+virtual code chunks and output beyond the visible preview. Tool input copies
+the formatted JSON shown in its details. Selection preserves Unicode and
+source newline bytes across line and virtual-row boundaries.
+
+Selecting transcript content moves Copy focus out of the composer, fixing the
+reproduced case where Cmd-C copied a stale draft selection. Typed Copy actions
+also serve the native Edit menu. Interaction layouts register after prepaint so
+virtual-list measurement cannot expose an unpainted layout to pointer events.
+
+Six focused GPUI content tests pass, including actual drag, scroll and clipboard
+behavior. Native QA in the isolated packaged app confirms full code/result
+buttons, partial code/output selection after editing a draft, correct Cmd-C
+routing, and readable selection in dark and light modes. Physical IME and
+VoiceOver remain unverified. Markdown structure and activity hierarchy remain
+separate follow-up work.

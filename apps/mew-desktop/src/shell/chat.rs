@@ -1,6 +1,36 @@
 use super::chat_render::{transcript_scrollbar_metrics, TranscriptScrollbarMetrics};
 use super::*;
 
+#[derive(Clone, Copy)]
+pub(super) enum ToolTextSection {
+    Input,
+    Output,
+    Diff,
+}
+
+impl ToolTextSection {
+    pub(super) fn index(self) -> usize {
+        match self {
+            Self::Input => 0,
+            Self::Output => 1,
+            Self::Diff => 2,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum TranscriptCopySource {
+    Code {
+        message_index: usize,
+        block_index: usize,
+    },
+    Tool {
+        message_index: usize,
+        part_index: usize,
+        section: ToolTextSection,
+    },
+}
+
 impl DesktopShell {
     pub(super) fn render_inline(
         &self,
@@ -31,36 +61,72 @@ impl DesktopShell {
         if !highlights.is_empty() {
             text = text.with_highlights(highlights);
         }
+        let element = self
+            .render_selectable_transcript_text(
+                message_index,
+                block_index,
+                0,
+                &inline.text,
+                &inline.links,
+                text,
+                cx,
+            )
+            .when(fill_width, |element| element.w_full())
+            .whitespace_normal();
+        if !animate {
+            return element.into_any_element();
+        }
+        element
+            .with_animation(
+                ElementId::Name(format!("markdown-inline-{message_index}-{block_index}").into()),
+                Animation::new(Duration::from_millis(180)).with_easing(gpui::ease_out_quint()),
+                |element, delta| element.opacity(0.72 + delta * 0.28),
+            )
+            .into_any_element()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn render_selectable_transcript_text(
+        &self,
+        message_index: usize,
+        block_index: usize,
+        source_offset: usize,
+        source: &str,
+        links: &[InlineLink],
+        text: gpui::StyledText,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         // Keep the interaction layout tied to the actual element being
         // painted. A separately-created TextLayout is never measured by
         // GPUI, so querying it from a mouse or accessibility event panics.
         let down_layout = text.layout().clone();
-        let down_text = inline.text.clone();
-        let down_links = inline.links.clone();
+        let down_text = source.to_owned();
+        let down_links = links.to_vec();
         // The registry is only consulted while a transcript selection is active.
         // Avoid rebuilding it for every visible markdown span during ordinary scrolling.
-        if self.transcript_selection.is_some() {
-            self.transcript_text_registry
-                .borrow_mut()
-                .push(TranscriptTextEntry {
-                    message_index,
-                    block_index,
-                    text: inline.text.clone(),
-                    layout: down_layout.clone(),
-                });
-        }
-        let element = div()
+        let container = div().when(self.transcript_selection.is_some(), |element| {
+            let registry = self.transcript_text_registry.clone();
+            let entry = TranscriptTextEntry {
+                message_index,
+                block_index,
+                source_offset,
+                text: source.to_owned(),
+                layout: down_layout.clone(),
+            };
+            element.on_children_prepainted(move |_, _, _| {
+                registry.borrow_mut().push(entry.clone());
+            })
+        });
+        container
             .id(format!(
                 "markdown-inline-container-{message_index}-{block_index}"
             ))
             .debug_selector(move || {
                 format!("markdown-inline-container-{message_index}-{block_index}")
             })
-            .when(fill_width, |element| element.w_full())
             .min_w_0()
-            .whitespace_normal()
             .cursor(gpui::CursorStyle::IBeam)
-            .when(!inline.links.is_empty(), |element| {
+            .when(!links.is_empty(), |element| {
                 element.cursor(gpui::CursorStyle::PointingHand)
             })
             .on_mouse_down(
@@ -69,6 +135,7 @@ impl DesktopShell {
                     shell.transcript_mouse_down(
                         message_index,
                         block_index,
+                        source_offset,
                         &down_text,
                         &down_layout,
                         &down_links,
@@ -86,17 +153,7 @@ impl DesktopShell {
                 gpui::MouseButton::Left,
                 cx.listener(Self::transcript_mouse_up),
             )
-            .child(text);
-        if !animate {
-            return element.into_any_element();
-        }
-        element
-            .with_animation(
-                ElementId::Name(format!("markdown-inline-{message_index}-{block_index}").into()),
-                Animation::new(Duration::from_millis(180)).with_easing(gpui::ease_out_quint()),
-                |element, delta| element.opacity(0.72 + delta * 0.28),
-            )
-            .into_any_element()
+            .child(text)
     }
 
     fn inline_highlights(
@@ -104,10 +161,31 @@ impl DesktopShell {
         inline: &InlineText,
         selection: Option<Range<usize>>,
     ) -> Vec<(Range<usize>, gpui::HighlightStyle)> {
-        let mut boundaries = vec![0, inline.text.len()];
-        for highlight in &inline.highlights {
-            boundaries.push(highlight.range.start);
-            boundaries.push(highlight.range.end);
+        self.merge_selection_highlights(
+            inline.text.len(),
+            inline
+                .highlights
+                .iter()
+                .map(|highlight| {
+                    (
+                        highlight.range.clone(),
+                        self.inline_highlight_style(highlight.style),
+                    )
+                })
+                .collect(),
+            selection,
+        )
+    }
+
+    fn merge_selection_highlights(
+        &self,
+        text_len: usize,
+        highlights: Vec<(Range<usize>, gpui::HighlightStyle)>,
+        selection: Option<Range<usize>>,
+    ) -> Vec<(Range<usize>, gpui::HighlightStyle)> {
+        let mut boundaries = vec![0, text_len];
+        for (range, _) in &highlights {
+            boundaries.extend([range.start, range.end]);
         }
         if let Some(selection) = &selection {
             boundaries.push(selection.start);
@@ -120,11 +198,10 @@ impl DesktopShell {
             .windows(2)
             .filter_map(|window| {
                 let range = window[0]..window[1];
-                let style = inline
-                    .highlights
+                let style = highlights
                     .iter()
-                    .find(|highlight| highlight.range.contains(&range.start))
-                    .map(|highlight| self.inline_highlight_style(highlight.style))
+                    .find(|(highlight, _)| highlight.contains(&range.start))
+                    .map(|(_, style)| *style)
                     .unwrap_or_default();
                 let selected = selection.as_ref().is_some_and(|selection| {
                     selection.start < range.end && range.start < selection.end
@@ -134,11 +211,8 @@ impl DesktopShell {
                 }
                 let mut style = style;
                 if selected {
-                    style.background_color = Some(
-                        theme_rgb(&self.theme, "selection.background")
-                            .opacity(0.28)
-                            .into(),
-                    );
+                    style.background_color =
+                        Some(theme_rgb(&self.theme, "selection.background").into());
                     style.color = Some(theme_rgb(&self.theme, "selection.foreground").into());
                 }
                 Some((range, style))
@@ -151,18 +225,19 @@ impl DesktopShell {
         &mut self,
         message_index: usize,
         block_index: usize,
+        source_offset: usize,
         text: &str,
         layout: &gpui::TextLayout,
         links: &[InlineLink],
         event: &gpui::MouseDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let offset = transcript_index_for_position(layout, event.position, text);
         let point = TranscriptSelectionPoint {
             message_index,
             block_index,
-            offset,
+            offset: source_offset + offset,
         };
         self.transcript_link_candidate = links
             .iter()
@@ -171,6 +246,7 @@ impl DesktopShell {
         self.transcript_selection_anchor = Some(point);
         self.update_transcript_selection(point);
         self.transcript_is_selecting = true;
+        window.focus(&self.transcript_focus_handle, cx);
         cx.notify();
     }
 
@@ -270,7 +346,7 @@ impl DesktopShell {
         let point = TranscriptSelectionPoint {
             message_index: entry.message_index,
             block_index: entry.block_index,
-            offset,
+            offset: entry.source_offset + offset,
         };
         drop(registry);
         if point != anchor {
@@ -346,22 +422,82 @@ impl DesktopShell {
 
     fn transcript_selection_text(&self, selection: &TranscriptSelection) -> Option<String> {
         let registry = self.transcript_text_registry.borrow();
-        let mut entries = registry.iter().collect::<Vec<_>>();
-        entries.sort_by_key(|entry| (entry.message_index, entry.block_index));
-        let mut selected = String::new();
-        for entry in entries {
-            let Some(range) = Self::selection_range_for(
-                selection,
-                entry.message_index,
-                entry.block_index,
-                entry.text.len(),
-            ) else {
+        let mut sources = BTreeMap::new();
+        let (start, end) = if selection.start <= selection.end {
+            (selection.start, selection.end)
+        } else {
+            (selection.end, selection.start)
+        };
+        let selected_ids =
+            (start.message_index, start.block_index)..=(end.message_index, end.block_index);
+        for entry in registry.iter() {
+            let id = (entry.message_index, entry.block_index);
+            if selected_ids.contains(&id) {
+                sources.entry(id).or_insert_with(|| {
+                    (
+                        self.tool_text_for_selection(entry.message_index, entry.block_index)
+                            .unwrap_or(Cow::Borrowed(entry.text.as_str())),
+                        false,
+                    )
+                });
+            }
+        }
+        // A code fence can span virtual rows that have scrolled out of the
+        // painted registry. Read those chunks from the retained projection.
+        let first_row = self
+            .transcript_rows
+            .partition_point(|row| row.message_index < start.message_index);
+        let last_row = self
+            .transcript_rows
+            .partition_point(|row| row.message_index <= end.message_index);
+        for row in &self.transcript_rows[first_row..last_row] {
+            let block_index = row
+                .part_index
+                .saturating_mul(1_000_000)
+                .saturating_add(row.block_index);
+            let id = (row.message_index, block_index);
+            if !selected_ids.contains(&id) {
+                continue;
+            }
+            if matches!(
+                self.model
+                    .ui
+                    .transcript
+                    .get(row.message_index)
+                    .and_then(|item| item.parts.get(row.part_index)),
+                Some(TranscriptPart::Reasoning(_))
+            ) && !self
+                .expanded_chat_parts
+                .contains(&Self::chat_part_key(row.message_index, row.part_index))
+            {
+                continue;
+            }
+            let Some(block) = self
+                .markdown_cache
+                .get(row.message_index)
+                .and_then(|parts| parts.get(row.part_index))
+                .and_then(|cached| cached.render_blocks.get(row.block_index))
+            else {
                 continue;
             };
-            if !selected.is_empty() {
+            if let MarkdownBlock::Code { text, .. } = &block.block {
+                sources.insert(id, (Cow::Borrowed(text.as_str()), block.continuation));
+            }
+        }
+        let mut selected = String::new();
+        for ((message_index, block_index), (text, continuation)) in sources {
+            let Some(range) =
+                Self::selection_range_for(selection, message_index, block_index, text.len())
+            else {
+                continue;
+            };
+            let Some(text) = text.get(range) else {
+                continue;
+            };
+            if !selected.is_empty() && !continuation {
                 selected.push('\n');
             }
-            selected.push_str(&entry.text[range]);
+            selected.push_str(text);
         }
         (!selected.is_empty()).then_some(selected)
     }
@@ -375,6 +511,160 @@ impl DesktopShell {
         }
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.to_owned()));
         true
+    }
+
+    pub(super) fn copy_selected_transcript_text(
+        &mut self,
+        _: &TextCopy,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.copy_transcript_selection(cx) {
+            cx.propagate();
+        }
+    }
+
+    fn tool_text_for_selection(
+        &self,
+        message_index: usize,
+        block_index: usize,
+    ) -> Option<Cow<'_, str>> {
+        let part_index = block_index / 1_000_000;
+        let TranscriptPart::ToolCall {
+            input,
+            output,
+            diff,
+            ..
+        } = self
+            .model
+            .ui
+            .transcript
+            .get(message_index)?
+            .parts
+            .get(part_index)?
+        else {
+            return None;
+        };
+        match block_index % 1_000_000 {
+            0 => Some(Cow::Owned(super::chat_render::formatted_tool_input(input))),
+            1 => output.as_deref().map(Cow::Borrowed),
+            2 => diff.as_deref().map(Cow::Borrowed),
+            _ => None,
+        }
+    }
+
+    fn transcript_copy_text(&self, source: TranscriptCopySource) -> Option<String> {
+        match source {
+            TranscriptCopySource::Code {
+                message_index,
+                block_index,
+            } => {
+                let blocks = &self
+                    .markdown_cache
+                    .get(message_index)?
+                    .get(block_index / 1_000_000)?
+                    .render_blocks;
+                let mut index = block_index % 1_000_000;
+                while blocks.get(index)?.continuation {
+                    index = index.checked_sub(1)?;
+                }
+                let mut code = String::new();
+                for (offset, block) in blocks[index..].iter().enumerate() {
+                    if offset > 0 && !block.continuation {
+                        break;
+                    }
+                    let MarkdownBlock::Code { text, .. } = &block.block else {
+                        break;
+                    };
+                    code.push_str(text);
+                }
+                Some(code)
+            }
+            TranscriptCopySource::Tool {
+                message_index,
+                part_index,
+                section,
+            } => {
+                let TranscriptPart::ToolCall {
+                    input,
+                    output,
+                    diff,
+                    ..
+                } = self
+                    .model
+                    .ui
+                    .transcript
+                    .get(message_index)?
+                    .parts
+                    .get(part_index)?
+                else {
+                    return None;
+                };
+                match section {
+                    ToolTextSection::Input => Some(super::chat_render::formatted_tool_input(input)),
+                    ToolTextSection::Output => output.clone(),
+                    ToolTextSection::Diff => diff.clone(),
+                }
+            }
+        }
+    }
+
+    pub(super) fn render_content_copy_button(
+        &self,
+        id: String,
+        label: &'static str,
+        source: TranscriptCopySource,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let selector = id.clone();
+        div()
+            .id(id)
+            .debug_selector(move || selector.clone())
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .px(px(5.))
+            .py(px(3.))
+            .rounded(px(4.))
+            .cursor_pointer()
+            .role(Role::Button)
+            .aria_label(label)
+            .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+            .text_xs()
+            .text_color(theme_rgb(&self.theme, "text.muted"))
+            .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
+            .on_click(cx.listener(move |shell, _, _, cx| {
+                cx.stop_propagation();
+                if let Some(text) = shell.transcript_copy_text(source) {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                }
+            }))
+            .child("copy")
+            .into_any_element()
+    }
+
+    pub(super) fn transcript_text_highlights(
+        &self,
+        message_index: usize,
+        block_index: usize,
+        source_offset: usize,
+        text_len: usize,
+        highlights: Vec<(Range<usize>, gpui::HighlightStyle)>,
+    ) -> Vec<(Range<usize>, gpui::HighlightStyle)> {
+        let Some(range) =
+            self.transcript_selection_range(message_index, block_index, source_offset + text_len)
+        else {
+            return highlights;
+        };
+        let start = range.start.max(source_offset) - source_offset;
+        let end = range
+            .end
+            .min(source_offset + text_len)
+            .saturating_sub(source_offset);
+        if start >= end {
+            return highlights;
+        }
+        self.merge_selection_highlights(text_len, highlights, Some(start..end))
     }
 
     pub(super) fn inline_highlight_style(&self, style: InlineStyle) -> gpui::HighlightStyle {
@@ -520,16 +810,41 @@ impl DesktopShell {
                     .border_color(theme_rgb(&self.theme, "divider"))
                     .bg(theme_rgb(&self.theme, "muted"))
                     .p(px(12.));
-                if let Some(language) = language {
-                    code = code.when(!continuation, |element| {
-                        element.child(
-                            div()
-                                .text_xs()
-                                .text_color(theme_rgb(&self.theme, "text.muted"))
-                                .child(language.clone()),
-                        )
-                    });
-                }
+                code = code.when(!continuation, |element| {
+                    element.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .text_xs()
+                            .text_color(theme_rgb(&self.theme, "text.muted"))
+                            .child(language.clone().unwrap_or_default())
+                            .child(self.render_content_copy_button(
+                                format!("copy-code-{message_index}-{block_index}"),
+                                "Copy code",
+                                TranscriptCopySource::Code {
+                                    message_index,
+                                    block_index,
+                                },
+                                cx,
+                            )),
+                    )
+                });
+                let highlights = self.transcript_text_highlights(
+                    message_index,
+                    block_index,
+                    0,
+                    text.len(),
+                    syntax_highlights
+                        .iter()
+                        .map(|highlight| {
+                            (
+                                highlight.range.clone(),
+                                self.syntax_highlight_style(highlight),
+                            )
+                        })
+                        .collect(),
+                );
                 let code_text = div()
                     .id(format!("markdown-code-text-{message_index}-{block_index}"))
                     .w_full()
@@ -538,17 +853,20 @@ impl DesktopShell {
                     .whitespace_nowrap()
                     .text_xs()
                     .child(
-                        gpui::StyledText::new(text.clone())
-                            .with_font_family_overrides(std::iter::once((
-                                0..text.len(),
-                                gpui::SharedString::from(DEFAULT_FONT_FAMILY),
-                            )))
-                            .with_highlights(syntax_highlights.iter().map(|highlight| {
-                                (
-                                    highlight.range.clone(),
-                                    self.syntax_highlight_style(highlight),
-                                )
-                            })),
+                        self.render_selectable_transcript_text(
+                            message_index,
+                            block_index,
+                            0,
+                            text,
+                            &[],
+                            gpui::StyledText::new(text.clone())
+                                .with_font_family_overrides(std::iter::once((
+                                    0..text.len(),
+                                    gpui::SharedString::from(DEFAULT_FONT_FAMILY),
+                                )))
+                                .with_highlights(highlights),
+                            cx,
+                        ),
                     );
                 if animate {
                     code.child(
@@ -943,13 +1261,6 @@ impl DesktopShell {
             self.close_shell_popovers();
             window.focus(&self.composer_focus_handle, cx);
             cx.notify();
-            cx.stop_propagation();
-            return;
-        }
-        if is_copy_keystroke(event)
-            && !self.composer_focus_handle.is_focused(window)
-            && self.copy_transcript_selection(cx)
-        {
             cx.stop_propagation();
             return;
         }

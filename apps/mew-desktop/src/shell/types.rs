@@ -119,6 +119,7 @@ pub(super) struct DesktopShell {
     pub(super) review_error: Option<String>,
     pub(super) input_animation_id: u64,
     pub(super) composer_focus_handle: FocusHandle,
+    pub(super) transcript_focus_handle: FocusHandle,
     pub(super) composer_selection: Range<usize>,
     pub(super) composer_selection_reversed: bool,
     pub(super) composer_marked_range: Option<Range<usize>>,
@@ -512,6 +513,7 @@ impl SessionViewState {
 }
 
 pub(super) struct ToolTextCache {
+    pub(super) line_offsets: Arc<Vec<usize>>,
     pub(super) source_identity: usize,
     pub(super) source_len: usize,
     pub(super) lines: Arc<Vec<SharedString>>,
@@ -532,6 +534,7 @@ pub(super) struct TranscriptSelection {
 
 #[derive(Clone)]
 pub(super) struct TranscriptTextEntry {
+    pub(super) source_offset: usize,
     pub(super) message_index: usize,
     pub(super) block_index: usize,
     pub(super) text: String,

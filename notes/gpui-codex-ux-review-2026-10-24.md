@@ -482,3 +482,14 @@ Recommended order: fix editor overflow and validate copy/selection first, then
 restore markdown/content fidelity, then refine activity/progress and composer
 hierarchy. Treat the edited-files handoff as a separate product decision. Finish
 with a spacing/type pass once those behaviors are stable.
+
+## Content interactions follow-up, 2026-10-24
+
+Resolved the direct reuse gap with selectable code and tool input/output/diffs,
+plus controls that copy complete fences/sections rather than visible chunks or
+preview lines. A failing behavior test confirmed the suspected stale composer
+Copy focus; transcript selection now owns its typed Copy route. Six focused
+tests cover complete sources, Unicode, offscreen chunks and real pointer/focus
+behavior. Native QA confirms code/result buttons and partial selection copying
+after draft editing, with readable selection in both theme modes. This does not
+resolve list/table fidelity, repeated code cards or source-file link routing.

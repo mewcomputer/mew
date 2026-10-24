@@ -270,6 +270,308 @@ mod shell_tests {
     }
 
     #[gpui::test]
+    fn content_copy_code_button_copies_the_complete_fence(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        let code = (0..90)
+            .map(|index| format!("let value_{index} = \"🙂中\";"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            shell.model.ui.transcript = vec![TranscriptItem {
+                role: TranscriptRole::Assistant,
+                text: format!("```rust\n{code}\n```\n\n```text\nseparate fence\n```"),
+                parts: Vec::new(),
+            }];
+            shell.sync_markdown_cache();
+            assert!(shell.markdown_cache[0][0].render_blocks.len() > 2);
+            shell.transcript_list.scroll_to(gpui::ListOffset::default());
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(680.), px(900.)));
+        cx.run_until_parked();
+        let button = cx
+            .debug_bounds("copy-code-0-0")
+            .expect("code has a copy button");
+        cx.simulate_click(button.center(), gpui::Modifiers::none());
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().as_deref(),
+            Some(code.as_str())
+        );
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn content_copy_tool_buttons_copy_full_input_output_and_diff(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        let output = (0..70)
+            .map(|index| format!("line {index} 🙂中"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let diff = (0..70)
+            .map(|index| format!("+line {index} é"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            shell.model.ui.transcript = vec![TranscriptItem {
+                role: TranscriptRole::Assistant,
+                text: String::new(),
+                parts: vec![TranscriptPart::ToolCall {
+                    tool_name: "shell".into(),
+                    call_id: "copy-call".into(),
+                    status: ToolStatus::Completed,
+                    input: r#"{"command":"printf '🙂中'"}"#.into(),
+                    output: Some(output.clone()),
+                    error: None,
+                    diff: Some(diff.clone()),
+                }],
+            }];
+            shell.expanded_chat_parts.insert("chat-part-0-0".into());
+            shell.sync_markdown_cache();
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(680.), px(1200.)));
+        cx.run_until_parked();
+        for (selector, expected) in [
+            (
+                "copy-tool-input-0-0",
+                "{\n  \"command\": \"printf '🙂中'\"\n}",
+            ),
+            ("copy-tool-output-0-0", output.as_str()),
+            ("copy-tool-diff-0-0", diff.as_str()),
+        ] {
+            let button = cx
+                .debug_bounds(selector)
+                .expect("each tool section has a copy button");
+            cx.simulate_click(button.center(), gpui::Modifiers::none());
+            assert_eq!(
+                cx.read_from_clipboard().unwrap().text().as_deref(),
+                Some(expected),
+                "{selector}"
+            );
+        }
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn content_copy_transcript_selection_takes_focus_from_the_composer(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        let text = "reply 🙂中";
+        cx.update(|window, cx| {
+            let focus = shell.update(cx, |shell, cx| {
+                shell.layout.sidebar_collapsed = true;
+                shell.layout.workbench_collapsed = true;
+                shell.model.ui.composer = "keep this draft".into();
+                shell.composer_selection = 0..4;
+                shell.model.ui.transcript = vec![TranscriptItem {
+                    role: TranscriptRole::Assistant,
+                    text: text.into(),
+                    parts: Vec::new(),
+                }];
+                shell.sync_markdown_cache();
+                cx.notify();
+                shell.composer_focus_handle.clone()
+            });
+            window.focus(&focus, cx);
+        });
+        cx.simulate_resize(gpui::size(px(680.), px(900.)));
+        cx.run_until_parked();
+        let bounds = cx.debug_bounds("markdown-inline-container-0-0").unwrap();
+        let start = point(bounds.left() + px(0.1), bounds.top() + px(10.));
+        let end = point(bounds.right() - px(1.), start.y);
+        cx.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_mouse_move(end, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_up(end, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.dispatch_action(TextCopy);
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().as_deref(),
+            Some(text)
+        );
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.model.ui.composer, "keep this draft")
+        });
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn content_copy_code_and_tool_output_support_unicode_selection(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            shell.model.ui.transcript = vec![TranscriptItem {
+                role: TranscriptRole::Assistant,
+                text: String::new(),
+                parts: vec![
+                    TranscriptPart::Text("```text\ncode 🙂中\n```".into()),
+                    TranscriptPart::ToolCall {
+                        tool_name: "shell".into(),
+                        call_id: "select-call".into(),
+                        status: ToolStatus::Completed,
+                        input: r#"{"command":"echo é"}"#.into(),
+                        output: Some("first 🙂\nsecond 中\nlast é".into()),
+                        error: None,
+                        diff: Some("+added 🙂\n-removed 中".into()),
+                    },
+                ],
+            }];
+            shell.expanded_chat_parts.insert("chat-part-0-1".into());
+            shell.sync_markdown_cache();
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(680.), px(1000.)));
+        cx.run_until_parked();
+        for (first, last, expected) in [
+            (
+                "markdown-inline-container-0-0",
+                "markdown-inline-container-0-0",
+                "code 🙂中",
+            ),
+            (
+                "tool-input-0-1-line-0",
+                "tool-input-0-1-line-2",
+                "{\n  \"command\": \"echo é\"\n}",
+            ),
+            (
+                "tool-output-0-1-line-0",
+                "tool-output-0-1-line-2",
+                "first 🙂\nsecond 中\nlast é",
+            ),
+            (
+                "tool-diff-0-1-line-0",
+                "tool-diff-0-1-line-1",
+                "+added 🙂\n-removed 中",
+            ),
+        ] {
+            let first = cx.debug_bounds(first).unwrap();
+            let last = cx.debug_bounds(last).unwrap();
+            let start = point(first.left() + px(0.1), first.top() + px(8.));
+            let end = point(last.right() - px(1.), last.top() + px(8.));
+            cx.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::none());
+            cx.run_until_parked();
+            cx.simulate_mouse_move(end, gpui::MouseButton::Left, gpui::Modifiers::none());
+            cx.simulate_mouse_up(end, gpui::MouseButton::Left, gpui::Modifiers::none());
+            cx.run_until_parked();
+            cx.dispatch_action(TextCopy);
+            assert_eq!(
+                cx.read_from_clipboard().unwrap().text().as_deref(),
+                Some(expected)
+            );
+        }
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn content_copy_selection_preserves_code_chunk_boundaries(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        let code = (0..24)
+            .map(|index| format!("line_{index}: {}", "中".repeat(20)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            shell.model.ui.transcript = vec![TranscriptItem {
+                role: TranscriptRole::Assistant,
+                text: format!("```text\n{code}\n```"),
+                parts: Vec::new(),
+            }];
+            shell.sync_markdown_cache();
+            assert_eq!(shell.markdown_cache[0][0].render_blocks.len(), 2);
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(900.), px(1400.)));
+        cx.run_until_parked();
+        let first = cx.debug_bounds("markdown-inline-container-0-0").unwrap();
+        let last = cx.debug_bounds("markdown-inline-container-0-1").unwrap();
+        let start = point(first.left() + px(0.1), first.top() + px(8.));
+        let end = point(last.right() - px(1.), last.bottom() - px(8.));
+        cx.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_mouse_move(end, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_up(end, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.dispatch_action(TextCopy);
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().as_deref(),
+            Some(code.as_str())
+        );
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn content_copy_selection_keeps_code_chunks_that_scroll_out_of_view(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        let code = (0..160)
+            .map(|index| format!("line_{index}: {}", "中".repeat(20)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            shell.model.ui.transcript = vec![TranscriptItem {
+                role: TranscriptRole::Assistant,
+                text: format!("```text\n{code}\n```"),
+                parts: Vec::new(),
+            }];
+            shell.sync_markdown_cache();
+            shell.transcript_list.scroll_to(gpui::ListOffset::default());
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(900.), px(700.)));
+        cx.run_until_parked();
+        let first = cx.debug_bounds("markdown-inline-container-0-0").unwrap();
+        let start = point(first.left() + px(0.1), first.top() + px(8.));
+        cx.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.run_until_parked();
+        shell.update(cx, |shell, cx| {
+            shell.transcript_list.scroll_to(gpui::ListOffset {
+                item_ix: shell.transcript_rows.len() - 1,
+                offset_in_item: px(0.),
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let end = shell.read_with(cx, |shell, _| {
+            let registry = shell.transcript_text_registry.borrow();
+            assert!(registry.iter().all(|entry| entry.block_index > 0));
+            let last = registry
+                .iter()
+                .max_by_key(|entry| entry.block_index)
+                .unwrap();
+            last.layout.position_for_index(last.text.len()).unwrap() + point(px(2.), px(8.))
+        });
+        cx.simulate_mouse_move(end, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_up(end, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.dispatch_action(TextCopy);
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().as_deref(),
+            Some(code.as_str())
+        );
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
     fn changing_chat_theme_refreshes_cached_code_colors(cx: &mut gpui::TestAppContext) {
         let (shell, cx) =
             cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));

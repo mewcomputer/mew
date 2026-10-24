@@ -344,6 +344,7 @@ impl DesktopShell {
             review_error: None,
             input_animation_id: 0,
             composer_focus_handle,
+            transcript_focus_handle: cx.focus_handle(),
             composer_selection: 0..0,
             composer_selection_reversed: false,
             composer_marked_range: None,
