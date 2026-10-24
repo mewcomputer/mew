@@ -1096,14 +1096,16 @@ impl DesktopShell {
         style
     }
 
-    pub(super) fn submit_prompt(&mut self, cx: &mut Context<Self>) {
-        let awaiting_question = self
-            .model
+    pub(super) fn pending_question(&self) -> Option<&PendingAction> {
+        self.model
             .ui
             .pending_actions
             .iter()
-            .any(|action| matches!(&action.kind, ActionKind::AskUser { .. }));
-        if self.model.ui.running && !awaiting_question {
+            .find(|action| matches!(&action.kind, ActionKind::AskUser { .. }))
+    }
+
+    pub(super) fn submit_prompt(&mut self, cx: &mut Context<Self>) {
+        if self.model.ui.running && self.pending_question().is_none() {
             return;
         }
         if self.model.ui.composer.trim().is_empty() {
@@ -1142,13 +1144,7 @@ impl DesktopShell {
             cx.notify();
             return;
         }
-        let accepted = if let Some(action) = self
-            .model
-            .ui
-            .pending_actions
-            .iter()
-            .find(|action| matches!(&action.kind, ActionKind::AskUser { .. }))
-        {
+        let accepted = if let Some(action) = self.pending_question() {
             let ActionKind::AskUser { questions, .. } = &action.kind else {
                 return;
             };

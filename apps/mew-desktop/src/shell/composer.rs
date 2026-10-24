@@ -1377,8 +1377,14 @@ impl Element for ComposerElement {
             .text_input_focus_handle(self.target)
             .clone();
         let target = self.target;
-        self.shell.update(cx, |shell, _| match target {
-            TextInputTarget::Composer => shell.composer_bounds = Some(bounds),
+        self.shell.update(cx, |shell, cx| match target {
+            TextInputTarget::Composer => {
+                let was_compact = composer_settings_are_compact(shell.composer_bounds);
+                shell.composer_bounds = Some(bounds);
+                if composer_settings_are_compact(Some(bounds)) != was_compact {
+                    cx.defer_in(window, |_, _, cx| cx.notify());
+                }
+            }
             TextInputTarget::BrowserUrl => shell.browser_url_bounds = Some(bounds),
             TextInputTarget::Rename => {}
             TextInputTarget::SidebarSearch => {}

@@ -559,18 +559,13 @@ impl DesktopShell {
             .into_any_element()
     }
 
-    pub(super) fn render_model_picker(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let query = self.model_picker_query.clone();
-        let (filtered_indices, rows) =
-            build_model_picker_rows(&self.model.ui.models, &self.recent_models, &query);
-        self.model_picker_filtered_indices = filtered_indices;
-        self.model_picker_rows = rows;
+    pub(super) fn render_model_picker(
+        &mut self,
+        popup_size: gpui::Size<Pixels>,
+        thinking_variants: Vec<String>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let option_count = self.model_picker_rows.len();
-        let thinking_variants = thinking_variants_for_model(
-            &self.model.ui.models,
-            self.model.ui.current_provider.as_deref(),
-            self.model.ui.model.as_deref(),
-        );
         let current_thinking_variant = self.model.ui.thinking_variant.clone();
         let options = if option_count > 0 {
             gpui::uniform_list(
@@ -578,17 +573,19 @@ impl DesktopShell {
                 option_count,
                 cx.processor(Self::render_model_option_rows),
             )
+            .debug_selector(|| "model-picker-list".into())
             .flex_1()
             .min_h_0()
             .into_any_element()
         } else {
-            let message = if query.trim().is_empty() {
+            let message = if self.model_picker_query.trim().is_empty() {
                 "No models reported by the daemon"
             } else {
                 "No models match your search"
             };
             div()
                 .flex_1()
+                .min_h_0()
                 .p(px(8.))
                 .text_sm()
                 .text_color(theme_rgb(&self.theme, "text.muted"))
@@ -778,7 +775,9 @@ impl DesktopShell {
             Some(
                 div()
                     .id("model-picker-effort")
+                    .debug_selector(|| "model-picker-effort".into())
                     .flex()
+                    .flex_none()
                     .flex_col()
                     .gap(px(4.))
                     .pt(px(8.))
@@ -931,10 +930,11 @@ impl DesktopShell {
         });
         div()
             .id("model-picker")
-            .w(px(400.))
+            .debug_selector(|| "model-picker".into())
+            .w(popup_size.width)
             .flex()
             .flex_col()
-            .h(model_picker_height(option_count, effort_option_count))
+            .h(popup_size.height)
             .p(px(8.))
             .border_1()
             .border_color(theme_rgb(&self.theme, "divider"))
@@ -948,7 +948,9 @@ impl DesktopShell {
             .child(
                 div()
                     .id("model-picker-search-frame")
+                    .debug_selector(|| "model-picker-search-frame".into())
                     .flex()
+                    .flex_none()
                     .items_center()
                     .gap(px(4.))
                     .h(px(28.))
@@ -1074,6 +1076,7 @@ impl DesktopShell {
         let has_options = !options.is_empty();
         div()
             .id("persona-picker")
+            .debug_selector(|| "persona-picker".into())
             .w(px(280.))
             .flex()
             .flex_col()
@@ -1153,6 +1156,7 @@ impl DesktopShell {
 
         div()
             .id("permission-picker")
+            .debug_selector(|| "permission-picker".into())
             .w(px(300.))
             .flex()
             .flex_col()

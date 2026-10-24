@@ -3436,3 +3436,34 @@ Codex evidence remains the user-supplied screenshot; direct inspection is denied
 by the computer-use safety policy. The HTML/JSX detector does not support native
 Rust. No product code or tests were changed. No provider prompt was submitted;
 the owned native QA app and daemon are stopped, draft cleared and width restored.
+
+
+# 2026-10-24 - composer interaction fixes and narrow settings
+
+Fixed attachment overflow and removal, model-picker geometry and primary-action
+state before adapting the settings row. Long Unicode filenames truncate inside
+wrapping chips while named 24 px remove buttons remain visible and tabbable.
+Removal preserves the draft and restores editor focus.
+
+The model picker shares its Recent/header inventory and exact size with its
+placement calculation. Search and effort retain their height while model rows
+scroll inside available window space. Model, persona and permission menus defer
+redraw after trigger measurement, fixing stale anchors during resizing. Empty
+and whitespace-only drafts and model switching disable Send. Pending questions
+show an answer action and share Enter's existing response path; other running
+turns retain Stop.
+
+At conversation widths below 480 px, persona becomes a compact icon using the
+existing picker. Effort remains a separate visible suffix while long model names
+truncate. Compact mode follows measured editor width through pane transitions;
+wider views retain persona text and naturally sized model controls.
+
+Twelve new actual-GPUI regressions cover geometry, pointer/keyboard interaction,
+Unicode attachments, question routing, disabled states, pane widths, transitions
+and popup resizing. All 291 desktop tests, strict all-target desktop Clippy,
+native build/packaging, formatting, architecture and generated-theme checks pass.
+Isolated native QA at 420 px in dark mode and 480 px in light mode confirmed
+legible model/effort, compact/expanded persona, attachment removal, popup fit
+and accessible disabled Send. No provider prompt was submitted. The QA app and
+owned daemon are stopped, draft cleared and fixture restored. Physical IME and
+VoiceOver remain unverified. Long-draft overflow cues remain a separate item.

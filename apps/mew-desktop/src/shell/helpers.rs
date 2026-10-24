@@ -166,6 +166,11 @@ pub(super) fn workbench_max_width(window_width: f32, sidebar_width: f32) -> f32 
     (window_width - sidebar_width - CHAT_MIN_WIDTH - PANE_DIVIDER_WIDTH).max(0.)
 }
 
+pub(super) fn composer_settings_are_compact(bounds: Option<Bounds<Pixels>>) -> bool {
+    // A 480 px conversation leaves 410 px after its gutters, composer border and padding.
+    bounds.is_none_or(|bounds| bounds.size.width < px(410.))
+}
+
 pub(super) fn workbench_fits_window(window_width: f32, sidebar_width: f32) -> bool {
     window_width >= sidebar_width + CHAT_MIN_WIDTH + WORKBENCH_MIN_WIDTH + PANE_DIVIDER_WIDTH
 }

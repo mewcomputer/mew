@@ -1805,6 +1805,7 @@ impl DesktopShell {
             format!("{model_display_label} · {thinking_label}")
         };
         let persona_display = non_empty_label(self.model.ui.current_persona.as_deref(), "Persona");
+        let compact_settings = composer_settings_are_compact(self.composer_bounds);
         let permission_display = permission_mode_label(self.model.ui.permission_mode.as_deref());
         let session_path: SharedString = selected_session_path(
             &self.model.ui.conversations,
@@ -1818,7 +1819,15 @@ impl DesktopShell {
 
         let composer_is_empty = self.model.ui.composer.is_empty();
         let composer_value = self.model.ui.composer.clone();
-        let turn_is_running = self.model.ui.running;
+        let question = self.pending_question();
+        let submit_label = match question.map(|action| &action.kind) {
+            Some(ActionKind::AskUser { questions, .. }) if questions.len() > 1 => "Send answers",
+            Some(_) => "Send answer",
+            None => "Send message",
+        };
+        let turn_is_running = self.model.ui.running && question.is_none();
+        let can_submit =
+            !self.model.ui.composer.trim().is_empty() && self.awaiting_model_switch.is_none();
         let composer_focused = self.composer_focus_handle.is_focused(window);
         let attachments = self.attachments.clone();
         let attachment_error = self.attachment_error.clone();
@@ -2037,19 +2046,29 @@ impl DesktopShell {
                         element.child(
                             div()
                                 .id("attachment-chips")
+                                .debug_selector(|| "attachment-chips".into())
                                 .flex()
                                 .flex_wrap()
+                                .min_w_0()
+                                .w_full()
                                 .gap(px(6.))
                                 .children(attachments.iter().enumerate().map(
                                     |(index, attachment)| {
-                                        let label = Path::new(&attachment.path)
-                                            .file_name()
-                                            .and_then(|name| name.to_str())
-                                            .unwrap_or(&attachment.path)
-                                            .to_owned();
+                                        let label = SharedString::from(
+                                            Path::new(&attachment.path)
+                                                .file_name()
+                                                .and_then(|name| name.to_str())
+                                                .unwrap_or(&attachment.path)
+                                                .to_owned(),
+                                        );
                                         div()
                                             .id(format!("attachment-{index}"))
+                                            .debug_selector(move || {
+                                                format!("attachment-{index}")
+                                            })
                                             .flex()
+                                            .min_w_0()
+                                            .max_w(relative(1.))
                                             .items_center()
                                             .gap(px(5.))
                                             .px(px(8.))
@@ -2057,18 +2076,42 @@ impl DesktopShell {
                                             .rounded(px(7.))
                                             .bg(theme_rgb(&self.theme, "card"))
                                             .text_xs()
-                                            .child(SharedString::from(label))
+                                            .child(
+                                                div()
+                                                    .min_w_0()
+                                                    .truncate()
+                                                    .child(label.clone()),
+                                            )
                                             .child(
                                                 div()
                                                     .id(format!("remove-attachment-{index}"))
+                                                    .debug_selector(move || {
+                                                        format!("remove-attachment-{index}")
+                                                    })
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .size(px(24.))
+                                                    .flex_shrink_0()
+                                                    .rounded(px(4.))
                                                     .cursor_pointer()
+                                                    .role(Role::Button)
+                                                    .aria_label(format!("Remove attachment {label}"))
+                                                    .desktop_focus(theme_rgb(
+                                                        &self.theme,
+                                                        "text.accent",
+                                                    ))
                                                     .text_color(theme_rgb(
                                                         &self.theme,
                                                         "text.muted",
                                                     ))
                                                     .on_click(cx.listener(
-                                                        move |shell, _, _, cx| {
+                                                        move |shell, _, window, cx| {
                                                             shell.remove_attachment(index, cx);
+                                                            window.focus(
+                                                                &shell.composer_focus_handle,
+                                                                cx,
+                                                            );
                                                         },
                                                     ))
                                                     .child(tabler_icon(
@@ -2267,7 +2310,7 @@ impl DesktopShell {
                                                     ))
                                                     .child(
                                                         canvas(
-                                                            move |bounds, _, cx| {
+                                                            move |bounds, window, cx| {
                                                                 permission_picker_trigger_shell
                                                                     .update(cx, |shell, cx| {
                                                                         if shell.permission_picker_bounds
@@ -2275,7 +2318,9 @@ impl DesktopShell {
                                                                         {
                                                                             shell.permission_picker_bounds =
                                                                                 Some(bounds);
-                                                                            cx.notify();
+                                                                            if shell.permission_picker_open {
+                                                                                cx.defer_in(window, |_, _, cx| cx.notify());
+                                                                            }
                                                                         }
                                                                     })
                                                                     .ok();
@@ -2308,6 +2353,9 @@ impl DesktopShell {
                                             )))
                                             .px(px(4.))
                                             .h(px(26.))
+                                            .when(compact_settings, |element| {
+                                                element.flex_none().w(px(26.)).max_w(px(26.)).justify_center()
+                                            })
                                             .rounded(px(6.))
                                             .hover(|element| {
                                                 element.bg(theme_rgb(&self.theme, "muted"))
@@ -2318,15 +2366,24 @@ impl DesktopShell {
                                             .flex()
                                             .items_center()
                                             .gap(px(4.))
-                                            .child(div().min_w_0().truncate().child(SharedString::from(persona_display)))
-                                            .child(tabler_icon(
-                                                TablerIcon::ChevronDown,
-                                                theme_rgb(&self.theme, "secondary_foreground"),
-                                                px(12.),
-                                            ))
+                                            .when(compact_settings, |element| {
+                                                element.child(tabler_icon(
+                                                    TablerIcon::UserCircle,
+                                                    theme_rgb(&self.theme, "secondary_foreground"),
+                                                    px(14.),
+                                                ))
+                                            })
+                                            .when(!compact_settings, |element| {
+                                                element.child(div().debug_selector(|| "composer-persona-label".into()).min_w_0().truncate().child(SharedString::from(persona_display)))
+                                                    .child(tabler_icon(
+                                                        TablerIcon::ChevronDown,
+                                                        theme_rgb(&self.theme, "secondary_foreground"),
+                                                        px(12.),
+                                                    ))
+                                            })
                                             .child(
                                                 canvas(
-                                                    move |bounds, _, cx| {
+                                                    move |bounds, window, cx| {
                                                         persona_picker_trigger_shell
                                                             .update(cx, |shell, cx| {
                                                                 if shell.persona_picker_bounds
@@ -2334,7 +2391,9 @@ impl DesktopShell {
                                                                 {
                                                                     shell.persona_picker_bounds =
                                                                         Some(bounds);
-                                                                    cx.notify();
+                                                                    if shell.persona_picker_open {
+                                                                        cx.defer_in(window, |_, _, cx| cx.notify());
+                                                                    }
                                                                 }
                                                             })
                                                             .ok();
@@ -2379,10 +2438,17 @@ impl DesktopShell {
                                             .max_w(px(280.))
                                             .child(
                                                 div()
+                                                    .debug_selector(|| "composer-model-label".into())
                                                     .min_w_0()
                                                     .truncate()
-                                                    .child(SharedString::from(model_display)),
+                                                    .child(SharedString::from(model_display_label.to_owned())),
                                             )
+                                            .when(!thinking_label.is_empty(), |element| {
+                                                element.child(div()
+                                                    .debug_selector(|| "composer-effort-label".into())
+                                                    .flex_none()
+                                                    .child(SharedString::from(format!("· {thinking_label}"))))
+                                            })
                                             .child(tabler_icon(
                                                 TablerIcon::ChevronDown,
                                                 theme_rgb(
@@ -2393,7 +2459,7 @@ impl DesktopShell {
                                             ))
                                             .child(
                                                 canvas(
-                                                    move |bounds, _, cx| {
+                                                    move |bounds, window, cx| {
                                                         model_picker_trigger_shell
                                                             .update(cx, |shell, cx| {
                                                                 if shell.model_picker_bounds
@@ -2401,7 +2467,11 @@ impl DesktopShell {
                                                                 {
                                                                     shell.model_picker_bounds =
                                                                         Some(bounds);
-                                                                    cx.notify();
+                                                                    if shell.model_picker_open {
+                                                                        cx.defer_in(window, |_, _, cx| {
+                                                                            cx.notify();
+                                                                        });
+                                                                    }
                                                                 }
                                                             })
                                                             .ok();
@@ -2445,21 +2515,29 @@ impl DesktopShell {
                                             .flex_none()
                                             .size(px(28.))
                                             .rounded_full()
-                                            .bg(theme_rgb(&self.theme, "text.body"))
+                                            .bg(theme_rgb(&self.theme, if can_submit { "text.body" } else { "muted" }))
                                             .text_color(theme_rgb(&self.theme, "background"))
                                             .flex()
                                             .items_center()
                                             .justify_center()
-                                            .cursor_pointer()
                                             .role(Role::Button)
-                                            .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                                            .aria_label("Send message")
-                                            .on_click(cx.listener(|shell, _, _, cx| {
-                                                shell.submit_prompt(cx);
-                                            }))
+                                            .aria_label(submit_label)
+                                            .when(can_submit, |element| {
+                                                element.cursor_pointer()
+                                                    .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+                                                    .on_click(cx.listener(|shell, _, window, cx| {
+                                                        shell.submit_prompt(cx);
+                                                        window.focus(&shell.composer_focus_handle, cx);
+                                                    }))
+                                            })
+                                            .when(!can_submit, |element| {
+                                                element.a11y_synthetic_children(|builder| {
+                                                    builder.parent_node().set_disabled();
+                                                })
+                                            })
                                             .child(tabler_icon(
                                                 TablerIcon::ArrowUp,
-                                                theme_rgb(&self.theme, "background"),
+                                                theme_rgb(&self.theme, if can_submit { "background" } else { "text.muted" }),
                                                 px(15.),
                                             ))
                                             .into_any_element()
@@ -2590,39 +2668,52 @@ impl DesktopShell {
     ) -> gpui::AnyElement {
         let window_width = window.bounds().size.width;
         let window_height = window.bounds().size.height;
-        let model_option_count = self
-            .model
-            .ui
-            .models
-            .iter()
-            .filter(|model| model_matches_query(model, &self.model_picker_query))
-            .count();
-        let model_effort_option_count = {
-            let count = thinking_variants_for_model(
-                &self.model.ui.models,
-                self.model.ui.current_provider.as_deref(),
-                self.model.ui.model.as_deref(),
-            )
-            .len();
-            if count == 0 {
-                0
-            } else {
-                count + 1
-            }
-        };
-        let model_position = self.model_picker_open.then(|| {
-            self.model_picker_bounds.map(|bounds| {
-                picker_popup_position_in_window_right_aligned(
+        let model_popup = self
+            .model_picker_bounds
+            .filter(|_| self.model_picker_open)
+            .map(|bounds| {
+                let (indices, rows) = build_model_picker_rows(
+                    &self.model.ui.models,
+                    &self.recent_models,
+                    &self.model_picker_query,
+                );
+                self.model_picker_filtered_indices = indices;
+                self.model_picker_rows = rows;
+                let thinking_variants = thinking_variants_for_model(
+                    &self.model.ui.models,
+                    self.model.ui.current_provider.as_deref(),
+                    self.model.ui.model.as_deref(),
+                );
+                let effort_option_count = if thinking_variants.is_empty() {
+                    0
+                } else {
+                    thinking_variants.len() + 1
+                };
+                let available_height = (window_height - px(16.)).max(Pixels::ZERO);
+                let available_above =
+                    (bounds.top() - px(16.)).clamp(Pixels::ZERO, available_height);
+                let available_below = (window_height - bounds.bottom() - px(16.))
+                    .clamp(Pixels::ZERO, available_height);
+                let popup_size = gpui::size(
+                    px(400.).min((window_width - px(16.)).max(Pixels::ZERO)),
+                    model_picker_height(self.model_picker_rows.len(), effort_option_count)
+                        .min(available_above.max(available_below)),
+                );
+                let position = picker_popup_position_in_window_right_aligned(
                     bounds,
-                    px(300.),
-                    model_picker_height(model_option_count, model_effort_option_count),
+                    popup_size.width,
+                    popup_size.height,
                     window_width,
                     window_height,
                     px(8.),
                     px(8.),
+                );
+                (
+                    position,
+                    self.render_model_picker(popup_size, thinking_variants, cx)
+                        .into_any_element(),
                 )
-            })
-        });
+            });
         let persona_position = self.persona_picker_open.then(|| {
             self.persona_picker_bounds.map(|bounds| {
                 picker_popup_position_in_window(
@@ -2686,14 +2777,14 @@ impl DesktopShell {
             .id("picker-overlays")
             .absolute()
             .inset_0()
-            .when_some(model_position.flatten(), |element, position| {
+            .when_some(model_popup, |element, (position, popup)| {
                 element.child(
                     deferred(
                         anchored()
                             .anchor(Anchor::TopLeft)
                             .position(position)
                             .snap_to_window_with_margin(px(8.))
-                            .child(self.render_model_picker(cx)),
+                            .child(popup),
                     )
                     .with_priority(4),
                 )

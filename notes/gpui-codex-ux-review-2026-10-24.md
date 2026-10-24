@@ -749,3 +749,42 @@ The next implementation should reproduce those cases before changing behavior.
 
 All owned QA processes were stopped, the test draft cleared and the fixture's
 420 px width restored. No production app preferences or sessions were changed.
+
+
+## Composer follow-up: interaction fixes and narrow settings
+
+Implemented the first four findings from the compact-composer review. Attachment
+filenames now truncate within the reading column while a named, tabbable remove
+button remains visible. The primary action is disabled for empty or whitespace
+drafts and pending model switches. A running AskUser request shows an answer
+action matching Enter, with the original request identity and response format.
+
+Model-picker rendering and placement share the actual row inventory, width and
+height. The popup includes Recent/header rows, fits available window space and
+scrolls the model list without shrinking search or effort. Deferred trigger
+notifications keep model, persona and permission menus attached during resizing.
+
+The settings row prioritizes permission, model and effort at the minimum pane
+width. Persona uses its existing picker through a compact icon below 480 px.
+Effort is separate from the truncating name. Measured editor width controls this
+change, including animated pane transitions, while wider panes retain persona
+text and naturally sized model controls. Draft typography is unchanged.
+
+Verification: twelve new actual-GPUI regressions and all 291 desktop tests pass,
+as do strict desktop Clippy, native build/packaging and repository checks.
+Native QA used the isolated real daemon/catalog fixture, with no provider turn.
+The 420 px dark view retains the full ordinary model/effort label and a visible
+attachment remove button; the 480 px light view restores persona text. Native
+accessibility reports disabled Send for an empty draft and enables it after
+typing. Pointer removal preserves the Unicode draft, and both model and persona
+controls open their existing menus.
+
+Evidence: [420 px composer](/private/tmp/mew-composer-fixes-2026-10-24/420-empty.png),
+[long attachment](/private/tmp/mew-composer-fixes-2026-10-24/420-attachment.png),
+[model picker](/private/tmp/mew-composer-fixes-2026-10-24/420-picker.png),
+[480 px light view](/private/tmp/mew-composer-fixes-2026-10-24/480-light.png).
+
+The owned QA app and daemon are stopped, the draft cleared and the fixture's
+420 px/system appearance restored. Long-draft overflow cues, contextual Yield
+and picker header density remain outside this pass. Physical IME and VoiceOver
+were not exercised.

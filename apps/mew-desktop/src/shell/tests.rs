@@ -4440,3 +4440,664 @@ mod progress_tests {
         shell.update(cx, |shell, _| shell.quitting = true);
     }
 }
+
+#[cfg(test)]
+mod composer_attachment_interaction_tests {
+    use super::super::*;
+
+    fn draft_attachments() -> Vec<Attachment> {
+        [
+            format!("/tmp/{}末尾.txt", "long-é🙂-filename-".repeat(28)),
+            "/tmp/second-attachment-資料.txt".into(),
+            "/tmp/third.txt".into(),
+        ]
+        .into_iter()
+        .map(|path| Attachment { path, mime: None })
+        .collect()
+    }
+
+    fn prepare_draft(shell: &Entity<DesktopShell>, cx: &mut gpui::VisualTestContext) {
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            shell.model.ui.composer = "keep my draft é🙂".into();
+            shell.attachments = draft_attachments();
+            cx.notify();
+        });
+    }
+
+    fn assert_composer_focused(shell: &Entity<DesktopShell>, cx: &mut gpui::VisualTestContext) {
+        cx.update(|window, cx| {
+            assert!(shell.read(cx).composer_focus_handle.is_focused(window));
+        });
+    }
+
+    #[gpui::test]
+    fn attachment_chips_keep_long_unicode_names_and_remove_targets_inside_the_reading_column(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        prepare_draft(&shell, cx);
+        for width in [420., 480., 900.] {
+            cx.simulate_resize(gpui::size(px(width), px(760.)));
+            cx.run_until_parked();
+            let composer = cx.debug_bounds("composer").unwrap();
+            let row = cx.debug_bounds("attachment-chips").unwrap();
+            assert_eq!(row.left(), composer.left());
+            assert_eq!(row.right(), composer.right());
+            let mut chips = Vec::new();
+            for (chip_selector, remove_selector) in [
+                ("attachment-0", "remove-attachment-0"),
+                ("attachment-1", "remove-attachment-1"),
+                ("attachment-2", "remove-attachment-2"),
+            ] {
+                let chip = cx.debug_bounds(chip_selector).unwrap();
+                let remove = cx.debug_bounds(remove_selector).unwrap();
+                assert!(chip.left() >= composer.left());
+                assert!(
+                    chip.right() <= composer.right(),
+                    "{chip_selector} overflows at {width}px"
+                );
+                assert!(chip.top() >= row.top() && chip.bottom() <= row.bottom());
+                assert!(remove.left() >= chip.left() && remove.right() <= chip.right());
+                assert!(remove.top() >= chip.top() && remove.bottom() <= chip.bottom());
+                assert_eq!(remove.size, gpui::size(px(24.), px(24.)));
+                chips.push(chip);
+            }
+            for (index, chip) in chips.iter().enumerate() {
+                for other in &chips[index + 1..] {
+                    assert!(!chip.intersects(other), "attachment chips overlap");
+                }
+            }
+            assert!(
+                chips[2].size.width < px(150.),
+                "short chips keep their natural width"
+            );
+        }
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn attachment_remove_pointer_targets_preserve_other_files_and_the_draft(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        prepare_draft(&shell, cx);
+        cx.simulate_resize(gpui::size(px(420.), px(760.)));
+        cx.run_until_parked();
+        let remove = cx.debug_bounds("remove-attachment-0").unwrap();
+        cx.simulate_click(remove.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            assert_eq!(shell.read(cx).attachments, draft_attachments()[1..]);
+            assert_eq!(shell.read(cx).model.ui.composer, "keep my draft é🙂");
+        });
+        assert_composer_focused(&shell, cx);
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn attachment_removal_is_tabbable_and_returns_keyboard_focus_to_the_draft(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        prepare_draft(&shell, cx);
+        cx.simulate_resize(gpui::size(px(420.), px(760.)));
+        cx.run_until_parked();
+        for (key, remaining) in [("enter", 2), ("space", 1), ("enter", 0)] {
+            cx.update(|window, cx| {
+                let focus = shell.read(cx).composer_focus_handle.clone();
+                window.focus(&focus, cx);
+                window.focus_prev(cx);
+            });
+            cx.run_until_parked();
+            let keystroke = gpui::Keystroke::parse(key).unwrap();
+            cx.simulate_event(gpui::KeyDownEvent {
+                keystroke: keystroke.clone(),
+                is_held: false,
+                prefer_character_input: false,
+            });
+            cx.simulate_event(gpui::KeyUpEvent { keystroke });
+            cx.run_until_parked();
+            cx.update(|_, cx| {
+                assert_eq!(shell.read(cx).attachments, draft_attachments()[..remaining]);
+                assert_eq!(shell.read(cx).model.ui.composer, "keep my draft é🙂");
+            });
+            assert_composer_focused(&shell, cx);
+        }
+        assert!(cx.debug_bounds("attachment-chips").is_none());
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+}
+
+#[cfg(test)]
+mod composer_model_picker_geometry_regressions {
+    use super::super::*;
+
+    fn configure_picker(shell: &mut DesktopShell, recent: bool) {
+        shell.layout.sidebar_collapsed = true;
+        shell.layout.workbench_collapsed = true;
+        shell.model.ui.current_provider = Some("picker-qa".into());
+        shell.model.ui.model = Some("alpha".into());
+        shell.model.ui.models = serde_json::from_value(serde_json::json!([
+            {"id":"picker-qa/alpha", "provider":"picker-qa", "model":"alpha",
+             "display_name":"Alpha", "thinking_variants":[{"name":"low"},{"name":"high"}]},
+            {"id":"picker-qa/beta", "provider":"picker-qa", "model":"beta", "display_name":"Beta"},
+            {"id":"picker-qa/gamma", "provider":"picker-qa", "model":"gamma", "display_name":"Gamma"}
+        ])).unwrap();
+        shell.recent_models = if recent {
+            vec!["picker-qa/beta".into(), "picker-qa/alpha".into()]
+        } else {
+            Vec::new()
+        };
+    }
+
+    #[gpui::test]
+    fn picker_uses_rendered_rows_and_width_for_its_trigger_alignment(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        for width in [420., 900.] {
+            cx.simulate_resize(gpui::size(px(width), px(760.)));
+            for (recent, effort) in [(false, false), (false, true), (true, false), (true, true)] {
+                for query in ["", "beta", "no such model"] {
+                    shell.update(cx, |shell, cx| {
+                        configure_picker(shell, recent);
+                        shell.model.ui.model = Some(if effort { "alpha" } else { "beta" }.into());
+                        shell.model_picker_open = true;
+                        shell.model_picker_query = query.into();
+                        cx.notify();
+                    });
+                    cx.run_until_parked();
+                    let trigger = cx.debug_bounds("model-picker-trigger").unwrap();
+                    let popup = cx.debug_bounds("model-picker").unwrap();
+                    assert!(popup.left() >= px(8.) && popup.right() <= px(width - 8.));
+                    assert!(popup.top() >= px(8.) && popup.bottom() <= px(752.));
+                    assert!(
+                        popup.bottom() <= trigger.top() - px(8.),
+                        "the popup fits above its trigger, width {width}, recent {recent}, query {query:?}: {popup:?}, trigger {trigger:?}"
+                    );
+                    if trigger.right() - popup.size.width >= px(8.) {
+                        assert_eq!(
+                            popup.right(),
+                            trigger.right(),
+                            "the rendered popup width defines right alignment"
+                        );
+                    }
+                    for selector in ["model-picker-search-frame"]
+                        .into_iter()
+                        .chain(effort.then_some("model-picker-effort"))
+                    {
+                        let bounds = cx.debug_bounds(selector).unwrap();
+                        assert!(bounds.left() >= popup.left() && bounds.right() <= popup.right());
+                        assert!(bounds.top() >= popup.top() && bounds.bottom() <= popup.bottom());
+                    }
+                    assert_eq!(cx.debug_bounds("model-picker-effort").is_some(), effort);
+                    shell.update(cx, |shell, _| {
+                        if query == "no such model" {
+                            assert!(shell.model_picker_rows.is_empty());
+                            assert!(shell.model_picker_filtered_indices.is_empty());
+                        }
+                    });
+                }
+            }
+        }
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn short_picker_keeps_search_effort_and_scrollable_models_inside_window(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        shell.update(cx, |shell, cx| {
+            configure_picker(shell, true);
+            shell.model_picker_open = true;
+            cx.notify();
+        });
+        for height in [260., 340., 480., 500.] {
+            cx.simulate_resize(gpui::size(px(420.), px(height)));
+            cx.run_until_parked();
+            let popup = cx.debug_bounds("model-picker").unwrap();
+            let trigger = cx.debug_bounds("model-picker-trigger").unwrap();
+            assert!(
+                popup.top() >= px(8.) && popup.bottom() <= px(height - 8.),
+                "popup stays within a {height}px window: {popup:?}, trigger {trigger:?}"
+            );
+            assert!(
+                popup.bottom() <= trigger.top() - px(8.),
+                "the list shrinks to retain the trigger gap in a {height}px window"
+            );
+            let search = cx.debug_bounds("model-picker-search-frame").unwrap();
+            let effort = cx.debug_bounds("model-picker-effort").unwrap();
+            let list = cx.debug_bounds("model-picker-list").unwrap();
+            assert_eq!(search.size.height, px(28.));
+            assert!(search.top() >= popup.top() && search.bottom() < list.bottom());
+            assert!(list.size.height > px(24.));
+            assert!(list.bottom() <= effort.top());
+            assert!(effort.bottom() <= popup.bottom());
+            shell.update(cx, |shell, _| {
+                let track = shell.thinking_effort_track_bounds.unwrap();
+                assert!(track.top() >= popup.top() && track.bottom() <= popup.bottom());
+            });
+            cx.simulate_event(gpui::ScrollWheelEvent {
+                position: list.center(),
+                delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-500.))),
+                ..Default::default()
+            });
+            cx.run_until_parked();
+            let last = cx.debug_bounds("model-option-all-2").unwrap();
+            assert!(last.top() < list.bottom() && last.bottom() > list.top());
+        }
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+}
+
+#[cfg(test)]
+mod composer_primary_action_regressions {
+    use super::super::*;
+
+    fn assert_send_background(
+        shell: &Entity<DesktopShell>,
+        cx: &mut gpui::VisualTestContext,
+        token: &str,
+    ) {
+        let bounds = cx.debug_bounds("submit-prompt").unwrap();
+        cx.update(|window, cx| {
+            let expected: gpui::Hsla = theme_rgb(&shell.read(cx).theme, token).into();
+            let bounds = bounds.scale(window.scale_factor());
+            assert!(
+                window
+                    .painted_quads()
+                    .iter()
+                    .any(|quad| quad.bounds == bounds
+                        && quad.background.as_solid() == Some(expected)),
+                "the send surface must show its availability"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn empty_send_stays_quiet_and_inert_until_the_draft_has_text(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            shell.command_tx = Some(sender);
+            shell.model.attached_session = Some("button-test".into());
+            shell.model.ui.selected_session = Some("button-test".into());
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(420.), px(760.)));
+        for text in ["", " \n\t", "\u{2003}"] {
+            shell.update(cx, |shell, cx| {
+                shell.model.ui.composer = text.into();
+                shell.attachments = vec![Attachment {
+                    path: "/tmp/composer-only-attachment.txt".into(),
+                    mime: Some("text/plain".into()),
+                }];
+                cx.notify();
+            });
+            cx.run_until_parked();
+            assert_send_background(&shell, cx, "muted");
+            let send = cx.debug_bounds("submit-prompt").unwrap();
+            cx.simulate_click(send.center(), gpui::Modifiers::none());
+            assert!(commands.try_recv().is_err());
+        }
+        shell.update(cx, |shell, cx| {
+            shell.attachments.clear();
+            shell.model.ui.composer = "a real prompt é中".into();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_send_background(&shell, cx, "text.body");
+        let send = cx.debug_bounds("submit-prompt").unwrap();
+        cx.simulate_click(send.center(), gpui::Modifiers::none());
+        assert!(
+            matches!(commands.try_recv().unwrap(), ClientMessage::Prompt { text, .. } if text == "a real prompt é中")
+        );
+        shell.update(cx, |shell, _| {
+            assert!(shell.model.ui.composer.is_empty());
+            shell.quitting = true;
+        });
+    }
+
+    #[gpui::test]
+    fn running_question_uses_answer_action_while_normal_working_turn_keeps_stop(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            shell.command_tx = Some(sender);
+            shell.model.attached_session = Some("button-test".into());
+            shell.model.ui.selected_session = Some("button-test".into());
+            shell.model.ui.running = true;
+            shell.model.ui.pending_actions = vec![PendingAction {
+                request_id: "question-1".into(),
+                kind: ActionKind::AskUser {
+                    subagent: None,
+                    call_id: "ask-1".into(),
+                    questions: vec![
+                        mew_protocol::Question {
+                            prompt: "which layout?".into(),
+                            options: Vec::new(),
+                        },
+                        mew_protocol::Question {
+                            prompt: "which width?".into(),
+                            options: Vec::new(),
+                        },
+                    ],
+                },
+            }];
+            shell.model.ui.composer = "three panes\n420 pixels".into();
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(420.), px(760.)));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("cancel-turn").is_none(),
+            "answering must not offer Cancel as its primary action"
+        );
+        let answer = cx
+            .debug_bounds("submit-prompt")
+            .expect("a running question has a submit action");
+        cx.simulate_click(answer.center(), gpui::Modifiers::none());
+        assert!(
+            matches!(commands.try_recv().unwrap(), ClientMessage::AskUserResponse { request_id, answers, cancelled: false } if request_id == "question-1" && answers == ["three panes", "420 pixels"])
+        );
+        assert!(commands.try_recv().is_err());
+        cx.run_until_parked();
+        assert_send_background(&shell, cx, "muted");
+        shell.update(cx, |shell, cx| {
+            shell.model.ui.composer = "sidebar\n480 pixels".into();
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            let focus = shell.read(cx).composer_focus_handle.clone();
+            window.focus(&focus, cx);
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        assert!(
+            matches!(commands.try_recv().unwrap(), ClientMessage::AskUserResponse { request_id, answers, cancelled: false } if request_id == "question-1" && answers == ["sidebar", "480 pixels"])
+        );
+        shell.update(cx, |shell, cx| {
+            shell.model.ui.pending_actions = vec![PendingAction {
+                request_id: "permission-1".into(),
+                kind: ActionKind::Permission {
+                    tool_name: "shell".into(),
+                    input: serde_json::json!({}),
+                },
+            }];
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("submit-prompt").is_none());
+        let stop = cx
+            .debug_bounds("cancel-turn")
+            .expect("ordinary running turn retains Stop");
+        cx.simulate_click(stop.center(), gpui::Modifiers::none());
+        assert!(matches!(
+            commands.try_recv().unwrap(),
+            ClientMessage::Cancel
+        ));
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn model_switch_disables_send_and_preserves_the_draft(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            shell.command_tx = Some(sender);
+            shell.model.attached_session = Some("button-test".into());
+            shell.model.ui.selected_session = Some("button-test".into());
+            shell.model.ui.composer = "keep this draft".into();
+            shell.awaiting_model_switch = Some(("provider".into(), "new-model".into()));
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(480.), px(760.)));
+        cx.run_until_parked();
+        assert_send_background(&shell, cx, "muted");
+        let send = cx.debug_bounds("submit-prompt").unwrap();
+        cx.simulate_click(send.center(), gpui::Modifiers::none());
+        shell.update(cx, |shell, cx| {
+            assert_eq!(shell.model.ui.composer, "keep this draft");
+            shell.submit_prompt(cx);
+            assert!(shell
+                .model
+                .last_error
+                .as_deref()
+                .unwrap()
+                .contains("still switching"));
+            shell.awaiting_model_switch = None;
+            cx.notify();
+        });
+        assert!(commands.try_recv().is_err());
+        cx.run_until_parked();
+        assert_send_background(&shell, cx, "text.body");
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+}
+
+#[cfg(test)]
+mod composer_narrow_settings_regressions {
+    use super::super::*;
+
+    #[gpui::test]
+    fn secondary_pickers_follow_their_triggers_when_the_window_grows(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            cx.notify();
+        });
+        for (trigger, popup) in [
+            ("persona-picker-trigger", "persona-picker"),
+            ("permission-picker-trigger", "permission-picker"),
+        ] {
+            cx.simulate_resize(gpui::size(px(420.), px(600.)));
+            cx.run_until_parked();
+            let target = cx.debug_bounds(trigger).unwrap();
+            cx.simulate_click(target.center(), gpui::Modifiers::none());
+            cx.run_until_parked();
+            let before = cx.debug_bounds(popup).unwrap();
+            cx.simulate_resize(gpui::size(px(420.), px(760.)));
+            cx.run_until_parked();
+            let after = cx.debug_bounds(popup).unwrap();
+            let trigger = cx.debug_bounds(trigger).unwrap();
+            assert_eq!(
+                after.top() - before.top(),
+                px(160.),
+                "{popup} follows its current trigger"
+            );
+            assert!(after.bottom() <= trigger.top() - px(8.));
+            shell.update(cx, |shell, cx| {
+                shell.persona_picker_open = false;
+                shell.permission_picker_open = false;
+                cx.notify();
+            });
+        }
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn settings_stay_compact_until_the_animated_pane_has_room(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(false));
+        cx.simulate_resize(gpui::size(px(1000.), px(760.)));
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = false;
+            shell.conversation_width = 420.;
+            shell.model.ui.current_persona = Some("builder".into());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        shell.update(cx, |shell, cx| shell.toggle_workbench(cx));
+        cx.run_until_parked();
+        let pane = cx.debug_bounds("conversation-pane").unwrap();
+        assert!(pane.size.width < px(480.));
+        assert!(
+            cx.debug_bounds("composer-persona-label").is_none(),
+            "the label must wait for actual space, even after the workbench is marked collapsed"
+        );
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        shell.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("conversation-pane").unwrap().size.width >= px(480.));
+        assert!(cx.debug_bounds("composer-persona-label").is_some());
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn settings_follow_the_conversation_width_and_keep_effort_visible(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        shell.update(cx, |shell, cx| {
+            shell.model.ui.current_persona = Some("builder".into());
+            shell.model.ui.model = Some("Claude Sonnet 4.5".into());
+            shell.model.ui.thinking_variant = Some("high".into());
+            cx.notify();
+        });
+        for split in [false, true] {
+            for width in [420., 479., 480., 600., 420.] {
+                cx.simulate_resize(gpui::size(px(if split { 1280. } else { width }), px(760.)));
+                shell.update(cx, |shell, cx| {
+                    shell.layout.sidebar_collapsed = !split;
+                    shell.sidebar_width = 264.;
+                    shell.layout.workbench_collapsed = !split;
+                    shell.conversation_width = width;
+                    cx.notify();
+                });
+                cx.run_until_parked();
+                let pane = cx.debug_bounds("conversation-pane").unwrap();
+                assert_eq!(pane.size.width, px(width));
+                let persona = cx.debug_bounds("persona-picker-trigger").unwrap();
+                if width < 480. {
+                    assert_eq!(
+                        persona.size.width,
+                        px(26.),
+                        "secondary persona control stays compact at {width}px"
+                    );
+                    assert!(cx.debug_bounds("composer-persona-label").is_none());
+                } else {
+                    assert!(
+                        cx.debug_bounds("composer-persona-label")
+                            .unwrap()
+                            .size
+                            .width
+                            > px(30.)
+                    );
+                }
+                let model = cx.debug_bounds("model-picker-trigger").unwrap();
+                let name = cx.debug_bounds("composer-model-label").unwrap();
+                let effort = cx
+                    .debug_bounds("composer-effort-label")
+                    .expect("effort has its own untruncated label");
+                assert!(
+                    name.size.width >= px(90.),
+                    "the selected model remains identifiable"
+                );
+                assert!(effort.size.width >= px(24.));
+                assert!(name.right() <= effort.left() && effort.right() < model.right());
+                shell.update(cx, |shell, _| {
+                    assert_eq!(shell.model_picker_bounds, Some(model))
+                });
+            }
+        }
+        shell.update(cx, |shell, cx| {
+            shell.model.ui.model = Some(
+                "a-long-model-name-which-must-truncate-before-it-can-hide-the-effort-é中".into(),
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let model = cx.debug_bounds("model-picker-trigger").unwrap();
+        let effort = cx.debug_bounds("composer-effort-label").unwrap();
+        assert!(effort.size.width >= px(24.) && effort.right() < model.right());
+        shell.update(cx, |shell, cx| {
+            shell.model.ui.thinking_variant = None;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("composer-effort-label").is_none());
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn compact_persona_keeps_its_picker_and_keyboard_action(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            shell.model.ui.current_persona = Some("builder".into());
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(420.), px(760.)));
+        cx.run_until_parked();
+        let trigger = cx.debug_bounds("persona-picker-trigger").unwrap();
+        assert_eq!(trigger.size.width, px(26.));
+        cx.simulate_click(trigger.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        shell.update(cx, |shell, cx| {
+            assert!(shell.persona_picker_open);
+            shell.persona_picker_open = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let focus = shell.read(cx).composer_focus_handle.clone();
+            window.focus(&focus, cx);
+            for _ in 0..3 {
+                window.focus_next(cx);
+            }
+        });
+        cx.run_until_parked();
+        let keystroke = gpui::Keystroke::parse("enter").unwrap();
+        cx.simulate_event(gpui::KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        cx.simulate_event(gpui::KeyUpEvent { keystroke });
+        cx.run_until_parked();
+        shell.update(cx, |shell, _| {
+            assert!(
+                shell.persona_picker_open,
+                "the compact control is keyboard accessible"
+            );
+            shell.quitting = true;
+        });
+    }
+}

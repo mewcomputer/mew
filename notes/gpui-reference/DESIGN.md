@@ -135,13 +135,31 @@ cards. Composer settings share one 28 px toolbar row, with 11 px labels and
 targets. Names truncate inside bounded controls rather than wrapping the toolbar;
 retain complete accessible labels and measured picker anchors. Keep the model
 control at its natural width beside Send, without stretching a short name into
-an empty button. Persona/model controls use their selected text without a
-redundant leading icon. Unset values use concise Model/Persona placeholders.
+an empty button. Effort has a separate fixed-width suffix so only the model name
+truncates. Below 480 px of conversation space, replace the persona label with a
+26 px icon control that opens the same picker and retains its full accessible
+label. Follow the measured composer width through pane animations and resizing.
+Wider panes show the selected persona text. Unset values use concise Model/Persona placeholders.
 Composer footer labels are also 11 px; draft text remains 15 px with 24 px leading.
 Long workspace paths truncate while preserving the full accessible label.
 Use provider-scoped catalog model names in the composer and picker, falling back
 to the raw model ID when no name is supplied. Search matches names and IDs;
 picker details retain the fully qualified identity used for switching models.
+
+Attachment chips wrap inside the reading column. Truncate the filename while
+keeping its named 24 px remove button visible, tabbable and independently
+clickable. Removing a file preserves the draft and returns focus to the editor.
+
+Empty or whitespace-only drafts and pending model switches show a disabled Send
+surface, without click or Tab activation. Running questions expose Send answer
+or Send answers; ordinary running turns retain Stop. Pointer submission and
+Enter use the same question ownership and submission path.
+
+The model picker uses one row inventory and popup size for layout and placement,
+including Recent entries and headers. Constrain its 400 px width to the window
+and its height to space above or below the trigger. Keep search and effort fixed
+while the model list scrolls. Picker trigger measurements request their redraw
+after painting so open menus follow resizing.
 
 Display connection and browser failures through the existing stateful surfaces.
 A deferred failure must request a redraw immediately. Use the existing native
