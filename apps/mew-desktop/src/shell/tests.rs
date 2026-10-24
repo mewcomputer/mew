@@ -2123,6 +2123,7 @@ mod shell_tests {
             source_identity: 1,
             source_len: 12,
             render_blocks: Vec::new(),
+            scroll_groups: Vec::new(),
             streaming: None,
             completed_tool: false,
         };
@@ -2383,6 +2384,7 @@ mod shell_tests {
                 };
                 3
             ],
+            scroll_groups: Vec::new(),
             streaming: None,
             completed_tool: false,
         };
@@ -3304,5 +3306,143 @@ mod shell_tests {
             mention_menu_height(100),
             mention_menu_height(MENTION_MENU_LIMIT)
         );
+    }
+}
+
+#[cfg(test)]
+mod code_continuity_tests {
+    use super::super::*;
+
+    #[gpui::test]
+    fn markdown_horizontal_scroll_retains_append_identity_and_resets_for_replacement(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        shell.update(cx, |shell, _| {
+            shell.model.ui.transcript = vec![TranscriptItem {
+                role: TranscriptRole::Assistant,
+                text: "```text\none physical line\n```".into(),
+                parts: Vec::new(),
+            }];
+            shell.sync_markdown_cache();
+            shell
+                .markdown_scroll_handle(0, 0)
+                .unwrap()
+                .set_offset(point(px(-60.), px(0.)));
+            shell.model.ui.transcript[0].text.push_str("\n\nafter");
+            shell.sync_markdown_cache();
+            assert_eq!(
+                shell.markdown_scroll_handle(0, 0).unwrap().offset().x,
+                px(-60.)
+            );
+
+            shell.model.ui.transcript[0].text = "```text\na replacement fence\n```".into();
+            shell.sync_markdown_cache();
+            assert_eq!(
+                shell.markdown_scroll_handle(0, 0).unwrap().offset().x,
+                px(0.)
+            );
+            assert_eq!(shell.markdown_cache[0][0].scroll_groups.len(), 1);
+            shell.model.ui.transcript.clear();
+            shell.sync_markdown_cache();
+            assert!(shell.markdown_cache.is_empty());
+            shell.quitting = true;
+        });
+    }
+
+    #[gpui::test]
+    fn code_continuations_share_line_leading_and_horizontal_position(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        let code = std::iter::once(format!("let caption = \"{}🙂\";", "long ".repeat(90)))
+            .chain((0..64).map(|index| format!("line_{index}: 中🙂;")))
+            .collect::<Vec<_>>()
+            .join("\n");
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            shell.model.ui.transcript = vec![TranscriptItem {
+                role: TranscriptRole::Assistant,
+                text: format!("```rust\n{code}\n```\n\n```text\nseparate fence\n```"),
+                parts: Vec::new(),
+            }];
+            shell.transcript_selection = Some(TranscriptSelection {
+                start: TranscriptSelectionPoint {
+                    message_index: 0,
+                    block_index: 0,
+                    offset: 0,
+                },
+                end: TranscriptSelectionPoint {
+                    message_index: 0,
+                    block_index: 0,
+                    offset: 0,
+                },
+            });
+            shell.sync_markdown_cache();
+            shell.transcript_list.scroll_to(gpui::ListOffset::default());
+            cx.notify();
+        });
+        for width in [380., 920.] {
+            cx.simulate_resize(gpui::size(px(width), px(1900.)));
+            cx.run_until_parked();
+            let initial_x = shell.read_with(cx, |shell, _| {
+                let entries = shell.transcript_text_registry.borrow();
+                let mut code_entries = entries
+                    .iter()
+                    .filter(|entry| entry.block_index < 2)
+                    .collect::<Vec<_>>();
+                code_entries.sort_by_key(|entry| entry.block_index);
+                assert_eq!(code_entries.len(), 2);
+                let first = code_entries[0];
+                let second = code_entries[1];
+                let last_line = first
+                    .layout
+                    .position_for_index(first.text.trim_end_matches('\n').len())
+                    .unwrap();
+                let next_line = second.layout.position_for_index(0).unwrap();
+                assert_eq!(
+                    next_line.y - last_line.y,
+                    px(20.),
+                    "a virtual seam has normal line leading"
+                );
+                assert_eq!(next_line.x, first.layout.position_for_index(0).unwrap().x);
+                next_line.x
+            });
+            assert!(cx.debug_bounds("copy-code-0-0").is_some());
+            assert!(cx.debug_bounds("copy-code-0-1").is_none());
+            assert!(
+                cx.debug_bounds("copy-code-0-5").is_some(),
+                "an adjacent fence keeps its own copy button"
+            );
+            let first = cx.debug_bounds("markdown-inline-container-0-0").unwrap();
+            let viewport_left = shell.read_with(cx, |shell, _| {
+                shell.markdown_scroll_handle(0, 0).unwrap().bounds().left()
+            });
+            cx.simulate_event(gpui::ScrollWheelEvent {
+                position: point(viewport_left + px(20.), first.top() + px(8.)),
+                delta: gpui::ScrollDelta::Pixels(point(px(-80.), px(0.))),
+                modifiers: gpui::Modifiers::none(),
+                touch_phase: gpui::TouchPhase::Moved,
+            });
+            cx.run_until_parked();
+            shell.read_with(cx, |shell, _| {
+                let entries = shell.transcript_text_registry.borrow();
+                let first = entries.iter().find(|entry| entry.block_index == 0).unwrap().layout.position_for_index(0).unwrap();
+                let second = entries.iter().find(|entry| entry.block_index == 1).unwrap().layout.position_for_index(0).unwrap();
+                assert!(first.x < initial_x, "long code scrolls horizontally: first={first:?}, initial={initial_x:?}, handle={:?}", shell.markdown_scroll_handle(0, 0).map(|handle| (handle.offset(), handle.max_offset(), handle.bounds())));
+                assert_eq!(first.x, second.x, "all code chunks share the horizontal position");
+            });
+            let button = cx.debug_bounds("copy-code-0-0").unwrap();
+            cx.simulate_click(button.center(), gpui::Modifiers::none());
+            assert_eq!(
+                cx.read_from_clipboard().unwrap().text().as_deref(),
+                Some(code.as_str())
+            );
+        }
+        shell.update(cx, |shell, _| shell.quitting = true);
     }
 }

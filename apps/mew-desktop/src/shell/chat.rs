@@ -711,6 +711,7 @@ impl DesktopShell {
         animate: bool,
         fill_width: bool,
         syntax_highlights: &[MarkdownSyntaxHighlight],
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let block_id = format!("markdown-block-{message_index}-{block_index}");
@@ -798,6 +799,17 @@ impl DesktopShell {
                 }))
                 .into_any_element(),
             MarkdownBlock::Code { language, text } => {
+                let final_chunk = self
+                    .markdown_scroll_group(message_index, block_index)
+                    .is_none_or(|(_, group)| group.blocks.end == block_index % 1_000_000 + 1);
+                let displayed_text = if final_chunk {
+                    text.as_str()
+                } else {
+                    text.strip_suffix('\n').unwrap_or(text)
+                };
+                let common_width = self
+                    .markdown_code_width(message_index, block_index, window)
+                    .unwrap_or(px(0.));
                 let mut code = div()
                     .id(block_id)
                     .flex()
@@ -805,11 +817,16 @@ impl DesktopShell {
                     .gap(px(6.))
                     .when(space_after, |element| element.mb(px(12.)))
                     .line_height(px(20.))
-                    .rounded(px(8.))
-                    .border_1()
+                    .border_x_1()
                     .border_color(theme_rgb(&self.theme, "divider"))
                     .bg(theme_rgb(&self.theme, "muted"))
-                    .p(px(12.));
+                    .px(px(12.))
+                    .when(!continuation, |element| {
+                        element.rounded_t(px(8.)).border_t_1().pt(px(12.))
+                    })
+                    .when(final_chunk, |element| {
+                        element.rounded_b(px(8.)).border_b_1().pb(px(12.))
+                    });
                 code = code.when(!continuation, |element| {
                     element.child(
                         div()
@@ -830,26 +847,36 @@ impl DesktopShell {
                             )),
                     )
                 });
-                let highlights = self.transcript_text_highlights(
-                    message_index,
-                    block_index,
-                    0,
-                    text.len(),
-                    syntax_highlights
-                        .iter()
-                        .map(|highlight| {
-                            (
-                                highlight.range.clone(),
-                                self.syntax_highlight_style(highlight),
-                            )
-                        })
-                        .collect(),
-                );
+                let highlights = self
+                    .transcript_text_highlights(
+                        message_index,
+                        block_index,
+                        0,
+                        text.len(),
+                        syntax_highlights
+                            .iter()
+                            .map(|highlight| {
+                                (
+                                    highlight.range.clone(),
+                                    self.syntax_highlight_style(highlight),
+                                )
+                            })
+                            .collect(),
+                    )
+                    .into_iter()
+                    .filter_map(|(mut range, style)| {
+                        range.end = range.end.min(displayed_text.len());
+                        (range.start < range.end).then_some((range, style))
+                    });
                 let code_text = div()
                     .id(format!("markdown-code-text-{message_index}-{block_index}"))
                     .w_full()
                     .min_w_0()
                     .overflow_x_scroll()
+                    .when_some(
+                        self.markdown_scroll_handle(message_index, block_index),
+                        |element, handle| element.track_scroll(handle),
+                    )
                     .whitespace_nowrap()
                     .text_xs()
                     .child(
@@ -859,14 +886,16 @@ impl DesktopShell {
                             0,
                             text,
                             &[],
-                            gpui::StyledText::new(text.clone())
+                            gpui::StyledText::new(displayed_text.to_owned())
                                 .with_font_family_overrides(std::iter::once((
-                                    0..text.len(),
+                                    0..displayed_text.len(),
                                     gpui::SharedString::from(DEFAULT_FONT_FAMILY),
                                 )))
                                 .with_highlights(highlights),
                             cx,
-                        ),
+                        )
+                        .w_full()
+                        .min_w(common_width),
                     );
                 if animate {
                     code.child(

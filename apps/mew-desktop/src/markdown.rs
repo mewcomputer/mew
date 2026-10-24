@@ -280,14 +280,66 @@ fn split_lines(text: &str) -> Vec<String> {
     if text.is_empty() {
         return vec![String::new()];
     }
-    split_inline(&InlineText {
-        text: text.to_owned(),
-        highlights: Vec::new(),
-        links: Vec::new(),
-    })
-    .into_iter()
-    .map(|chunk| chunk.text)
-    .collect()
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    let mut end = 0;
+    let mut lines = 0;
+    for line in text.split_inclusive('\n') {
+        if end > start
+            && (end - start + line.len() > VIRTUAL_ROW_BYTES || lines == VIRTUAL_ROW_ITEMS)
+        {
+            chunks.push(text[start..end].to_owned());
+            start = end;
+            lines = 0;
+        }
+        end += line.len();
+        lines += 1;
+    }
+    chunks.push(text[start..end].to_owned());
+    chunks
+}
+
+#[cfg(test)]
+mod code_chunk_tests {
+    use super::*;
+
+    #[test]
+    fn code_chunks_end_at_physical_newlines_and_preserve_the_source() {
+        let source = (0..65)
+            .map(|index| format!("let line_{index} = \"🙂中 {}\";", "x".repeat(index % 13)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let chunks = split_lines(&source);
+
+        assert!(chunks.len() > 1);
+        assert_eq!(chunks.concat(), source);
+        assert!(chunks[..chunks.len() - 1]
+            .iter()
+            .all(|chunk| chunk.ends_with('\n')));
+        assert!(chunks.iter().all(|chunk| chunk.len() <= VIRTUAL_ROW_BYTES));
+    }
+
+    #[test]
+    fn code_chunks_keep_an_oversized_physical_line_on_one_visual_row() {
+        let line = format!("let value = \"{}\";", "🙂中".repeat(400));
+        let source = format!("before\n{line}\nafter\n");
+        let chunks = split_lines(&source);
+
+        assert_eq!(chunks, ["before\n", &format!("{line}\n"), "after\n"]);
+        assert_eq!(chunks.concat(), source);
+        assert_eq!(split_lines(""), [""]);
+    }
+
+    #[test]
+    fn code_chunks_bound_runs_of_empty_lines() {
+        let source = "\n".repeat(100);
+        let chunks = split_lines(&source);
+        assert_eq!(chunks.concat(), source);
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.lines().count() <= VIRTUAL_ROW_ITEMS));
+        assert!(chunks.len() > 1);
+    }
 }
 
 pub fn parse_document(text: &str) -> MarkdownDocument {

@@ -947,8 +947,22 @@ pub(super) struct CachedMarkdown {
     pub(super) source_identity: usize,
     pub(super) source_len: usize,
     pub(super) render_blocks: Vec<MarkdownRenderBlock>,
+    pub(super) scroll_groups: Vec<MarkdownScrollGroup>,
     pub(super) streaming: Option<StreamingMarkdown>,
     pub(super) completed_tool: bool,
+}
+
+pub(super) struct MarkdownScrollGroup {
+    pub(super) blocks: Range<usize>,
+    pub(super) is_code: bool,
+    pub(super) handle: gpui::ScrollHandle,
+    pub(super) code_width: RefCell<Option<MarkdownCodeWidth>>,
+}
+
+pub(super) struct MarkdownCodeWidth {
+    pub(super) font: gpui::Font,
+    pub(super) font_size: Pixels,
+    pub(super) width: Pixels,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

@@ -473,7 +473,7 @@ impl DesktopShell {
     pub(super) fn render_transcript_row(
         &mut self,
         index: usize,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let Some(row) = self.transcript_rows.get(index).copied() else {
@@ -545,12 +545,18 @@ impl DesktopShell {
                     animate,
                     !is_user,
                     &render_block.syntax_highlights,
+                    window,
                     cx,
                 )
             }
-            TranscriptPart::Reasoning(_) => {
-                self.render_reasoning_part(row, cached, selection_block_index, space_after, cx)
-            }
+            TranscriptPart::Reasoning(_) => self.render_reasoning_part(
+                row,
+                cached,
+                selection_block_index,
+                space_after,
+                window,
+                cx,
+            ),
             TranscriptPart::ToolCall {
                 tool_name,
                 call_id,
@@ -851,6 +857,7 @@ impl DesktopShell {
         cached: Option<&CachedMarkdown>,
         selection_block_index: usize,
         space_after: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let TranscriptRenderRow {
@@ -880,6 +887,7 @@ impl DesktopShell {
                             false,
                             true,
                             &block.syntax_highlights,
+                            window,
                             cx,
                         ))
                 })

@@ -14,7 +14,132 @@ pub(super) fn transcript_part_block_count(
     }
 }
 
+fn markdown_scroll_groups(
+    blocks: &[MarkdownRenderBlock],
+    previous: Vec<MarkdownScrollGroup>,
+    preserve: bool,
+) -> Vec<MarkdownScrollGroup> {
+    let mut previous = previous.into_iter().peekable();
+    let mut groups: Vec<MarkdownScrollGroup> = Vec::new();
+    for (index, block) in blocks.iter().enumerate() {
+        let is_code = matches!(block.block, MarkdownBlock::Code { .. });
+        if !is_code && !matches!(block.block, MarkdownBlock::Table(_)) {
+            continue;
+        }
+        if block.continuation {
+            if let Some(group) = groups.last_mut().filter(|group| group.blocks.end == index) {
+                group.blocks.end += 1;
+                continue;
+            }
+        }
+        while previous
+            .peek()
+            .is_some_and(|group| group.blocks.start < index)
+        {
+            previous.next();
+        }
+        let handle = previous
+            .next_if(|group| preserve && group.blocks.start == index && group.is_code == is_code)
+            .map_or_else(gpui::ScrollHandle::new, |group| group.handle);
+        groups.push(MarkdownScrollGroup {
+            blocks: index..index + 1,
+            is_code,
+            handle,
+            code_width: RefCell::new(None),
+        });
+    }
+    groups
+}
+
 impl DesktopShell {
+    pub(super) fn markdown_scroll_group(
+        &self,
+        message_index: usize,
+        encoded_block_index: usize,
+    ) -> Option<(&CachedMarkdown, &MarkdownScrollGroup)> {
+        let cached = self
+            .markdown_cache
+            .get(message_index)?
+            .get(encoded_block_index / 1_000_000)?;
+        let block_index = encoded_block_index % 1_000_000;
+        cached
+            .scroll_groups
+            .iter()
+            .find(|group| group.blocks.contains(&block_index))
+            .map(|group| (cached, group))
+    }
+
+    pub(super) fn markdown_scroll_handle(
+        &self,
+        message_index: usize,
+        encoded_block_index: usize,
+    ) -> Option<&gpui::ScrollHandle> {
+        self.markdown_scroll_group(message_index, encoded_block_index)
+            .map(|(_, group)| &group.handle)
+    }
+
+    pub(super) fn markdown_code_width(
+        &self,
+        message_index: usize,
+        encoded_block_index: usize,
+        window: &mut Window,
+    ) -> Option<Pixels> {
+        let (cached, group) = self.markdown_scroll_group(message_index, encoded_block_index)?;
+        let mut style = window.text_style();
+        style.font_family = DEFAULT_FONT_FAMILY.into();
+        let font = style.font();
+        let font_size = window.rem_size() * 0.75;
+        if let Some(width) = group
+            .code_width
+            .borrow()
+            .as_ref()
+            .filter(|width| width.font == font && width.font_size == font_size)
+        {
+            return Some(width.width);
+        }
+        let mut width = px(0.);
+        for block in &cached.render_blocks[group.blocks.clone()] {
+            let MarkdownBlock::Code { text, .. } = &block.block else {
+                continue;
+            };
+            let mut runs = Vec::new();
+            let mut offset = 0;
+            for highlight in &block.syntax_highlights {
+                if offset < highlight.range.start {
+                    runs.push(style.to_run(highlight.range.start - offset));
+                }
+                let mut run = style.to_run(highlight.range.len());
+                if highlight.bold {
+                    run.font.weight = gpui::FontWeight::BOLD;
+                }
+                if highlight.italic {
+                    run.font.style = gpui::FontStyle::Italic;
+                }
+                runs.push(run);
+                offset = highlight.range.end;
+            }
+            if offset < text.len() {
+                runs.push(style.to_run(text.len() - offset));
+            }
+            if let Ok(lines) =
+                window
+                    .text_system()
+                    .shape_text(text.clone().into(), font_size, &runs, None, None)
+            {
+                width = lines
+                    .iter()
+                    .fold(width, |width, line| width.max(line.width()));
+            }
+        }
+        let width = width.ceil();
+        *group.code_width.borrow_mut() = Some(MarkdownCodeWidth {
+            font,
+            font_size,
+            width,
+        });
+        Some(width)
+    }
+
     pub(super) fn prepare_for_history_prepend(&mut self, added_messages: usize) {
         if added_messages == 0 {
             return;
@@ -110,6 +235,7 @@ impl DesktopShell {
                 source_identity: 0,
                 source_len: 0,
                 render_blocks: Vec::new(),
+                scroll_groups: Vec::new(),
                 streaming: None,
                 completed_tool: false,
             });
@@ -156,6 +282,7 @@ impl DesktopShell {
                     cached_part.source_identity = 0;
                     cached_part.source_len = 0;
                     cached_part.render_blocks.clear();
+                    cached_part.scroll_groups.clear();
                     cached_part.streaming = None;
                     continue;
                 };
@@ -205,11 +332,17 @@ impl DesktopShell {
                     }
                     Some(_) => (Vec::new(), None),
                 };
+                let scroll_groups = markdown_scroll_groups(
+                    &render_blocks,
+                    std::mem::take(&mut cached_part.scroll_groups),
+                    source.as_ref().starts_with(cached_part.source.as_str()),
+                );
                 *cached_part = CachedMarkdown {
                     source: source.into_owned(),
                     source_identity,
                     source_len,
                     render_blocks,
+                    scroll_groups,
                     streaming,
                     completed_tool,
                 };

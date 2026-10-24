@@ -3245,3 +3245,22 @@ scrolling and Shift-arrow selection without toolbar overlap. Later wrapped-draft
 and pane-width visual checks were limited by stale computer-use captures;
 automated geometry coverage passed. Test drafts were cleared and owned QA
 processes stopped. Physical IME and VoiceOver remain unverified.
+
+# 2026-10-24 - keep virtual desktop code fences continuous
+
+Long code fences retain virtual rows while splitting only at physical newlines.
+Oversized individual lines remain intact for horizontal scrolling. Each fence
+has one header/copy control, top and bottom edges only at its ends, and ordinary
+20 px leading across internal row boundaries. Copy still uses the complete
+original source, including chunk delimiters.
+
+A retained horizontal scroll handle and common measured content width keep all
+chunks aligned. Appended source retains its scroll position; replacements reset
+it. Font or theme changes invalidate measured widths. Scroll state belongs to
+the current markdown cache and is discarded with obsolete content.
+
+Three source-splitting tests, two GPUI continuity/cache tests and six existing
+copy regressions pass. The combined desktop suite passes all 261 tests, plus
+strict Clippy, native build/packaging, formatting, architecture, generated-theme
+checks and hooks. Native QA confirms one continuous 32-line fence and complete
+copy in the isolated app, with readable syntax in dark and light themes.

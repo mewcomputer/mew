@@ -511,3 +511,13 @@ Shift-arrow selection. Captures became stale during the later wrapped/pane-width
 check, so visual verification of that transition remains open. Physical IME and
 VoiceOver remain unverified. The remaining markdown, activity/progress and
 composer hierarchy findings keep their existing priority.
+
+## Continuous code follow-up, 2026-10-24
+
+Resolved repeated code cards and artificial line breaks at virtual boundaries.
+Code chunks now end at physical newlines, share one surface and horizontal
+position, and expose one header/copy control per fence. A GPUI regression
+reproduced a 66 px seam before the fix; it now matches normal 20 px leading.
+Narrow/wide geometry, source fidelity, adjacent fences, streaming scroll state
+and existing copy behavior pass. The native 32-line fixture confirms continuous
+spacing and complete copy, with readable syntax in both themes.

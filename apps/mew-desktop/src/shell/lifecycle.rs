@@ -42,6 +42,9 @@ impl DesktopShell {
             SyntectHighlighter::from_theme_tokens(|token| theme_rgb_value(&self.theme, token));
         for cached in self.markdown_cache.iter_mut().flatten() {
             highlight_code_blocks(&mut cached.render_blocks, &mut highlighter);
+            for group in &cached.scroll_groups {
+                *group.code_width.borrow_mut() = None;
+            }
         }
         let theme = self.theme.clone();
         self.terminal_view.update(cx, |view, cx| {

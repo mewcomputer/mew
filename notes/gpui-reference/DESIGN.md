@@ -82,6 +82,13 @@ within a message by 8 px. Keep virtual paragraph chunks continuous. The first
 loaded turn has the same padding as later turns so history prepending preserves
 the visible text position.
 
+Long code fences remain virtualized but read as one surface. Split only between
+physical lines, preserve oversized lines for horizontal scrolling, and apply
+header/copy controls and outer padding only at the fence ends. Internal chunks
+keep the same line leading and share a measured content width and horizontal
+scroll position. Retain this state with the markdown cache; invalidate width
+when its source, font or syntax theme changes.
+
 Consecutive completed assistant tools fold into one muted activity summary with
 a call count, including runs across provider messages. Prose, reasoning, user
 turns and unfinished/failed calls break the group. Disclosure reveals the
