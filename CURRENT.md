@@ -3359,3 +3359,30 @@ Native hover could not be reliably sustained with the inspection tool; the
 preview is covered by the GPUI hover/timer test. Test drafts are empty, appearance
 and width restored, and owned QA processes stopped. VoiceOver and physical IME
 remain unverified.
+
+# 2026-10-24 - stabilize the desktop composer at narrow widths
+
+The composer settings now stay on one 28 px toolbar row. Labels and footer text
+use 11 px type; draft text stays at 15 px with its existing scrolling viewport.
+Tighter spacing and text-led persona/model controls leave more room for selected
+values. Unset choices use concise Model/Persona placeholders. Complete selected
+values remain in accessible labels, while long visual labels truncate inside
+bounded controls. Model/persona values use the identifiers the daemon supplies;
+the protocol does not currently carry separate friendly model names.
+
+Send and Stop keep their 28 px targets. All picker buttons retain 26 px height
+and their actual measured popup anchors. The model control keeps its natural
+width beside Send instead of stretching into unused space at wider pane sizes.
+
+A failing-first layout check reproduced Send moving 36 px beneath the other
+controls at the 420 px conversation minimum. Regression tests now cover long
+and short names, custom permission labels, Unicode, Send/Stop, picker activation
+and exact trigger anchors at four widths. A second native finding reproduced
+the oversized short-model button in a focused test before fixing its flex growth.
+
+All 276 desktop tests, strict all-target Clippy, native build/packaging,
+formatting, architecture and generated-theme checks pass. Isolated native QA
+confirms the 420 px split pane and wide conversation, dark/light appearance,
+all three dropdowns and a long scrolling Unicode draft. Test drafts were cleared,
+the initial theme/layout restored, and owned QA processes stopped. Physical IME
+and VoiceOver remain unverified.

@@ -590,3 +590,23 @@ dismissal. Two real daemon/fake-provider background turns exercised unread
 arrival, reading and the empty inbox. Actual GPUI hover/timer tests verify the
 full-title preview and stable row bounds; native inspection could not reliably
 sustain hover. VoiceOver and physical IME remain unverified.
+
+## Narrow composer follow-up, 2026-10-24
+
+The wrapping toolbar made settings and Send land on different rows, with a
+reproduced 36 px baseline jump at the 420 px conversation minimum. Settings now
+share one fixed toolbar row with 11 px labels, tighter spacing and text-led
+persona/model controls. Bounded labels truncate within the row; Send/Stop keep
+their full targets and pickers retain measured trigger anchors. Short model
+names keep a natural button width beside Send in wider conversations. Footer
+labels are smaller while draft typography and internal scrolling are preserved.
+
+Selected values remain explicit, with short placeholders only for unset choices.
+The daemon currently supplies model identifiers and descriptions, without a
+separate friendly-name field; this pass does not invent names from those IDs.
+
+All 276 desktop tests and lint/build gates pass. Actual GPUI tests cover four
+widths, long/short labels, Unicode, Send/Stop and all picker triggers. Native
+dark/light checks confirm the narrow/wide layout, dropdown placement and a long
+scrolling draft. The broader persona/secondary-control hierarchy finding remains
+a separate design decision. VoiceOver and physical IME remain unverified.

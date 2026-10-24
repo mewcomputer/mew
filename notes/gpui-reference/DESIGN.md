@@ -130,9 +130,15 @@ Running turns use a 24 px status line above the composer, aligned with the
 reading column. Keep it mounted through assistant text and tool updates, even
 when running metadata arrives before history. The composer owns Stop. Required
 actions replace the working line; waiting and failed turns retain their retry
-cards. Composer settings may wrap when labels need more space; send keeps its
-size, and long workspace paths truncate while preserving the full accessible
-label.
+cards. Composer settings share one 28 px toolbar row, with 11 px labels and
+16 px leading. Setting controls stay 26 px tall and Send/Stop retain their 28 px
+targets. Names truncate inside bounded controls rather than wrapping the toolbar;
+retain complete accessible labels and measured picker anchors. Keep the model
+control at its natural width beside Send, without stretching a short name into
+an empty button. Persona/model controls use their selected text without a
+redundant leading icon. Unset values use concise Model/Persona placeholders.
+Composer footer labels are also 11 px; draft text remains 15 px with 24 px leading.
+Long workspace paths truncate while preserving the full accessible label.
 
 Display connection and browser failures through the existing stateful surfaces.
 A deferred failure must request a redraw immediately. Use the existing native

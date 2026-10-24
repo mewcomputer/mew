@@ -1785,15 +1785,14 @@ impl DesktopShell {
                         )),
                 )
             });
-        let model_display_label = non_empty_label(self.model.ui.model.as_deref(), "choose a model");
+        let model_display_label = non_empty_label(self.model.ui.model.as_deref(), "Model");
         let thinking_label = self.model.ui.thinking_variant.as_deref().unwrap_or("");
         let model_display = if thinking_label.is_empty() {
             model_display_label
         } else {
             format!("{model_display_label} · {thinking_label}")
         };
-        let persona_display =
-            non_empty_label(self.model.ui.current_persona.as_deref(), "choose a persona");
+        let persona_display = non_empty_label(self.model.ui.current_persona.as_deref(), "Persona");
         let permission_display = permission_mode_label(self.model.ui.permission_mode.as_deref());
         let session_path: SharedString = selected_session_path(
             &self.model.ui.conversations,
@@ -2160,17 +2159,20 @@ impl DesktopShell {
                                 div()
                                     .id("composer-toolbar")
                                     .flex()
-                                    .flex_wrap()
-                                    .line_height(px(20.))
+                                    .flex_nowrap()
+                                    .h(px(28.))
+                                    .text_size(px(11.))
+                                    .line_height(px(16.))
                                     .items_center()
                                     .justify_start()
                                     .w_full()
-                                    .gap(px(8.))
+                                    .gap(px(4.))
                                     .child(
                                         div()
                                             .flex()
+                                            .flex_none()
                                             .items_center()
-                                            .gap(px(5.))
+                                            .gap(px(4.))
                                             .child(
                                                 div()
                                                     .id("attachment-picker-trigger")
@@ -2206,7 +2208,7 @@ impl DesktopShell {
                                             )
                                             .child(
                                                 div()
-                                                    .text_xs()
+                                                    .text_size(px(11.))
                                                     .text_color(theme_rgb(
                                                         &self.theme,
                                                         "secondary_foreground",
@@ -2220,8 +2222,10 @@ impl DesktopShell {
                                                     .aria_label(SharedString::from(format!(
                                                         "Choose permission mode: {permission_display}"
                                                     )))
-                                                    .px(px(6.))
-                                                    .py(px(4.))
+                                                    .px(px(4.))
+                                                    .h(px(26.))
+                                                    .min_w_0()
+                                                    .max_w(px(96.))
                                                     .rounded(px(6.))
                                                     .hover(|element| {
                                                         element.bg(theme_rgb(&self.theme, "muted"))
@@ -2231,7 +2235,7 @@ impl DesktopShell {
                                                     }))
                                                     .flex()
                                                     .items_center()
-                                                    .gap(px(4.))
+                                                    .gap(px(3.))
                                                     .child(tabler_icon(
                                                         TablerIcon::ShieldLock,
                                                         theme_rgb(
@@ -2240,7 +2244,7 @@ impl DesktopShell {
                                                         ),
                                                         px(13.),
                                                     ))
-                                                    .child(SharedString::from(permission_display.clone()))
+                                                    .child(div().min_w_0().truncate().child(SharedString::from(permission_display.clone())))
                                                     .child(tabler_icon(
                                                         TablerIcon::ChevronDown,
                                                         theme_rgb(
@@ -2274,7 +2278,7 @@ impl DesktopShell {
                                     )
                                     .child(
                                         div()
-                                            .text_xs()
+                                            .text_size(px(11.))
                                             .text_color(theme_rgb(
                                                 &self.theme,
                                                 "secondary_foreground",
@@ -2283,15 +2287,15 @@ impl DesktopShell {
                                             .id("persona-picker-trigger")
                                             .debug_selector(|| "persona-picker-trigger".into())
                                             .min_w_0()
-                                            .max_w(px(120.))
+                                            .max_w(px(96.))
                                             .relative()
                                             .role(Role::Button)
                                             .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                                             .aria_label(SharedString::from(format!(
                                                 "Choose persona: {persona_display}"
                                             )))
-                                            .px(px(6.))
-                                            .py(px(4.))
+                                            .px(px(4.))
+                                            .h(px(26.))
                                             .rounded(px(6.))
                                             .hover(|element| {
                                                 element.bg(theme_rgb(&self.theme, "muted"))
@@ -2302,11 +2306,6 @@ impl DesktopShell {
                                             .flex()
                                             .items_center()
                                             .gap(px(4.))
-                                            .child(tabler_icon(
-                                                TablerIcon::UserCircle,
-                                                theme_rgb(&self.theme, "secondary_foreground"),
-                                                px(13.),
-                                            ))
                                             .child(div().min_w_0().truncate().child(SharedString::from(persona_display)))
                                             .child(tabler_icon(
                                                 TablerIcon::ChevronDown,
@@ -2337,7 +2336,7 @@ impl DesktopShell {
                                     )
                                     .child(
                                         div()
-                                            .text_xs()
+                                            .text_size(px(11.))
                                             .text_color(theme_rgb(
                                                 &self.theme,
                                                 "secondary_foreground",
@@ -2353,8 +2352,8 @@ impl DesktopShell {
                                             .aria_label(SharedString::from(format!(
                                                 "Choose model and effort: {model_display}"
                                             )))
-                                            .px(px(6.))
-                                            .py(px(4.))
+                                            .px(px(4.))
+                                            .h(px(26.))
                                             .rounded(px(6.))
                                             .hover(|element| {
                                                 element.bg(theme_rgb(&self.theme, "muted"))
@@ -2365,15 +2364,7 @@ impl DesktopShell {
                                             .flex()
                                             .items_center()
                                             .gap(px(4.))
-                                            .max_w(px(220.))
-                                            .child(tabler_icon(
-                                                TablerIcon::SlidersHorizontal,
-                                                theme_rgb(
-                                                    &self.theme,
-                                                    "secondary_foreground",
-                                                ),
-                                                px(13.),
-                                            ))
+                                            .max_w(px(280.))
                                             .child(
                                                 div()
                                                     .min_w_0()
@@ -2479,7 +2470,7 @@ impl DesktopShell {
                             .justify_between()
                             .gap(px(12.))
                             .px(px(4.))
-                            .text_xs()
+                            .text_size(px(11.))
                             .text_color(theme_rgb(&self.theme, "text.muted"))
                             .child(
                                 div()

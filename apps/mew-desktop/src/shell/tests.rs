@@ -394,12 +394,107 @@ mod shell_tests {
             for b in &controls[index + 1..] {
                 assert!(!a.intersects(b), "composer controls overlap");
             }
+            assert_eq!(
+                a.center().y,
+                controls.last().unwrap().center().y,
+                "settings and send stay on one stable toolbar row"
+            );
         }
         assert_eq!(controls.last().unwrap().size.width, px(28.));
         let path = cx.debug_bounds("checkout-path").unwrap();
         let status = cx.debug_bounds("session-status").unwrap();
         assert!(path.right() <= status.left());
         assert!(path.left() >= composer.left());
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn composer_toolbar_keeps_its_height_and_picker_anchors_across_pane_widths(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            cx.notify();
+        });
+        for width in [420., 480., 640., 900.] {
+            cx.simulate_resize(gpui::size(px(width), px(760.)));
+            for long in [false, true] {
+                for running in [false, true] {
+                    shell.update(cx, |shell, cx| {
+                        shell.model.ui.model = Some(if long { "provider/a-very-long-model-identifier-with-a-version-and-release-date" } else { "gpt-5.2" }.into());
+                        shell.model.ui.current_persona = Some(if long { "a-long-persona-name-é🙂" } else { "builder" }.into());
+                        shell.model.ui.permission_mode = Some(if long { "custom-permission-policy-with-a-long-name" } else { "standard" }.into());
+                        shell.model.ui.thinking_variant = Some("high".into());
+                        shell.model.ui.running = running;
+                        cx.notify();
+                    });
+                    cx.run_until_parked();
+                    let composer = cx.debug_bounds("composer").unwrap();
+                    let send = cx
+                        .debug_bounds(if running {
+                            "cancel-turn"
+                        } else {
+                            "submit-prompt"
+                        })
+                        .unwrap();
+                    assert_eq!(send.size, gpui::size(px(28.), px(28.)));
+                    assert!((composer.right() - send.right()) <= px(12.));
+                    for selector in [
+                        "permission-picker-trigger",
+                        "persona-picker-trigger",
+                        "model-picker-trigger",
+                    ] {
+                        let bounds = cx.debug_bounds(selector).unwrap();
+                        assert_eq!(
+                            bounds.center().y,
+                            send.center().y,
+                            "{selector}, width {width}, long {long}, running {running}"
+                        );
+                        assert!(bounds.left() >= composer.left() && bounds.right() < send.left());
+                        assert_eq!(bounds.size.height, px(26.));
+                        assert!(bounds.size.width > px(24.));
+                    }
+                    let permission = cx.debug_bounds("permission-picker-trigger");
+                    let persona = cx.debug_bounds("persona-picker-trigger");
+                    let model = cx.debug_bounds("model-picker-trigger");
+                    if !long && width == 900. {
+                        assert!(
+                            model.unwrap().size.width < px(160.),
+                            "a short model name does not stretch into a wide empty button"
+                        );
+                    }
+                    shell.update(cx, |shell, _| {
+                        assert_eq!(shell.permission_picker_bounds, permission);
+                        assert_eq!(shell.persona_picker_bounds, persona);
+                        assert_eq!(shell.model_picker_bounds, model);
+                    });
+                }
+            }
+        }
+        for selector in [
+            "permission-picker-trigger",
+            "persona-picker-trigger",
+            "model-picker-trigger",
+        ] {
+            let trigger = cx.debug_bounds(selector).unwrap();
+            cx.simulate_click(trigger.center(), gpui::Modifiers::none());
+            cx.run_until_parked();
+            shell.update(cx, |shell, _| {
+                assert_eq!(
+                    shell.permission_picker_open,
+                    selector == "permission-picker-trigger"
+                );
+                assert_eq!(
+                    shell.persona_picker_open,
+                    selector == "persona-picker-trigger"
+                );
+                assert_eq!(shell.model_picker_open, selector == "model-picker-trigger");
+            });
+        }
         shell.update(cx, |shell, _| shell.quitting = true);
     }
 
