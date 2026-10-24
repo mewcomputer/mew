@@ -48,6 +48,11 @@ invalidate its row projection, and notify that entity. Default-color cells,
 cursor and selection must update even when no new PTY bytes arrive. Keep explicit
 ANSI foreground/background colors and inverse styles semantically correct.
 
+Code fences use the selected theme's `foreground` and `syntax.*` tokens through
+the shared highlighter. Its scope mapping also drives theme codegen. Recolor
+cached markdown blocks on theme reload without replacing their parsed source;
+new streaming blocks must use the current palette as well.
+
 Check both system appearance changes and explicit light/dark preferences.
 Switch theme while the terminal is idle, with a selection, and after font changes;
 waiting for terminal output can hide a missing invalidation.

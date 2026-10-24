@@ -3,12 +3,13 @@ use std::sync::OnceLock;
 use ratatui::style::{Color, Modifier, Style};
 use syntect::{
     highlighting::{
-        HighlightIterator, HighlightState, Highlighter as SyntectHighlighterInner, Theme,
+        HighlightIterator, HighlightState, Highlighter as SyntectHighlighterInner, StyleModifier,
+        Theme, ThemeItem, ThemeSettings,
     },
     parsing::{ParseState, ScopeStack, SyntaxDefinition, SyntaxSet},
 };
 
-use crate::highlight::{Highlighter, StyledRun};
+use crate::highlight::{Highlighter, StyledRun, SYNTAX_SCOPES};
 
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 
@@ -33,6 +34,36 @@ pub struct SyntectHighlighter {
 }
 
 impl SyntectHighlighter {
+    /// Build a palette from shared theme tokens resolved to packed RGB colors.
+    pub fn from_theme_tokens(resolve: impl Fn(&str) -> u32) -> Self {
+        let color = |token| {
+            let rgb = resolve(token);
+            syntect::highlighting::Color {
+                r: (rgb >> 16) as u8,
+                g: (rgb >> 8) as u8,
+                b: rgb as u8,
+                a: 255,
+            }
+        };
+        Self::new(Theme {
+            settings: ThemeSettings {
+                foreground: Some(color("foreground")),
+                ..Default::default()
+            },
+            scopes: SYNTAX_SCOPES
+                .iter()
+                .map(|(scope, token)| ThemeItem {
+                    scope: scope.parse().expect("built-in syntax scopes are valid"),
+                    style: StyleModifier {
+                        foreground: Some(color(token)),
+                        ..Default::default()
+                    },
+                })
+                .collect(),
+            ..Default::default()
+        })
+    }
+
     pub fn new(theme: Theme) -> Self {
         Self {
             parse_state: None,
@@ -120,6 +151,27 @@ impl Highlighter for SyntectHighlighter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_theme_tokens_color_plain_text_and_syntax() {
+        let mut highlighter = SyntectHighlighter::from_theme_tokens(|token| match token {
+            "foreground" => 0x112233,
+            "syntax.string" => 0x445566,
+            _ => 0x778899,
+        });
+        highlighter.begin_block(None);
+        assert_eq!(
+            highlighter.highlight_line(None, "plain code")[0].1.fg,
+            Some(Color::Rgb(0x11, 0x22, 0x33))
+        );
+        highlighter.begin_block(Some("rust"));
+        let runs = highlighter.highlight_line(Some("rust"), "let message = \"hello\";");
+        let (_, string) = runs
+            .iter()
+            .find(|(text, _)| text.contains("hello"))
+            .unwrap();
+        assert_eq!(string.fg, Some(Color::Rgb(0x44, 0x55, 0x66)));
+    }
 
     #[test]
     fn test_wgsl_syntax_available() {

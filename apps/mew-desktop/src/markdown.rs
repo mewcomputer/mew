@@ -1,7 +1,7 @@
 use std::ops::Range;
 
 use ratatui::style::{Color, Modifier};
-use ratatui_mdstream::highlight::{Highlighter, SyntectHighlighter};
+use ratatui_mdstream::highlight::Highlighter;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarkdownDocument {
@@ -102,8 +102,10 @@ pub fn virtualize_document(document: &MarkdownDocument) -> Vec<MarkdownRenderBlo
     document.blocks.iter().flat_map(virtualize_block).collect()
 }
 
-pub fn highlight_code_blocks(blocks: &mut [MarkdownRenderBlock]) {
-    let mut highlighter = SyntectHighlighter::default();
+pub fn highlight_code_blocks(
+    blocks: &mut [MarkdownRenderBlock],
+    highlighter: &mut impl Highlighter,
+) {
     let mut in_code_block = false;
 
     for block in blocks {
@@ -494,6 +496,7 @@ fn parse_inline(input: &str) -> InlineText {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui_mdstream::highlight::SyntectHighlighter;
 
     #[test]
     fn headings_do_not_retain_their_source_line_ending() {
@@ -565,7 +568,7 @@ mod tests {
     fn syntax_highlights_code_fences_with_existing_syntect_assets() {
         let document = parse_document("```rust\nfn main() { let answer = 42; }\n```");
         let mut rows = virtualize_document(&document);
-        highlight_code_blocks(&mut rows);
+        highlight_code_blocks(&mut rows, &mut SyntectHighlighter::default());
 
         assert!(rows.iter().any(|row| {
             matches!(row.block, MarkdownBlock::Code { .. })

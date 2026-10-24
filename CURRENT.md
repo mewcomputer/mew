@@ -3167,3 +3167,21 @@ split pane, expanded command input/output, visible running/failed calls and
 Space activation. The light-theme pass also exposed an existing dark syntax
 palette in code fences; that separate fix follows this commit. Physical IME and
 VoiceOver remain unverified.
+
+# 2026-10-24 - keep desktop code fences readable across themes
+
+Native light-mode QA exposed code fences retaining the generated dark syntax
+palette. The desktop now builds its highlighter from the selected theme's
+foreground and syntax tokens, sharing the existing scope mapping with theme
+codegen. Theme reload recolors cached code without reparsing or replacing the
+message source. Streaming cache updates lazily reuse one themed highlighter
+when code blocks need it. Generated theme outputs remain unchanged.
+
+Reproduced the stale light-mode string color in a failing GPUI regression before
+the fix. All 233 desktop tests and 43 markdown-stream unit/integration tests
+pass. Strict all-target Clippy for desktop, markdown-stream and TUI, an explicit
+native build, packaging, formatting, architecture and generated-theme checks
+pass. The rebuilt isolated app confirms readable light-mode code and live
+recoloring of the same conversation when returning to dark mode. A fresh review
+found no further palette/cache correctness issues. Physical IME and VoiceOver
+remain unverified.

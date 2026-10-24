@@ -27,6 +27,7 @@ use mew_ui_model::{
     TranscriptRole, UsageSummary,
 };
 use ratatui::style::Color;
+use ratatui_mdstream::highlight::SyntectHighlighter;
 use std::{
     borrow::Cow,
     cell::RefCell,

@@ -38,6 +38,11 @@ impl DesktopShell {
             &self.dark_theme,
         );
         self.theme = Theme::load(theme_name);
+        let mut highlighter =
+            SyntectHighlighter::from_theme_tokens(|token| theme_rgb_value(&self.theme, token));
+        for cached in self.markdown_cache.iter_mut().flatten() {
+            highlight_code_blocks(&mut cached.render_blocks, &mut highlighter);
+        }
         let theme = self.theme.clone();
         self.terminal_view.update(cx, |view, cx| {
             view.set_theme_colors(

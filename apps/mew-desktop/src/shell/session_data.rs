@@ -81,6 +81,7 @@ impl DesktopShell {
         let mut changed = self.markdown_cache.len() != self.model.ui.transcript.len();
         let mut changed_message_start = None;
         let mut changed_message_end = None;
+        let mut highlighter = None;
         self.markdown_cache.truncate(self.model.ui.transcript.len());
         for (index, item) in self.model.ui.transcript.iter().enumerate() {
             let part_count = if item.parts.is_empty() {
@@ -189,7 +190,17 @@ impl DesktopShell {
                             document
                         };
                         let mut blocks = virtualize_document(&document);
-                        highlight_code_blocks(&mut blocks);
+                        if blocks
+                            .iter()
+                            .any(|block| matches!(block.block, MarkdownBlock::Code { .. }))
+                        {
+                            let highlighter = highlighter.get_or_insert_with(|| {
+                                SyntectHighlighter::from_theme_tokens(|token| {
+                                    theme_rgb_value(&self.theme, token)
+                                })
+                            });
+                            highlight_code_blocks(&mut blocks, highlighter);
+                        }
                         (blocks, Some(streaming))
                     }
                     Some(_) => (Vec::new(), None),

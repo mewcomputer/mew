@@ -270,6 +270,50 @@ mod shell_tests {
     }
 
     #[gpui::test]
+    fn changing_chat_theme_refreshes_cached_code_colors(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        shell.update(cx, |shell, cx| {
+            shell.model.ui.transcript = vec![TranscriptItem {
+                role: TranscriptRole::Assistant,
+                text: "```rust\nlet message = \"hello\";\n```".into(),
+                parts: Vec::new(),
+            }];
+            shell.sync_markdown_cache();
+            let source_pointer = shell.markdown_cache[0][0].source.as_ptr();
+            for mode in [DesktopThemeMode::Light, DesktopThemeMode::Dark] {
+                shell.theme_mode = mode;
+                shell.reload_theme(WindowAppearance::Dark, cx);
+                let cached = &shell.markdown_cache[0][0];
+                assert_eq!(
+                    cached.source.as_ptr(),
+                    source_pointer,
+                    "changing colors keeps the parsed source"
+                );
+                let row = &cached.render_blocks[0];
+                let MarkdownBlock::Code { text, .. } = &row.block else {
+                    panic!("expected code")
+                };
+                let color = row
+                    .syntax_highlights
+                    .iter()
+                    .find(|highlight| text[highlight.range.clone()].contains("hello"))
+                    .expect("string is highlighted")
+                    .color;
+                let Color::Rgb(r, g, b) = shell.theme.resolve("syntax.string") else {
+                    panic!("RGB token")
+                };
+                assert_eq!(
+                    color,
+                    Some([r, g, b]),
+                    "cached code follows the selected syntax palette"
+                );
+            }
+            shell.quitting = true;
+        });
+    }
+
+    #[gpui::test]
     fn completed_tool_rows_are_quieter_and_still_expand(cx: &mut gpui::TestAppContext) {
         let (shell, cx) =
             cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));

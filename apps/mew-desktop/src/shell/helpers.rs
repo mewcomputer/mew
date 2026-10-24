@@ -1878,7 +1878,11 @@ pub(super) fn normalize_browser_url(value: &str) -> Option<String> {
 }
 
 pub(super) fn theme_rgb(theme: &Theme, token: &str) -> gpui::Rgba {
-    let color = match theme.resolve(token) {
+    rgb(theme_rgb_value(theme, token))
+}
+
+pub(super) fn theme_rgb_value(theme: &Theme, token: &str) -> u32 {
+    match theme.resolve(token) {
         Color::Rgb(red, green, blue) => ((red as u32) << 16) | ((green as u32) << 8) | blue as u32,
         Color::Black => 0x000000,
         Color::DarkGray => 0x555555,
@@ -1901,8 +1905,7 @@ pub(super) fn theme_rgb(theme: &Theme, token: &str) -> gpui::Rgba {
             (value << 16) | (value << 8) | value
         }
         Color::Reset => 0x000000,
-    };
-    rgb(color)
+    }
 }
 
 #[cfg(test)]
