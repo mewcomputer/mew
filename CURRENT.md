@@ -3185,3 +3185,20 @@ pass. The rebuilt isolated app confirms readable light-mode code and live
 recoloring of the same conversation when returning to dark mode. A fresh review
 found no further palette/cache correctness issues. Physical IME and VoiceOver
 remain unverified.
+
+# 2026-10-24 - review the remaining active-chat UX gaps
+
+Compared the current native chat in split and wide layouts with the supplied
+Codex screenshots, supported by two independent visual/source assessments.
+Direct Codex inspection remains safety-denied. Reproduced an eight-line unsent
+draft painting through composer controls/footer, and inspected the two-stage
+group/call disclosure and raw input/output hierarchy. Cleared the QA draft and
+restored its pane layout afterward. No product source changed for this review.
+
+Appended the evidence, severity, source anchors and proposed order to the
+existing GPUI comparison notes. Editor scrolling, content selection/copy and
+markdown fidelity take priority; quieter singleton/progress rows and composer
+controls follow. The edited-files result handoff is recorded as a product
+opportunity. Clipboard focus routing and source-file link handling remain
+source-supported candidates requiring behavior tests. No HTML detector scan,
+new automated test run, native streaming or VoiceOver check is claimed.

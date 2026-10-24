@@ -373,3 +373,112 @@ tests. The CLI regression compares actual page-target sets before registration,
 after browser operations and after closing owned pages. Native divider dragging
 could not be established with the inspection tool; GPUI pointer/geometry tests
 cover it. VoiceOver, physical IME and motion quality remain unverified.
+
+## Active conversation review after activity grouping, 2026-10-24
+
+Reviewed commit `da98960` with two independent assessments and a fresh native
+pass in the isolated QA app. Compared the supplied Codex screenshots, including
+the compact activity rows, inline working marker and edited-files handoff.
+Direct inspection of Codex remains denied by the computer-use safety policy.
+This establishes a screenshot comparison, not current Codex interaction parity.
+
+The native checks covered the 480 px conversation pane, the wider centered
+reading column, grouped command disclosure and an eight-line unsent draft.
+The draft was cleared afterward. No product code was changed for this review.
+The Impeccable HTML/DOM detector does not support Rust GPUI; the second
+assessment instead inventoried the actual render, control and input paths.
+No automated detector results or performance measurements are claimed.
+
+### Main assessment
+
+The three-pane ownership, shared reading column and grouped completed activity
+now give the chat a coherent structure. The remaining roughness is concentrated
+in the editor, content interactions and disclosure hierarchy. Another broad
+layout rewrite is not supported by these findings.
+
+The visual treatment does not show the gradient/glass/card-grid patterns the
+design detector targets. The more relevant risk is a log-like reading rhythm:
+single tools still expose completion chrome, and expanded details prioritize
+raw input JSON over the result a reader usually wants.
+
+### Priorities
+
+| Priority | Finding and evidence | Next change |
+| --- | --- | --- |
+| P1 | **Long drafts overlap controls.** Native paste of eight explicit lines retained all eight in the accessible field value, but painted text through the toolbar/footer and left the end out of view. The composer caps its allocated height, paints from the top and has no caret-following scroll offset. | Implement a bounded scrolling editor, clip text/caret to the editing viewport and keep the active selection/caret visible. Test explicit lines and wrapped text before further cosmetic work. |
+| P2 | **Useful content lacks direct reuse actions.** Code fences and tool output use bare text elements rather than the selectable transcript renderer, and expose no copy control. Native inspection confirms the absent actions; clipboard routing was not exercised. | Add selection/copy for code and command results, with a contextual copy button. Validate focus and selection behavior after writing in the composer. |
+| P2 | **Markdown loses structure.** Source parsing strips ordered-list markers and nesting; rendering always adds bullets. Tables remain pipe-delimited text rows. Every virtual code chunk receives another rounded card and padding. | Preserve list markers/depth and table cells, and make virtual code chunks read as one continuous block. These are content-fidelity fixes, independent of the comparison. |
+| P2 | **Activity disclosure remains uneven.** Groups use one muted row; single completions still show a tool name, green completed label and a second command/path line. Native group inspection requires opening the group and the call, then shows input JSON before output. Errors remain inside collapsed details. | Give singleton completions the same quiet treatment. Put the command and result first, move raw input to secondary details and show an error excerpt immediately. |
+| P2 | **Running feedback changes abruptly.** Source shows a bordered Working card before assistant output, then removes it once an assistant item exists, even when the turn is still running. The Codex reference shows a small Working-for marker. | Keep a stable, small turn-status row near the live tail. Reserve attention cards for requests and failures. This running-state finding is source-supported, not a fresh native streaming reproduction. |
+| P2 | **Composer administration is still prominent.** Permission, persona and model controls sit beside attachment/send; a separate footer repeats workspace context and always exposes Yield. Native inspection confirms the persistent controls in both widths. | Keep frequently changed choices close to writing and move persona/secondary session controls into a menu. Reveal collaboration controls when another client makes them useful. |
+| P3 | **Edited work has a weak handoff.** The Codex reference includes filenames, change totals and View changes. Mew exposes review through a header icon and individual tool diffs. | Consider a compact edited-files result that opens the existing Changes tab. This is a product opportunity, not a current correctness defect; Undo is a separate capability and is not implied. |
+
+Source anchors:
+
+- Composer layout, shaping and painting: `shell/composer.rs`,
+  `ComposerElement::{request_layout, prepaint, paint}`; editor bounds and toolbar:
+  `shell/chat_render.rs`, `render_center`.
+- Content selection/actions and code/table rendering: `shell/chat.rs`,
+  `render_inline`, `render_markdown_block`, `transcript_mouse_down`,
+  `shell_key_down`; tool input/output: `shell/chat_render.rs`, `render_tool_text`.
+- Markdown structure: `markdown.rs`, `parse_block`, `parse_list_items`,
+  `virtualize_block` and `split_lines`.
+- Activity/status: `shell/chat_render.rs`, `render_tool_part`,
+  `render_tool_group`, `render_transcript_attention`; `shell/helpers.rs`,
+  `transcript_attention`.
+
+### Smaller findings and unverified candidates
+
+- Empty send remains visually enabled while whitespace submission returns
+  silently. Disable/dim it consistently with actual availability.
+- The 15 px/24 px prose setting is comfortable in the wide reading column.
+  The narrower pane feels heavier than the supplied Codex stream, but this pass
+  found no evidence that normal prose is accidentally assigned bold weight.
+  Keep typography changes behind the editor/content fixes and verify them with
+  equal-width, equal-content captures.
+- Source suggests that selecting prose after focusing the composer may leave
+  Cmd-C routed to the editor. A focused behavior test is needed before calling
+  this a reproduced clipboard bug.
+- Source-file links currently enter the browser URL path rather than a
+  file-aware handoff. Test absolute paths, relative paths and line references
+  before choosing an editor or external-open behavior.
+- Physical IME, VoiceOver, actual long-running provider turns and Codex's own
+  disclosure/copy interactions were not exercised in this pass.
+
+### Design health and audience checks
+
+These are provisional design judgments for the active conversation, not measured
+usability outcomes or a whole-application accessibility score.
+
+| Heuristic | Score / 4 | Basis |
+| --- | --- | --- |
+| Visibility of system status | 2 | Running label is conditional on transcript shape. |
+| Match with user language | 3 | Activity phrases are clearer; Yield and raw JSON need context. |
+| User control and freedom | 2 | Long-draft editing and content reuse have gaps. |
+| Consistency and standards | 2 | Singleton/group activity and markdown fidelity differ. |
+| Error prevention | 2 | Draft ownership is retained; empty-send availability is misleading. |
+| Recognition over recall | 3 | Pane identity and disclosures are visible; result review is indirect. |
+| Flexibility and efficiency | 2 | Keyboard disclosure works; code/output reuse is missing. |
+| Aesthetic and minimalist design | 3 | Shared column is sound; composer/footer chrome can be quieter. |
+| Error recovery | 2 | Failure labels are visible, but the useful error is initially hidden. |
+| Contextual help | 1 | Active-chat controls offer little explanation of collaboration and raw tool details. |
+| **Total** | **22 / 40** | **Focused behavior and hierarchy work remains.** |
+
+Cognitive-load checklist: two of eight areas need attention, minimal choices in
+the persistent composer and progressive disclosure inside tool inspection.
+The main reading focus, chunking, grouping, visual priority, independent writing
+decision and retained workspace context are materially improved. This is a
+moderate-load judgment; the number of controls alone does not establish that
+users must make every choice on each prompt.
+
+For a coding power user, the major friction is pasting a substantial prompt,
+reusing command/code output and finding the changed files. For a returning TUI
+user, persistent Yield/persona controls make the chat feel more administrative
+than necessary. For a keyboard/assistive-technology user, disclosure activation
+is available, but editor scrolling and copy/focus behavior need direct coverage;
+VoiceOver conclusions would be premature.
+
+Recommended order: fix editor overflow and validate copy/selection first, then
+restore markdown/content fidelity, then refine activity/progress and composer
+hierarchy. Treat the edited-files handoff as a separate product decision. Finish
+with a spacing/type pass once those behaviors are stable.
