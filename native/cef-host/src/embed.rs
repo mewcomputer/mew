@@ -28,8 +28,9 @@ mod mac_impl {
     use super::{BrowserEvent, BrowserEventCallback};
     use crate::mac;
     use cef::*;
+    use objc2::sel;
     use objc2_app_kit::{NSResponder, NSView};
-    use objc2_foundation::{NSPoint, NSRect, NSSize};
+    use objc2_foundation::{NSObjectNSDelayedPerforming, NSPoint, NSRect, NSSize};
     use std::{
         ffi::{CString, c_void},
         os::unix::ffi::OsStrExt,
@@ -809,6 +810,21 @@ mod mac_impl {
                 }
             }
 
+            fn do_close(&self, browser: Option<&mut Browser>) -> i32 {
+                // CEF's default closes the containing GPUI window. Removing
+                // only its child view completes browser destruction instead.
+                if let Some(host) = browser.and_then(|browser| browser.host()) {
+                    let handle = host.window_handle();
+                    if !handle.is_null() {
+                        let view = unsafe { &*handle.cast::<NSView>() };
+                        // The run loop retains the receiver until removal;
+                        // defer teardown until CEF's close callback returns.
+                        unsafe { view.performSelector_withObject_afterDelay(sel!(removeFromSuperview), None, 0.); }
+                    }
+                }
+                1
+            }
+
             fn on_before_close(&self, _browser: Option<&mut Browser>) {
                 self.state.emit(BrowserEvent::Closed);
                 self.state.closed.store(true, Ordering::Release);
@@ -838,10 +854,13 @@ mod mac_impl {
                 }
                 let target_id = if success != 0 {
                     parse_json_buffer(result, JsonParserOptions::RFC)
-                        .and_then(|value| value.dictionary())
-                        .and_then(|dictionary| dictionary.dictionary(Some(&CefString::from("targetInfo"))))
-                        .map(|dictionary| CefString::from(&dictionary.string(Some(&CefString::from("targetId")))).to_string())
-                        .filter(|target_id| !target_id.is_empty())
+                        .and_then(|value| {
+                            // Nested dictionaries remain valid only while their owning Value lives.
+                            let dictionary = value.dictionary()?;
+                            let target_info = dictionary.dictionary(Some(&CefString::from("targetInfo")))?;
+                            let target_id = CefString::from(&target_info.string(Some(&CefString::from("targetId")))).to_string();
+                            (!target_id.is_empty()).then_some(target_id)
+                        })
                 } else { None };
                 match target_id {
                     Some(target_id) => self.state.emit(BrowserEvent::Ready {
@@ -883,6 +902,64 @@ mod mac_impl {
                 let error = super::resolve_debug_port(Some(value)).unwrap_err();
                 assert!(error.contains("MEW_CEF_DEBUG_PORT"));
             }
+        }
+
+        #[test]
+        #[ignore = "requires MEW_CEF_FRAMEWORK_PATH pointing to the native CEF runtime"]
+        fn native_target_reply_emits_the_exact_page_identity() {
+            use cef::ImplDevToolsMessageObserver;
+
+            let framework = super::framework_path().expect("native CEF runtime path");
+            let framework = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(
+                framework.as_os_str(),
+            ))
+            .unwrap();
+            assert_eq!(
+                unsafe { cef::load_library(Some(&*framework.as_ptr().cast())) },
+                1
+            );
+            let _ = cef::api_hash(cef::sys::CEF_API_VERSION_LAST, 0);
+            let runtime = Arc::new(RuntimeState::new("http://127.0.0.1:9223".into()));
+            runtime.initialized.store(true, Ordering::Release);
+            let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let captured = events.clone();
+            let page = Arc::new(PageState::new(
+                0,
+                "about:blank",
+                runtime,
+                Arc::new(move |event| captured.lock().unwrap().push(event)),
+            ));
+            page.target_request_id.store(1, Ordering::Release);
+            let observer = super::MewTargetObserver::new(page.clone());
+            let reply =
+                br#"{"targetInfo":{"targetId":"page-42","type":"page","url":"about:blank"}}"#;
+            observer.on_dev_tools_method_result(None, 2, 1, Some(reply));
+            assert!(events.lock().unwrap().is_empty());
+            observer.on_dev_tools_method_result(None, 1, 1, Some(reply));
+            assert!(matches!(
+                events.lock().unwrap().as_slice(),
+                [super::BrowserEvent::Ready { cdp_endpoint, target_id }]
+                if cdp_endpoint == "http://127.0.0.1:9223" && target_id == "page-42"
+            ));
+
+            for (success, reply) in [
+                (0, Some(reply.as_slice())),
+                (1, None),
+                (1, Some(b"invalid".as_slice())),
+                (1, Some(b"{}".as_slice())),
+                (1, Some(br#"{"targetInfo":{"targetId":""}}"#.as_slice())),
+            ] {
+                events.lock().unwrap().clear();
+                observer.on_dev_tools_method_result(None, 1, success, reply);
+                assert!(matches!(
+                    events.lock().unwrap().as_slice(),
+                    [super::BrowserEvent::Error { .. }]
+                ));
+            }
+            events.lock().unwrap().clear();
+            page.close();
+            observer.on_dev_tools_method_result(None, 1, 1, Some(reply));
+            assert!(events.lock().unwrap().is_empty());
         }
 
         fn request_popup(handler: &cef::LifeSpanHandler, target: Option<&str>) -> i32 {
@@ -954,6 +1031,17 @@ mod mac_impl {
             page.close();
             assert_eq!(request_popup(&handler, Some("https://late.example")), 1);
             assert!(page.pending_navigation.lock().unwrap().is_none());
+        }
+
+        #[test]
+        fn closing_an_embedded_page_never_requests_the_parent_window_close() {
+            let runtime = Arc::new(RuntimeState::new("http://127.0.0.1:1".into()));
+            runtime.initialized.store(true, Ordering::Release);
+            let page = Arc::new(PageState::new(0, "about:blank", runtime, Arc::new(|_| {})));
+            let handler = super::MewLifeSpanHandler::new(page.clone());
+            assert_eq!(handler.do_close(None), 1);
+            page.close();
+            assert_eq!(handler.do_close(None), 1);
         }
 
         #[test]

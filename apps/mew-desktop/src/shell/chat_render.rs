@@ -1329,6 +1329,7 @@ impl DesktopShell {
                         .flex_col()
                         .flex_1()
                         .min_h_0()
+                        .px(px(CHAT_TRANSCRIPT_PADDING))
                         .child(
                             gpui::list(
                                 self.transcript_list.clone(),
@@ -1338,7 +1339,7 @@ impl DesktopShell {
                             .flex_1()
                             .min_h_0()
                             .w_full()
-                            .p(px(CHAT_TRANSCRIPT_PADDING)),
+                            .py(px(CHAT_TRANSCRIPT_PADDING)),
                         )
                         .when_some(
                             self.render_transcript_scrollbar(cx),

@@ -204,15 +204,29 @@ async fn real_cdp_same_url_pages_keep_refs_and_revoked_commands_isolated() {
     let b = BrowserAccess::with_executable(executable);
     let target_a = chrome.page(&url, "page-a").await;
     let target_b = chrome.page(&url, "page-b").await;
+    let target_ids = |targets: Vec<serde_json::Value>| {
+        targets
+            .into_iter()
+            .filter(|target| target["type"] == "page")
+            .map(|target| target["id"].as_str().unwrap().to_owned())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let original_targets = target_ids(chrome.targets().await);
     let cancel = CancellationToken::new();
     a.register("owner-a", target_a.clone()).await.unwrap();
     b.register("owner-b", target_b.clone()).await.unwrap();
+    assert_eq!(
+        target_ids(chrome.targets().await),
+        original_targets,
+        "registering existing pages must not create browser tabs"
+    );
     assert!(a.clone().is_available());
     assert!(a.register("owner-b", target_b.clone()).await.is_err());
     let snapshot = a
         .execute(BrowserAction::Snapshot, None, &cancel)
         .await
         .unwrap();
+    assert_eq!(target_ids(chrome.targets().await), original_targets);
     let data: serde_json::Value = serde_json::from_str(&snapshot.output).unwrap();
     assert!(a
         .execute(
@@ -455,6 +469,14 @@ async fn real_cdp_same_url_pages_keep_refs_and_revoked_commands_isolated() {
     assert!(!final_targets
         .iter()
         .any(|target| target["id"] == target_a.target_id));
+    assert_eq!(
+        target_ids(final_targets),
+        original_targets
+            .into_iter()
+            .filter(|id| id != &target_a.target_id && id != &target_b.target_id)
+            .collect(),
+        "closing owned pages must not create replacement tabs"
+    );
     assert!(!a.is_available());
     assert!(a
         .execute(BrowserAction::Snapshot, None, &cancel)

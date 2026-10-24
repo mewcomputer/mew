@@ -82,6 +82,47 @@ mod shell_tests {
     }
 
     #[gpui::test]
+    fn transcript_keeps_horizontal_gutters_in_split_and_folded_layouts(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = false;
+            shell.layout.workbench_collapsed = false;
+            shell.layout.terminal_collapsed = true;
+            shell.sidebar_animation_id = 0;
+            shell.workbench_animation_id = 0;
+            shell.model.ui.transcript = vec![TranscriptItem {
+                role: TranscriptRole::Assistant,
+                text: "This reply needs space beside the pane divider.".into(),
+                parts: Vec::new(),
+            }];
+            shell.sync_markdown_cache();
+            cx.notify();
+        });
+        for width in [1240., 900.] {
+            cx.simulate_resize(gpui::size(px(width), px(760.)));
+            cx.refresh().unwrap();
+            cx.run_until_parked();
+            let conversation = cx.debug_bounds("conversation-pane").unwrap();
+            shell.update(cx, |shell, _| {
+                let viewport = shell.transcript_list.viewport_bounds();
+                assert_eq!(
+                    viewport.origin.x,
+                    conversation.origin.x + px(CHAT_TRANSCRIPT_PADDING)
+                );
+                assert_eq!(
+                    viewport.right(),
+                    conversation.right() - px(CHAT_TRANSCRIPT_PADDING)
+                );
+            });
+        }
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
     fn new_tab_launcher_opens_closable_tool_tabs_without_changing_the_chat(
         cx: &mut gpui::TestAppContext,
     ) {

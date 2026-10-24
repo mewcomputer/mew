@@ -337,3 +337,39 @@ callbacks. The real-daemon browser test passes with isolated headless Chrome and
 the bundled agent-browser executable. These checks still leave live native
 appearance, CEF embedding, VoiceOver and motion unverified because native
 computer use remains blocked by the OS permission error.
+
+## Native verification follow-up
+
+Native inspection became available after reverting the recent Codex/OpenCode
+configuration changes. A disposable app bundle with isolated settings, sessions,
+CEF cache and a real fake-provider daemon now exercises the implemented panes.
+The live mew comparison uses the user's Codex screenshots. Direct inspection of
+the Codex app is denied by the inspection tool's safety policy.
+
+The native pass reproduced and fixed four gaps:
+
+- Transcript rows touched the conversation dividers because pinned GPUI lists
+  apply vertical padding only. Horizontal gutters now belong to the list's parent.
+- Target replies lost their owning CEF JSON Value before nested dictionaries
+  were read. Keeping that owner alive restores exact native target registration.
+- Closing a browser page used CEF's default close handler, which closes the
+  containing GPUI window. The handler now queues removal of only its child view;
+  the retired target disappears and sibling pages survive.
+- A fresh pinned agent-browser session created a separate Chromium blank page.
+  Registration now selects and persists the existing target before pinning it,
+  checks the returned target and persistence warnings, and disconnects without
+  reconnecting during cleanup.
+
+The real native smoke confirms aligned full-height headers, message gutters,
+sidebar collapse/restore, new-chat navigation with an unsent draft restored,
+Files and full-pane Terminal launch, independent browser inputs across tab/chat
+switches, and restored browser navigation after restarting on a tool tab. Blank
+page replacement keeps the app alive and removes the retired CDP target. No
+extra Chromium window appeared with the corrected registration flow.
+
+The desktop, CEF host and tools suites pass, along with the opt-in native CEF
+parser regression, real-CLI page-isolation regression and real-daemon browser
+tests. The CLI regression compares actual page-target sets before registration,
+after browser operations and after closing owned pages. Native divider dragging
+could not be established with the inspection tool; GPUI pointer/geometry tests
+cover it. VoiceOver, physical IME and motion quality remain unverified.

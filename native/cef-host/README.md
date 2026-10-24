@@ -92,5 +92,22 @@ It requires a macOS graphical session, leaves the clipboard unchanged, and check
 native editing ownership and host shortcut fallback. CEF page rendering and
 clipboard behavior still require the packaged app smoke test.
 
+The native target-reply regression loads CEF's real JSON parser without starting
+a browser. Point it at the packaged framework binary:
+
+```sh
+MEW_CEF_FRAMEWORK_PATH="/absolute/path/mew.app/Contents/Frameworks/Chromium Embedded Framework.framework/Chromium Embedded Framework" \
+cargo test -p mew-cef-host native_target_reply_emits_the_exact_page_identity -- --ignored --test-threads=1
+```
+
+Embedded page close handling must remove only the CEF child view. CEF's default
+close handler sends `performClose:` to the containing GPUI window. Returning
+handled without removing the child leaves the browser alive. In the packaged
+smoke test, replace a blank tab with Files or Terminal and check that its CDP
+target disappears while the app window and another browser page remain usable.
+Registration should also leave the target set unchanged: the CLI selects and
+persists the existing target before enabling pinning. A fresh pinned CLI session
+creates an unwanted page, and cleanup with `--cdp` reconnects before closing.
+
 CEF is distributed under its own license. The final app bundle must include
 the CEF license and credits.

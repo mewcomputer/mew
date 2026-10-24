@@ -45,6 +45,13 @@ struct BrowserState {
     executable: PathBuf,
 }
 
+#[derive(Clone, Copy)]
+enum CommandScope {
+    Unscoped,
+    SelectPage,
+    PinnedPage,
+}
+
 #[derive(Clone)]
 pub struct BrowserAccess(Arc<BrowserState>);
 
@@ -145,7 +152,9 @@ impl BrowserAccess {
             return Ok(());
         }
         let cancel = CancellationToken::new();
-        let version = self.command(lease, &cancel, &["--version"], false).await?;
+        let version = self
+            .command(lease, &cancel, &["--version"], CommandScope::Unscoped)
+            .await?;
         check_version(&version)?;
         let targets: Vec<serde_json::Value> = self
             .cdp_get(lease, &cancel, "list")
@@ -158,9 +167,27 @@ impl BrowserAccess {
         }) {
             return Err("registered browser page no longer exists".into());
         }
-        // Tab selection clears snapshot refs, so bind only once per page lease.
-        self.command(lease, &cancel, &["tab", &lease.target.target_id], true)
-            .await?;
+        // A fresh pinned CLI session creates a page. Select and persist the
+        // existing native page first, then pin that exact binding.
+        // Tab selection clears snapshot refs, so bind only once per lease.
+        for scope in [CommandScope::SelectPage, CommandScope::PinnedPage] {
+            let output = self
+                .command(
+                    lease,
+                    &cancel,
+                    &["tab", &lease.target.target_id, "--json"],
+                    scope,
+                )
+                .await?;
+            let reply: serde_json::Value = serde_json::from_str(&output)
+                .map_err(|error| format!("read browser tab binding: {error}"))?;
+            if let Some(warning) = reply["warning"].as_str() {
+                return Err(format!("browser tab binding: {warning}"));
+            }
+            if reply["success"] != true || reply["data"]["targetId"] != lease.target.target_id {
+                return Err("agent-browser did not bind the registered page".into());
+            }
+        }
         if lease.revoked.is_cancelled() {
             return Err("browser page registration was revoked".into());
         }
@@ -205,21 +232,13 @@ impl BrowserAccess {
         }
         let executable = self.0.executable.clone();
         let session = lease.cli_session.clone();
-        let endpoint = lease.target.cdp_endpoint.clone();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_secs(30),
                     Command::new(executable)
                         .env("AGENT_BROWSER_IDLE_TIMEOUT_MS", "300000")
-                        .args([
-                            "--session",
-                            &session,
-                            "--cdp",
-                            &endpoint,
-                            "--pin-tab",
-                            "close",
-                        ])
+                        .args(["--session", &session, "close"])
                         .kill_on_drop(true)
                         .output(),
                 )
@@ -296,8 +315,13 @@ impl BrowserAccess {
                 self.data_command(&lease, cancel, &["open", &url]).await?
             }
             BrowserAction::Snapshot => {
-                self.command(&lease, cancel, &["snapshot", "--json"], true)
-                    .await?
+                self.command(
+                    &lease,
+                    cancel,
+                    &["snapshot", "--json"],
+                    CommandScope::PinnedPage,
+                )
+                .await?
             }
             BrowserAction::Click(selector) => {
                 self.data_command(&lease, cancel, &["click", &selector])
@@ -324,7 +348,9 @@ impl BrowserAccess {
                 if annotate {
                     args.push("--annotate");
                 }
-                let result = self.command(&lease, cancel, &args, true).await;
+                let result = self
+                    .command(&lease, cancel, &args, CommandScope::PinnedPage)
+                    .await;
                 let bytes = match result {
                     Ok(_) => tokio::fs::read(&path)
                         .await
@@ -336,9 +362,11 @@ impl BrowserAccess {
                 String::new()
             }
         };
-        let url = self.command(&lease, cancel, &["get", "url"], true).await?;
+        let url = self
+            .command(&lease, cancel, &["get", "url"], CommandScope::PinnedPage)
+            .await?;
         let title = self
-            .command(&lease, cancel, &["get", "title"], true)
+            .command(&lease, cancel, &["get", "title"], CommandScope::PinnedPage)
             .await?;
         Ok(BrowserOutput {
             output,
@@ -375,9 +403,9 @@ impl BrowserAccess {
         lease: &PageLease,
         cancel: &CancellationToken,
         args: &[&str],
-        scoped: bool,
+        scope: CommandScope,
     ) -> Result<String, String> {
-        let output = self.run_command(lease, cancel, args, scoped, None).await?;
+        let output = self.run_command(lease, cancel, args, scope, None).await?;
         if !output.status.success() {
             return Err(format!(
                 "agent-browser: {}",
@@ -396,7 +424,13 @@ impl BrowserAccess {
         // Batch stdin bypasses the CLI's global option scanner for page data.
         let input = serde_json::to_vec(&[args]).expect("browser command strings serialize");
         let output = self
-            .run_command(lease, cancel, &["--json", "batch"], true, Some(input))
+            .run_command(
+                lease,
+                cancel,
+                &["--json", "batch"],
+                CommandScope::PinnedPage,
+                Some(input),
+            )
             .await?;
         let responses: Vec<serde_json::Value> =
             serde_json::from_slice(&output.stdout).map_err(|error| {
@@ -425,13 +459,18 @@ impl BrowserAccess {
         lease: &PageLease,
         cancel: &CancellationToken,
         args: &[&str],
-        scoped: bool,
+        scope: CommandScope,
         input: Option<Vec<u8>>,
     ) -> Result<std::process::Output, String> {
         let mut command = Command::new(&self.0.executable);
         command.kill_on_drop(true);
         command.env("AGENT_BROWSER_IDLE_TIMEOUT_MS", "300000");
-        if scoped {
+        let binding_flag = match scope {
+            CommandScope::Unscoped => None,
+            CommandScope::SelectPage => Some("--no-pin-tab"),
+            CommandScope::PinnedPage => Some("--pin-tab"),
+        };
+        if let Some(binding_flag) = binding_flag {
             lease
                 .cli_started
                 .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -440,7 +479,7 @@ impl BrowserAccess {
                 &lease.cli_session,
                 "--cdp",
                 &lease.target.cdp_endpoint,
-                "--pin-tab",
+                binding_flag,
             ]);
         }
         command.args(args);

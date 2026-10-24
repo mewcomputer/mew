@@ -3076,3 +3076,41 @@ Updated the design, ownership, skill and comparison guidance after verification.
 Native inspection was retried and still fails with the computer-use OS
 permission error; live appearance, CEF embedding, VoiceOver and motion remain
 unverified.
+
+# 2026-10-24 - verify native panes and fix browser lifecycle failures
+
+Native inspection works after reverting the recent Codex/OpenCode configuration
+changes. Used a disposable app/helper bundle identity with isolated settings,
+sessions, CEF cache, local HTML fixtures and a real fake-provider daemon. Direct
+Codex inspection is denied by the tool's safety policy; the supplied screenshots
+remain the visual comparison reference.
+
+Reproduced transcript rows touching the pane dividers and moved horizontal
+padding onto the list parent. Reproduced CEF target replies losing their owning
+JSON Value and kept it alive through nested dictionary reads. Reproduced blank
+tab replacement quitting the app: CEF's default handler closes the containing
+window. Embedded close handling now queues child-view removal, completing page
+destruction while preserving the GPUI window and sibling pages.
+
+Native testing also exposed extra Chromium windows from initially pinning a
+fresh agent-browser session. Registration now selects and persists the exact
+existing target before pinning it, checks JSON target identity and persistence
+warnings, and closes CLI sessions without reconnecting during cleanup. Extended
+the real-CLI regression to reject added page targets through registration,
+browser operations and owned-page closure. Each reproduced gap failed its
+regression before the fix.
+
+Verified native sidebar collapse/restore, new-chat navigation and draft return,
+Files and full-pane Terminal launch, independent retained browser inputs across
+tabs and chat navigation, restored browser navigation after restart on a tool
+tab, and blank-page retirement without app exit or extra Chromium windows.
+Native divider dragging could not be established through the inspection tool;
+the existing GPUI pointer/geometry tests cover it. VoiceOver, physical IME and
+motion quality remain unverified.
+
+All 218 desktop, 9 CEF host, 112 tools unit and 8 tools integration tests pass.
+The opt-in native CEF target-parser regression, real-CLI page-isolation test and
+all 5 daemon browser tests, including real Chrome integration, pass as well.
+Strict all-target Clippy for the affected crates, native build and packaging,
+formatting, architecture and generated-theme checks pass. Updated the native
+host and comparison notes after the smoke test.
