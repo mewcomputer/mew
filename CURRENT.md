@@ -2964,3 +2964,25 @@ capture fixtures and updated mobile documentation. Three review lenses found
 no remaining blockers after fixing list refresh and explicit offline labeling.
 Hands-on VoiceOver, gestures, keyboard and live network changes remain part of
 the wider verification pass.
+
+# 2026-10-24 — GPUI UX assessment against the Codex GUI reference
+
+Recorded a provisional comparison in
+`notes/gpui-codex-ux-review-2026-10-24.md`, using two independent native-source
+assessments and the interactive Codex workspace example in current official
+desktop documentation. The user prioritized crowded layout and starting or
+switching projects/chats. Findings center on expanded auxiliary-pane defaults,
+working-location selection, project identity in chat tabs, and composer density.
+
+Identified a source-level resize defect: the width-changed boolean short-circuits
+the workbench-collapse check. Also recorded silent follow-up submission while
+running, positional multi-question answers, and uneven control semantics.
+Recommendations retain existing panes, workspace grouping, drafts and view-state
+ownership. No product code was changed and no behavior tests were run.
+
+Verified 26 report source links and their line anchors, checked the cited source
+paths, and ran the whitespace diff check. Native computer use failed with an
+operating-system permission error, so installed-app side-by-side inspection,
+visual scoring, motion, and native interaction verification remain outstanding.
+The official documentation example is explicitly distinguished from the installed
+Codex app throughout the report.
