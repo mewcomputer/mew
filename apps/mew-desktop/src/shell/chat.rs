@@ -1110,7 +1110,7 @@ impl DesktopShell {
     pub(super) fn composer_key_down(
         &mut self,
         event: &gpui::KeyDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let key = event.keystroke.key.as_str();
@@ -1188,6 +1188,15 @@ impl DesktopShell {
         }
         if key == "enter" && !shift {
             self.submit_prompt(cx);
+            cx.stop_propagation();
+            return;
+        }
+        if matches!(key, "up" | "down")
+            && !event.keystroke.modifiers.platform
+            && !event.keystroke.modifiers.control
+            && !event.keystroke.modifiers.alt
+            && self.composer_move_vertical(key == "up", shift, window, cx)
+        {
             cx.stop_propagation();
             return;
         }

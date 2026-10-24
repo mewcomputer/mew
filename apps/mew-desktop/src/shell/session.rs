@@ -497,6 +497,12 @@ impl DesktopShell {
         }
         self.session_requests.navigate();
         let end = self.model.ui.composer.len();
+        self.composer_scroll_offset = Pixels::ZERO;
+        self.composer_scroll_max = Pixels::ZERO;
+        self.composer_preferred_column = None;
+        self.composer_cursor_downstream = false;
+        self.text_input_layout = None;
+        self.composer_text_layout = None;
         self.composer_selection = end..end;
         self.composer_selection_reversed = false;
         self.composer_marked_range = None;

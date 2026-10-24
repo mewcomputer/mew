@@ -22,17 +22,24 @@ pub(super) struct ComposerPrepaint {
     font_size: Pixels,
     cursor: Option<Point<Pixels>>,
     line_height: Pixels,
+    scroll_offset: Pixels,
+    cursor_offset: usize,
+    cursor_downstream: bool,
 }
 
 pub(super) struct TextInputLayout {
     target: TextInputTarget,
     text: SharedString,
-    lines: Vec<WrappedLine>,
+    lines: Rc<[WrappedLine]>,
     font: gpui::Font,
     font_size: Pixels,
     line_height: Pixels,
     bounds: Bounds<Pixels>,
     selection: Range<usize>,
+    scroll_offset: Pixels,
+    cursor_offset: usize,
+    cursor_downstream: bool,
+    focused: bool,
 }
 
 impl TextInputLayout {
@@ -55,9 +62,22 @@ impl TextInputLayout {
         let start = byte_offset_for_utf16(text, range_utf16.start);
         let end = byte_offset_for_utf16(text, range_utf16.end);
         let range = start.min(end)..start.max(end);
+        if range.is_empty() && range.start == self.cursor_offset && self.cursor_downstream {
+            let position = cursor_position_with_affinity(
+                &self.lines,
+                text,
+                range.start,
+                self.line_height,
+                true,
+            )?;
+            return Some(Bounds::new(
+                bounds.origin + point(position.x, position.y - self.scroll_offset),
+                gpui::size(Pixels::ZERO, self.line_height),
+            ));
+        }
         let start_position = cursor_position(&self.lines, text, range.start, self.line_height)?;
         let mut line_start = 0;
-        for line in &self.lines {
+        for line in self.lines.iter() {
             let line_end = line_start + line.len();
             if range.start <= line_end {
                 // AppKit requests the first rectangle when a range spans visual rows.
@@ -76,7 +96,7 @@ impl TextInputLayout {
                 return Some(Bounds::new(
                     point(
                         bounds.left() + start_position.x.min(end_position.x),
-                        bounds.top() + start_position.y,
+                        bounds.top() + start_position.y - self.scroll_offset,
                     ),
                     gpui::size((end_position.x - start_position.x).abs(), self.line_height),
                 ));
@@ -101,36 +121,92 @@ impl DesktopShell {
     // Native text services can request candidate bounds before the next paint.
     fn refresh_text_input_layout(&mut self, target: TextInputTarget, window: &Window) {
         let text = self.text_input_value(target);
-        let Some(layout) = self.text_input_layout.as_ref() else {
+        let layout = if target == TextInputTarget::Composer {
+            self.composer_text_layout
+                .as_ref()
+                .or(self.text_input_layout.as_ref())
+        } else {
+            self.text_input_layout.as_ref()
+        };
+        let Some(layout) = layout else {
             return;
         };
-        if layout.target != target || layout.text.as_ref() == text {
+        if layout.target != target {
             return;
         }
-        let text: SharedString = text.to_owned().into();
-        let Ok(lines) = window.text_system().shape_text(
-            text.clone(),
-            layout.font_size,
-            &[TextRun {
-                len: text.len(),
-                font: layout.font.clone(),
-                color: gpui::black(),
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            }],
-            Some(layout.bounds.size.width),
-            Some(if target == TextInputTarget::Composer {
-                3
-            } else {
-                1
-            }),
-        ) else {
-            return;
+        let (text, lines) = if layout.text.as_ref() == text {
+            (layout.text.clone(), layout.lines.clone())
+        } else {
+            let text: SharedString = text.to_owned().into();
+            let Ok(lines) = window.text_system().shape_text(
+                text.clone(),
+                layout.font_size,
+                &[TextRun {
+                    len: text.len(),
+                    font: layout.font.clone(),
+                    color: gpui::black(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                }],
+                Some(layout.bounds.size.width),
+                (target != TextInputTarget::Composer).then_some(1),
+            ) else {
+                return;
+            };
+            (text, lines.into_vec().into())
         };
-        let layout = self.text_input_layout.as_mut().unwrap();
-        layout.text = text;
-        layout.lines = lines.into_vec();
+        let cursor_offset = self.text_input_cursor_offset(target);
+        let cursor_downstream =
+            target == TextInputTarget::Composer && self.composer_cursor_downstream;
+        let scroll_offset = if target == TextInputTarget::Composer {
+            let content_height = lines
+                .iter()
+                .map(|line| line.size(layout.line_height).height)
+                .sum::<Pixels>();
+            self.composer_scroll_max =
+                (content_height - layout.bounds.size.height).max(Pixels::ZERO);
+            self.composer_scroll_offset = cursor_position_with_affinity(
+                &lines,
+                &text,
+                cursor_offset,
+                layout.line_height,
+                cursor_downstream,
+            )
+            .map(|cursor| {
+                revealed_composer_scroll(
+                    self.composer_scroll_offset,
+                    cursor.y,
+                    layout.line_height,
+                    layout.bounds.size.height,
+                    self.composer_scroll_max,
+                )
+            })
+            .unwrap_or(Pixels::ZERO);
+            self.composer_scroll_offset
+        } else {
+            Pixels::ZERO
+        };
+        let layout = Rc::new(TextInputLayout {
+            target,
+            text,
+            lines,
+            font: layout.font.clone(),
+            font_size: layout.font_size,
+            line_height: layout.line_height,
+            bounds: layout.bounds,
+            selection: self.text_input_selection(target),
+            scroll_offset,
+            cursor_offset,
+            cursor_downstream,
+            focused: layout.focused,
+        });
+        if target == TextInputTarget::Composer {
+            self.composer_text_layout = Some(layout.clone());
+        }
+        if self.text_input_focus_handle(target).is_focused(window) {
+            self.text_input_layout = Some(layout);
+        }
     }
 
     fn text_input_target(&self, window: &Window) -> TextInputTarget {
@@ -320,6 +396,8 @@ impl DesktopShell {
     /// Used by slash completion and history recall; unlike
     /// `replace_composer_text` this does not reset the recall position.
     pub(super) fn set_composer_text(&mut self, text: String, cx: &mut Context<Self>) {
+        self.composer_preferred_column = None;
+        self.composer_cursor_downstream = false;
         self.initial_auto_attach = false;
         self.session_requests.cancel_initial_prompt();
         self.model.ui.set_composer(text);
@@ -497,12 +575,16 @@ impl DesktopShell {
     }
 
     fn move_composer_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.composer_preferred_column = None;
+        self.composer_cursor_downstream = false;
         self.composer_selection = offset..offset;
         self.composer_selection_reversed = false;
         self.restart_composer_cursor_blink(cx);
     }
 
     fn select_composer_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.composer_preferred_column = None;
+        self.composer_cursor_downstream = false;
         if self.composer_selection_reversed {
             self.composer_selection.start = offset;
         } else {
@@ -648,6 +730,8 @@ impl DesktopShell {
         replacement: &str,
         cx: &mut Context<Self>,
     ) {
+        self.composer_preferred_column = None;
+        self.composer_cursor_downstream = false;
         let mut updated = self.model.ui.composer.clone();
         self.initial_auto_attach = false;
         self.session_requests.cancel_initial_prompt();
@@ -670,6 +754,8 @@ impl DesktopShell {
         new_selected_range_utf16: Option<Range<usize>>,
         cx: &mut Context<Self>,
     ) {
+        self.composer_preferred_column = None;
+        self.composer_cursor_downstream = false;
         let current = self.model.ui.composer.clone();
         self.initial_auto_attach = false;
         self.session_requests.cancel_initial_prompt();
@@ -851,20 +937,37 @@ impl DesktopShell {
             underline: None,
             strikethrough: None,
         };
-        let lines = window
-            .text_system()
-            .shape_text(
-                content.clone().into(),
-                style.font_size.to_pixels(window.rem_size()),
-                &[run],
-                Some(bounds.size.width),
-                Some(3),
-            )
-            .unwrap_or_default();
-        let relative = point(position.x - bounds.left(), position.y - bounds.top());
+        let cached = self.composer_text_layout.as_ref().filter(|layout| {
+            layout.target == TextInputTarget::Composer
+                && layout.text.as_ref() == content
+                && layout.bounds == bounds
+        });
+        let line_height = cached
+            .map(|layout| layout.line_height)
+            .unwrap_or(window.line_height());
+        let shaped;
+        let lines: &[WrappedLine] = if let Some(layout) = cached {
+            &layout.lines
+        } else {
+            shaped = window
+                .text_system()
+                .shape_text(
+                    content.clone().into(),
+                    style.font_size.to_pixels(window.rem_size()),
+                    &[run],
+                    Some(bounds.size.width),
+                    None,
+                )
+                .unwrap_or_default();
+            &shaped
+        };
+        let relative = point(
+            position.x - bounds.left(),
+            position.y - bounds.top() + self.composer_scroll_offset,
+        );
         let mut search_offset = 0;
         let mut line_y = Pixels::ZERO;
-        for line in &lines {
+        for line in lines {
             let Some(line_start) = content
                 .get(search_offset..)
                 .and_then(|text| text.find(line.text.as_ref()))
@@ -872,13 +975,10 @@ impl DesktopShell {
             else {
                 continue;
             };
-            let line_height = line.size(window.line_height()).height;
-            if relative.y <= line_y + line_height {
+            let height = line.size(line_height).height;
+            if relative.y <= line_y + height {
                 let local = line
-                    .closest_index_for_position(
-                        point(relative.x, relative.y - line_y),
-                        window.line_height(),
-                    )
+                    .closest_index_for_position(point(relative.x, relative.y - line_y), line_height)
                     .unwrap_or_else(|offset| offset);
                 return (line_start + local).min(content.len());
             }
@@ -886,9 +986,78 @@ impl DesktopShell {
             if content.as_bytes().get(search_offset) == Some(&b'\n') {
                 search_offset += 1;
             }
-            line_y += line_height;
+            line_y += height;
         }
         content.len()
+    }
+
+    pub(super) fn composer_move_vertical(
+        &mut self,
+        older: bool,
+        extend: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self
+            .composer_text_layout
+            .as_ref()
+            .is_none_or(|layout| layout.text.as_ref() != self.model.ui.composer)
+        {
+            self.refresh_text_input_layout(TextInputTarget::Composer, window);
+        }
+        let Some(layout) = self.composer_text_layout.as_ref().filter(|layout| {
+            layout.target == TextInputTarget::Composer
+                && layout.text.as_ref() == self.model.ui.composer
+        }) else {
+            return false;
+        };
+        let height = layout
+            .lines
+            .iter()
+            .map(|line| line.size(layout.line_height).height)
+            .sum::<Pixels>();
+        if height <= layout.line_height {
+            return false;
+        }
+        let Some(cursor) = cursor_position_with_affinity(
+            &layout.lines,
+            &self.model.ui.composer,
+            self.composer_cursor_offset(),
+            layout.line_height,
+            self.composer_cursor_downstream,
+        ) else {
+            return false;
+        };
+        let target_y = (cursor.y
+            + if older {
+                -layout.line_height
+            } else {
+                layout.line_height
+            })
+        .clamp(Pixels::ZERO, height - layout.line_height)
+            + layout.line_height * 0.5;
+        let preferred_column = self.composer_preferred_column.unwrap_or(cursor.x);
+        let position =
+            layout.bounds.origin + point(preferred_column, target_y - self.composer_scroll_offset);
+        let offset = self.composer_index_for_position(position, window);
+        let upstream = cursor_position(
+            &layout.lines,
+            &self.model.ui.composer,
+            offset,
+            layout.line_height,
+        );
+        let downstream =
+            upstream.is_some_and(|position| position.y + layout.line_height * 0.5 < target_y);
+        if extend {
+            self.select_composer_to(offset, cx);
+            self.restart_composer_cursor_blink(cx);
+        } else {
+            self.move_composer_to(offset, cx);
+        }
+        self.composer_preferred_column = Some(preferred_column);
+        self.composer_cursor_downstream = downstream;
+        self.refresh_text_input_layout(TextInputTarget::Composer, window);
+        true
     }
 
     pub(super) fn composer_mouse_down(
@@ -924,8 +1093,35 @@ impl DesktopShell {
         cx: &mut Context<Self>,
     ) {
         if self.composer_is_selecting && event.dragging() {
+            if let Some(bounds) = self.composer_bounds {
+                let delta = if event.position.y < bounds.top() {
+                    event.position.y - bounds.top()
+                } else if event.position.y > bounds.bottom() {
+                    event.position.y - bounds.bottom()
+                } else {
+                    Pixels::ZERO
+                };
+                self.composer_scroll_offset = (self.composer_scroll_offset + delta)
+                    .clamp(Pixels::ZERO, self.composer_scroll_max);
+            }
             let offset = self.composer_index_for_position(event.position, window);
             self.select_composer_to(offset, cx);
+        }
+    }
+
+    pub(super) fn composer_scroll_wheel(
+        &mut self,
+        event: &gpui::ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let delta = event.delta.pixel_delta(window.line_height()).y;
+        let offset =
+            (self.composer_scroll_offset - delta).clamp(Pixels::ZERO, self.composer_scroll_max);
+        if self.composer_scroll_max > Pixels::ZERO {
+            self.composer_scroll_offset = offset;
+            cx.stop_propagation();
+            cx.notify();
         }
     }
 
@@ -977,55 +1173,53 @@ impl Element for ComposerElement {
     ) -> (LayoutId, Self::RequestLayoutState) {
         let mut style = Style::default();
         style.size.width = relative(1.).into();
-        style.size.height = match self.target {
-            TextInputTarget::Composer => {
-                let shell = self.shell.read(cx);
-                let content = shell.text_input_value(self.target).to_owned();
-                let width = shell
-                    .composer_bounds
-                    .map(|bounds| bounds.size.width)
-                    .unwrap_or(px(480.));
-                let text_style = window.text_style();
-                let line_count = if content.is_empty() {
-                    1
-                } else {
-                    let run = TextRun {
-                        len: content.len(),
-                        font: text_style.font(),
-                        color: text_style.color,
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
-                    };
-                    window
-                        .text_system()
-                        .shape_text(
-                            content.into(),
-                            text_style.font_size.to_pixels(window.rem_size()),
-                            &[run],
-                            Some(width),
-                            Some(3),
-                        )
-                        .map(|lines| {
-                            lines
-                                .iter()
-                                .map(|line| line.wrap_boundaries().len() + 1)
-                                .sum()
-                        })
-                        .unwrap_or(1)
-                };
-                px(composer_input_height(
-                    line_count,
-                    f32::from(window.line_height()),
-                ))
-            }
-            TextInputTarget::BrowserUrl => px(28.),
-            TextInputTarget::Rename => px(20.),
-            TextInputTarget::SidebarSearch => px(20.),
-            TextInputTarget::ModelSearch => px(20.),
+        if self.target != TextInputTarget::Composer {
+            style.size.height = px(match self.target {
+                TextInputTarget::BrowserUrl => 28.,
+                _ => 20.,
+            })
+            .into();
+            return (window.request_layout(style, [], cx), ());
         }
-        .into();
-        (window.request_layout(style, [], cx), ())
+        let content: SharedString = self.shell.read(cx).model.ui.composer.clone().into();
+        let text_style = window.text_style();
+        let font_size = text_style.font_size.to_pixels(window.rem_size());
+        let line_height = window.line_height();
+        let run = text_style.to_run(content.len());
+        let layout = window.request_measured_layout(style, move |known, available, window, _| {
+            let width = known
+                .width
+                .or(match available.width {
+                    gpui::AvailableSpace::Definite(width) => Some(width),
+                    _ => None,
+                })
+                .unwrap_or(px(480.));
+            let line_count = if content.is_empty() {
+                1
+            } else {
+                window
+                    .text_system()
+                    .shape_text(
+                        content.clone(),
+                        font_size,
+                        std::slice::from_ref(&run),
+                        Some(width),
+                        None,
+                    )
+                    .map(|lines| {
+                        lines
+                            .iter()
+                            .map(|line| line.wrap_boundaries().len() + 1)
+                            .sum()
+                    })
+                    .unwrap_or(1)
+            };
+            gpui::size(
+                width,
+                px(composer_input_height(line_count, f32::from(line_height))),
+            )
+        });
+        (layout, ())
     }
 
     fn prepaint(
@@ -1092,11 +1286,7 @@ impl Element for ComposerElement {
                 style.font_size.to_pixels(window.rem_size()),
                 &runs,
                 Some(bounds.size.width),
-                Some(if self.target == TextInputTarget::Composer {
-                    3
-                } else {
-                    1
-                }),
+                (self.target != TextInputTarget::Composer).then_some(1),
             )
             .unwrap_or_default();
         let cursor_text = if content.is_empty() {
@@ -1104,21 +1294,71 @@ impl Element for ComposerElement {
         } else {
             &content
         };
-        let cursor = if !selection.is_empty()
-            || (self.target == TextInputTarget::Composer && !shell.composer_cursor_visible)
-        {
-            None
-        } else {
-            cursor_position(&lines, cursor_text, cursor, window.line_height())
-        };
-        ComposerPrepaint {
+        let cursor_downstream =
+            self.target == TextInputTarget::Composer && shell.composer_cursor_downstream;
+        let caret = cursor_position_with_affinity(
+            &lines,
+            cursor_text,
+            cursor,
+            window.line_height(),
+            cursor_downstream,
+        );
+        let mut scroll_offset = Pixels::ZERO;
+        if self.target == TextInputTarget::Composer {
+            let content_height = lines
+                .iter()
+                .map(|line| line.size(window.line_height()).height)
+                .sum::<Pixels>();
+            let max_scroll = (content_height - bounds.size.height).max(Pixels::ZERO);
+            scroll_offset = shell.composer_scroll_offset.clamp(Pixels::ZERO, max_scroll);
+            let reveal = shell.composer_text_layout.as_ref().is_none_or(|layout| {
+                layout.target != self.target
+                    || layout.text.as_ref() != content
+                    || layout.bounds != bounds
+                    || layout.cursor_offset != cursor
+                    || layout.selection != selection
+                    || (shell.composer_focus_handle.is_focused(window) && !layout.focused)
+            });
+            if reveal {
+                if let Some(caret) = caret {
+                    scroll_offset = revealed_composer_scroll(
+                        scroll_offset,
+                        caret.y,
+                        window.line_height(),
+                        bounds.size.height,
+                        max_scroll,
+                    );
+                }
+            }
+        }
+        let draw_cursor = selection.is_empty()
+            && (self.target != TextInputTarget::Composer || shell.composer_cursor_visible);
+        let cursor_position = caret
+            .filter(|_| draw_cursor)
+            .map(|position| point(position.x, position.y - scroll_offset));
+        let prepaint = ComposerPrepaint {
             text: content,
             lines: lines.into_vec(),
             font: style.font(),
             font_size: style.font_size.to_pixels(window.rem_size()),
-            cursor,
+            cursor: cursor_position,
             line_height: window.line_height(),
+            scroll_offset,
+            cursor_offset: cursor,
+            cursor_downstream,
+        };
+        if self.target == TextInputTarget::Composer {
+            let content_height = prepaint
+                .lines
+                .iter()
+                .map(|line| line.size(prepaint.line_height).height)
+                .sum::<Pixels>();
+            self.shell.update(cx, |shell, _| {
+                shell.composer_scroll_offset = scroll_offset;
+                shell.composer_scroll_max = (content_height - bounds.size.height).max(Pixels::ZERO);
+            });
         }
+        prepaint
     }
 
     fn paint(
@@ -1150,39 +1390,47 @@ impl Element for ComposerElement {
             cx,
         );
         let selection = self.shell.read(cx).text_input_selection(self.target);
-        let mut line_y = bounds.top();
-        for line in &prepaint.lines {
-            if !selection.is_empty() {
-                let _ = line.paint_background(
-                    point(bounds.left(), line_y),
-                    prepaint.line_height,
-                    gpui::TextAlign::Left,
-                    Some(bounds),
-                    window,
-                    cx,
-                );
+        window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+            let mut line_y = bounds.top() - prepaint.scroll_offset;
+            for line in &prepaint.lines {
+                let height = line.size(prepaint.line_height).height;
+                if line_y + height > bounds.top() && line_y < bounds.bottom() {
+                    if !selection.is_empty() {
+                        let _ = line.paint_background(
+                            point(bounds.left(), line_y),
+                            prepaint.line_height,
+                            gpui::TextAlign::Left,
+                            Some(bounds),
+                            window,
+                            cx,
+                        );
+                    }
+                    let _ = line.paint(
+                        point(bounds.left(), line_y),
+                        prepaint.line_height,
+                        gpui::TextAlign::Left,
+                        Some(bounds),
+                        window,
+                        cx,
+                    );
+                }
+                line_y += height;
             }
-            let _ = line.paint(
-                point(bounds.left(), line_y),
-                prepaint.line_height,
-                gpui::TextAlign::Left,
-                Some(bounds),
-                window,
-                cx,
-            );
-            line_y += line.size(prepaint.line_height).height;
-        }
-        if focus_handle.is_focused(window) {
-            if let Some(cursor) = prepaint.cursor {
-                let theme = self.shell.read(cx).theme.clone();
-                window.paint_quad(fill(
-                    Bounds::new(
-                        point(bounds.left() + cursor.x, bounds.top() + cursor.y),
-                        gpui::size(px(2.), prepaint.line_height),
-                    ),
-                    theme_rgb(&theme, "foreground"),
-                ));
+            if focus_handle.is_focused(window) {
+                if let Some(cursor) = prepaint.cursor {
+                    let theme = self.shell.read(cx).theme.clone();
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            point(bounds.left() + cursor.x, bounds.top() + cursor.y),
+                            gpui::size(px(2.), prepaint.line_height),
+                        ),
+                        theme_rgb(&theme, "foreground"),
+                    ));
+                }
             }
+        });
+        let focused = focus_handle.is_focused(window);
+        if self.target == TextInputTarget::Composer || focused {
             let geometry_changed =
                 self.shell
                     .read(cx)
@@ -1196,21 +1444,33 @@ impl Element for ComposerElement {
                             || layout.font != prepaint.font
                             || layout.font_size != prepaint.font_size
                             || layout.line_height != prepaint.line_height
+                            || layout.scroll_offset != prepaint.scroll_offset
+                            || layout.cursor_offset != prepaint.cursor_offset
+                            || layout.cursor_downstream != prepaint.cursor_downstream
                     });
-            let layout = TextInputLayout {
+            let layout = Rc::new(TextInputLayout {
                 target: self.target,
                 text: std::mem::take(&mut prepaint.text).into(),
-                lines: std::mem::take(&mut prepaint.lines),
+                lines: std::mem::take(&mut prepaint.lines).into(),
                 font: std::mem::take(&mut prepaint.font),
                 font_size: prepaint.font_size,
                 line_height: prepaint.line_height,
                 bounds,
                 selection,
-            };
-            self.shell.update(cx, |shell, _| {
-                shell.text_input_layout = Some(layout);
+                scroll_offset: prepaint.scroll_offset,
+                cursor_offset: prepaint.cursor_offset,
+                cursor_downstream: prepaint.cursor_downstream,
+                focused,
             });
-            if geometry_changed {
+            self.shell.update(cx, |shell, _| {
+                if self.target == TextInputTarget::Composer {
+                    shell.composer_text_layout = Some(layout.clone());
+                }
+                if focused {
+                    shell.text_input_layout = Some(layout);
+                }
+            });
+            if focused && geometry_changed {
                 window.invalidate_character_coordinates();
             }
         }
@@ -1221,11 +1481,34 @@ pub(super) fn composer_input_height(line_count: usize, line_height: f32) -> f32 
     (line_count.max(1) as f32 * line_height).clamp(48., 96.)
 }
 
+fn revealed_composer_scroll(
+    offset: Pixels,
+    caret_y: Pixels,
+    line_height: Pixels,
+    viewport_height: Pixels,
+    max_scroll: Pixels,
+) -> Pixels {
+    let offset = offset
+        .min(caret_y)
+        .max(caret_y + line_height - viewport_height);
+    offset.clamp(Pixels::ZERO, max_scroll)
+}
+
 fn cursor_position(
     lines: &[WrappedLine],
     text: &str,
     cursor: usize,
     line_height: Pixels,
+) -> Option<Point<Pixels>> {
+    cursor_position_with_affinity(lines, text, cursor, line_height, false)
+}
+
+fn cursor_position_with_affinity(
+    lines: &[WrappedLine],
+    text: &str,
+    cursor: usize,
+    line_height: Pixels,
+    downstream: bool,
 ) -> Option<Point<Pixels>> {
     let mut search_offset = 0;
     let mut line_y = Pixels::ZERO;
@@ -1243,6 +1526,13 @@ fn cursor_position(
         if cursor_belongs_here {
             let local_cursor = cursor.saturating_sub(line_start).min(line.len());
             let position = line.position_for_index(local_cursor, line_height)?;
+            if downstream
+                && line.wrap_boundaries().iter().any(|boundary| {
+                    line.runs()[boundary.run_ix].glyphs[boundary.glyph_ix].index == local_cursor
+                })
+            {
+                return Some(point(Pixels::ZERO, line_y + position.y + line_height));
+            }
             return Some(point(position.x, line_y + position.y));
         }
 
@@ -1444,7 +1734,7 @@ impl EntityInputHandler for DesktopShell {
         &mut self,
         range_utf16: Range<usize>,
         window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
         let target = self.text_input_target(window);
         let text = self.text_input_value(target);
@@ -1452,12 +1742,18 @@ impl EntityInputHandler for DesktopShell {
             ..byte_offset_for_utf16(text, range_utf16.end);
         self.set_text_input_selection(target, selection);
         match target {
-            TextInputTarget::Composer => self.composer_selection_reversed = false,
+            TextInputTarget::Composer => {
+                self.composer_selection_reversed = false;
+                self.composer_preferred_column = None;
+                self.composer_cursor_downstream = false;
+            }
             TextInputTarget::BrowserUrl => self.browser_url_selection_reversed = false,
             TextInputTarget::Rename => self.rename_selection_reversed = false,
             TextInputTarget::SidebarSearch => self.sidebar_search_selection_reversed = false,
             TextInputTarget::ModelSearch => self.model_picker_selection_reversed = false,
         }
+        self.refresh_text_input_layout(target, window);
+        cx.notify();
     }
 
     fn text_length_utf16(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> Option<usize> {
@@ -1495,12 +1791,16 @@ mod tests {
         TextInputLayout {
             target: TextInputTarget::Composer,
             text: text.to_owned().into(),
-            lines,
+            lines: lines.into(),
             font: gpui::font("Helvetica"),
             font_size: px(16.),
             line_height: px(24.),
             bounds: Bounds::new(point(px(0.), px(0.)), gpui::size(px(width), px(96.))),
             selection: 0..0,
+            scroll_offset: Pixels::ZERO,
+            cursor_offset: 0,
+            cursor_downstream: false,
+            focused: false,
         }
     }
 
@@ -1756,9 +2056,18 @@ mod tests {
             shell.update(cx, |shell, cx| {
                 let layout = shell.text_input_layout.as_ref().unwrap();
                 assert_eq!(layout.lines.len(), 1);
-                assert_eq!(layout.lines[0].wrap_boundaries().len(), 2);
+                assert_eq!(
+                    layout.lines[0].text.as_ref(),
+                    text,
+                    "wrapping preserves the full draft"
+                );
+                assert_eq!(layout.lines[0].wrap_boundaries().len(), 3);
                 let field = shell.composer_bounds.unwrap();
-                assert_eq!(field.size.height, layout.line_height * 3.);
+                assert_eq!(
+                    field.size.height,
+                    px(96.),
+                    "long wrapping respects the editor height limit"
+                );
                 let caret = shell
                     .bounds_for_range(text.len()..text.len(), field, window, cx)
                     .unwrap();
@@ -1766,6 +2075,538 @@ mod tests {
                 shell.quitting = true;
             });
         });
+    }
+
+    #[gpui::test]
+    fn long_drafts_keep_the_caret_and_pointer_mapping_inside_the_editor(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.skip_drawing();
+        let cx = cx.add_empty_window();
+        let shell = cx
+            .new_window_entity(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        for text in [
+            "first\nsecond\nthird\nfourth\nfifth\nsixth\nseventh\nlast é🙂".to_owned(),
+            "wrapped draft é🙂 ".repeat(80),
+        ] {
+            cx.update(|window, cx| {
+                let focus = shell.update(cx, |shell, _| {
+                    shell.model.ui.composer = text.clone();
+                    shell.composer_selection = text.len()..text.len();
+                    shell.composer_cursor_visible = true;
+                    shell.composer_focus_handle.clone()
+                });
+                window.focus(&focus, cx);
+            });
+            for width in [240., 360.] {
+                let (_, painted) = cx.draw(
+                    point(px(80.), px(120.)),
+                    gpui::size(px(width), px(96.)),
+                    |_, _| ComposerElement {
+                        shell: shell.clone(),
+                        target: TextInputTarget::Composer,
+                    },
+                );
+                let caret = painted.cursor.expect("focused draft has a caret");
+                cx.update(|window, cx| {
+                    shell.update(cx, |shell, cx| {
+                        let field = shell.composer_bounds.unwrap();
+                        assert!(field.size.height <= px(96.));
+                        assert!(
+                            caret.y >= px(0.) && caret.y + painted.line_height <= field.size.height,
+                            "the draft tail is visible at width {width}"
+                        );
+                        let utf16_end = text.encode_utf16().count();
+                        let native = shell
+                            .bounds_for_range(utf16_end..utf16_end, field, window, cx)
+                            .unwrap();
+                        assert_eq!(native.origin, field.origin + caret);
+                        assert!(native.bottom() <= field.bottom());
+                        assert_eq!(
+                            shell.composer_index_for_position(
+                                native.origin + point(px(1.), px(1.)),
+                                window
+                            ),
+                            text.len(),
+                            "pointer lookup follows the scrolled text"
+                        );
+                    })
+                });
+            }
+            shell.update(cx, |shell, _| {
+                shell.composer_selection = 0..text.len();
+                shell.composer_selection_reversed = true;
+            });
+            cx.draw(
+                point(px(80.), px(120.)),
+                gpui::size(px(240.), px(96.)),
+                |_, _| ComposerElement {
+                    shell: shell.clone(),
+                    target: TextInputTarget::Composer,
+                },
+            );
+            shell.read_with(cx, |shell, _| {
+                assert_eq!(
+                    shell.composer_scroll_offset,
+                    Pixels::ZERO,
+                    "selection reveals its active edge"
+                )
+            });
+            cx.update(|window, cx| {
+                shell.update(cx, |shell, cx| {
+                    shell.composer_home(&ComposerHome, window, cx)
+                })
+            });
+            let (_, painted) = cx.draw(
+                point(px(80.), px(120.)),
+                gpui::size(px(240.), px(96.)),
+                |_, _| ComposerElement {
+                    shell: shell.clone(),
+                    target: TextInputTarget::Composer,
+                },
+            );
+            assert_eq!(
+                painted.cursor.unwrap().y,
+                px(0.),
+                "moving to the beginning reveals it"
+            );
+        }
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn draft_wheel_scrolling_holds_until_editing_and_ime_tracks_the_scrolled_caret(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.skip_drawing();
+        let cx = cx.add_empty_window();
+        let shell = cx
+            .new_window_entity(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        let text = "first\nsecond\nthird\nfourth\nfifth\nsixth\nseventh\nend é🙂";
+        cx.update(|window, cx| {
+            let focus = shell.update(cx, |shell, _| {
+                shell.model.ui.composer = text.into();
+                shell.composer_selection = text.len()..text.len();
+                shell.composer_focus_handle.clone()
+            });
+            window.focus(&focus, cx);
+        });
+        cx.draw(
+            point(px(80.), px(120.)),
+            gpui::size(px(240.), px(96.)),
+            |_, _| ComposerElement {
+                shell: shell.clone(),
+                target: TextInputTarget::Composer,
+            },
+        );
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                assert!(shell.composer_scroll_offset > Pixels::ZERO);
+                let field = shell.composer_bounds.unwrap().scale(window.scale_factor());
+                assert!(
+                    window
+                        .painted_quads()
+                        .iter()
+                        .any(|quad| quad.content_mask.bounds == field),
+                    "the caret is clipped to the editor viewport"
+                );
+                shell.composer_scroll_wheel(
+                    &gpui::ScrollWheelEvent {
+                        delta: gpui::ScrollDelta::Pixels(point(px(0.), px(1000.))),
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
+                );
+            })
+        });
+        let (_, painted) = cx.draw(
+            point(px(80.), px(120.)),
+            gpui::size(px(240.), px(96.)),
+            |_, _| ComposerElement {
+                shell: shell.clone(),
+                target: TextInputTarget::Composer,
+            },
+        );
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(
+                shell.composer_scroll_offset,
+                Pixels::ZERO,
+                "manual scrolling can inspect the beginning while the caret stays at the end"
+            )
+        });
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                let field = shell.composer_bounds.unwrap();
+                assert_eq!(
+                    shell.composer_index_for_position(field.origin + point(px(1.), px(1.)), window),
+                    0
+                );
+                shell.replace_and_mark_text_in_range(None, "拼音", Some(2..2), window, cx);
+                let end = shell.model.ui.composer.encode_utf16().count();
+                let caret = shell.bounds_for_range(end..end, field, window, cx).unwrap();
+                assert!(
+                    caret.top() >= field.top() && caret.bottom() <= field.bottom(),
+                    "IME geometry follows editing before the next paint"
+                );
+            })
+        });
+        let (_, edited) = cx.draw(
+            point(px(80.), px(120.)),
+            gpui::size(px(240.), px(96.)),
+            |_, _| ComposerElement {
+                shell: shell.clone(),
+                target: TextInputTarget::Composer,
+            },
+        );
+        assert!(
+            painted.cursor.is_some_and(|cursor| cursor.y >= px(96.)),
+            "the offscreen caret is clipped rather than forcing manual scroll back"
+        );
+        assert!(edited.cursor.unwrap().y + edited.line_height <= px(96.));
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn unchanged_marked_text_and_native_selection_reveal_the_active_caret(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.skip_drawing();
+        let cx = cx.add_empty_window();
+        let shell = cx
+            .new_window_entity(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|window, cx| {
+            let focus = shell.read(cx).composer_focus_handle.clone();
+            window.focus(&focus, cx);
+        });
+        cx.draw(
+            point(px(80.), px(120.)),
+            gpui::size(px(240.), px(96.)),
+            |_, _| ComposerElement {
+                shell: shell.clone(),
+                target: TextInputTarget::Composer,
+            },
+        );
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                let text = "first\nsecond\nthird\nfourth\nfifth\nsixth\nlast 拼音";
+                let end = text.encode_utf16().count();
+                let field = shell.composer_bounds.unwrap();
+                shell.replace_and_mark_text_in_range(None, text, Some(end..end), window, cx);
+                assert!(shell.composer_scroll_offset > Pixels::ZERO);
+                shell.replace_and_mark_text_in_range(None, text, Some(0..0), window, cx);
+                let caret = shell.bounds_for_range(0..0, field, window, cx).unwrap();
+                assert_eq!(
+                    caret.top(),
+                    field.top(),
+                    "unchanged composition reveals its new caret before painting"
+                );
+                shell.set_selected_text_range(end..end, window, cx);
+                let caret = shell.bounds_for_range(end..end, field, window, cx).unwrap();
+                assert!(
+                    caret.top() >= field.top() && caret.bottom() <= field.bottom(),
+                    "native selection updates candidate geometry before painting"
+                );
+                shell.quitting = true;
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn long_drafts_move_vertically_instead_of_recalling_prompt_history(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.skip_drawing();
+        let cx = cx.add_empty_window();
+        let shell = cx
+            .new_window_entity(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        for text in [
+            "first\nsecond\nthird\nfourth\nfifth\nsixth\nlast é🙂".to_owned(),
+            "a wrapped draft é🙂 ".repeat(20),
+        ] {
+            cx.update(|window, cx| {
+                let focus = shell.update(cx, |shell, _| {
+                    shell.model.ui.composer = text.clone();
+                    shell.composer_selection = text.len()..text.len();
+                    shell.composer_selection_reversed = false;
+                    shell.composer_focus_handle.clone()
+                });
+                window.focus(&focus, cx);
+            });
+            cx.draw(
+                point(px(80.), px(120.)),
+                gpui::size(px(240.), px(96.)),
+                |_, _| ComposerElement {
+                    shell: shell.clone(),
+                    target: TextInputTarget::Composer,
+                },
+            );
+            cx.update(|window, cx| {
+                shell.update(cx, |shell, cx| {
+                    for key in ["up", "shift-up"] {
+                        shell.composer_key_down(
+                            &gpui::KeyDownEvent {
+                                keystroke: gpui::Keystroke::parse(key).unwrap(),
+                                is_held: false,
+                                prefer_character_input: false,
+                            },
+                            window,
+                            cx,
+                        );
+                    }
+                    assert_eq!(shell.model.ui.composer, text);
+                    assert!(shell.composer_cursor_offset() < text.len());
+                    assert!(
+                        !shell.composer_selection.is_empty(),
+                        "shift-up extends selection"
+                    );
+                    assert!(shell.composer_selection_reversed);
+                })
+            });
+            let (_, painted) = cx.draw(
+                point(px(80.), px(120.)),
+                gpui::size(px(240.), px(96.)),
+                |_, _| ComposerElement {
+                    shell: shell.clone(),
+                    target: TextInputTarget::Composer,
+                },
+            );
+            shell.read_with(cx, |shell, _| {
+                let cursor = cursor_position(
+                    &shell.text_input_layout.as_ref().unwrap().lines,
+                    &text,
+                    shell.composer_cursor_offset(),
+                    painted.line_height,
+                )
+                .unwrap();
+                assert!(
+                    cursor.y >= shell.composer_scroll_offset
+                        && cursor.y + painted.line_height <= shell.composer_scroll_offset + px(96.)
+                );
+            });
+        }
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn vertical_navigation_preserves_the_column_through_short_lines(cx: &mut gpui::TestAppContext) {
+        cx.skip_drawing();
+        let cx = cx.add_empty_window();
+        let shell = cx
+            .new_window_entity(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        for extend in [false, true] {
+            cx.update(|window, cx| {
+                let focus = shell.update(cx, |shell, cx| {
+                    shell.set_composer_text("abcdefghij\nx\nabcdefghij".into(), cx);
+                    shell.move_composer_to(8, cx);
+                    shell.composer_focus_handle.clone()
+                });
+                window.focus(&focus, cx);
+            });
+            cx.draw(
+                point(px(80.), px(120.)),
+                gpui::size(px(400.), px(96.)),
+                |_, _| ComposerElement {
+                    shell: shell.clone(),
+                    target: TextInputTarget::Composer,
+                },
+            );
+            cx.update(|window, cx| {
+                shell.update(cx, |shell, cx| {
+                    assert!(shell.composer_move_vertical(false, extend, window, cx));
+                    assert_eq!(shell.composer_cursor_offset(), 12);
+                    assert!(shell.composer_move_vertical(false, extend, window, cx));
+                    assert_eq!(
+                        shell.composer_cursor_offset(),
+                        21,
+                        "the next long line restores column eight"
+                    );
+                    if extend {
+                        assert_eq!(shell.composer_selection, 8..21);
+                    }
+                    shell.composer_left(&ComposerLeft, window, cx);
+                    shell.composer_move_vertical(true, false, window, cx);
+                    shell.composer_move_vertical(true, false, window, cx);
+                    assert_eq!(
+                        shell.composer_cursor_offset(),
+                        if extend { 8 } else { 7 },
+                        "horizontal movement resets the preferred column"
+                    );
+                })
+            });
+        }
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn vertical_navigation_uses_the_target_side_of_a_soft_wrap(cx: &mut gpui::TestAppContext) {
+        cx.skip_drawing();
+        let cx = cx.add_empty_window();
+        let shell = cx
+            .new_window_entity(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|window, cx| {
+            let focus = shell.update(cx, |shell, _| {
+                shell.model.ui.composer = "a wrapped draft ".repeat(30);
+                shell.composer_selection = 0..0;
+                shell.composer_focus_handle.clone()
+            });
+            window.focus(&focus, cx);
+        });
+        cx.draw(
+            point(px(80.), px(120.)),
+            gpui::size(px(240.), px(96.)),
+            |_, _| ComposerElement {
+                shell: shell.clone(),
+                target: TextInputTarget::Composer,
+            },
+        );
+        for (older, row) in [(false, 1.), (false, 2.), (true, 1.)] {
+            cx.update(|window, cx| {
+                shell.update(cx, |shell, cx| {
+                    assert!(shell.composer_move_vertical(older, false, window, cx));
+                })
+            });
+            let (_, painted) = cx.draw(
+                point(px(80.), px(120.)),
+                gpui::size(px(240.), px(96.)),
+                |_, _| ComposerElement {
+                    shell: shell.clone(),
+                    target: TextInputTarget::Composer,
+                },
+            );
+            let caret = painted.cursor.unwrap();
+            assert_eq!(caret.y, painted.line_height * row);
+            assert_eq!(caret.x, px(0.));
+            cx.update(|window, cx| {
+                shell.update(cx, |shell, cx| {
+                    let offset = utf16_offset_for_byte(
+                        &shell.model.ui.composer,
+                        shell.composer_cursor_offset(),
+                    );
+                    let field = shell.composer_bounds.unwrap();
+                    let native = shell
+                        .bounds_for_range(offset..offset, field, window, cx)
+                        .unwrap();
+                    assert_eq!(
+                        native.origin,
+                        field.origin + caret,
+                        "native geometry uses the same wrap affinity"
+                    );
+                    assert_eq!(
+                        shell.composer_index_for_position(
+                            native.origin + point(px(0.1), px(1.)),
+                            window
+                        ),
+                        shell.composer_cursor_offset()
+                    );
+                })
+            });
+        }
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn vertical_navigation_refreshes_a_draft_edited_before_paint(cx: &mut gpui::TestAppContext) {
+        cx.skip_drawing();
+        let cx = cx.add_empty_window();
+        let shell = cx
+            .new_window_entity(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|window, cx| {
+            let focus = shell.update(cx, |shell, _| {
+                shell.model.ui.composer = "a wrapped draft ".repeat(30);
+                let end = shell.model.ui.composer.len();
+                shell.composer_selection = end..end;
+                shell.composer_focus_handle.clone()
+            });
+            window.focus(&focus, cx);
+        });
+        cx.draw(
+            point(px(80.), px(120.)),
+            gpui::size(px(240.), px(96.)),
+            |_, _| ComposerElement {
+                shell: shell.clone(),
+                target: TextInputTarget::Composer,
+            },
+        );
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.composer_backspace(&ComposerBackspace, window, cx);
+                let edited = shell.model.ui.composer.clone();
+                let cursor = shell.composer_cursor_offset();
+                assert!(
+                    shell.composer_move_vertical(true, false, window, cx),
+                    "edited wrapping is available before drawing"
+                );
+                assert_eq!(shell.model.ui.composer, edited);
+                assert!(shell.composer_cursor_offset() < cursor);
+                shell.quitting = true;
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn scrolling_an_unfocused_draft_does_not_follow_another_fields_layout(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.skip_drawing();
+        let cx = cx.add_empty_window();
+        let shell = cx
+            .new_window_entity(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|window, cx| {
+            let focus = shell.update(cx, |shell, _| {
+                shell.model.ui.composer = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight".into();
+                shell.composer_selection =
+                    shell.model.ui.composer.len()..shell.model.ui.composer.len();
+                shell.composer_focus_handle.clone()
+            });
+            window.focus(&focus, cx);
+        });
+        cx.draw(
+            point(px(80.), px(120.)),
+            gpui::size(px(240.), px(96.)),
+            |_, _| ComposerElement {
+                shell: shell.clone(),
+                target: TextInputTarget::Composer,
+            },
+        );
+        cx.update(|window, cx| window.focus(&shell.read(cx).browser_url_focus_handle.clone(), cx));
+        cx.draw(
+            point(px(400.), px(20.)),
+            gpui::size(px(240.), px(28.)),
+            |_, _| ComposerElement {
+                shell: shell.clone(),
+                target: TextInputTarget::BrowserUrl,
+            },
+        );
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.composer_scroll_wheel(
+                    &gpui::ScrollWheelEvent {
+                        delta: gpui::ScrollDelta::Pixels(point(px(0.), px(1000.))),
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
+                )
+            })
+        });
+        cx.draw(
+            point(px(80.), px(120.)),
+            gpui::size(px(240.), px(96.)),
+            |_, _| ComposerElement {
+                shell: shell.clone(),
+                target: TextInputTarget::Composer,
+            },
+        );
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.composer_scroll_offset, Pixels::ZERO);
+            assert_eq!(
+                shell.text_input_layout.as_ref().unwrap().target,
+                TextInputTarget::BrowserUrl,
+                "draft painting does not steal native text input ownership"
+            );
+        });
+        shell.update(cx, |shell, _| shell.quitting = true);
     }
 
     #[gpui::test]

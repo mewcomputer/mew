@@ -87,6 +87,19 @@ For application-driven text or selection changes, the pin also exposes
 services. These notifications complement GPUI redraw; use them when changing the
 registered input through application commands.
 
+The composer shapes the complete draft, measures against its available width
+and caps its editing viewport at 96 px. Paint text, selection and caret through
+the same content mask and scroll offset used by pointer lookup and native range
+geometry. Retain composer geometry separately from the focused shell field so
+scrolling an unfocused draft cannot reuse a URL or search layout. Manual scroll
+holds until editing, selection, focus or geometry requires revealing the caret.
+
+Vertical draft movement keeps the preferred horizontal position across short
+lines and tracks the downstream side of soft wraps. Refresh retained geometry
+when editing precedes the next paint. Native composition and selection callbacks
+must refresh caret/scroll geometry even if the text bytes are unchanged; reuse
+the shaping in that case.
+
 ## Pointer selection
 
 `WrappedLine::paint` paints glyphs and text decorations. Paint selected text's

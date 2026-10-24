@@ -3222,3 +3222,26 @@ buttons, partial code/output selection after editing a draft, correct Cmd-C
 routing, and readable selection in dark and light modes. Physical IME and
 VoiceOver remain unverified. Markdown structure and activity hierarchy remain
 separate follow-up work.
+
+# 2026-10-24 - scroll long desktop drafts within the editor
+
+The composer now measures and shapes the complete draft inside its existing
+height cap. Text, selection and caret share a clipped scrolling viewport with
+pointer hit testing and native range geometry. Manual wheel scrolling holds
+until editing or a relevant caret/geometry change. Composer geometry remains
+available while another shell input owns native text focus.
+
+Up/Down and Shift-Up/Down navigate visual draft rows before prompt history,
+retain the horizontal position through short lines and respect soft-wrap
+affinity. Native composition and selection refresh candidate geometry before
+the next paint, including unchanged marked text with a moved selection.
+
+All 247 desktop tests pass, including 24 composer tests with failing-first
+coverage for scrolling, clipping, Unicode, width changes, pointer mapping,
+keyboard navigation and synchronous native geometry. Strict desktop Clippy,
+native build/packaging, formatting, architecture and generated-theme checks
+pass. The isolated native app confirms bounded eight-line drafts, wheel
+scrolling and Shift-arrow selection without toolbar overlap. Later wrapped-draft
+and pane-width visual checks were limited by stale computer-use captures;
+automated geometry coverage passed. Test drafts were cleared and owned QA
+processes stopped. Physical IME and VoiceOver remain unverified.

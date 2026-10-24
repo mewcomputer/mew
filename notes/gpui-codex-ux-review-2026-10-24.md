@@ -493,3 +493,21 @@ tests cover complete sources, Unicode, offscreen chunks and real pointer/focus
 behavior. Native QA confirms code/result buttons and partial selection copying
 after draft editing, with readable selection in both theme modes. This does not
 resolve list/table fidelity, repeated code cards or source-file link routing.
+
+## Draft editing follow-up, 2026-10-24
+
+Resolved the overflowing-draft defect with complete shaping, measured wrapping
+and an internally scrolling, clipped editor. The caret, selection, pointer
+mapping and native candidate geometry share the scroll offset. Vertical keys
+edit visual rows before history recall and preserve their horizontal position
+through short lines and soft wraps. Unchanged composition text can move its
+selection without waiting for another paint.
+
+The 247-test desktop suite and strict lint/build gates pass. Actual GPUI tests
+cover narrow/wide wrapping, caret clipping and revelation, manual scroll,
+another field owning native focus and immediate IME geometry. Native QA confirms
+an eight-line draft stays within its viewport and supports wheel scrolling and
+Shift-arrow selection. Captures became stale during the later wrapped/pane-width
+check, so visual verification of that transition remains open. Physical IME and
+VoiceOver remain unverified. The remaining markdown, activity/progress and
+composer hierarchy findings keep their existing priority.

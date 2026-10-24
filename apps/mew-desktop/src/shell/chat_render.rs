@@ -2099,6 +2099,7 @@ impl DesktopShell {
                                         cx.listener(Self::composer_mouse_up),
                                     )
                                     .on_mouse_move(cx.listener(Self::composer_mouse_move))
+                                    .on_scroll_wheel(cx.listener(Self::composer_scroll_wheel))
                                     .child(ComposerElement {
                                         shell: cx.entity(),
                                         target: TextInputTarget::Composer,
