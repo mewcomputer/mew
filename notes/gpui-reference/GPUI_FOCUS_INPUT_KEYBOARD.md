@@ -120,6 +120,14 @@ Keep source byte offsets for tool lines and reconstruct virtual code chunks
 from retained markdown when copying across offscreen content. Copy buttons use
 the complete section or fence source, including preview-hidden lines.
 
+List items and table cells retain their parent block identity and use source
+byte offsets inside that block. Avoid arithmetic child IDs that can collide
+with the next top-level block. Copy structured content from the retained
+projection, including offscreen rows; tables separate cells with tabs. Pointer
+targeting must distinguish horizontal cells as well as vertical rows. At this
+pin, `TextLayout` hit testing ignores text alignment, so position aligned cell
+content directly to keep pointer geometry consistent with paint.
+
 ## Verification
 
 Exercise each field's focus independently, including switching from CEF back to

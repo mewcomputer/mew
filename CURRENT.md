@@ -3264,3 +3264,32 @@ copy regressions pass. The combined desktop suite passes all 261 tests, plus
 strict Clippy, native build/packaging, formatting, architecture, generated-theme
 checks and hooks. Native QA confirms one continuous 32-line fence and complete
 copy in the isolated app, with readable syntax in dark and light themes.
+
+# 2026-10-24 - preserve desktop markdown lists and tables
+
+Lists retain ordered starts, sequential sibling numbers and nested marker depth
+instead of becoming a flat set of bullets. Wrapped items use hanging content
+columns; parent continuations keep their owning item. Existing inline styles
+and links survive parsing and virtualization.
+
+Tables now contain real cells and column alignment rather than pipe-delimited
+text rows. Cells wrap within equal columns, headers have a quiet surface, and
+wide tables scroll inside the conversation. Virtual chunks retain column
+metadata and share horizontal position; only the first logical row is a header.
+Escaped pipes, matched code spans, Unicode, empty cells and ragged rows are
+covered. Center/right content is positioned directly because pinned GPUI text
+hit testing omits text-alignment offsets.
+
+Selection uses stable block identities and byte offsets for list items and
+table cells. Copy reconstructs offscreen structured chunks in reading order,
+with tabs between table cells and newlines between rows. Pointer targeting also
+distinguishes cells on the same visual row.
+
+The combined desktop suite passes all 261 tests; the final four focused layout
+tests also pass after adding center-alignment coverage. Strict Clippy, native
+build/packaging, formatting, architecture and generated-theme checks pass.
+Native QA confirms nested/ordered markers, wrapping aligned tables, Unicode row
+selection/copy and split-to-wide layout in dark and light modes. Test drafts
+were cleared, theme/layout restored, and owned QA processes stopped. VoiceOver
+and physical IME remain unverified. Nested block-level content and interactive
+task checkboxes were not added in this pass.

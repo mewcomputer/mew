@@ -521,3 +521,22 @@ reproduced a 66 px seam before the fix; it now matches normal 20 px leading.
 Narrow/wide geometry, source fidelity, adjacent fences, streaming scroll state
 and existing copy behavior pass. The native 32-line fixture confirms continuous
 spacing and complete copy, with readable syntax in both themes.
+
+## Lists and tables follow-up, 2026-10-24
+
+Resolved flattened list markers/depth and pipe-delimited table rendering. Lists
+retain ordered starts, nested markers and hanging wrapped text. Tables retain
+cells, alignment and a single header across virtual rows, wrap within shared
+columns and scroll horizontally inside the reading column. Inline formatting,
+links, escaped pipes and code-span pipes survive the projection. Structured
+selection uses parent block identities and byte offsets; copied table rows have
+tabs between cells.
+
+Parser and actual GPUI tests cover source structure, streamed/final parity,
+narrow/wide geometry, left/center/right placement, cross-cell selection and
+shared scrolling across virtual table chunks. All 261 desktop tests and the
+lint/build gates pass. Native split/wide QA confirms ordered/nested markers,
+aligned wrapping tables and Unicode row copy in dark/light themes. The requested
+three markdown gaps are addressed. VoiceOver and physical IME remain unverified;
+full nested block content and interactive task checkboxes remain outside this
+pass. Activity/progress and composer hierarchy keep their existing priority.

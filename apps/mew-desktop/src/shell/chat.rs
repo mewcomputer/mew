@@ -32,22 +32,33 @@ pub(super) enum TranscriptCopySource {
 }
 
 impl DesktopShell {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn render_inline(
         &self,
         inline: &InlineText,
         message_index: usize,
         block_index: usize,
+        source_offset: usize,
         animate: bool,
         fill_width: bool,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let selection =
-            self.transcript_selection_range(message_index, block_index, inline.text.len());
-        let highlights = if inline.highlights.is_empty() && selection.is_none() {
-            Vec::new()
-        } else {
-            self.inline_highlights(inline, selection)
-        };
+        let highlights = self.transcript_text_highlights(
+            message_index,
+            block_index,
+            source_offset,
+            inline.text.len(),
+            inline
+                .highlights
+                .iter()
+                .map(|highlight| {
+                    (
+                        highlight.range.clone(),
+                        self.inline_highlight_style(highlight.style),
+                    )
+                })
+                .collect(),
+        );
         let code_font_overrides = inline
             .highlights
             .iter()
@@ -65,7 +76,7 @@ impl DesktopShell {
             .render_selectable_transcript_text(
                 message_index,
                 block_index,
-                0,
+                source_offset,
                 &inline.text,
                 &inline.links,
                 text,
@@ -78,7 +89,9 @@ impl DesktopShell {
         }
         element
             .with_animation(
-                ElementId::Name(format!("markdown-inline-{message_index}-{block_index}").into()),
+                ElementId::Name(
+                    format!("markdown-inline-{message_index}-{block_index}-{source_offset}").into(),
+                ),
                 Animation::new(Duration::from_millis(180)).with_easing(gpui::ease_out_quint()),
                 |element, delta| element.opacity(0.72 + delta * 0.28),
             )
@@ -117,13 +130,15 @@ impl DesktopShell {
                 registry.borrow_mut().push(entry.clone());
             })
         });
+        let id = if source_offset == 0 {
+            format!("markdown-inline-container-{message_index}-{block_index}")
+        } else {
+            format!("markdown-inline-container-{message_index}-{block_index}-{source_offset}")
+        };
+        let selector = id.clone();
         container
-            .id(format!(
-                "markdown-inline-container-{message_index}-{block_index}"
-            ))
-            .debug_selector(move || {
-                format!("markdown-inline-container-{message_index}-{block_index}")
-            })
+            .id(id)
+            .debug_selector(move || selector.clone())
             .min_w_0()
             .cursor(gpui::CursorStyle::IBeam)
             .when(!links.is_empty(), |element| {
@@ -154,27 +169,6 @@ impl DesktopShell {
                 cx.listener(Self::transcript_mouse_up),
             )
             .child(text)
-    }
-
-    fn inline_highlights(
-        &self,
-        inline: &InlineText,
-        selection: Option<Range<usize>>,
-    ) -> Vec<(Range<usize>, gpui::HighlightStyle)> {
-        self.merge_selection_highlights(
-            inline.text.len(),
-            inline
-                .highlights
-                .iter()
-                .map(|highlight| {
-                    (
-                        highlight.range.clone(),
-                        self.inline_highlight_style(highlight.style),
-                    )
-                })
-                .collect(),
-            selection,
-        )
     }
 
     fn merge_selection_highlights(
@@ -329,17 +323,24 @@ impl DesktopShell {
             return;
         };
         let registry = self.transcript_text_registry.borrow();
-        let Some(entry) = registry.iter().find(|entry| {
-            let Some(start) = entry.layout.position_for_index(0) else {
-                return false;
-            };
-            let Some(end) = entry.layout.position_for_index(entry.text.len()) else {
-                return false;
-            };
-            let top = start.y.min(end.y);
-            let bottom = start.y.max(end.y) + px(24.);
-            event.position.y >= top && event.position.y <= bottom
-        }) else {
+        let Some(entry) = registry
+            .iter()
+            .filter(|entry| {
+                let bounds = entry.layout.bounds();
+                event.position.y >= bounds.top() && event.position.y <= bounds.bottom()
+            })
+            .min_by(|a, b| {
+                let distance = |entry: &TranscriptTextEntry| {
+                    let bounds = entry.layout.bounds();
+                    f32::from(
+                        (bounds.left() - event.position.x)
+                            .max(Pixels::ZERO)
+                            .max(event.position.x - bounds.right()),
+                    )
+                };
+                distance(a).total_cmp(&distance(b))
+            })
+        else {
             return;
         };
         let offset = transcript_index_for_position(&entry.layout, event.position, &entry.text);
@@ -436,14 +437,20 @@ impl DesktopShell {
                 sources.entry(id).or_insert_with(|| {
                     (
                         self.tool_text_for_selection(entry.message_index, entry.block_index)
+                            .or_else(|| {
+                                self.markdown_text_for_selection(
+                                    entry.message_index,
+                                    entry.block_index,
+                                )
+                            })
                             .unwrap_or(Cow::Borrowed(entry.text.as_str())),
                         false,
                     )
                 });
             }
         }
-        // A code fence can span virtual rows that have scrolled out of the
-        // painted registry. Read those chunks from the retained projection.
+        // Structured content can span virtual rows outside the painted registry.
+        // Read those chunks from the retained projection when copying.
         let first_row = self
             .transcript_rows
             .partition_point(|row| row.message_index < start.message_index);
@@ -480,8 +487,18 @@ impl DesktopShell {
             else {
                 continue;
             };
-            if let MarkdownBlock::Code { text, .. } = &block.block {
-                sources.insert(id, (Cow::Borrowed(text.as_str()), block.continuation));
+            match &block.block {
+                MarkdownBlock::Code { text, .. } => {
+                    sources.insert(id, (Cow::Borrowed(text.as_str()), block.continuation));
+                }
+                MarkdownBlock::List(_) | MarkdownBlock::Table(_) => {
+                    if let Some(text) =
+                        self.markdown_text_for_selection(row.message_index, block_index)
+                    {
+                        sources.insert(id, (text, false));
+                    }
+                }
+                _ => {}
             }
         }
         let mut selected = String::new();
@@ -551,6 +568,46 @@ impl DesktopShell {
             2 => diff.as_deref().map(Cow::Borrowed),
             _ => None,
         }
+    }
+
+    fn markdown_text_for_selection(
+        &self,
+        message_index: usize,
+        block_index: usize,
+    ) -> Option<Cow<'_, str>> {
+        let block = &self
+            .markdown_cache
+            .get(message_index)?
+            .get(block_index / 1_000_000)?
+            .render_blocks
+            .get(block_index % 1_000_000)?
+            .block;
+        let mut text = String::new();
+        match block {
+            MarkdownBlock::List(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    if index > 0 {
+                        text.push('\n');
+                    }
+                    text.push_str(&item.content.text);
+                }
+            }
+            MarkdownBlock::Table(table) => {
+                for (row_index, row) in table.rows.iter().enumerate() {
+                    if row_index > 0 {
+                        text.push('\n');
+                    }
+                    for (column_index, cell) in row.iter().enumerate() {
+                        if column_index > 0 {
+                            text.push('\t');
+                        }
+                        text.push_str(&cell.text);
+                    }
+                }
+            }
+            _ => return None,
+        }
+        Some(Cow::Owned(text))
     }
 
     fn transcript_copy_text(&self, source: TranscriptCopySource) -> Option<String> {
@@ -723,6 +780,7 @@ impl DesktopShell {
                     inline,
                     message_index,
                     block_index,
+                    0,
                     animate,
                     fill_width,
                     cx,
@@ -745,38 +803,63 @@ impl DesktopShell {
                         content,
                         message_index,
                         block_index,
+                        0,
                         animate,
                         fill_width,
                         cx,
                     ))
                     .into_any_element()
             }
-            MarkdownBlock::List(items) => div()
-                .id(block_id)
-                .flex()
-                .flex_col()
-                .gap(px(5.))
-                .when(space_after, |element| element.mb(px(12.)))
-                .children(items.iter().enumerate().map(|(item_index, item)| {
-                    div()
-                        .flex()
-                        .items_start()
-                        .gap(px(8.))
-                        .child(
-                            div()
-                                .text_color(theme_rgb(&self.theme, "text.muted"))
-                                .child("•"),
-                        )
-                        .child(div().flex_1().min_w_0().child(self.render_inline(
-                            item,
-                            message_index,
-                            block_index * 1000 + item_index,
-                            animate,
-                            true,
-                            cx,
-                        )))
-                }))
-                .into_any_element(),
+            MarkdownBlock::List(items) => {
+                let mut source_offset = 0;
+                div()
+                    .id(block_id)
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .when(continuation, |element| element.pt(px(4.)))
+                    .when(space_after, |element| element.mb(px(12.)))
+                    .children(items.iter().enumerate().map(|(item_index, item)| {
+                        let offset = source_offset;
+                        source_offset += item.content.text.len() + 1;
+                        let marker_id = format!(
+                            "markdown-list-marker-{message_index}-{block_index}-{item_index}"
+                        );
+                        let content_id = format!(
+                            "markdown-list-content-{message_index}-{block_index}-{item_index}"
+                        );
+                        div()
+                            .flex()
+                            .items_start()
+                            .pl(px(item.depth as f32 * 24.))
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .debug_selector(move || marker_id.clone())
+                                    .w(px(32.))
+                                    .flex_shrink_0()
+                                    .text_align(gpui::TextAlign::Right)
+                                    .text_color(theme_rgb(&self.theme, "text.muted"))
+                                    .child(item.marker.clone()),
+                            )
+                            .child(
+                                div()
+                                    .debug_selector(move || content_id.clone())
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(self.render_inline(
+                                        &item.content,
+                                        message_index,
+                                        block_index,
+                                        offset,
+                                        animate,
+                                        true,
+                                        cx,
+                                    )),
+                            )
+                    }))
+                    .into_any_element()
+            }
             MarkdownBlock::Quote(lines) => div()
                 .id(block_id)
                 .flex()
@@ -792,6 +875,7 @@ impl DesktopShell {
                         line,
                         message_index,
                         block_index * 1000 + line_index,
+                        0,
                         animate,
                         true,
                         cx,
@@ -913,33 +997,60 @@ impl DesktopShell {
                 }
                 .into_any_element()
             }
-            MarkdownBlock::Table(rows) => div()
-                .id(block_id)
-                .flex()
-                .flex_col()
-                .gap(px(4.))
-                .when(space_after, |element| element.mb(px(12.)))
-                .rounded(px(8.))
-                .border_1()
-                .border_color(theme_rgb(&self.theme, "divider"))
-                .p(px(10.))
-                .children(rows.iter().enumerate().map(|(row_index, row)| {
-                    div()
+            MarkdownBlock::Table(table) => {
+                let columns = table.alignments.len().max(1);
+                let viewport_id = format!("markdown-table-viewport-{message_index}-{block_index}");
+                let mut source_offset = 0;
+                div()
+                    .id(block_id)
+                    .debug_selector(move || viewport_id.clone())
+                    .w_full()
+                    .min_w_0()
+                    .overflow_x_scroll()
+                    .when_some(self.markdown_scroll_handle(message_index, block_index), |element, handle| element.track_scroll(handle))
+                    .when(space_after, |element| element.mb(px(12.)))
+                    .child(div()
+                        .flex()
+                        .flex_col()
                         .w_full()
-                        .min_w_0()
-                        .when(row_index == 0, |element| {
-                            element.font_weight(gpui::FontWeight::SEMIBOLD)
-                        })
-                        .child(self.render_inline(
-                            row,
-                            message_index,
-                            block_index * 1000 + row_index,
-                            animate,
-                            true,
-                            cx,
-                        ))
-                }))
-                .into_any_element(),
+                        .min_w(px(columns as f32 * 112.))
+                        .children(table.rows.iter().enumerate().map(|(row_index, row)| {
+                            let header = table.row_start == 0 && row_index == 0;
+                            let mut cells = Vec::with_capacity(row.len());
+                            for (column_index, cell) in row.iter().enumerate() {
+                                let offset = source_offset;
+                                source_offset += cell.text.len() + 1;
+                                let cell_id = format!("markdown-table-cell-{message_index}-{block_index}-{row_index}-{column_index}");
+                                let align = match table.alignments.get(column_index) {
+                                    Some(crate::markdown::MarkdownTableAlignment::Right) => gpui::TextAlign::Right,
+                                    Some(crate::markdown::MarkdownTableAlignment::Center) => gpui::TextAlign::Center,
+                                    _ => gpui::TextAlign::Left,
+                                };
+                                // GPUI's TextLayout hit testing ignores text alignment.
+                                // Position the content itself so selection matches paint.
+                                cells.push(div()
+                                    .debug_selector(move || cell_id.clone())
+                                    .flex()
+                                    .items_start()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .px(px(12.))
+                                    .py(px(8.))
+                                    .when(align == gpui::TextAlign::Right, |element| element.justify_end())
+                                    .when(align == gpui::TextAlign::Center, |element| element.justify_center())
+                                    .child(self.render_inline(cell, message_index, block_index, offset, animate, false, cx)));
+                            }
+                            div()
+                                .flex()
+                                .items_stretch()
+                                .w_full()
+                                .border_b_1()
+                                .border_color(theme_rgb(&self.theme, "divider"))
+                                .when(header, |element| element.font_weight(gpui::FontWeight::SEMIBOLD).bg(theme_rgb(&self.theme, "muted")))
+                                .children(cells)
+                        })))
+                    .into_any_element()
+            }
             MarkdownBlock::Rule => div()
                 .id(block_id)
                 .h(px(1.))
@@ -953,6 +1064,7 @@ impl DesktopShell {
                     inline,
                     message_index,
                     block_index,
+                    0,
                     animate,
                     fill_width,
                     cx,

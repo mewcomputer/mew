@@ -89,6 +89,13 @@ keep the same line leading and share a measured content width and horizontal
 scroll position. Retain this state with the markdown cache; invalidate width
 when its source, font or syntax theme changes.
 
+Lists retain ordered starts and nesting. Keep markers in a separate aligned
+column and indent nested content by 24 px so wrapped lines hang beneath their
+item text. Tables use real cells with shared equal-width columns, at least
+112 px each, and wrap content inside those columns. Use a quiet header surface
+and row dividers. Horizontal overflow belongs inside the reading column, with
+one scroll position across virtual chunks and a header only at the table start.
+
 Consecutive completed assistant tools fold into one muted activity summary with
 a call count, including runs across provider messages. Prose, reasoning, user
 turns and unfinished/failed calls break the group. Disclosure reveals the

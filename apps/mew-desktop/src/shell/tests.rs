@@ -3446,3 +3446,182 @@ mod code_continuity_tests {
         shell.update(cx, |shell, _| shell.quitting = true);
     }
 }
+
+#[cfg(test)]
+mod markdown_content_tests {
+    use super::super::*;
+
+    fn load_markdown(shell: &Entity<DesktopShell>, cx: &mut gpui::VisualTestContext, text: &str) {
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            shell.model.ui.transcript = vec![TranscriptItem {
+                role: TranscriptRole::Assistant,
+                text: text.into(),
+                parts: Vec::new(),
+            }];
+            shell.sync_markdown_cache();
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(480.), px(1000.)));
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn markdown_list_markers_align_and_nested_items_keep_their_indent(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        load_markdown(&shell, cx, "9. first item\n   - nested item with enough words to wrap inside this narrow reading column and keep the following lines aligned\n10. last item");
+        let first = cx.debug_bounds("markdown-list-content-0-0-0").unwrap();
+        let nested = cx.debug_bounds("markdown-list-content-0-0-1").unwrap();
+        let last = cx.debug_bounds("markdown-list-content-0-0-2").unwrap();
+        assert_eq!(
+            first.left(),
+            last.left(),
+            "ordered siblings share a content column"
+        );
+        assert_eq!(nested.left(), first.left() + px(24.));
+        assert!(
+            nested.size.height >= px(48.),
+            "nested text wraps inside its indented column"
+        );
+        let first_marker = cx.debug_bounds("markdown-list-marker-0-0-0").unwrap();
+        let last_marker = cx.debug_bounds("markdown-list-marker-0-0-2").unwrap();
+        assert_eq!(first_marker.right(), last_marker.right());
+        assert_eq!(first.left() - first_marker.right(), px(8.));
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn markdown_table_columns_stay_aligned_and_scroll_inside_the_conversation(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        load_markdown(&shell, cx, "| name | description | count | result |\n| :--- | :--- | ---: | :---: |\n| mew | a longer description that should wrap within its cell | 42 | ready |\n| é🙂 | small | 1 | done |");
+        for width in [480., 840.] {
+            cx.simulate_resize(gpui::size(px(width), px(1000.)));
+            cx.run_until_parked();
+            let header = cx.debug_bounds("markdown-table-cell-0-0-0-1").unwrap();
+            let body = cx.debug_bounds("markdown-table-cell-0-0-1-1").unwrap();
+            let second = cx.debug_bounds("markdown-table-cell-0-0-2-1").unwrap();
+            let viewport = cx.debug_bounds("markdown-table-viewport-0-0").unwrap();
+            assert_eq!(header.left(), body.left());
+            assert_eq!(header.size.width, body.size.width);
+            assert_eq!(header.left(), second.left());
+            assert!(
+                body.size.height > header.size.height,
+                "cell content wraps, increasing row height"
+            );
+            let conversation = cx.debug_bounds("conversation-pane").unwrap();
+            assert!(viewport.left() >= conversation.left());
+            assert!(viewport.right() <= conversation.right());
+        }
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn markdown_table_selection_copies_adjacent_cells_in_reading_order(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        load_markdown(
+            &shell,
+            cx,
+            "| name | value |\n| --- | --- |\n| é🙂 | **right 中** |",
+        );
+        let first = cx.debug_bounds("markdown-table-cell-0-0-1-0").unwrap();
+        let last = cx.debug_bounds("markdown-table-cell-0-0-1-1").unwrap();
+        let start = point(first.left() + px(12.1), first.top() + px(18.));
+        let end = point(last.right() - px(12.), last.top() + px(18.));
+        cx.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_mouse_move(end, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_up(end, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.dispatch_action(TextCopy);
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().as_deref(),
+            Some("é🙂\tright 中")
+        );
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn markdown_table_alignment_and_horizontal_scroll_survive_virtual_rows(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        let mut source =
+            "| name | detail | count | result | extra |\n| --- | --- | ---: | :---: | --- |\n"
+                .to_owned();
+        for index in 0..17 {
+            source.push_str(&format!("| row{index} | text | {index} | ok | end |\n"));
+        }
+        load_markdown(&shell, cx, &source);
+        shell.update(cx, |shell, cx| {
+            shell.transcript_selection = Some(TranscriptSelection {
+                start: TranscriptSelectionPoint {
+                    message_index: 0,
+                    block_index: 0,
+                    offset: 0,
+                },
+                end: TranscriptSelectionPoint {
+                    message_index: 0,
+                    block_index: 0,
+                    offset: 0,
+                },
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let centered_cell = cx.debug_bounds("markdown-table-cell-0-0-1-3").unwrap();
+        shell.read_with(cx, |shell, _| {
+            let registry = shell.transcript_text_registry.borrow();
+            let right_edges = ["0", "10"].map(|text| {
+                let entry = registry.iter().find(|entry| entry.text == text).unwrap();
+                entry.layout.position_for_index(entry.text.len()).unwrap().x
+            });
+            assert_eq!(
+                right_edges[0], right_edges[1],
+                "right aligned numbers share an edge"
+            );
+            let centered = registry.iter().find(|entry| entry.text == "ok").unwrap();
+            let start = centered.layout.position_for_index(0).unwrap();
+            let end = centered
+                .layout
+                .position_for_index(centered.text.len())
+                .unwrap();
+            assert!(
+                ((start.x + end.x) / 2. - centered_cell.center().x).abs() <= px(1.),
+                "centered content stays in its column and retains correct pointer geometry"
+            );
+        });
+        let first = cx.debug_bounds("markdown-table-cell-0-0-0-0").unwrap();
+        let last = cx.debug_bounds("markdown-table-cell-0-1-0-0").unwrap();
+        let viewport = cx.debug_bounds("markdown-table-viewport-0-0").unwrap();
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: viewport.origin + point(px(30.), px(20.)),
+            delta: gpui::ScrollDelta::Pixels(point(px(-80.), px(0.))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        let scrolled_first = cx.debug_bounds("markdown-table-cell-0-0-0-0").unwrap();
+        let scrolled_last = cx.debug_bounds("markdown-table-cell-0-1-0-0").unwrap();
+        assert!(
+            scrolled_first.left() < first.left(),
+            "wide tables scroll horizontally"
+        );
+        assert_eq!(
+            scrolled_first.left() - first.left(),
+            scrolled_last.left() - last.left(),
+            "all table chunks share the horizontal position"
+        );
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+}

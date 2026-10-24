@@ -59,15 +59,36 @@ pub enum MarkdownBlock {
         level: u8,
         content: InlineText,
     },
-    List(Vec<InlineText>),
+    List(Vec<MarkdownListItem>),
     Quote(Vec<InlineText>),
     Code {
         language: Option<String>,
         text: String,
     },
-    Table(Vec<InlineText>),
+    Table(MarkdownTable),
     Rule,
     Raw(InlineText),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkdownListItem {
+    pub marker: String,
+    pub depth: usize,
+    pub content: InlineText,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkdownTable {
+    pub alignments: Vec<MarkdownTableAlignment>,
+    pub rows: Vec<Vec<InlineText>>,
+    pub row_start: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkdownTableAlignment {
+    Left,
+    Center,
+    Right,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,11 +215,16 @@ fn virtualize_block(block: &MarkdownBlock) -> Vec<MarkdownRenderBlock> {
                 syntax_highlights: Vec::new(),
             })
             .collect(),
-        MarkdownBlock::Table(rows) => rows
+        MarkdownBlock::Table(table) => table
+            .rows
             .chunks(VIRTUAL_ROW_ITEMS)
             .enumerate()
             .map(|(index, rows)| MarkdownRenderBlock {
-                block: MarkdownBlock::Table(rows.to_vec()),
+                block: MarkdownBlock::Table(MarkdownTable {
+                    alignments: table.alignments.clone(),
+                    rows: rows.to_vec(),
+                    row_start: table.row_start + index * VIRTUAL_ROW_ITEMS,
+                }),
                 continuation: index > 0,
                 syntax_highlights: Vec::new(),
             })
@@ -391,12 +417,7 @@ fn parse_block(block: &mdstream::Block) -> MarkdownBlock {
                 text: code_lines.join("\n"),
             }
         }
-        mdstream::BlockKind::Table => MarkdownBlock::Table(
-            text.lines()
-                .filter(|line| !is_table_separator(line))
-                .map(|line| parse_inline(line.trim()))
-                .collect(),
-        ),
+        mdstream::BlockKind::Table => MarkdownBlock::Table(parse_table(&block.raw)),
         mdstream::BlockKind::ThematicBreak => MarkdownBlock::Rule,
         mdstream::BlockKind::FootnoteDefinition
         | mdstream::BlockKind::HtmlBlock
@@ -405,43 +426,142 @@ fn parse_block(block: &mdstream::Block) -> MarkdownBlock {
     }
 }
 
-fn list_item_text(line: &str) -> Option<&str> {
-    let trimmed = line.trim_start();
-    if let Some(item) = trimmed
-        .strip_prefix("- ")
-        .or_else(|| trimmed.strip_prefix("* "))
-        .or_else(|| trimmed.strip_prefix("+ "))
-    {
-        return Some(item);
-    }
-
-    let (number, item) = trimmed.split_once(". ")?;
-    number
-        .chars()
-        .all(|character| character.is_ascii_digit())
-        .then_some(item)
+#[derive(Clone, Copy)]
+enum ListMarker {
+    Bullet,
+    Ordered { number: u64, delimiter: char },
 }
 
-fn parse_list_items(text: &str) -> Vec<InlineText> {
-    let mut items = Vec::new();
+struct ListItemSource<'a> {
+    indentation: usize,
+    content_indentation: usize,
+    marker: ListMarker,
+    content: &'a str,
+}
+
+fn list_item_source(line: &str) -> Option<ListItemSource<'_>> {
+    let trimmed = line.trim_start_matches([' ', '\t']);
+    let indent_bytes = line.len() - trimmed.len();
+    let bytes = trimmed.as_bytes();
+    let (marker, marker_len) = match bytes.first()? {
+        b'-' | b'*' | b'+' => (ListMarker::Bullet, 1),
+        b'0'..=b'9' => {
+            let digits = bytes
+                .iter()
+                .take_while(|byte| byte.is_ascii_digit())
+                .count();
+            let delimiter = match bytes.get(digits)? {
+                b'.' => '.',
+                b')' => ')',
+                _ => return None,
+            };
+            let number = trimmed[..digits].parse().ok()?;
+            (ListMarker::Ordered { number, delimiter }, digits + 1)
+        }
+        _ => return None,
+    };
+    if !matches!(bytes.get(marker_len), Some(b' ' | b'\t')) {
+        return None;
+    }
+    let content = trimmed[marker_len..].trim_start_matches([' ', '\t']);
+    let content_start = line.len() - content.len();
+    Some(ListItemSource {
+        indentation: prefix_columns(&line[..indent_bytes]),
+        content_indentation: prefix_columns(&line[..content_start]),
+        marker,
+        content,
+    })
+}
+
+fn prefix_columns(prefix: &str) -> usize {
+    prefix.chars().fold(0, |column, character| {
+        if character == '\t' {
+            column + 4 - column % 4
+        } else {
+            column + 1
+        }
+    })
+}
+
+fn parse_list_items(text: &str) -> Vec<MarkdownListItem> {
+    struct ListLevel {
+        indentation: usize,
+        content_indentation: usize,
+        next_number: Option<(u64, char)>,
+        item_index: usize,
+    }
+
+    let mut levels: Vec<ListLevel> = Vec::new();
+    let mut items: Vec<MarkdownListItem> = Vec::new();
     for line in text.lines() {
-        if let Some(item) = list_item_text(line) {
-            items.push(item.to_owned());
-        } else if let Some(item) = items.last_mut() {
-            let continuation = line.trim();
-            if !continuation.is_empty() {
-                if item
-                    .chars()
+        if let Some(source) = list_item_source(line) {
+            while levels.len() > 1
+                && levels
                     .last()
-                    .is_some_and(|character| !character.is_whitespace())
-                {
-                    item.push(' ');
+                    .is_some_and(|level| level.indentation > source.indentation)
+            {
+                levels.pop();
+            }
+            if levels
+                .last()
+                .is_none_or(|level| source.indentation >= level.content_indentation)
+            {
+                levels.push(ListLevel {
+                    indentation: source.indentation,
+                    content_indentation: source.content_indentation,
+                    next_number: None,
+                    item_index: items.len(),
+                });
+            }
+            let depth = levels.len() - 1;
+            let level = levels.last_mut().unwrap();
+            level.indentation = level.indentation.min(source.indentation);
+            let marker = match source.marker {
+                ListMarker::Bullet => {
+                    level.next_number = None;
+                    "•".to_owned()
                 }
-                item.push_str(continuation);
+                ListMarker::Ordered { number, delimiter } => {
+                    let number = level
+                        .next_number
+                        .filter(|(_, previous_delimiter)| *previous_delimiter == delimiter)
+                        .map_or(number, |(number, _)| number);
+                    level.next_number = Some((number.saturating_add(1), delimiter));
+                    format!("{number}{delimiter}")
+                }
+            };
+            level.content_indentation = source.content_indentation;
+            level.item_index = items.len();
+            items.push(MarkdownListItem {
+                marker,
+                depth,
+                content: InlineText {
+                    text: source.content.to_owned(),
+                    highlights: Vec::new(),
+                    links: Vec::new(),
+                },
+            });
+        } else if !line.trim().is_empty() {
+            let trimmed = line.trim_start_matches([' ', '\t']);
+            let indentation = prefix_columns(&line[..line.len() - trimmed.len()]);
+            let level = levels
+                .iter()
+                .rev()
+                .find(|level| indentation >= level.content_indentation)
+                .or_else(|| levels.last());
+            if let Some(level) = level {
+                let content = &mut items[level.item_index].content.text;
+                if !content.is_empty() {
+                    content.push(' ');
+                }
+                content.push_str(line.trim());
             }
         }
     }
-    items.into_iter().map(|item| parse_inline(&item)).collect()
+    for item in &mut items {
+        item.content = parse_inline(&item.content.text);
+    }
+    items
 }
 
 fn code_language(line: &str) -> Option<&str> {
@@ -458,14 +578,90 @@ fn is_fence(line: &str) -> bool {
     line.starts_with("```") || line.starts_with("~~~")
 }
 
-fn is_table_separator(line: &str) -> bool {
-    let trimmed = line.trim().trim_matches('|').trim();
-    !trimmed.is_empty()
-        && trimmed.split('|').all(|cell| {
-            cell.trim()
-                .chars()
-                .all(|character| character == '-' || character == ':')
+fn parse_table(text: &str) -> MarkdownTable {
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
+    let header = table_cells(lines.next().unwrap_or_default());
+    let separator = lines.next().map(table_cells).unwrap_or_default();
+    let mut alignments = separator
+        .iter()
+        .map(|cell| match (cell.starts_with(':'), cell.ends_with(':')) {
+            (true, true) => MarkdownTableAlignment::Center,
+            (_, true) => MarkdownTableAlignment::Right,
+            _ => MarkdownTableAlignment::Left,
         })
+        .collect::<Vec<_>>();
+    let column_count = header.len().max(alignments.len());
+    alignments.resize(column_count, MarkdownTableAlignment::Left);
+    let rows = std::iter::once(header)
+        .chain(lines.map(table_cells))
+        .map(|mut cells| {
+            cells.resize(column_count, "");
+            cells.into_iter().map(parse_inline).collect()
+        })
+        .collect();
+    MarkdownTable {
+        alignments,
+        rows,
+        row_start: 0,
+    }
+}
+
+fn table_cells(line: &str) -> Vec<&str> {
+    let line = line.trim();
+    let bytes = line.as_bytes();
+    let mut cells = Vec::new();
+    let mut start = 0;
+    let mut index = 0;
+    let mut last_pipe = None;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => {
+                index += 1;
+                if let Some(character) = line[index..].chars().next() {
+                    index += character.len_utf8();
+                }
+            }
+            b'`' => {
+                let delimiter_len = bytes[index..]
+                    .iter()
+                    .take_while(|byte| **byte == b'`')
+                    .count();
+                index = code_span_end(line, index, delimiter_len)
+                    .map_or(index + delimiter_len, |end| end + delimiter_len);
+            }
+            b'|' => {
+                cells.push(line[start..index].trim());
+                last_pipe = Some(index);
+                index += 1;
+                start = index;
+            }
+            _ => index += line[index..].chars().next().unwrap().len_utf8(),
+        }
+    }
+    cells.push(line[start..].trim());
+    if line.starts_with('|') {
+        cells.remove(0);
+    }
+    if last_pipe.is_some_and(|pipe| pipe + 1 == line.len()) {
+        cells.pop();
+    }
+    cells
+}
+
+fn code_span_end(text: &str, start: usize, delimiter_len: usize) -> Option<usize> {
+    let mut index = start + delimiter_len;
+    while let Some(offset) = text[index..].find('`') {
+        index += offset;
+        let run = text.as_bytes()[index..]
+            .iter()
+            .take_while(|byte| **byte == b'`')
+            .count();
+        if run == delimiter_len {
+            return Some(index);
+        }
+        index += run;
+    }
+    None
 }
 
 fn parse_inline(input: &str) -> InlineText {
@@ -509,12 +705,27 @@ fn parse_inline(input: &str) -> InlineText {
             }
         }
 
+        if rest.starts_with('`') {
+            let delimiter_len = rest.bytes().take_while(|byte| *byte == b'`').count();
+            if let Some(end) = code_span_end(rest, 0, delimiter_len) {
+                let start = output.text.len();
+                output.text.push_str(&rest[delimiter_len..end]);
+                output.highlights.push(InlineHighlight {
+                    range: start..output.text.len(),
+                    style: InlineStyle::Code,
+                });
+                index += end + delimiter_len;
+            } else {
+                output.text.push_str(&rest[..delimiter_len]);
+                index += delimiter_len;
+            }
+            continue;
+        }
+
         let marker = if rest.starts_with("**") || rest.starts_with("__") {
             Some((2, &rest[..2], InlineStyle::Strong))
         } else if rest.starts_with("~~") {
             Some((2, &rest[..2], InlineStyle::Strikethrough))
-        } else if rest.starts_with('`') {
-            Some((1, "`", InlineStyle::Code))
         } else if rest.starts_with('*') || rest.starts_with('_') {
             Some((1, &rest[..1], InlineStyle::Emphasis))
         } else {
@@ -644,7 +855,7 @@ mod tests {
         ));
         assert!(matches!(
             &document.blocks[1],
-            MarkdownBlock::Table(rows) if rows.len() == 2
+            MarkdownBlock::Table(table) if table.rows.len() == 2
         ));
     }
 
@@ -702,13 +913,13 @@ mod tests {
             panic!("expected a list")
         };
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].text, item);
+        assert_eq!(items[0].content.text, item);
 
         let rows = virtualize_document(&document);
         assert_eq!(rows.len(), 1);
         assert!(matches!(
             &rows[0].block,
-            MarkdownBlock::List(items) if items.len() == 1 && items[0].text == item
+            MarkdownBlock::List(items) if items.len() == 1 && items[0].content.text == item
         ));
     }
 
@@ -720,8 +931,170 @@ mod tests {
             panic!("expected a list")
         };
         assert_eq!(items.len(), 2);
-        assert_eq!(items[0].text, "first line continuation line");
-        assert_eq!(items[1].text, "second item");
+        assert_eq!(items[0].content.text, "first line continuation line");
+        assert_eq!(items[1].content.text, "second item");
+    }
+
+    #[test]
+    fn preserves_ordered_starts_and_nested_list_markers() {
+        let document = parse_document(
+            "7. **first** item\n   continuation\n   - child\n     3) [leaf](https://example.com)\n     1) next leaf\n   - sibling\n1. final item\n",
+        );
+        let MarkdownBlock::List(items) = &document.blocks[0] else {
+            panic!("expected a list")
+        };
+
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| (item.marker.as_str(), item.depth))
+                .collect::<Vec<_>>(),
+            [
+                ("7.", 0),
+                ("•", 1),
+                ("3)", 2),
+                ("4)", 2),
+                ("•", 1),
+                ("8.", 0)
+            ],
+        );
+        assert_eq!(items[0].content.text, "first item continuation");
+        assert_eq!(items[0].content.highlights[0].style, InlineStyle::Strong);
+        assert_eq!(items[2].content.text, "leaf");
+        assert_eq!(items[2].content.links[0].url, "https://example.com");
+    }
+
+    #[test]
+    fn list_continuations_follow_their_parent_across_indentation_changes() {
+        let document = parse_document(
+            "  4. first\n     - child\n     parent continuation\n1. second\n\t+ tabbed child\n1. final\n",
+        );
+        let MarkdownBlock::List(items) = &document.blocks[0] else {
+            panic!("expected a list")
+        };
+
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| (item.marker.as_str(), item.depth))
+                .collect::<Vec<_>>(),
+            [("4.", 0), ("•", 1), ("5.", 0), ("•", 1), ("6.", 0),]
+        );
+        assert_eq!(items[0].content.text, "first parent continuation");
+        assert_eq!(items[1].content.text, "child");
+    }
+
+    #[test]
+    fn preserves_table_cells_alignment_and_inline_content() {
+        let document = parse_document(
+            "| label | code | value |\n| :--- | :---: | ---: |\n| **雪** \\| path | `a|b` | [link](https://example.com) |\n| short |\n| | | | extra |\n",
+        );
+        let MarkdownBlock::Table(table) = &document.blocks[0] else {
+            panic!("expected a table")
+        };
+
+        assert_eq!(
+            table.alignments,
+            [
+                MarkdownTableAlignment::Left,
+                MarkdownTableAlignment::Center,
+                MarkdownTableAlignment::Right,
+            ]
+        );
+        assert_eq!(table.rows.len(), 4);
+        assert!(table.rows.iter().all(|row| row.len() == 3));
+        assert_eq!(
+            table.rows[0]
+                .iter()
+                .map(|cell| cell.text.as_str())
+                .collect::<Vec<_>>(),
+            ["label", "code", "value"]
+        );
+        assert_eq!(table.rows[1][0].text, "雪 | path");
+        assert_eq!(table.rows[1][0].highlights[0].style, InlineStyle::Strong);
+        assert_eq!(table.rows[1][1].text, "a|b");
+        assert_eq!(table.rows[1][1].highlights[0].style, InlineStyle::Code);
+        assert_eq!(table.rows[1][2].links[0].url, "https://example.com");
+        assert_eq!(
+            table.rows[2]
+                .iter()
+                .map(|cell| cell.text.as_str())
+                .collect::<Vec<_>>(),
+            ["short", "", ""]
+        );
+        assert_eq!(
+            table.rows[3]
+                .iter()
+                .map(|cell| cell.text.as_str())
+                .collect::<Vec<_>>(),
+            ["", "", ""]
+        );
+        assert_eq!(table.row_start, 0);
+    }
+
+    #[test]
+    fn table_cell_boundaries_ignore_escaped_pipes_and_matching_code_spans() {
+        let document = parse_document(
+            "left | right\n:--- | ---:\n``a`|b`` | escaped \\| cell\nunclosed `span | final\n",
+        );
+        let MarkdownBlock::Table(table) = &document.blocks[0] else {
+            panic!("expected a table")
+        };
+
+        assert_eq!(table.rows[1][0].text, "a`|b");
+        assert_eq!(table.rows[1][1].text, "escaped | cell");
+        assert_eq!(table.rows[2][0].text, "unclosed `span");
+        assert_eq!(table.rows[2][1].text, "final");
+    }
+
+    #[test]
+    fn table_and_list_metadata_survive_virtualization_and_streaming() {
+        let mut source = String::from("| name | count |\n| :--- | ---: |\n");
+        for index in 0..40 {
+            source.push_str(&format!("| row {index} | {index} |\n"));
+        }
+        source.push_str("\n9. first\n   - nested\n");
+        for index in 0..20 {
+            source.push_str(&format!("1. item {index}\n"));
+        }
+        source.push('\n');
+        let expected = parse_document(&source);
+        let mut streaming = StreamingMarkdown::new();
+        let mut actual = MarkdownDocument { blocks: Vec::new() };
+        for character in source.chars() {
+            actual = streaming.append(character.encode_utf8(&mut [0; 4]));
+        }
+        assert_eq!(actual, expected);
+
+        let rows = virtualize_document(&actual);
+        let tables = rows
+            .iter()
+            .filter_map(|row| match &row.block {
+                MarkdownBlock::Table(table) => Some(table),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tables.len(), 3);
+        assert_eq!(
+            tables
+                .iter()
+                .map(|table| table.row_start)
+                .collect::<Vec<_>>(),
+            [0, 16, 32]
+        );
+        assert!(tables.iter().all(|table| table.alignments
+            == [MarkdownTableAlignment::Left, MarkdownTableAlignment::Right]));
+        let list_items = rows
+            .iter()
+            .filter_map(|row| match &row.block {
+                MarkdownBlock::List(items) => Some(items),
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(list_items[0].marker, "9.");
+        assert_eq!(list_items[1].depth, 1);
+        assert_eq!(list_items.last().unwrap().marker, "29.");
     }
 
     #[test]
