@@ -63,6 +63,47 @@ pub(super) fn tool_display_label(tool_name: &str) -> String {
     }
 }
 
+fn tool_activity(tool_name: &str) -> (&'static str, TablerIcon) {
+    match tool_name.rsplit(['.', ':']).next().unwrap_or(tool_name) {
+        "read" | "read_file" => ("Read files", TablerIcon::File),
+        "write" | "write_file" | "edit" | "edit_file" | "edit_str_replace" | "apply_patch" => {
+            ("Edited files", TablerIcon::Pencil)
+        }
+        "grep" | "glob" | "search" | "search_files" | "list" | "list_directory" => {
+            ("Searched files", TablerIcon::Search)
+        }
+        "bash" | "sh" | "shell" | "exec" | "exec_command" | "run_command" => {
+            ("Ran commands", TablerIcon::Terminal2)
+        }
+        name if name.starts_with("browser") || name == "web_fetch" => {
+            ("Browsed pages", TablerIcon::Browser)
+        }
+        _ => ("Used tools", TablerIcon::Dots),
+    }
+}
+
+fn tool_activity_summary<'a>(parts: impl Iterator<Item = &'a TranscriptPart>) -> String {
+    let mut activities = Vec::new();
+    for part in parts {
+        if let TranscriptPart::ToolCall { tool_name, .. } = part {
+            let (label, _) = tool_activity(tool_name);
+            if !activities.contains(&label) {
+                activities.push(label);
+            }
+        }
+    }
+    let mut summary = String::new();
+    for label in activities {
+        if summary.is_empty() {
+            summary.push_str(label);
+        } else {
+            summary.push_str(", ");
+            summary.extend(label.chars().map(|ch| ch.to_ascii_lowercase()));
+        }
+    }
+    summary
+}
+
 pub(super) fn tool_summary(input: &str) -> Option<String> {
     let value = serde_json::from_str::<serde_json::Value>(input).ok()?;
     let object = value.as_object()?;
@@ -457,6 +498,26 @@ impl DesktopShell {
             .checked_sub(1)
             .and_then(|index| self.transcript_rows.get(index));
         let next = self.transcript_rows.get(index + 1);
+        let grouped_call = row.tool_group_len == 0
+            && matches!(
+                part,
+                TranscriptPart::ToolCall {
+                    status: ToolStatus::Completed,
+                    ..
+                }
+            )
+            && previous.is_some_and(|previous| {
+                previous.tool_group_len > 0
+                    || matches!(
+                        self.model.ui.transcript[previous.message_index]
+                            .parts
+                            .get(previous.part_index),
+                        Some(TranscriptPart::ToolCall {
+                            status: ToolStatus::Completed,
+                            ..
+                        })
+                    )
+            });
         let space_after = next.is_some_and(|next| {
             next.message_index == row.message_index && next.part_index == row.part_index
         }) && !cached
@@ -467,6 +528,7 @@ impl DesktopShell {
             .saturating_mul(1_000_000)
             .saturating_add(row.block_index);
         let content = match part {
+            _ if row.tool_group_len > 0 => self.render_tool_group(row, cx),
             TranscriptPart::Text(_) => {
                 let Some(render_block) =
                     cached.and_then(|cached| cached.render_blocks.get(row.block_index))
@@ -546,16 +608,19 @@ impl DesktopShell {
             .justify_center()
             // Keep the first loaded turn's geometry stable when history is prepended.
             .when(
-                previous.is_none_or(|previous| previous.message_index != row.message_index),
+                !grouped_call
+                    && previous.is_none_or(|previous| previous.message_index != row.message_index),
                 |element| element.pt(px(24.)),
             )
             .when(
-                previous.is_some_and(|previous| {
-                    previous.message_index == row.message_index
-                        && previous.part_index != row.part_index
-                }),
+                !grouped_call
+                    && previous.is_some_and(|previous| {
+                        previous.message_index == row.message_index
+                            && previous.part_index != row.part_index
+                    }),
                 |element| element.pt(px(8.)),
             )
+            .when(grouped_call, |element| element.pt(px(6.)))
             .child(
                 div()
                     .flex()
@@ -570,6 +635,7 @@ impl DesktopShell {
                             .flex_col()
                             .gap(px(6.))
                             .min_w_0()
+                            .when(grouped_call, |element| element.pl(px(20.)))
                             .when(!is_user, |element| element.w_full().min_w_0())
                             .when(is_user, |element| {
                                 element
@@ -594,7 +660,32 @@ impl DesktopShell {
     }
 
     fn toggle_chat_part(&mut self, key: String, cx: &mut Context<Self>) {
-        if !self.expanded_chat_parts.remove(&key) {
+        let group_keys = self
+            .transcript_rows
+            .iter()
+            .copied()
+            .find(|row| {
+                row.tool_group_len > 0 && self.tool_group_key(*row).as_deref() == Some(key.as_str())
+            })
+            .map(|row| {
+                self.tool_group_members(row)
+                    .flat_map(|(message, part_index, part)| match part {
+                        TranscriptPart::ToolCall { call_id, .. } => [
+                            format!("tool-group-{call_id}"),
+                            Self::chat_part_key(message, part_index),
+                        ],
+                        _ => unreachable!("tool groups contain only tool calls"),
+                    })
+                    .collect::<Vec<_>>()
+            });
+        if let Some(keys) = group_keys.filter(|keys| {
+            keys.iter()
+                .any(|key| self.expanded_chat_parts.contains(key))
+        }) {
+            for key in keys {
+                self.expanded_chat_parts.remove(&key);
+            }
+        } else if !self.expanded_chat_parts.remove(&key) {
             self.expanded_chat_parts.insert(key);
         }
         self.rebuild_transcript_rows_from_cache();
@@ -606,6 +697,95 @@ impl DesktopShell {
 
     pub(super) fn chat_part_key(message_index: usize, part_index: usize) -> String {
         format!("chat-part-{message_index}-{part_index}")
+    }
+
+    pub(super) fn tool_group_key(&self, row: TranscriptRenderRow) -> Option<String> {
+        match self
+            .model
+            .ui
+            .transcript
+            .get(row.message_index)?
+            .parts
+            .get(row.part_index)?
+        {
+            TranscriptPart::ToolCall { call_id, .. } => Some(format!("tool-group-{call_id}")),
+            _ => None,
+        }
+    }
+
+    fn tool_group_members(
+        &self,
+        row: TranscriptRenderRow,
+    ) -> impl Iterator<Item = (usize, usize, &TranscriptPart)> {
+        self.model
+            .ui
+            .transcript
+            .iter()
+            .enumerate()
+            .skip(row.message_index)
+            .flat_map(move |(message, item)| {
+                item.parts
+                    .iter()
+                    .enumerate()
+                    .skip(if message == row.message_index {
+                        row.part_index
+                    } else {
+                        0
+                    })
+                    .map(move |(part_index, part)| (message, part_index, part))
+            })
+            .take(row.tool_group_len)
+    }
+
+    fn tool_group_parts(&self, row: TranscriptRenderRow) -> impl Iterator<Item = &TranscriptPart> {
+        self.tool_group_members(row).map(|(_, _, part)| part)
+    }
+
+    pub(super) fn tool_group_is_expanded(&self, row: TranscriptRenderRow) -> bool {
+        !self.expanded_chat_parts.is_empty()
+            && self
+                .tool_group_members(row)
+                .any(|(message, part_index, part)| match part {
+                    TranscriptPart::ToolCall { call_id, .. } => {
+                        self.expanded_chat_parts
+                            .contains(&format!("tool-group-{call_id}"))
+                            || self
+                                .expanded_chat_parts
+                                .contains(&Self::chat_part_key(message, part_index))
+                    }
+                    _ => false,
+                })
+    }
+
+    fn render_tool_group(
+        &self,
+        row: TranscriptRenderRow,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let key = self
+            .tool_group_key(row)
+            .expect("tool groups start at a tool call");
+        let expanded = self.tool_group_is_expanded(row);
+        let (_, icon) = match &self.model.ui.transcript[row.message_index].parts[row.part_index] {
+            TranscriptPart::ToolCall { tool_name, .. } => tool_activity(tool_name),
+            _ => unreachable!(),
+        };
+        div()
+            .w_full()
+            .min_w_0()
+            .line_height(px(20.))
+            .child(self.render_part_header(
+                key,
+                icon,
+                tool_activity_summary(self.tool_group_parts(row)),
+                Some((
+                    format!("{} calls", row.tool_group_len),
+                    theme_rgb(&self.theme, "text.muted"),
+                )),
+                !expanded,
+                cx,
+            ))
+            .into_any_element()
     }
 
     fn render_part_header(
@@ -622,6 +802,8 @@ impl DesktopShell {
             .id(format!("{key}-header"))
             .debug_selector(move || format!("{key}-header"))
             .flex()
+            .w_full()
+            .min_w_0()
             .items_center()
             .gap(px(7.))
             .cursor_pointer()
@@ -646,7 +828,7 @@ impl DesktopShell {
                 theme_rgb(&self.theme, "text.muted"),
                 px(13.),
             ))
-            .child(SharedString::from(label))
+            .child(div().min_w_0().truncate().child(SharedString::from(label)))
             .when_some(status, |element, (label, color)| {
                 element.child(div().text_color(color).child(SharedString::from(label)))
             })
@@ -674,6 +856,7 @@ impl DesktopShell {
             message_index,
             part_index,
             block_index,
+            ..
         } = row;
         let key = Self::chat_part_key(message_index, part_index);
         let collapsed = !self.expanded_chat_parts.contains(&key);
@@ -750,7 +933,7 @@ impl DesktopShell {
         let summary = tool_summary(input);
         let header = self.render_part_header(
             key,
-            TablerIcon::Terminal2,
+            tool_activity(tool_name).1,
             display_name,
             Some((status_label.into(), status_color)),
             collapsed,
@@ -1162,18 +1345,38 @@ impl DesktopShell {
         let Some(anchor) = self.pending_transcript_scroll_anchor else {
             return;
         };
-        let Some(item_ix) = self.transcript_rows.iter().position(|row| {
+        let exact = self.transcript_rows.iter().position(|row| {
             row.message_index == anchor.message_index
                 && row.part_index == anchor.part_index
                 && row.block_index == anchor.block_index
-        }) else {
+        });
+        let grouped = || {
+            let part = self
+                .model
+                .ui
+                .transcript
+                .get(anchor.message_index)?
+                .parts
+                .get(anchor.part_index)?;
+            self.transcript_rows.iter().position(|row| {
+                row.tool_group_len > 0
+                    && self
+                        .tool_group_parts(*row)
+                        .any(|member| std::ptr::eq(member, part))
+            })
+        };
+        let Some(item_ix) = exact.or_else(grouped) else {
             return;
         };
         self.transcript_list
             .set_follow_mode(gpui::FollowMode::Normal);
         self.transcript_list.scroll_to(gpui::ListOffset {
             item_ix,
-            offset_in_item: px(anchor.offset.max(0.)),
+            offset_in_item: px(if exact.is_some() {
+                anchor.offset.max(0.)
+            } else {
+                0.
+            }),
         });
         self.pending_transcript_scroll_anchor = None;
     }
@@ -2391,10 +2594,39 @@ fn split_tool_text_lines(text: &str) -> Vec<SharedString> {
 #[cfg(test)]
 mod tests {
     use super::{
-        formatted_tool_input, split_tool_text_lines, tool_display_label, tool_summary,
-        TranscriptRenderRow,
+        formatted_tool_input, split_tool_text_lines, tool_activity_summary, tool_display_label,
+        tool_summary, TranscriptRenderRow,
     };
     use gpui::SharedString;
+
+    #[test]
+    fn activity_summaries_name_each_kind_once_in_order_of_use() {
+        let parts: Vec<_> = [
+            "read",
+            "read_file",
+            "bash",
+            "edit",
+            "browser_open",
+            "glob",
+            "integration.unknown",
+        ]
+        .into_iter()
+        .map(|name| super::TranscriptPart::ToolCall {
+            tool_name: name.into(),
+            call_id: name.into(),
+            status: super::ToolStatus::Completed,
+            input: String::new(),
+            output: None,
+            error: None,
+            diff: None,
+        })
+        .collect();
+        assert_eq!(
+            tool_activity_summary(parts.iter()),
+            "Read files, ran commands, edited files, browsed pages, searched files, used tools"
+        );
+        assert_eq!(tool_activity_summary(parts[2..3].iter()), "Ran commands");
+    }
 
     #[test]
     fn tool_names_are_presented_as_human_facing_categories() {
@@ -2450,26 +2682,31 @@ mod tests {
                 message_index: 0,
                 part_index: 0,
                 block_index: 0,
+                tool_group_len: 0,
             },
             TranscriptRenderRow {
                 message_index: 1,
                 part_index: 0,
                 block_index: 0,
+                tool_group_len: 0,
             },
             TranscriptRenderRow {
                 message_index: 2,
                 part_index: 0,
                 block_index: 0,
+                tool_group_len: 0,
             },
             TranscriptRenderRow {
                 message_index: 2,
                 part_index: 0,
                 block_index: 1,
+                tool_group_len: 0,
             },
             TranscriptRenderRow {
                 message_index: 3,
                 part_index: 0,
                 block_index: 0,
+                tool_group_len: 0,
             },
         ];
 

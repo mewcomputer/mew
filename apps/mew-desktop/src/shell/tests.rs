@@ -321,6 +321,377 @@ mod shell_tests {
     }
 
     #[gpui::test]
+    fn completed_tool_groups_span_messages_and_reveal_each_call(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            shell.model.ui.transcript = vec![
+                TranscriptItem {
+                    role: TranscriptRole::Assistant,
+                    text: String::new(),
+                    parts: vec![
+                        TranscriptPart::Text("checking the implementation".into()),
+                        activity_tool("read_file", "read", ToolStatus::Completed),
+                    ],
+                },
+                TranscriptItem {
+                    role: TranscriptRole::Assistant,
+                    text: String::new(),
+                    parts: vec![
+                        activity_tool("shell", "test", ToolStatus::Completed),
+                        TranscriptPart::Text("the checks passed".into()),
+                    ],
+                },
+            ];
+            shell.sync_markdown_cache();
+            assert_eq!(
+                shell.transcript_rows.len(),
+                3,
+                "one activity summary between prose"
+            );
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(680.), px(1000.)));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("chat-part-0-1-header").is_none());
+        let group = cx.debug_bounds("tool-group-read-header").unwrap();
+        cx.simulate_click(group.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        shell.update(cx, |shell, _| assert_eq!(shell.transcript_rows.len(), 5));
+        let first_call = cx.debug_bounds("transcript-content-2").unwrap();
+        let second_call = cx.debug_bounds("transcript-content-3").unwrap();
+        assert!(
+            second_call.top() - first_call.bottom() <= px(8.),
+            "grouped calls stay together across provider messages"
+        );
+        let call = cx.debug_bounds("chat-part-1-0-header").unwrap();
+        cx.simulate_click(call.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("tool-input-1-0-line-0").is_some());
+        assert!(cx.debug_bounds("tool-output-1-0-line-0").is_some());
+        assert!(cx.debug_bounds("tool-diff-1-0-line-0").is_some());
+        let group = cx.debug_bounds("tool-group-read-header").unwrap();
+        cx.simulate_click(group.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("chat-part-1-0-header").is_none());
+        shell.update(cx, |shell, _| {
+            assert_eq!(shell.transcript_rows.len(), 3);
+            shell.quitting = true;
+        });
+    }
+
+    fn activity_tool(name: &str, id: &str, status: ToolStatus) -> TranscriptPart {
+        TranscriptPart::ToolCall {
+            tool_name: name.into(),
+            call_id: id.into(),
+            status,
+            input: r#"{"command":"cargo test","path":"src/main.rs"}"#.into(),
+            output: Some(format!("output from {id}")),
+            error: (status == ToolStatus::Error).then(|| "command failed".into()),
+            diff: Some("-before\n+after".into()),
+        }
+    }
+
+    #[gpui::test]
+    fn tool_groups_keep_prose_unfinished_calls_and_turn_boundaries_visible(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        shell.update(cx, |shell, _| {
+            let completed = |id| activity_tool("shell", id, ToolStatus::Completed);
+            shell.model.ui.transcript = vec![
+                TranscriptItem {
+                    role: TranscriptRole::Assistant,
+                    text: String::new(),
+                    parts: vec![
+                        completed("a"),
+                        completed("b"),
+                        TranscriptPart::Text("a checkpoint".into()),
+                        completed("c"),
+                        activity_tool("shell", "pending", ToolStatus::Pending),
+                        activity_tool("shell", "running", ToolStatus::Running),
+                        activity_tool("shell", "failed", ToolStatus::Error),
+                        completed("d"),
+                        completed("e"),
+                    ],
+                },
+                TranscriptItem {
+                    role: TranscriptRole::User,
+                    text: "continue".into(),
+                    parts: Vec::new(),
+                },
+                TranscriptItem {
+                    role: TranscriptRole::Assistant,
+                    text: String::new(),
+                    parts: vec![completed("f")],
+                },
+            ];
+            shell.sync_markdown_cache();
+            assert_eq!(shell.transcript_rows.len(), 9);
+            let parts: Vec<_> = shell
+                .transcript_rows
+                .iter()
+                .map(|row| (row.message_index, row.part_index))
+                .collect();
+            assert_eq!(
+                parts,
+                vec![
+                    (0, 0),
+                    (0, 2),
+                    (0, 3),
+                    (0, 4),
+                    (0, 5),
+                    (0, 6),
+                    (0, 7),
+                    (1, 0),
+                    (2, 0)
+                ]
+            );
+            shell.quitting = true;
+        });
+    }
+
+    #[gpui::test]
+    fn tool_completion_updates_groups_without_a_markdown_change(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        shell.update(cx, |shell, _| {
+            shell.model.ui.transcript = vec![TranscriptItem {
+                role: TranscriptRole::Assistant,
+                text: String::new(),
+                parts: vec![
+                    activity_tool("shell", "a", ToolStatus::Completed),
+                    activity_tool("shell", "b", ToolStatus::Running),
+                ],
+            }];
+            shell.sync_markdown_cache();
+            assert_eq!(shell.transcript_rows.len(), 2);
+            let TranscriptPart::ToolCall { status, .. } =
+                &mut shell.model.ui.transcript[0].parts[1]
+            else {
+                unreachable!()
+            };
+            *status = ToolStatus::Completed;
+            shell.pending_transcript_scroll_anchor =
+                Some(mew_config::DesktopTranscriptScrollAnchor {
+                    message_index: 0,
+                    part_index: 1,
+                    block_index: 0,
+                    offset: 200.,
+                });
+            shell.sync_markdown_cache();
+            assert_eq!(
+                shell.transcript_rows.len(),
+                1,
+                "completion folds into the adjacent activity group"
+            );
+            assert_eq!(
+                shell.transcript_list.logical_scroll_top().offset_in_item,
+                px(0.),
+                "a tall call's offset does not skip its replacement summary"
+            );
+            shell.expanded_chat_parts.insert("tool-group-a".into());
+            shell.rebuild_transcript_rows_from_cache();
+            assert_eq!(shell.transcript_rows.len(), 3);
+            shell.model.ui.transcript[0].parts.push(activity_tool(
+                "read_file",
+                "c",
+                ToolStatus::Completed,
+            ));
+            shell.sync_markdown_cache();
+            assert_eq!(
+                shell.transcript_rows.len(),
+                4,
+                "new calls retain the expanded group"
+            );
+            shell.quitting = true;
+        });
+    }
+
+    #[gpui::test]
+    fn prepending_tools_preserves_the_open_group_and_restores_its_anchor(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        shell.update(cx, |shell, cx| {
+            let message = |id| TranscriptItem {
+                role: TranscriptRole::Assistant,
+                text: String::new(),
+                parts: vec![activity_tool("shell", id, ToolStatus::Completed)],
+            };
+            shell.model.ui.transcript = vec![message("a"), message("b")];
+            shell.expanded_chat_parts.insert("tool-group-a".into());
+            shell.sync_markdown_cache();
+            shell.pending_transcript_scroll_anchor =
+                Some(mew_config::DesktopTranscriptScrollAnchor {
+                    message_index: 0,
+                    part_index: 0,
+                    block_index: 1,
+                    offset: 0.,
+                });
+            shell.prepare_for_history_prepend(1);
+            shell.model.ui.transcript.insert(0, message("older"));
+            shell.sync_markdown_cache();
+            assert_eq!(
+                shell.transcript_rows.len(),
+                4,
+                "the existing group remains expanded"
+            );
+            assert!(
+                shell.pending_transcript_scroll_anchor.is_none(),
+                "an anchor in the merged group is restored"
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let header = cx.debug_bounds("tool-group-older-header").unwrap();
+        cx.simulate_click(header.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        shell.update(cx, |shell, _| {
+            assert_eq!(
+                shell.transcript_rows.len(),
+                1,
+                "the merged group can still collapse"
+            );
+            shell.quitting = true;
+        });
+    }
+
+    #[gpui::test]
+    fn activity_groups_fit_a_narrow_pane_without_wrapping_the_count(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            shell.model.ui.transcript = vec![TranscriptItem {
+                role: TranscriptRole::Assistant,
+                text: String::new(),
+                parts: [
+                    "read",
+                    "shell",
+                    "edit",
+                    "glob",
+                    "browser_open",
+                    "integration.unknown",
+                ]
+                .into_iter()
+                .map(|name| activity_tool(name, name, ToolStatus::Completed))
+                .collect(),
+            }];
+            shell.sync_markdown_cache();
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(420.), px(760.)));
+        cx.run_until_parked();
+        let header = cx.debug_bounds("tool-group-read-header").unwrap();
+        let content = cx.debug_bounds("transcript-content-0").unwrap();
+        assert_eq!(
+            header.size.height,
+            px(20.),
+            "the activity count stays on the summary line"
+        );
+        assert!(header.left() >= content.left() && header.right() <= content.right());
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn forming_a_group_keeps_manually_opened_call_details(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        shell.update(cx, |shell, _| {
+            shell.model.ui.transcript = vec![TranscriptItem {
+                role: TranscriptRole::Assistant,
+                text: String::new(),
+                parts: vec![
+                    activity_tool("shell", "a", ToolStatus::Completed),
+                    activity_tool("shell", "b", ToolStatus::Running),
+                ],
+            }];
+            shell.sync_markdown_cache();
+            shell.expanded_chat_parts.insert("chat-part-0-0".into());
+            let TranscriptPart::ToolCall { status, .. } =
+                &mut shell.model.ui.transcript[0].parts[1]
+            else {
+                unreachable!()
+            };
+            *status = ToolStatus::Completed;
+            shell.sync_markdown_cache();
+            assert_eq!(
+                shell.transcript_rows.len(),
+                3,
+                "grouping preserves the call the reader opened"
+            );
+            shell.quitting = true;
+        });
+    }
+
+    #[gpui::test]
+    fn completing_offscreen_tools_keeps_the_readers_position(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            shell.model.ui.transcript = vec![
+                TranscriptItem {
+                    role: TranscriptRole::Assistant,
+                    text: "older context to keep reading ".repeat(300),
+                    parts: Vec::new(),
+                },
+                TranscriptItem {
+                    role: TranscriptRole::Assistant,
+                    text: String::new(),
+                    parts: vec![
+                        activity_tool("shell", "first", ToolStatus::Completed),
+                        activity_tool("shell", "second", ToolStatus::Running),
+                    ],
+                },
+            ];
+            shell.sync_markdown_cache();
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(680.), px(760.)));
+        cx.run_until_parked();
+        shell.update(cx, |shell, cx| {
+            shell
+                .transcript_list
+                .set_follow_mode(gpui::FollowMode::Normal);
+            shell.transcript_list.scroll_to(gpui::ListOffset {
+                item_ix: 0,
+                offset_in_item: px(30.),
+            });
+            shell.transcript_scrolled_away = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let before = cx.debug_bounds("markdown-inline-container-0-0").unwrap();
+        shell.update(cx, |shell, cx| {
+            let TranscriptPart::ToolCall { status, .. } =
+                &mut shell.model.ui.transcript[1].parts[1]
+            else {
+                unreachable!()
+            };
+            *status = ToolStatus::Completed;
+            shell.sync_markdown_cache();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let after = cx
+            .debug_bounds("markdown-inline-container-0-0")
+            .expect("the older context stays visible");
+        assert_eq!(after.top(), before.top());
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
     fn virtualized_paragraph_chunks_read_as_one_continuous_paragraph(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -1407,6 +1778,7 @@ mod shell_tests {
             source_len: 12,
             render_blocks: Vec::new(),
             streaming: None,
+            completed_tool: false,
         };
         let fresh = String::from("same content");
         assert!(cached_markdown_source_unchanged(
@@ -1666,6 +2038,7 @@ mod shell_tests {
                 3
             ],
             streaming: None,
+            completed_tool: false,
         };
         let reasoning = TranscriptPart::Reasoning("one\ntwo\nthree".into());
         assert_eq!(

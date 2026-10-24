@@ -940,6 +940,7 @@ pub(super) struct CachedMarkdown {
     pub(super) source_len: usize,
     pub(super) render_blocks: Vec<MarkdownRenderBlock>,
     pub(super) streaming: Option<StreamingMarkdown>,
+    pub(super) completed_tool: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -947,6 +948,7 @@ pub(super) struct TranscriptRenderRow {
     pub(super) message_index: usize,
     pub(super) part_index: usize,
     pub(super) block_index: usize,
+    pub(super) tool_group_len: usize,
 }
 
 #[cfg(test)]

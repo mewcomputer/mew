@@ -82,6 +82,14 @@ within a message by 8 px. Keep virtual paragraph chunks continuous. The first
 loaded turn has the same padding as later turns so history prepending preserves
 the visible text position.
 
+Consecutive completed assistant tools fold into one muted activity summary with
+a call count, including runs across provider messages. Prose, reasoning, user
+turns and unfinished/failed calls break the group. Disclosure reveals the
+original calls as individually virtualized rows; manually opened details remain
+visible when a group forms. Keep reading anchors stable as calls finish and
+history loads. A replacement summary starts at its top rather than retaining
+an offset into a taller call.
+
 Collapsed completed tools use quiet rows; expanded, running and failed tools
 keep a distinct surface. Tool text and diff lists infer their content height
 inside bounded preview areas. Composer settings may wrap when labels need more

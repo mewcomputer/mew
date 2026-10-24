@@ -3144,3 +3144,26 @@ isolated app confirms wide and split conversation layout, visible expanded tool
 input/output, corrected heading gaps, text selection/replacement and multiline
 Unicode paste. Physical IME, VoiceOver and native light-theme appearance remain
 unverified. Updated design guidance after verification.
+
+# 2026-10-24 - group completed desktop tool activity
+
+Used the supplied Codex screenshot to replace consecutive completed tool rows
+with compact activity summaries and call counts. Groups span assistant provider
+messages, while prose, reasoning, user turns and unfinished/failed calls remain
+boundaries. Expanding a group reveals the original virtualized calls and their
+input, output and diffs. Category icons distinguish files, commands and browser
+activity. Long summaries truncate while retaining the full accessible label.
+
+Completion invalidates the projection even when markdown is unchanged. Open
+call details survive grouping, merged history groups remain usable, and domain
+anchors preserve reading position during automatic regrouping. Anchors that
+fall back to a short summary discard offsets into the original taller call.
+
+All 232 desktop tests pass, including failing-first disclosure, boundary,
+completion, history merge, narrow summary and real GPUI scroll regressions.
+Strict desktop Clippy, native build, formatting, architecture and generated-theme
+checks pass. Native QA confirms dark/light summary contrast, truncation in the
+split pane, expanded command input/output, visible running/failed calls and
+Space activation. The light-theme pass also exposed an existing dark syntax
+palette in code fences; that separate fix follows this commit. Physical IME and
+VoiceOver remain unverified.

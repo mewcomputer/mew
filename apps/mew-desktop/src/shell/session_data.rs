@@ -110,9 +110,25 @@ impl DesktopShell {
                 source_len: 0,
                 render_blocks: Vec::new(),
                 streaming: None,
+                completed_tool: false,
             });
             for (part_index, cached_part) in cached_parts.iter_mut().enumerate().take(part_count) {
                 let part = item.parts.get(part_index);
+                let completed_tool = matches!(
+                    part,
+                    Some(TranscriptPart::ToolCall {
+                        status: ToolStatus::Completed,
+                        ..
+                    })
+                );
+                if cached_part.completed_tool != completed_tool {
+                    changed = true;
+                    changed_message_start =
+                        Some(changed_message_start.map_or(index, |start: usize| start.min(index)));
+                    changed_message_end =
+                        Some(changed_message_end.map_or(index, |end: usize| end.max(index)));
+                    cached_part.completed_tool = completed_tool;
+                }
                 let Some((source, source_identity)) = (match part {
                     None => Some((
                         Cow::Borrowed(item.text.as_str()),
@@ -184,18 +200,25 @@ impl DesktopShell {
                     source_len,
                     render_blocks,
                     streaming,
+                    completed_tool,
                 };
             }
         }
         if !changed {
             return false;
         }
+        if self.pending_transcript_scroll_anchor.is_none() {
+            self.pending_transcript_scroll_anchor = self.current_transcript_scroll_anchor();
+        }
         if self.markdown_cache.len() != self.model.ui.transcript.len() {
             self.rebuild_transcript_rows_from_cache();
         } else if let (Some(message_start), Some(message_end)) =
             (changed_message_start, changed_message_end)
         {
-            self.rebuild_transcript_rows_in_range(message_start, message_end);
+            let (message_start, message_end) =
+                self.rebuild_transcript_rows_in_range(message_start, message_end);
+            changed_message_start = Some(message_start);
+            changed_message_end = Some(message_end);
         } else {
             self.rebuild_transcript_rows_from_cache();
         }
@@ -229,6 +252,7 @@ impl DesktopShell {
         for (message_index, item) in self.model.ui.transcript.iter().enumerate() {
             new_rows.extend(self.transcript_rows_for_message(message_index, item));
         }
+        self.group_completed_tool_rows(&mut new_rows);
         self.transcript_rows = new_rows;
         self.transcript_rows_append_only = self.transcript_rows.len() >= old_rows.len()
             && self.transcript_rows.starts_with(&old_rows);
@@ -267,19 +291,88 @@ impl DesktopShell {
                 message_index,
                 part_index,
                 block_index,
+                tool_group_len: 0,
             }));
         }
         rows
     }
 
-    fn rebuild_transcript_rows_in_range(&mut self, message_start: usize, message_end: usize) {
+    fn group_completed_tool_rows(&self, rows: &mut Vec<TranscriptRenderRow>) {
+        let mut read = 0;
+        let mut write = 0;
+        while read < rows.len() {
+            let first = rows[read];
+            let mut end = read;
+            while end < rows.len() {
+                let row = rows[end];
+                let item = &self.model.ui.transcript[row.message_index];
+                if item.role != TranscriptRole::Assistant
+                    || !matches!(
+                        item.parts.get(row.part_index),
+                        Some(TranscriptPart::ToolCall {
+                            status: ToolStatus::Completed,
+                            ..
+                        })
+                    )
+                {
+                    break;
+                }
+                end += 1;
+            }
+            let count = end - read;
+            if count < 2 {
+                rows[write] = first;
+                read += 1;
+                write += 1;
+                continue;
+            }
+            let header = TranscriptRenderRow {
+                // Tool calls have one detail block; block 1 identifies their group header
+                // independently of the first call when restoring a scroll anchor.
+                block_index: 1,
+                tool_group_len: count,
+                ..first
+            };
+            if self.tool_group_is_expanded(header) {
+                // Insert only at the unread boundary so the remaining rows stay intact.
+                rows.copy_within(read..end, write);
+                rows.insert(write, header);
+                write += count + 1;
+                read = end + 1;
+            } else {
+                rows[write] = header;
+                write += 1;
+                read = end;
+            }
+        }
+        rows.truncate(write);
+    }
+
+    fn rebuild_transcript_rows_in_range(
+        &mut self,
+        message_start: usize,
+        message_end: usize,
+    ) -> (usize, usize) {
         let Some(last_message) = self.model.ui.transcript.len().checked_sub(1) else {
             self.transcript_rows.clear();
             self.transcript_rows_append_only = false;
-            return;
+            return (0, 0);
         };
-        let message_start = message_start.min(last_message);
-        let message_end = message_end.min(last_message).max(message_start);
+        let mut message_start = message_start.min(last_message);
+        let mut message_end = message_end.min(last_message).max(message_start);
+        // A completed run can cross provider messages within the same assistant turn.
+        while message_start > 0
+            && self.model.ui.transcript[message_start].role == TranscriptRole::Assistant
+            && self.model.ui.transcript[message_start - 1].role == TranscriptRole::Assistant
+        {
+            message_start -= 1;
+        }
+        while message_end < last_message
+            && self.model.ui.transcript[message_end].role == TranscriptRole::Assistant
+            && self.model.ui.transcript[message_end + 1].role == TranscriptRole::Assistant
+        {
+            message_end += 1;
+        }
         let old_rows = std::mem::take(&mut self.transcript_rows);
         let row_start = old_rows
             .iter()
@@ -289,7 +382,7 @@ impl DesktopShell {
             .iter()
             .position(|row| row.message_index > message_end)
             .unwrap_or(old_rows.len());
-        let replacement = (message_start..=message_end)
+        let mut replacement = (message_start..=message_end)
             .filter_map(|message_index| {
                 self.model
                     .ui
@@ -299,6 +392,7 @@ impl DesktopShell {
             })
             .flat_map(|(message_index, item)| self.transcript_rows_for_message(message_index, item))
             .collect::<Vec<_>>();
+        self.group_completed_tool_rows(&mut replacement);
         let mut new_rows =
             Vec::with_capacity(old_rows.len() - (row_end - row_start) + replacement.len());
         new_rows.extend_from_slice(&old_rows[..row_start]);
@@ -307,6 +401,7 @@ impl DesktopShell {
         self.transcript_rows_append_only =
             new_rows.len() >= old_rows.len() && new_rows.starts_with(&old_rows);
         self.transcript_rows = new_rows;
+        (message_start, message_end)
     }
 
     pub(super) fn request_older_history(&mut self) {
