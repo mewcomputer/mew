@@ -610,3 +610,142 @@ widths, long/short labels, Unicode, Send/Stop and all picker triggers. Native
 dark/light checks confirm the narrow/wide layout, dropdown placement and a long
 scrolling draft. The broader persona/secondary-control hierarchy finding remains
 a separate design decision. VoiceOver and physical IME remain unverified.
+
+
+## Composer comparison after friendly model names, 2026-10-24
+
+Reviewed commit `2bf41a2`. This pass compares live native mew at 420, 480 and
+600 px conversation widths against the user's supplied Codex screenshot. Direct
+Codex inspection remains denied by the computer-use tool's safety policy; the
+reference establishes visible composition, not current Codex interaction or
+behavior at narrower widths. No product code was changed.
+
+Two independent assessments covered visual hierarchy and the control/state
+inventory. The Impeccable HTML/JSX detector has no supported native Rust target,
+so no detector score or browser overlay is claimed. Native inspection used the
+owned QA app, a real daemon, a local catalog and loopback provider endpoints.
+No provider turn was submitted.
+
+### Main diagnosis and width comparison
+
+The single-row toolbar now holds its geometry, but selected state loses space
+at the minimum width. The Codex reference groups attachment/approval on the left
+and model/effort/send on the right. Mew adds a persistent persona choice and a
+separate Yield footer. The useful next step is a narrower hierarchy with visible
+model/effort state, rather than another reduction in label size.
+
+| Conversation width | Native result with builder and Claude Sonnet 4.5 · high |
+| --- | --- |
+| 420 px | builder becomes `buil…`; the model remains recognizable but the effort suffix disappears. Controls remain aligned. |
+| 480 px | Persona, model and effort fit in full on the same row. |
+| 600 px | The same values fit; the model control keeps its natural width. |
+
+Local captures: [420 px empty](/private/tmp/mew-composer-comparison-2026-10-24/420-empty.png),
+[480 px empty](/private/tmp/mew-composer-comparison-2026-10-24/480-empty.png),
+[600 px empty](/private/tmp/mew-composer-comparison-2026-10-24/600-empty.png).
+These widths were set in the stopped QA fixture and confirmed visually after
+launch. A computer-use divider drag did not change width and is excluded as
+resize evidence.
+
+### Priority findings
+
+1. **P1: long attachment names hide removal.** A real file-picker selection with
+   a long basename extends beyond the 420 px pane and puts the remove icon out
+   of view. The chip has no width constraint or truncating filename; its remove
+   div also lacks a button role, accessible label and keyboard focus treatment.
+   Bound the chip to the available width, truncate only the filename and reserve
+   a fixed, accessible remove target. Suggested command: `/adapt`.
+   Evidence: [native attachment](/private/tmp/mew-composer-comparison-2026-10-24/420-long-attachment.png),
+   [attachment rendering](/Users/natalie/code/mew/apps/mew-desktop/src/shell/chat_render.rs:2036).
+
+2. **P1: the primary control does not follow submission state.** Native empty
+   drafts show a fully available Send button, while whitespace-only submission
+   returns silently, including attachment-only drafts. More seriously, source
+   permits Enter to answer an AskUser request during a running turn, but the
+   visible primary button still cancels that turn. The question card instructs
+   users to answer in the composer and has no free-text submit button of its
+   own. Derive the primary action, label and disabled state from the same mode
+   and eligibility rules as submission. The AskUser discrepancy is confirmed
+   in source, not reproduced in a live request during this pass. Suggested
+   command: `/clarify`, backed by interaction tests.
+   Evidence: [submission](/Users/natalie/code/mew/apps/mew-desktop/src/shell/chat.rs:1100),
+   [primary controls](/Users/natalie/code/mew/apps/mew-desktop/src/shell/chat_render.rs:2413),
+   [question instructions](/Users/natalie/code/mew/apps/mew-desktop/src/shell/chat_render.rs:298).
+
+3. **P2: ordinary selected values disappear at 420 px.** Model and effort share
+   one truncating string, so the effort suffix goes first. Persona competes with
+   that string even when its value is the ordinary builder default. Keep effort
+   outside the model-name truncation span and move lower-frequency persona
+   configuration into secondary settings at narrow pane widths. Preserve a
+   visible permission state. Suggested command: `/distill`.
+   Evidence: the width captures above and
+   [model label](/Users/natalie/code/mew/apps/mew-desktop/src/shell/chat_render.rs:1800).
+
+4. **P2: popup placement uses different dimensions from rendering.** The model
+   menu renders at 400 px, but its right-alignment calculation receives 300 px.
+   Placement counts only filtered catalog models; actual height also counts
+   Recent duplicates and two headers. With one model and one recent, the height
+   difference is 192 px before the shared effort panel. Native window snapping
+   prevents some overflow but can shift the oversized menu over the composer.
+   Use the same row inventory and dimensions for rendering and placement, and
+   constrain overall popup height to available window space. Suggested command:
+   `/adapt`.
+   Evidence: [native picker](/private/tmp/mew-composer-comparison-2026-10-24/420-model-picker.png),
+   [placement](/Users/natalie/code/mew/apps/mew-desktop/src/shell/chat_render.rs:2593),
+   [rendered size](/Users/natalie/code/mew/apps/mew-desktop/src/shell/preferences.rs:934).
+
+5. **P2: long drafts do not reveal their extent.** All eight pasted lines remain
+   intact and caret-following scrolling works. The 96 px editor shows the last
+   four 24 px lines, with no scroll thumb, overflow hint or expand affordance.
+   Give writers a restrained scroll cue, and consider expansion when they need
+   to inspect a long prompt. Additional height should follow available window
+   space. Suggested command: `/polish`.
+   Evidence: [native long draft](/private/tmp/mew-composer-comparison-2026-10-24/420-long-draft.png),
+   [height cap](/Users/natalie/code/mew/apps/mew-desktop/src/shell/composer.rs:1480).
+
+### Smaller observations and strengths
+
+Yield remains visible with no other clients; the footer's nonshrinking status
+area can also accumulate usage and presence text. Make collaboration controls
+contextual. The model picker uses 64 px section-header rows and repeats recent
+models in All Models, spending substantial height on organization. Compact
+headers could expose more choices. Shift+Enter exists in source but is absent
+from the input's accessible editing hint.
+
+The stable toolbar, readable catalog names, fixed Send target and shared reading
+column are working well. Draft text stays readable at 15 px, and the scrolling
+fix preserves all content. No strong ornamental template patterns were found;
+the remaining issues concern component behavior and control density.
+
+### Provisional heuristic assessment
+
+These are subjective composer scores based on the evidence above. Cognitive
+load is moderate: 2 of 8 checklist items fail, minimal choices and progressive
+disclosure. A power user loses effort visibility at 420 px; a keyboard or
+assistive-technology user lacks a named attachment-removal action; a long-prompt
+writer has no cue for hidden draft content. Physical IME and VoiceOver were not
+exercised in this pass.
+
+| Heuristic | Score / 4 | Main evidence |
+| --- | --- | --- |
+| Visibility of system status | 2 | Effort and draft extent become hidden. |
+| Match with the real world | 3 | Catalog names and familiar send/attachment controls. |
+| User control and freedom | 2 | Attachment removal becomes unreachable. |
+| Consistency and standards | 2 | Enter can answer while the primary button cancels. |
+| Error prevention | 2 | Empty Send appears available. |
+| Recognition over recall | 2 | Truncated selected settings require opening a picker. |
+| Flexibility and efficiency | 3 | Keyboard editing, search and preserved drafts. |
+| Aesthetic and minimalist design | 2 | Persistent persona and collaboration controls. |
+| Error recovery | 3 | Existing retry surfaces retain the draft. |
+| Help and documentation | 2 | Basic input hint omits newline/overflow guidance. |
+| **Total** | **23 / 40** | Improvements concentrated in narrow and conditional states. |
+
+Recommended sequence: `/adapt` for attachment and popup geometry, `/clarify` for
+primary-action state, `/distill` for narrow settings hierarchy, then `/polish`
+for draft overflow cues and final state coverage. Existing composer geometry
+tests cover widths and non-overlap, but do not establish attachment removal,
+AskUser primary-button semantics, full selected-state legibility or popup fit.
+The next implementation should reproduce those cases before changing behavior.
+
+All owned QA processes were stopped, the test draft cleared and the fixture's
+420 px width restored. No production app preferences or sessions were changed.

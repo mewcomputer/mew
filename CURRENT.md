@@ -3415,3 +3415,24 @@ searching by name, pointer selection and keyboard selection of an unnamed model
 work. Saved policy confirms the original raw model identity. The QA app and its
 daemon are stopped. No provider turn was submitted. Physical IME and VoiceOver
 remain unverified.
+
+
+# 2026-10-24 - compare the compact composer with the Codex reference
+
+Completed a review-only comparison of commit `2bf41a2`. Two independent source
+assessments and live native mew checks at 420, 480 and 600 px confirm ordinary
+model/effort/persona values lose legibility only at the minimum width. A real
+long-named attachment also exceeds the pane and hides its remove action. An
+eight-line draft remains intact and follows the caret, but has no overflow cue.
+
+Source inspection found primary-button/submission disagreements for empty
+prompts and running AskUser answers. It also found that the model popup renders
+400 px wide while placement uses 300 px, and placement omits Recent/header rows
+from its height calculation. Native captures show the resulting menu occupying
+the composer area. The review records exact evidence, priorities and scoped
+heuristic scores in `notes/gpui-codex-ux-review-2026-10-24.md`.
+
+Codex evidence remains the user-supplied screenshot; direct inspection is denied
+by the computer-use safety policy. The HTML/JSX detector does not support native
+Rust. No product code or tests were changed. No provider prompt was submitted;
+the owned native QA app and daemon are stopped, draft cleared and width restored.
