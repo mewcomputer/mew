@@ -516,10 +516,6 @@ pub(super) fn should_animate_transcript_row(row_index: usize, row_count: usize) 
     row_count > 0 && row_index + 1 == row_count
 }
 
-pub(super) fn chat_content_column_width(available_width: f32) -> f32 {
-    available_width.clamp(0., CHAT_CONTENT_MAX_WIDTH)
-}
-
 /// Slash menu entries matching the current composer text. The menu is only
 /// relevant while the composer starts with `/`; a query of `/` lists every
 /// command, and typing arguments (e.g. `/goal fix the bug`) stops matching so

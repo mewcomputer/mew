@@ -123,6 +123,282 @@ mod shell_tests {
     }
 
     #[gpui::test]
+    fn active_chat_uses_one_bounded_column_for_messages_and_composer(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            shell.model.ui.transcript = vec![
+                TranscriptItem {
+                    role: TranscriptRole::User,
+                    text: "Keep this longer user message readable inside the conversation pane, including when the browser is open and there is less room for the chat.".into(),
+                    parts: Vec::new(),
+                },
+                TranscriptItem {
+                    role: TranscriptRole::Assistant,
+                    text: "The reply and composer share a reading column while the pane stays resizable.".into(),
+                    parts: Vec::new(),
+                },
+            ];
+            shell.sync_markdown_cache();
+            cx.notify();
+        });
+        for width in [420., 480., 1240.] {
+            cx.simulate_resize(gpui::size(px(width), px(900.)));
+            cx.refresh().unwrap();
+            cx.run_until_parked();
+            let composer = cx.debug_bounds("composer").unwrap();
+            let reply = cx.debug_bounds("transcript-content-1").unwrap();
+            let user = cx.debug_bounds("transcript-content-0").unwrap();
+            assert_eq!(reply.left(), composer.left());
+            assert_eq!(reply.right(), composer.right());
+            assert!(reply.size.width <= px(CHAT_CONTENT_MAX_WIDTH));
+            assert!(
+                user.left() >= composer.left(),
+                "user message clipped at {width}"
+            );
+            assert!(user.right() <= composer.right());
+        }
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn active_chat_separates_turns_more_than_parts(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            shell.model.ui.transcript = vec![
+                TranscriptItem {
+                    role: TranscriptRole::User,
+                    text: "check the layout".into(),
+                    parts: Vec::new(),
+                },
+                TranscriptItem {
+                    role: TranscriptRole::Assistant,
+                    text: String::new(),
+                    parts: vec![
+                        TranscriptPart::Text("checking the view".into()),
+                        TranscriptPart::Text("the layout is ready".into()),
+                    ],
+                },
+                TranscriptItem {
+                    role: TranscriptRole::User,
+                    text: "keep going".into(),
+                    parts: Vec::new(),
+                },
+            ];
+            shell.sync_markdown_cache();
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(680.), px(900.)));
+        cx.run_until_parked();
+        let user = cx.debug_bounds("transcript-content-0").unwrap();
+        let first = cx.debug_bounds("transcript-content-1").unwrap();
+        let second = cx.debug_bounds("transcript-content-2").unwrap();
+        let followup = cx.debug_bounds("transcript-content-3").unwrap();
+        let part_gap = second.top() - first.bottom();
+        assert!(part_gap >= px(8.));
+        assert!(first.top() - user.bottom() >= px(24.));
+        assert!(followup.top() - second.bottom() >= px(24.));
+        assert!(part_gap < first.top() - user.bottom());
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn narrow_composer_keeps_long_setting_labels_and_send_inside_its_bounds(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            shell.model.ui.model =
+                Some("a-provider/model-with-a-long-name-and-extra-high-effort".into());
+            shell.model.ui.current_persona = Some("a-persona-with-a-long-display-name".into());
+            let mut conversation = navigation_conversation("layout");
+            conversation.cwd = Some(
+                "/workspace/a-project-with-a-very-long-name/a-deeply-nested-working-directory"
+                    .into(),
+            );
+            shell.model.ui.selected_session = Some("layout".into());
+            shell.model.ui.conversations = vec![conversation];
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(420.), px(760.)));
+        cx.run_until_parked();
+        let composer = cx.debug_bounds("composer").unwrap();
+        let mut controls = Vec::new();
+        for selector in [
+            "permission-picker-trigger",
+            "persona-picker-trigger",
+            "model-picker-trigger",
+            "submit-prompt",
+        ] {
+            let bounds = cx.debug_bounds(selector).unwrap();
+            assert!(
+                bounds.left() >= composer.left(),
+                "{selector} crosses left edge"
+            );
+            assert!(
+                bounds.right() <= composer.right(),
+                "{selector} crosses right edge"
+            );
+            assert!(bounds.top() >= composer.top() && bounds.bottom() <= composer.bottom());
+            assert!(bounds.size.width > px(0.));
+            controls.push(bounds);
+        }
+        for (index, a) in controls.iter().enumerate() {
+            for b in &controls[index + 1..] {
+                assert!(!a.intersects(b), "composer controls overlap");
+            }
+        }
+        assert_eq!(controls.last().unwrap().size.width, px(28.));
+        let path = cx.debug_bounds("checkout-path").unwrap();
+        let status = cx.debug_bounds("session-status").unwrap();
+        assert!(path.right() <= status.left());
+        assert!(path.left() >= composer.left());
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn completed_tool_rows_are_quieter_and_still_expand(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            shell.model.ui.transcript = [ToolStatus::Completed, ToolStatus::Running]
+                .into_iter()
+                .enumerate()
+                .map(|(index, status)| TranscriptItem {
+                    role: TranscriptRole::Assistant,
+                    text: String::new(),
+                    parts: vec![TranscriptPart::ToolCall {
+                        tool_name: "shell".into(),
+                        call_id: format!("call-{index}"),
+                        status,
+                        input: r#"{"command":"cargo test -p mew-desktop"}"#.into(),
+                        output: Some("all tests passed".into()),
+                        error: None,
+                        diff: Some("-old line\n+new line".into()),
+                    }],
+                })
+                .collect();
+            shell.sync_markdown_cache();
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(680.), px(900.)));
+        cx.run_until_parked();
+        let completed = cx.debug_bounds("transcript-content-0").unwrap();
+        let running = cx.debug_bounds("transcript-content-1").unwrap();
+        assert!(completed.size.height < running.size.height);
+        let header = cx.debug_bounds("chat-part-0-0-header").unwrap();
+        cx.simulate_click(header.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        shell.update(cx, |shell, _| {
+            assert!(shell.expanded_chat_parts.contains("chat-part-0-0"));
+            shell.quitting = true;
+        });
+        assert!(
+            cx.debug_bounds("transcript-content-0").unwrap().size.height > completed.size.height
+        );
+        let output = cx
+            .debug_bounds("tool-output-0-0-line-0")
+            .expect("expanded tool output is rendered");
+        assert!(output.size.height >= px(18.));
+        assert!(cx.debug_bounds("tool-input-0-0-line-0").is_some());
+        assert!(cx.debug_bounds("tool-diff-0-0-line-0").is_some());
+    }
+
+    #[gpui::test]
+    fn virtualized_paragraph_chunks_read_as_one_continuous_paragraph(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            shell.model.ui.transcript = vec![TranscriptItem {
+                role: TranscriptRole::Assistant,
+                text: "readable conversation ".repeat(60),
+                parts: Vec::new(),
+            }];
+            shell.sync_markdown_cache();
+            assert_eq!(shell.transcript_rows.len(), 2);
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(760.), px(1200.)));
+        cx.run_until_parked();
+        let first = cx.debug_bounds("markdown-inline-container-0-0").unwrap();
+        let second = cx.debug_bounds("markdown-inline-container-0-1").unwrap();
+        assert_eq!(second.top(), first.bottom());
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn turn_spacing_preserves_the_visible_text_when_history_is_prepended(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            shell.model.ui.transcript = vec![TranscriptItem {
+                role: TranscriptRole::Assistant,
+                text: "a longer response to read while older history loads ".repeat(90),
+                parts: Vec::new(),
+            }];
+            shell.sync_markdown_cache();
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(680.), px(760.)));
+        cx.run_until_parked();
+        shell.update(cx, |shell, cx| {
+            shell
+                .transcript_list
+                .set_follow_mode(gpui::FollowMode::Normal);
+            shell.transcript_list.scroll_to(gpui::ListOffset {
+                item_ix: 0,
+                offset_in_item: px(30.),
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let before = cx.debug_bounds("markdown-inline-container-0-0").unwrap();
+        shell.update(cx, |shell, cx| {
+            shell.prepare_for_history_prepend(1);
+            shell.model.ui.transcript.insert(
+                0,
+                TranscriptItem {
+                    role: TranscriptRole::User,
+                    text: "older question".into(),
+                    parts: Vec::new(),
+                },
+            );
+            shell.sync_markdown_cache();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let after = cx.debug_bounds("markdown-inline-container-1-0").unwrap();
+        assert_eq!(after.top(), before.top());
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
     fn new_tab_launcher_opens_closable_tool_tabs_without_changing_the_chat(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -1121,17 +1397,6 @@ mod shell_tests {
         assert!(should_animate_transcript_row(0, 1));
         assert!(!should_animate_transcript_row(0, 2));
         assert!(should_animate_transcript_row(1, 2));
-    }
-
-    #[test]
-    fn chat_content_column_stays_bounded_inside_a_wider_scroll_pane() {
-        assert_eq!(chat_content_column_width(0.), 0.);
-        assert_eq!(chat_content_column_width(420.), 420.);
-        assert_eq!(
-            chat_content_column_width(CHAT_CONTENT_MAX_WIDTH),
-            CHAT_CONTENT_MAX_WIDTH
-        );
-        assert_eq!(chat_content_column_width(1_200.), CHAT_CONTENT_MAX_WIDTH);
     }
 
     #[test]

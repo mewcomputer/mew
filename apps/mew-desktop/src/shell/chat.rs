@@ -53,6 +53,9 @@ impl DesktopShell {
             .id(format!(
                 "markdown-inline-container-{message_index}-{block_index}"
             ))
+            .debug_selector(move || {
+                format!("markdown-inline-container-{message_index}-{block_index}")
+            })
             .when(fill_width, |element| element.w_full())
             .min_w_0()
             .whitespace_normal()
@@ -414,6 +417,7 @@ impl DesktopShell {
         message_index: usize,
         block_index: usize,
         continuation: bool,
+        space_after: bool,
         animate: bool,
         fill_width: bool,
         syntax_highlights: &[MarkdownSyntaxHighlight],
@@ -423,7 +427,7 @@ impl DesktopShell {
         match block {
             MarkdownBlock::Paragraph(inline) => div()
                 .id(block_id)
-                .when(!continuation, |element| element.mb(px(10.)))
+                .when(space_after, |element| element.mb(px(12.)))
                 .child(self.render_inline(
                     inline,
                     message_index,
@@ -442,8 +446,9 @@ impl DesktopShell {
                 };
                 div()
                     .id(block_id)
-                    .when(!continuation, |element| element.mb(px(12.)))
+                    .when(space_after, |element| element.mb(px(12.)))
                     .text_size(size)
+                    .line_height(size + px(8.))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child(self.render_inline(
                         content,
@@ -460,7 +465,7 @@ impl DesktopShell {
                 .flex()
                 .flex_col()
                 .gap(px(5.))
-                .when(!continuation, |element| element.mb(px(10.)))
+                .when(space_after, |element| element.mb(px(12.)))
                 .children(items.iter().enumerate().map(|(item_index, item)| {
                     div()
                         .flex()
@@ -486,7 +491,7 @@ impl DesktopShell {
                 .flex()
                 .flex_col()
                 .gap(px(4.))
-                .when(!continuation, |element| element.mb(px(10.)))
+                .when(space_after, |element| element.mb(px(12.)))
                 .border_l_2()
                 .border_color(theme_rgb(&self.theme, "text.muted"))
                 .pl(px(12.))
@@ -508,7 +513,8 @@ impl DesktopShell {
                     .flex()
                     .flex_col()
                     .gap(px(6.))
-                    .when(!continuation, |element| element.mb(px(12.)))
+                    .when(space_after, |element| element.mb(px(12.)))
+                    .line_height(px(20.))
                     .rounded(px(8.))
                     .border_1()
                     .border_color(theme_rgb(&self.theme, "divider"))
@@ -565,7 +571,7 @@ impl DesktopShell {
                 .flex()
                 .flex_col()
                 .gap(px(4.))
-                .when(!continuation, |element| element.mb(px(10.)))
+                .when(space_after, |element| element.mb(px(12.)))
                 .rounded(px(8.))
                 .border_1()
                 .border_color(theme_rgb(&self.theme, "divider"))
@@ -590,12 +596,12 @@ impl DesktopShell {
             MarkdownBlock::Rule => div()
                 .id(block_id)
                 .h(px(1.))
-                .when(!continuation, |element| element.mb(px(12.)))
+                .when(space_after, |element| element.mb(px(12.)))
                 .bg(theme_rgb(&self.theme, "divider"))
                 .into_any_element(),
             MarkdownBlock::Raw(inline) => div()
                 .id(block_id)
-                .when(!continuation, |element| element.mb(px(10.)))
+                .when(space_after, |element| element.mb(px(12.)))
                 .child(self.render_inline(
                     inline,
                     message_index,

@@ -74,6 +74,20 @@ Keep sessions and review rows easy to scan. Use the existing virtualized
 transcript, review and sidebar structures rather than building an unbounded
 element collection. Preserve per-session draft and scroll state during navigation.
 
+The transcript and composer share a centered content column capped at 680 px,
+with 24 px pane gutters. User bubbles fit within that column; assistant content
+uses its full width. Conversation body text is 15 px with 24 px leading, while
+headings and code set their own leading. Separate messages by 24 px and parts
+within a message by 8 px. Keep virtual paragraph chunks continuous. The first
+loaded turn has the same padding as later turns so history prepending preserves
+the visible text position.
+
+Collapsed completed tools use quiet rows; expanded, running and failed tools
+keep a distinct surface. Tool text and diff lists infer their content height
+inside bounded preview areas. Composer settings may wrap when labels need more
+space; send keeps its size, and long workspace paths truncate while preserving
+the full accessible label.
+
 Display connection and browser failures through the existing stateful surfaces.
 A deferred failure must request a redraw immediately. Use the existing native
 dialog APIs only when the interaction calls for them; Zedra's native mobile

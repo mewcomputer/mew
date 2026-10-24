@@ -431,7 +431,7 @@ impl DesktopShell {
     pub(super) fn render_transcript_row(
         &mut self,
         index: usize,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let Some(row) = self.transcript_rows.get(index).copied() else {
@@ -453,6 +453,15 @@ impl DesktopShell {
             .markdown_cache
             .get(row.message_index)
             .and_then(|parts| parts.get(row.part_index));
+        let previous = index
+            .checked_sub(1)
+            .and_then(|index| self.transcript_rows.get(index));
+        let next = self.transcript_rows.get(index + 1);
+        let space_after = next.is_some_and(|next| {
+            next.message_index == row.message_index && next.part_index == row.part_index
+        }) && !cached
+            .and_then(|cached| cached.render_blocks.get(row.block_index + 1))
+            .is_some_and(|block| block.continuation);
         let selection_block_index = row
             .part_index
             .saturating_mul(1_000_000)
@@ -469,20 +478,16 @@ impl DesktopShell {
                     row.message_index,
                     selection_block_index,
                     render_block.continuation,
+                    space_after,
                     animate,
                     !is_user,
                     &render_block.syntax_highlights,
                     cx,
                 )
             }
-            TranscriptPart::Reasoning(_) => self.render_reasoning_part(
-                row.message_index,
-                row.part_index,
-                cached,
-                selection_block_index,
-                row.block_index,
-                cx,
-            ),
+            TranscriptPart::Reasoning(_) => {
+                self.render_reasoning_part(row, cached, selection_block_index, space_after, cx)
+            }
             TranscriptPart::ToolCall {
                 tool_name,
                 call_id,
@@ -534,32 +539,41 @@ impl DesktopShell {
                 .transcript_rows
                 .get(index + 1)
                 .is_some_and(|next| next.message_index == row.message_index);
-        let content_max_width = chat_content_column_width(
-            f32::from(window.bounds().size.width) - CHAT_TRANSCRIPT_PADDING * 2.,
-        );
-
         div()
             .id(format!("transcript-row-{index}"))
             .flex()
             .w_full()
             .justify_center()
-            .when(is_user && !continues_after, |element| element.mb(px(8.)))
+            // Keep the first loaded turn's geometry stable when history is prepended.
+            .when(
+                previous.is_none_or(|previous| previous.message_index != row.message_index),
+                |element| element.pt(px(24.)),
+            )
+            .when(
+                previous.is_some_and(|previous| {
+                    previous.message_index == row.message_index
+                        && previous.part_index != row.part_index
+                }),
+                |element| element.pt(px(8.)),
+            )
             .child(
                 div()
                     .flex()
                     .w_full()
-                    .max_w(px(content_max_width))
+                    .max_w(px(CHAT_CONTENT_MAX_WIDTH))
+                    .min_w_0()
                     .when(is_user, |element| element.justify_end())
                     .child(
                         div()
+                            .debug_selector(move || format!("transcript-content-{index}"))
                             .flex()
                             .flex_col()
                             .gap(px(6.))
-                            .max_w(px(650.))
+                            .min_w_0()
                             .when(!is_user, |element| element.w_full().min_w_0())
                             .when(is_user, |element| {
                                 element
-                                    .flex_none()
+                                    .max_w(relative(0.9))
                                     .p(px(12.))
                                     .when(continues_before, |element| element.pt(px(2.)))
                                     .when(continues_after, |element| element.pb(px(2.)))
@@ -569,8 +583,8 @@ impl DesktopShell {
                             .child(
                                 div()
                                     .when(!is_user, |element| element.w_full().min_w_0())
-                                    .text_sm()
-                                    .line_height(px(20.))
+                                    .text_size(px(15.))
+                                    .line_height(px(24.))
                                     .text_color(theme_rgb(&self.theme, "text.body"))
                                     .child(content),
                             ),
@@ -606,6 +620,7 @@ impl DesktopShell {
         let click_key = key.clone();
         div()
             .id(format!("{key}-header"))
+            .debug_selector(move || format!("{key}-header"))
             .flex()
             .items_center()
             .gap(px(7.))
@@ -649,13 +664,17 @@ impl DesktopShell {
 
     fn render_reasoning_part(
         &self,
-        message_index: usize,
-        part_index: usize,
+        row: TranscriptRenderRow,
         cached: Option<&CachedMarkdown>,
         selection_block_index: usize,
-        block_index: usize,
+        space_after: bool,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let TranscriptRenderRow {
+            message_index,
+            part_index,
+            block_index,
+        } = row;
         let key = Self::chat_part_key(message_index, part_index);
         let collapsed = !self.expanded_chat_parts.contains(&key);
         let block = cached.and_then(|cached| cached.render_blocks.get(block_index));
@@ -673,6 +692,7 @@ impl DesktopShell {
                             message_index,
                             selection_block_index,
                             block.continuation,
+                            space_after,
                             false,
                             true,
                             &block.syntax_highlights,
@@ -719,6 +739,7 @@ impl DesktopShell {
     ) -> gpui::AnyElement {
         let key = Self::chat_part_key(message_index, part_index);
         let collapsed = !self.expanded_chat_parts.contains(&key);
+        let compact = collapsed && status == ToolStatus::Completed;
         let (status_label, status_color) = match status {
             ToolStatus::Pending => ("pending", theme_rgb(&self.theme, "text.muted")),
             ToolStatus::Running => ("running", theme_rgb(&self.theme, "yellow.fg")),
@@ -738,8 +759,13 @@ impl DesktopShell {
         let summary_view = summary.map(|summary| {
             div()
                 .pl(px(20.))
+                .min_w_0()
+                .truncate()
                 .text_xs()
-                .text_color(theme_rgb(&self.theme, "text.body"))
+                .text_color(theme_rgb(
+                    &self.theme,
+                    if compact { "text.muted" } else { "text.body" },
+                ))
                 .child(SharedString::from(summary))
         });
         let body = (!collapsed).then(|| {
@@ -823,12 +849,16 @@ impl DesktopShell {
             .id(format!("tool-part-{message_index}-{part_index}-{call_id}"))
             .flex()
             .flex_col()
-            .gap(px(6.))
-            .p(px(10.))
-            .rounded(px(9.))
-            .bg(theme_rgb(&self.theme, "card").opacity(0.46))
-            .border_1()
-            .border_color(theme_rgb(&self.theme, "divider").opacity(0.7))
+            .gap(px(4.))
+            .line_height(px(20.))
+            .when(!compact, |element| {
+                element
+                    .p(px(10.))
+                    .rounded(px(9.))
+                    .bg(theme_rgb(&self.theme, "card").opacity(0.46))
+                    .border_1()
+                    .border_color(theme_rgb(&self.theme, "divider").opacity(0.7))
+            })
             .child(header)
             .when_some(summary_view, |element, summary| element.child(summary))
             .when_some(body, |element, body| element.child(body))
@@ -903,18 +933,23 @@ impl DesktopShell {
             .bg(theme_rgb(&self.theme, "background"))
             .rounded(px(6.))
             .p(px(8.))
-            .child(gpui::list(state, move |index, _, _| {
-                div()
-                    .id(format!("{id}-line-{index}"))
-                    .w_full()
-                    .min_w_0()
-                    .text_xs()
-                    .font_family(DEFAULT_FONT_FAMILY)
-                    .text_color(text_color)
-                    .whitespace_nowrap()
-                    .child(lines.get(index).cloned().unwrap_or_default())
-                    .into_any_element()
-            }))
+            .child(
+                gpui::list(state, move |index, _, _| {
+                    div()
+                        .id(format!("{id}-line-{index}"))
+                        .debug_selector(|| format!("{id}-line-{index}"))
+                        .w_full()
+                        .min_w_0()
+                        .text_xs()
+                        .line_height(px(18.))
+                        .font_family(DEFAULT_FONT_FAMILY)
+                        .text_color(text_color)
+                        .whitespace_nowrap()
+                        .child(lines.get(index).cloned().unwrap_or_default())
+                        .into_any_element()
+                })
+                .with_sizing_behavior(gpui::ListSizingBehavior::Infer),
+            )
             .into_any_element()
     }
 
@@ -958,21 +993,25 @@ impl DesktopShell {
             .bg(theme_rgb(&self.theme, "background"))
             .rounded(px(6.))
             .p(px(8.))
-            .child(gpui::list(state, move |index, _, _| {
-                let Some((line, color)) = lines.get(index) else {
-                    return div().into_any_element();
-                };
-                div()
-                    .id(format!("{id}-line-{index}"))
-                    .w_full()
-                    .min_w_0()
-                    .text_xs()
-                    .font_family(DEFAULT_FONT_FAMILY)
-                    .text_color(*color)
-                    .whitespace_nowrap()
-                    .child(line.clone())
-                    .into_any_element()
-            }))
+            .child(
+                gpui::list(state, move |index, _, _| {
+                    let Some((line, color)) = lines.get(index) else {
+                        return div().into_any_element();
+                    };
+                    div()
+                        .id(format!("{id}-line-{index}"))
+                        .debug_selector(|| format!("{id}-line-{index}"))
+                        .w_full()
+                        .min_w_0()
+                        .text_xs()
+                        .font_family(DEFAULT_FONT_FAMILY)
+                        .text_color(*color)
+                        .whitespace_nowrap()
+                        .child(line.clone())
+                        .into_any_element()
+                })
+                .with_sizing_behavior(gpui::ListSizingBehavior::Infer),
+            )
             .when(truncated, |element| {
                 element.child(
                     div()
@@ -1339,7 +1378,7 @@ impl DesktopShell {
                             .flex_1()
                             .min_h_0()
                             .w_full()
-                            .py(px(CHAT_TRANSCRIPT_PADDING)),
+                            .pb(px(CHAT_TRANSCRIPT_PADDING)),
                         )
                         .when_some(
                             self.render_transcript_scrollbar(cx),
@@ -1350,7 +1389,8 @@ impl DesktopShell {
                     element.child(
                         div()
                             .w_full()
-                            .max_w(px(CHAT_CONTENT_MAX_WIDTH))
+                            .max_w(px(CHAT_CONTENT_MAX_WIDTH + CHAT_TRANSCRIPT_PADDING * 2.))
+                            .px(px(CHAT_TRANSCRIPT_PADDING))
                             .self_center()
                             .child(self.render_transcript_attention(
                                 attention,
@@ -1375,10 +1415,12 @@ impl DesktopShell {
         let persona_display =
             non_empty_label(self.model.ui.current_persona.as_deref(), "choose a persona");
         let permission_display = permission_mode_label(self.model.ui.permission_mode.as_deref());
-        let session_path = selected_session_path(
+        let session_path: SharedString = selected_session_path(
             &self.model.ui.conversations,
             self.model.ui.selected_session.as_deref(),
-        );
+        )
+        .unwrap_or_else(|| "No workspace selected".into())
+        .into();
         let usage_label = self.model.ui.usage.and_then(usage_summary_label);
         let presence_count = self.model.ui.presence.len();
         let control_yielded = self.model.ui.control_yielded_by.is_some();
@@ -1475,10 +1517,10 @@ impl DesktopShell {
                     .flex()
                     .flex_col()
                     .w_full()
-                    .max_w(px(CHAT_CONTENT_MAX_WIDTH))
+                    .max_w(px(CHAT_CONTENT_MAX_WIDTH + CHAT_TRANSCRIPT_PADDING * 2.))
                     .self_center()
                     .gap(px(8.))
-                    .px(px(24.))
+                    .px(px(CHAT_TRANSCRIPT_PADDING))
                     .pb(px(12.))
                     .when_some(last_error, |element, error| {
                         element.child(
@@ -1647,6 +1689,7 @@ impl DesktopShell {
                     .child(
                         div()
                             .id("composer")
+                            .debug_selector(|| "composer".into())
                             .flex_col()
                             .items_stretch()
                             .gap(px(8.))
@@ -1656,7 +1699,8 @@ impl DesktopShell {
                             .rounded(px(16.))
                             .bg(theme_rgb(&self.theme, "panel.background"))
                             .p(px(10.))
-                            .text_sm()
+                            .text_size(px(15.))
+                            .line_height(px(24.))
                             .role(Role::Group)
                             .aria_label("Message composer. Drop files here to attach.")
                             .when(composer_focused, |element| {
@@ -1728,7 +1772,10 @@ impl DesktopShell {
                             )
                             .child(
                                 div()
+                                    .id("composer-toolbar")
                                     .flex()
+                                    .flex_wrap()
+                                    .line_height(px(20.))
                                     .items_center()
                                     .justify_start()
                                     .w_full()
@@ -1780,6 +1827,7 @@ impl DesktopShell {
                                                     ))
                                                     .cursor_pointer()
                                                     .id("permission-picker-trigger")
+                                                    .debug_selector(|| "permission-picker-trigger".into())
                                                     .relative()
                                                     .role(Role::Button)
                                                     .desktop_focus(theme_rgb(&self.theme, "text.accent"))
@@ -1847,6 +1895,9 @@ impl DesktopShell {
                                             ))
                                             .cursor_pointer()
                                             .id("persona-picker-trigger")
+                                            .debug_selector(|| "persona-picker-trigger".into())
+                                            .min_w_0()
+                                            .max_w(px(120.))
                                             .relative()
                                             .role(Role::Button)
                                             .desktop_focus(theme_rgb(&self.theme, "text.accent"))
@@ -1870,7 +1921,7 @@ impl DesktopShell {
                                                 theme_rgb(&self.theme, "secondary_foreground"),
                                                 px(13.),
                                             ))
-                                            .child(SharedString::from(persona_display))
+                                            .child(div().min_w_0().truncate().child(SharedString::from(persona_display)))
                                             .child(tabler_icon(
                                                 TablerIcon::ChevronDown,
                                                 theme_rgb(&self.theme, "secondary_foreground"),
@@ -1898,7 +1949,6 @@ impl DesktopShell {
                                                 .size_full(),
                                             )
                                     )
-                                    .child(div().flex_1().min_w_0())
                                     .child(
                                         div()
                                             .text_xs()
@@ -1908,6 +1958,9 @@ impl DesktopShell {
                                             ))
                                             .cursor_pointer()
                                             .id("model-picker-trigger")
+                                            .debug_selector(|| "model-picker-trigger".into())
+                                            .ml_auto()
+                                            .min_w_0()
                                             .relative()
                                             .role(Role::Button)
                                             .desktop_focus(theme_rgb(&self.theme, "text.accent"))
@@ -1974,6 +2027,7 @@ impl DesktopShell {
                                     .child(if turn_is_running {
                                         div()
                                             .id("cancel-turn")
+                                            .flex_none()
                                             .size(px(28.))
                                             .rounded_full()
                                             .bg(theme_rgb(&self.theme, "red.fg"))
@@ -1997,6 +2051,8 @@ impl DesktopShell {
                                     } else {
                                         div()
                                             .id("submit-prompt")
+                                            .debug_selector(|| "submit-prompt".into())
+                                            .flex_none()
                                             .size(px(28.))
                                             .rounded_full()
                                             .bg(theme_rgb(&self.theme, "text.body"))
@@ -2044,21 +2100,22 @@ impl DesktopShell {
                                     .items_center()
                                     .gap(px(5.))
                                     .min_w_0()
+                                    .flex_1()
                                     .child(tabler_icon(
                                         TablerIcon::Folder,
                                         theme_rgb(&self.theme, "text.muted"),
                                         px(13.),
                                     ))
-                                    .child(SharedString::from(
-                                        session_path
-                                            .as_deref()
-                                            .unwrap_or("No workspace selected")
-                                            .to_owned(),
-                                    )),
+                                    .child(div().id("checkout-path").debug_selector(|| "checkout-path".into())
+                                        .min_w_0().truncate()
+                                        .role(Role::Label)
+                                        .aria_label(session_path.clone())
+                                        .child(session_path)),
                             )
                             .child(
                                 div()
                                     .id("session-status")
+                                    .debug_selector(|| "session-status".into())
                                     .flex()
                                     .flex_none()
                                     .items_center()

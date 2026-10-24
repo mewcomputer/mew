@@ -308,7 +308,7 @@ fn parse_block(block: &mdstream::Block) -> MarkdownBlock {
                 .chars()
                 .take_while(|character| *character == '#')
                 .count();
-            let content = trimmed[level..].trim_start();
+            let content = trimmed[level..].trim();
             MarkdownBlock::Heading {
                 level: level.clamp(1, 6) as u8,
                 content: parse_inline(content),
@@ -494,6 +494,15 @@ fn parse_inline(input: &str) -> InlineText {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn headings_do_not_retain_their_source_line_ending() {
+        let document = parse_document("## A readable heading\n\nThe reply continues here.\n");
+        let MarkdownBlock::Heading { content, .. } = &document.blocks[0] else {
+            panic!("expected heading");
+        };
+        assert_eq!(content.text, "A readable heading");
+    }
 
     #[test]
     fn parses_blocks_and_inline_styles() {

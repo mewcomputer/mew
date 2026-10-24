@@ -3114,3 +3114,33 @@ all 5 daemon browser tests, including real Chrome integration, pass as well.
 Strict all-target Clippy for the affected crates, native build and packaging,
 formatting, architecture and generated-theme checks pass. Updated the native
 host and comparison notes after the smoke test.
+
+# 2026-10-24 - polish the active desktop conversation
+
+Focused on active chat, as requested. Transcript and composer now share a
+centered 680 px content column and 24 px pane gutters. Long user messages wrap
+within the pane instead of clipping at its left edge. Body text uses 15 px type
+and 24 px leading, with separate heading/code leading. Messages have clearer
+turn spacing; parts remain closer together, and virtual paragraph chunks do
+not gain an artificial gap. Consistent first-turn padding preserves the visible
+text position when older history is prepended.
+
+Collapsed completed tools use quieter rows, retaining disclosure and status.
+Native expansion exposed existing zero-height tool input/output previews;
+their virtual lists, including diffs, now infer content height within bounded
+previews. Heading parsing also retained the source newline, creating an empty
+line after headings; the parser now trims it. Composer settings wrap when long
+labels need room, send keeps its size, and the workspace path truncates with
+its full accessible label retained. Removed the obsolete window-width helper
+and replaced its pure cap test with actual pane/message/composer geometry tests.
+
+Reproduced clipping, turn/part spacing, narrow settings/path overflow, blank
+tool output, heading newlines, virtual paragraph gaps and history anchor shifts
+before their fixes. All 224 desktop tests pass, including the new actual GPUI
+geometry, disclosure and history-prepend regressions. Strict all-target desktop
+Clippy, native build and packaging, formatting, architecture and generated-theme
+checks pass. The packaged
+isolated app confirms wide and split conversation layout, visible expanded tool
+input/output, corrected heading gaps, text selection/replacement and multiline
+Unicode paste. Physical IME, VoiceOver and native light-theme appearance remain
+unverified. Updated design guidance after verification.
