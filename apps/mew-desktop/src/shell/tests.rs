@@ -82,6 +82,108 @@ mod shell_tests {
     }
 
     #[gpui::test]
+    fn new_tab_launcher_opens_closable_tool_tabs_without_changing_the_chat(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.simulate_resize(gpui::size(px(1440.), px(900.)));
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = false;
+            shell.layout.workbench_collapsed = false;
+            shell.workbench_animation_id = 0;
+            shell.model.ui.conversations = vec![navigation_conversation("a")];
+            shell.model.ui.selected_session = Some("a".into());
+            shell.model.ui.composer = "keep this follow-up".into();
+            cx.notify();
+        });
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+        let launcher = cx.debug_bounds("work-new-tab-page").unwrap();
+        let pane = cx.debug_bounds("work-pane").unwrap();
+        assert_eq!(launcher.bottom(), pane.bottom());
+        let target = cx.debug_bounds("launch-changes").unwrap().center();
+        cx.simulate_click(target, gpui::Modifiers::none());
+        cx.run_until_parked();
+        shell.update(cx, |shell, _| {
+            assert_eq!(shell.work_tabs.active().kind, WorkTabKind::Changes)
+        });
+        let target = cx.debug_bounds("new-work-tab").unwrap().center();
+        cx.simulate_click(target, gpui::Modifiers::none());
+        cx.run_until_parked();
+        let target = cx.debug_bounds("launch-terminal").unwrap().center();
+        cx.simulate_click(target, gpui::Modifiers::none());
+        cx.run_until_parked();
+        let terminal = cx.debug_bounds("terminal-tab-content").unwrap();
+        assert_eq!(terminal.bottom(), pane.bottom());
+        assert_eq!(
+            terminal.origin.y,
+            cx.debug_bounds("work-header").unwrap().bottom()
+        );
+        shell.update(cx, |shell, _| {
+            assert_eq!(shell.work_tabs.tabs.len(), 2);
+            assert_eq!(shell.work_tabs.active().kind, WorkTabKind::Terminal);
+        });
+        let target = cx.debug_bounds("work-tab-0").unwrap().center();
+        cx.simulate_click(target, gpui::Modifiers::none());
+        cx.run_until_parked();
+        let target = cx.debug_bounds("close-work-tab-1").unwrap().center();
+        cx.simulate_click(target, gpui::Modifiers::none());
+        cx.run_until_parked();
+        shell.update(cx, |shell, _| {
+            assert_eq!(shell.work_tabs.active().kind, WorkTabKind::Changes)
+        });
+        let target = cx.debug_bounds("close-work-tab-0").unwrap().center();
+        cx.simulate_click(target, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("work-new-tab-page").is_some());
+        shell.update(cx, |shell, _| {
+            assert_eq!(shell.work_tabs.tabs.len(), 1);
+            assert_eq!(shell.model.ui.selected_session.as_deref(), Some("a"));
+            assert_eq!(shell.model.ui.composer, "keep this follow-up");
+            shell.quitting = true;
+        });
+    }
+
+    #[gpui::test]
+    fn browser_tab_selection_revokes_only_that_chats_previous_target(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.skip_drawing();
+        let window =
+            cx.add_window(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        let shell = window.root(cx).unwrap();
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        shell.update(cx, |shell, cx| {
+            shell.command_tx = Some(sender);
+            shell.connection_profile = Some(DesktopConnectionProfile::LocalWebSocket { url: "ws://127.0.0.1:25566".into() });
+            shell.model.connection = crate::model::ShellConnection::Connected;
+            shell.model.ui.selected_session = Some("a".into());
+            shell.model.attached_session = Some("a".into());
+            shell.browser_confirmed_sessions.extend(["a".into(), "b".into()]);
+            let first = shell.work_tabs.active().id.clone();
+            let second = shell.work_tabs.new_tab();
+            shell.work_tabs.select(&first);
+            shell.browser_url = "https://first.example/a-draft".into();
+            let owner = shell.current_browser_owner().unwrap();
+            let other = BrowserOwner { session_id: "b".into(), ..owner.clone() };
+            shell.browser_registration_attempts.insert(owner.clone(), BrowserRegistration { page_instance: "page-a".into(), pending_replies: 0, retiring: false });
+            shell.browser_registration_attempts.insert(other.clone(), BrowserRegistration { page_instance: "page-b".into(), pending_replies: 0, retiring: false });
+            shell.select_work_tab(&second, cx);
+            assert_eq!(shell.current_browser_owner().unwrap().tab_id, second);
+            assert!(shell.browser_registration_attempts[&owner].retiring);
+            assert!(shell.browser_registration_attempts.contains_key(&other));
+            assert!(matches!(commands.try_recv().unwrap(), ClientMessage::UnregisterBrowserPage { session_id, page_instance } if session_id == "a" && page_instance == "page-a"));
+            assert!(commands.try_recv().is_err());
+            shell.complete_browser_registration("a", "page-a", None, cx);
+            assert!(!shell.browser_registration_attempts.contains_key(&owner));
+            shell.select_work_tab(&first, cx);
+            assert_eq!(shell.browser_url, "https://first.example/a-draft");
+            shell.quitting = true;
+        });
+    }
+
+    #[gpui::test]
     fn workspace_panes_have_full_height_owners_and_aligned_headers(cx: &mut gpui::TestAppContext) {
         let (shell, cx) =
             cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
@@ -232,21 +334,25 @@ mod shell_tests {
     fn work_tabs_switch_content_without_changing_the_chat(cx: &mut gpui::TestAppContext) {
         let (shell, cx) =
             cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
-        cx.simulate_resize(gpui::size(px(1440.), px(900.)));
+        cx.simulate_resize(gpui::size(px(1800.), px(900.)));
         shell.update(cx, |shell, cx| {
             shell.layout.sidebar_collapsed = false;
             shell.layout.workbench_collapsed = false;
             shell.layout.terminal_collapsed = true;
             shell.workbench_animation_id = 0;
+            shell.work_tabs.open_tool(WorkTabKind::Browser);
+            shell.work_tabs.open_tool(WorkTabKind::Changes);
+            shell.work_tabs.open_tool(WorkTabKind::Files);
+            shell.work_tabs.open_tool(WorkTabKind::Activity);
             shell.model.ui.composer = "retain this draft".into();
             cx.notify();
         });
         cx.refresh().unwrap();
         cx.run_until_parked();
-        let browser = cx.debug_bounds("work-tab-browser").unwrap();
-        let changes = cx.debug_bounds("work-tab-changes").unwrap();
-        let files = cx.debug_bounds("work-tab-files").unwrap();
-        let activity = cx.debug_bounds("work-tab-activity").unwrap();
+        let browser = cx.debug_bounds("work-tab-0").unwrap();
+        let changes = cx.debug_bounds("work-tab-1").unwrap();
+        let files = cx.debug_bounds("work-tab-2").unwrap();
+        let activity = cx.debug_bounds("work-tab-3").unwrap();
         for tab in [changes, files, activity] {
             assert_eq!(tab.origin.y, browser.origin.y);
         }
@@ -254,14 +360,14 @@ mod shell_tests {
         assert!(changes.right() <= files.origin.x);
         assert!(files.right() <= activity.origin.x);
         for (tab, view) in [
-            (files, AuxiliaryView::Local),
-            (activity, AuxiliaryView::Activity),
-            (changes, AuxiliaryView::Changes),
+            (files, WorkTabKind::Files),
+            (activity, WorkTabKind::Activity),
+            (changes, WorkTabKind::Changes),
         ] {
             cx.simulate_click(tab.center(), gpui::Modifiers::none());
             cx.run_until_parked();
             shell.update(cx, |shell, _| {
-                assert_eq!(shell.auxiliary_view, view);
+                assert_eq!(shell.work_tabs.active().kind, view);
                 assert_eq!(shell.model.ui.composer, "retain this draft");
                 assert!(shell.model.ui.selected_session.is_none());
             });
@@ -281,7 +387,7 @@ mod shell_tests {
             shell.layout.workbench_collapsed = false;
             shell.layout.terminal_collapsed = true;
             shell.layout.changes_expanded = true;
-            shell.auxiliary_view = AuxiliaryView::Changes;
+            shell.work_tabs.open_tool(WorkTabKind::Changes);
             shell.sidebar_animation_id = 0;
             shell.workbench_animation_id = 0;
             shell.review_diffs = vec![mew_diff::FileDiff::binary("image.png", None)];
@@ -328,7 +434,7 @@ mod shell_tests {
     }
 
     #[gpui::test]
-    fn terminal_docks_in_work_content_and_remains_available_in_a_narrow_window(
+    fn terminal_tab_fills_work_content_and_remains_available_in_a_narrow_window(
         cx: &mut gpui::TestAppContext,
     ) {
         let (shell, cx) =
@@ -339,14 +445,14 @@ mod shell_tests {
             shell.layout.sidebar_collapsed = false;
             shell.layout.workbench_collapsed = false;
             shell.layout.terminal_collapsed = false;
+            shell.work_tabs.open_tool(WorkTabKind::Terminal);
             shell.sidebar_animation_id = 0;
             shell.workbench_animation_id = 0;
-            shell.terminal_animation_id = 0;
             cx.notify();
         });
         cx.refresh().unwrap();
         cx.run_until_parked();
-        let terminal = cx.debug_bounds("terminal-dock").unwrap();
+        let terminal = cx.debug_bounds("terminal-tab-content").unwrap();
         let work = cx.debug_bounds("work-pane").unwrap();
         assert_eq!(terminal.origin.x, work.origin.x);
         assert_eq!(terminal.size.width, work.size.width);
@@ -1521,6 +1627,7 @@ mod shell_tests {
         let owner = BrowserOwner {
             connection_profile: "ws://127.0.0.1:25566".into(),
             session_id: "a".into(),
+            tab_id: "browser".into(),
         };
         let first = BrowserPage {
             owner: owner.clone(),

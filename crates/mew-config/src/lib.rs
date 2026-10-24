@@ -618,6 +618,8 @@ pub struct DesktopSessionViewState {
     pub activity_expanded: bool,
     #[serde(default = "default_auxiliary_view")]
     pub auxiliary_view: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_tabs: Option<DesktopWorkTabs>,
     #[serde(default = "default_conversation_width")]
     pub conversation_width: f32,
     #[serde(default)]
@@ -630,6 +632,28 @@ pub struct DesktopSessionViewState {
     pub browser_title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_scroll_anchor: Option<DesktopTranscriptScrollAnchor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DesktopWorkTabs {
+    #[serde(default)]
+    pub tabs: Vec<DesktopWorkTab>,
+    #[serde(default)]
+    pub active_tab_id: String,
+    #[serde(default)]
+    pub browser_tab_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DesktopWorkTab {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub title: String,
 }
 
 fn default_true() -> bool {
@@ -1152,6 +1176,24 @@ values = ["sk_test_deadbeef"]
                 local_expanded: false,
                 activity_expanded: true,
                 auxiliary_view: "activity".into(),
+                work_tabs: Some(DesktopWorkTabs {
+                    tabs: vec![
+                        DesktopWorkTab {
+                            id: "browser-a".into(),
+                            kind: "browser".into(),
+                            url: "https://example.com/é?q=one&next=two".into(),
+                            title: "例 • Example".into(),
+                        },
+                        DesktopWorkTab {
+                            id: "terminal-a".into(),
+                            kind: "terminal".into(),
+                            url: String::new(),
+                            title: String::new(),
+                        },
+                    ],
+                    active_tab_id: "terminal-a".into(),
+                    browser_tab_id: Some("browser-a".into()),
+                }),
                 conversation_width: 420.,
                 expanded_chat_parts: vec!["chat-part-1-0".into()],
                 browser_panel_open: false,

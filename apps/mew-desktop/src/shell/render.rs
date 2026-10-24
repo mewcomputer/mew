@@ -25,7 +25,10 @@ impl Render for DesktopShell {
             }
         }
         self.sync_browser_visibility();
-        if self.browser_panel_open && self.browser_url_focus_requested {
+        if self.work_tabs.active().kind.is_browser()
+            && !self.layout.workbench_collapsed
+            && self.browser_url_focus_requested
+        {
             self.browser_url_focus_requested = false;
             let focus_handle = self.browser_url_focus_handle.clone();
             window.defer(cx, move |window, cx| {
@@ -44,6 +47,8 @@ impl Render for DesktopShell {
             .on_key_down(cx.listener(Self::shell_key_down))
             .on_action(cx.listener(Self::action_new_conversation))
             .on_action(cx.listener(Self::action_close_conversation))
+            .on_action(cx.listener(Self::action_new_work_tab))
+            .on_action(cx.listener(Self::action_close_work_tab))
             .on_action(cx.listener(Self::action_toggle_sidebar))
             .on_action(cx.listener(Self::action_toggle_terminal))
             .on_action(cx.listener(Self::action_toggle_workbench))

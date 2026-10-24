@@ -1,4 +1,4 @@
-//! Retained native browser pages scoped to a confirmed connection and session.
+//! Retained native browser pages scoped to a confirmed connection, session and tab.
 
 use anyhow::{bail, Result};
 use mew_cef_host::embed::{
@@ -21,6 +21,7 @@ pub struct BrowserRect {
 pub struct BrowserOwner {
     pub connection_profile: String,
     pub session_id: String,
+    pub tab_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]

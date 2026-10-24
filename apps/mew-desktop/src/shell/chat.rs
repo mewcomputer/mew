@@ -771,9 +771,16 @@ impl DesktopShell {
             cx.notify();
             return;
         };
+        if !self.new_work_tab(cx) {
+            return;
+        }
+        self.work_tabs.active_mut().kind = WorkTabKind::Browser;
+        self.work_tabs.active_mut().url.clone_from(&url);
         self.browser_url = url;
-        self.open_browser_panel(cx);
-        self.navigate_browser_to(cx);
+        self.browser_panel_open = true;
+        self.browser_error = None;
+        self.capture_session_view_state();
+        cx.notify();
     }
 
     pub(super) fn composer_key_down(
@@ -908,6 +915,16 @@ impl DesktopShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if event.keystroke.modifiers.platform
+            && event.keystroke.key == "w"
+            && !self.layout.workbench_collapsed
+            && self.workbench_focus_handle.contains_focused(window, cx)
+        {
+            self.dispatch_shell_command(ShellCommand::CloseWorkTab, cx);
+            window.focus(&self.workbench_focus_handle, cx);
+            cx.stop_propagation();
+            return;
+        }
         if escape_dismisses_shell_popover(
             event.keystroke.key.as_str(),
             self.model_picker_open,

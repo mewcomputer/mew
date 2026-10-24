@@ -1906,7 +1906,7 @@ mod tests {
                     shell.layout.sidebar_collapsed = false;
                     shell.layout.workbench_collapsed = target != TextInputTarget::BrowserUrl;
                     shell.browser_panel_open = target == TextInputTarget::BrowserUrl;
-                    shell.auxiliary_view = AuxiliaryView::Browser;
+                    shell.work_tabs.active_mut().kind = WorkTabKind::Browser;
                     shell.rename_session_id =
                         (target == TextInputTarget::Rename).then(|| "rename-target".into());
                     if target == TextInputTarget::Rename {
@@ -2048,7 +2048,7 @@ mod tests {
             let focus = shell.update(cx, |shell, cx| {
                 shell.settings_open = false;
                 shell.layout.workbench_collapsed = false;
-                shell.auxiliary_view = AuxiliaryView::Browser;
+                shell.work_tabs.active_mut().kind = WorkTabKind::Browser;
                 shell.browser_panel_open = true;
                 cx.notify();
                 shell.browser_url_focus_handle.clone()
@@ -2057,7 +2057,9 @@ mod tests {
         });
         cx.run_until_parked();
         cx.update(|window, cx| assert!(window.is_action_available(&TextPaste, cx)));
-        shell.update(cx, |shell, cx| shell.close_browser_panel(cx));
+        shell.update(cx, |shell, cx| {
+            shell.open_work_tool(WorkTabKind::Changes, cx)
+        });
         cx.run_until_parked();
         cx.update(|window, cx| {
             assert!(shell.read(cx).browser_url_focus_handle.is_focused(window));

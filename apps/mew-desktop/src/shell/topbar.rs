@@ -319,6 +319,7 @@ impl DesktopShell {
     pub(super) fn render_terminal_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = theme_rgb(&self.theme, "text.muted");
         let active_icon = theme_rgb(&self.theme, "text.accent");
+        let selected = self.work_tabs.active().kind == WorkTabKind::Terminal;
         div()
             .id("terminal-toggle")
             .debug_selector(|| "terminal-toggle".into())
@@ -331,27 +332,19 @@ impl DesktopShell {
             .cursor_pointer()
             .role(Role::Button)
             .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-            .aria_label(if self.layout.terminal_collapsed {
-                "Show terminal"
+            .aria_label(if selected {
+                "Close terminal tab"
             } else {
-                "Hide terminal"
+                "Open terminal tab"
             })
-            .text_color(if self.layout.terminal_collapsed {
-                muted
-            } else {
-                active_icon
-            })
+            .text_color(if selected { active_icon } else { muted })
             .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
             .on_click(cx.listener(|shell, _, _, cx| {
                 shell.toggle_terminal(cx);
             }))
             .child(tabler_icon(
                 TablerIcon::Terminal2,
-                if self.layout.terminal_collapsed {
-                    muted
-                } else {
-                    active_icon
-                },
+                if selected { active_icon } else { muted },
                 px(14.),
             ))
     }

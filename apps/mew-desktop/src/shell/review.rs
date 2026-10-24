@@ -1,4 +1,4 @@
-use super::{AuxiliaryView, DesktopShell};
+use super::{DesktopShell, WorkTabKind};
 
 impl DesktopShell {
     pub(super) fn open_review(&mut self, cx: &mut gpui::Context<Self>) {
@@ -20,7 +20,7 @@ impl DesktopShell {
             return;
         }
         self.layout.changes_expanded = true;
-        self.select_auxiliary_view(AuxiliaryView::Changes, cx);
+        self.open_work_tool(WorkTabKind::Changes, cx);
         self.workbench_animation_id = self.workbench_animation_id.wrapping_add(1);
         self.capture_session_view_state();
         self.persist_layout();

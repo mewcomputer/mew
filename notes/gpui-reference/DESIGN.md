@@ -24,11 +24,23 @@ conversation and 360 px work minima, including the divider. Narrow windows fold
 work content; navigation resizing also preserves the conversation minimum.
 Legacy saved workbench widths use the new conversation default.
 
-Work content has named horizontal Browser, Changes, Files and Activity tabs.
+Work content has closable tabs for opened tools and browser pages. The plus
+control and Command-T open a new-tab page with URL entry and a launcher for
+Changes, Terminal, Files and Activity. Reopening a tool selects its existing tab;
+browser pages have independent identities, URLs, titles and retained native pages.
+Keep chat navigation in the left pane. Command-W closes a work tab while focus
+is in work content, and retains chat-close behavior in the conversation.
+
+Retain the tab order, selection and last browser target per chat. A first visit
+to another chat inherits pane sizing with a fresh tab workspace. Keep the active
+tab visible when the strip overflows, and keep the plus control accessible.
+
 Changes gives the diff the flexible area, with changed files at the right of a
-wide work pane or above the diff in a narrower one. The terminal docks beneath
-work content in split view and beneath the conversation when work is folded.
-Keep its retained entity and daemon session ownership across that move.
+wide work pane or above the diff in a narrower one. Terminal fills its selected
+work tab and falls back beneath the conversation in narrow windows where work
+is folded. Keep its retained entity and daemon session ownership across that
+move, and mount the entity in one place. Folded work content must not register
+hidden input fields or editing actions.
 
 New chat sits above the workspace list and inherits the selected workspace.
 Search and task filters open through the sidebar search control or Command-K.

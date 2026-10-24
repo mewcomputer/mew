@@ -88,28 +88,6 @@ impl DesktopShell {
         self.clear_review();
     }
 
-    pub(super) fn select_auxiliary_view(&mut self, view: AuxiliaryView, cx: &mut Context<Self>) {
-        self.auxiliary_view = view;
-        self.capture_session_view_state();
-        self.sync_workspace_watch();
-        if view == AuxiliaryView::Local {
-            if let Some(session_id) = self.model.attached_session.clone() {
-                self.refresh_file_tree(&session_id);
-            }
-        }
-        if view == AuxiliaryView::Changes {
-            self.review_requests.invalidate();
-            self.refresh_review(cx);
-        }
-        if view == AuxiliaryView::Browser {
-            self.open_browser_panel(cx);
-        } else if self.browser_panel_open {
-            self.close_browser_panel(cx);
-        } else {
-            cx.notify();
-        }
-    }
-
     pub(super) fn attach_session(&mut self, session_id: String, cx: &mut Context<Self>) {
         self.settings_open = false;
         if let Some(workspace) = self
@@ -258,7 +236,8 @@ impl DesktopShell {
             self.layout.workbench_collapsed = true;
         }
         self.sync_workspace_watch();
-        if !self.layout.workbench_collapsed && self.auxiliary_view == AuxiliaryView::Changes {
+        if !self.layout.workbench_collapsed && self.work_tabs.active().kind == WorkTabKind::Changes
+        {
             self.review_requests.invalidate();
             self.refresh_review(cx);
         }
@@ -295,22 +274,12 @@ impl DesktopShell {
     }
 
     pub(super) fn toggle_terminal(&mut self, cx: &mut Context<Self>) {
-        self.layout.terminal_collapsed = !self.layout.terminal_collapsed;
-        self.terminal_animation_id = self.terminal_animation_id.wrapping_add(1);
-        self.capture_session_view_state();
-        if let (Some(command_tx), Some(terminal_id)) = (&self.command_tx, &self.terminal_id) {
-            let _ = command_tx.send(ClientMessage::TerminalResize {
-                terminal_id: terminal_id.clone(),
-                rows: if self.layout.terminal_collapsed {
-                    1
-                } else {
-                    TERMINAL_EXPANDED_ROWS
-                },
-                cols: TERMINAL_COLS,
-            });
+        if self.work_tabs.active().kind == WorkTabKind::Terminal {
+            let id = self.work_tabs.active().id.clone();
+            self.close_work_tab(&id, cx);
+        } else {
+            self.open_work_tool(WorkTabKind::Terminal, cx);
         }
-        self.persist_layout();
-        cx.notify();
     }
 
     pub(super) fn close_terminal(&mut self) {
@@ -374,6 +343,13 @@ impl DesktopShell {
 
     pub(super) fn dispatch_shell_command(&mut self, command: ShellCommand, cx: &mut Context<Self>) {
         match command {
+            ShellCommand::NewWorkTab => {
+                self.new_work_tab(cx);
+            }
+            ShellCommand::CloseWorkTab => {
+                let id = self.work_tabs.active().id.clone();
+                self.close_work_tab(&id, cx);
+            }
             ShellCommand::ToggleSidebar => self.toggle_sidebar(cx),
             ShellCommand::ToggleTerminal => self.toggle_terminal(cx),
             ShellCommand::ToggleWorkbench => self.toggle_workbench(cx),
@@ -574,6 +550,7 @@ impl DesktopShell {
     }
 
     pub(super) fn capture_session_view_state(&mut self) {
+        self.save_browser_tab_draft();
         let Some(session_id) = self
             .model
             .ui
@@ -590,12 +567,9 @@ impl DesktopShell {
     fn current_session_view_state(&self) -> SessionViewState {
         SessionViewState {
             layout: self.layout,
-            auxiliary_view: self.auxiliary_view,
+            work_tabs: self.work_tabs.clone(),
             conversation_width: self.conversation_width,
             expanded_chat_parts: self.expanded_chat_parts.clone(),
-            browser_panel_open: self.browser_panel_open,
-            browser_url: self.browser_url.clone(),
-            browser_title: self.browser_title.clone(),
             transcript_scroll_anchor: self.current_transcript_scroll_anchor(),
         }
     }
@@ -631,7 +605,7 @@ impl DesktopShell {
             current_view_state,
         );
         restore_session_layout(&mut self.layout, view_state.layout);
-        self.auxiliary_view = view_state.auxiliary_view;
+        self.work_tabs = view_state.work_tabs;
         self.conversation_width = view_state.conversation_width;
         self.expanded_chat_parts = view_state.expanded_chat_parts;
         self.pending_transcript_scroll_anchor = view_state.transcript_scroll_anchor;
@@ -642,9 +616,8 @@ impl DesktopShell {
             } else {
                 gpui::FollowMode::Tail
             });
-        self.browser_panel_open = view_state.browser_panel_open;
-        self.browser_url = view_state.browser_url;
-        self.browser_title = view_state.browser_title;
+        self.browser_panel_open = self.work_tabs.active().kind == WorkTabKind::Browser;
+        self.layout.terminal_collapsed = self.work_tabs.active().kind != WorkTabKind::Terminal;
         self.browser_error = None;
         self.sync_browser_portal_to_view_state();
         if self.browser_panel_open && self.browser_portal.is_some() {
@@ -1228,23 +1201,12 @@ impl DesktopShell {
                     page_instance,
                     error,
                 } => {
-                    let page = self
-                        .browser_portal
-                        .as_ref()
-                        .and_then(|portal| portal.page_for_instance(page_instance))
-                        .filter(|page| {
-                            page.owner.session_id == *session_id
-                                && self.browser_owner_is_confirmed(&page.owner)
-                        });
-                    if let Some(page) = page {
-                        if let Some(portal) = &self.browser_portal {
-                            portal.set_error(&page, error.clone());
-                        }
-                        if self.current_browser_owner().as_ref() == Some(&page.owner) {
-                            self.browser_error = error.clone();
-                            cx.notify();
-                        }
-                    }
+                    self.complete_browser_registration(
+                        session_id,
+                        page_instance,
+                        error.clone(),
+                        cx,
+                    );
                 }
                 ClientEvent::BrowserError {
                     message,
@@ -1338,11 +1300,7 @@ impl DesktopShell {
             self.apply_file_tree_update(state);
         }
         if let Some(session_id) = ready_session_id {
-            if let Some(profile) = &self.connection_profile {
-                let owner = BrowserOwner {
-                    connection_profile: profile.endpoint_label(),
-                    session_id: session_id.to_owned(),
-                };
+            if let Some(owner) = self.browser_owner_for_session(session_id) {
                 if let Some(page) = self
                     .browser_portal
                     .as_ref()
@@ -1517,11 +1475,14 @@ fn restore_session_layout(current: &mut ShellLayoutState, saved: ShellLayoutStat
 fn session_view_state_or_current(
     states: &mut BTreeMap<String, SessionViewState>,
     session_id: &str,
-    current: SessionViewState,
+    mut current: SessionViewState,
 ) -> SessionViewState {
     states
         .entry(session_id.to_owned())
-        .or_insert(current)
+        .or_insert_with(|| {
+            current.work_tabs = WorkTabs::default();
+            current
+        })
         .clone()
 }
 
@@ -1538,8 +1499,40 @@ fn should_track_session_ready(
 mod tests {
     use super::*;
 
+    #[gpui::test]
+    fn each_chat_restores_its_own_browser_tabs_and_selection(cx: &mut gpui::TestAppContext) {
+        cx.skip_drawing();
+        let window =
+            cx.add_window(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        let shell = window.root(cx).unwrap();
+        shell.update(cx, |shell, cx| {
+            shell.model.ui.selected_session = Some("a".into());
+            shell.work_tabs.active_mut().kind = WorkTabKind::Browser;
+            shell.browser_url = "https://first.example".into();
+            let first = shell.work_tabs.active().id.clone();
+            shell.capture_session_view_state();
+            shell.model.ui.selected_session = Some("b".into());
+            shell.restore_session_view_state("b", cx);
+            assert_eq!(shell.work_tabs.active().kind, WorkTabKind::NewTab);
+            assert!(shell.browser_url.is_empty());
+            shell.work_tabs.active_mut().kind = WorkTabKind::Browser;
+            shell.browser_url = "https://second.example".into();
+            let second = shell.work_tabs.active().id.clone();
+            shell.capture_session_view_state();
+            shell.model.ui.selected_session = Some("a".into());
+            shell.restore_session_view_state("a", cx);
+            assert_eq!(shell.work_tabs.active().id, first);
+            assert_eq!(shell.browser_url, "https://first.example");
+            shell.model.ui.selected_session = Some("b".into());
+            shell.restore_session_view_state("b", cx);
+            assert_eq!(shell.work_tabs.active().id, second);
+            assert_eq!(shell.browser_url, "https://second.example");
+            shell.quitting = true;
+        });
+    }
+
     #[test]
-    fn first_visit_inherits_current_session_view_state() {
+    fn first_visit_inherits_layout_with_a_fresh_work_workspace() {
         let current = SessionViewState {
             layout: ShellLayoutState {
                 sidebar_collapsed: true,
@@ -1549,20 +1542,27 @@ mod tests {
                 local_expanded: true,
                 activity_expanded: false,
             },
-            auxiliary_view: AuxiliaryView::Activity,
+            work_tabs: {
+                let mut tabs = WorkTabs::default();
+                tabs.active_mut().kind = WorkTabKind::Browser;
+                tabs.active_mut().url = "https://example.com".into();
+                tabs.new_tab();
+                tabs.open_tool(WorkTabKind::Activity);
+                tabs
+            },
             conversation_width: 420.,
             expanded_chat_parts: BTreeSet::from(["tool-1".into()]),
-            browser_panel_open: true,
-            browser_url: "https://example.com".into(),
-            browser_title: "Example".into(),
             transcript_scroll_anchor: None,
         };
         let mut states = BTreeMap::new();
 
         let restored = session_view_state_or_current(&mut states, "session-1", current.clone());
 
-        assert_eq!(restored, current);
-        assert_eq!(states.get("session-1"), Some(&current));
+        assert_eq!(restored.layout, current.layout);
+        assert_eq!(restored.conversation_width, current.conversation_width);
+        assert_eq!(restored.work_tabs.active().kind, WorkTabKind::NewTab);
+        assert!(restored.work_tabs.active().url.is_empty());
+        assert_eq!(states.get("session-1"), Some(&restored));
     }
 
     #[test]

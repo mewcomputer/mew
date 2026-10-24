@@ -10,9 +10,7 @@ fn activity_row_count(subagent_count: usize, todo_count: usize) -> usize {
 
 impl DesktopShell {
     pub(super) fn render_terminal_dock(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let expanded = !self.layout.terminal_collapsed;
-        let animation_id = self.terminal_animation_id;
-        let terminal = div()
+        div()
             .id("terminal-surface")
             .debug_selector(|| "terminal-dock".into())
             .flex()
@@ -22,27 +20,8 @@ impl DesktopShell {
             .w_full()
             .overflow_hidden()
             .bg(theme_rgb(&self.theme, "panel.background"))
-            .child(self.render_remote_terminal_strip(cx));
-        if animation_id == 0 {
-            return terminal
-                .h(px(if expanded {
-                    TERMINAL_EXPANDED_HEIGHT
-                } else {
-                    0.
-                }))
-                .into_any_element();
-        }
-        terminal
-            .with_animation(
-                ElementId::Name(format!("terminal-transition-{animation_id}").into()),
-                Animation::new(Duration::from_millis(180)).with_easing(gpui::ease_out_quint()),
-                move |element, delta| {
-                    let progress = if expanded { delta } else { 1. - delta };
-                    element
-                        .h(px(TERMINAL_EXPANDED_HEIGHT * progress))
-                        .opacity(progress)
-                },
-            )
+            .h(px(TERMINAL_EXPANDED_HEIGHT))
+            .child(self.render_remote_terminal_strip(cx))
             .into_any_element()
     }
 
@@ -78,15 +57,18 @@ impl DesktopShell {
 
         div()
             .id("terminal-strip")
+            .debug_selector(|| "terminal-tab-content".into())
             .flex()
             .flex_col()
-            .h(px(190.))
+            .flex_1()
+            .min_h_0()
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(8.))
                     .h(px(40.))
+                    .flex_none()
                     .px(px(12.))
                     .relative()
                     .text_sm()
@@ -318,6 +300,82 @@ impl DesktopShell {
         .into_any_element()
     }
 
+    pub(super) fn render_browser_toolbar(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        div()
+            .id("native-browser-toolbar")
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .gap(px(8.))
+            .h(px(44.))
+            .px(px(12.))
+            .border_b_1()
+            .border_color(theme_rgb(&self.theme, "divider"))
+            .text_xs()
+            .text_color(theme_rgb(&self.theme, "text.muted"))
+            .child(
+                div()
+                    .flex_1()
+                    .max_w(px(640.))
+                    .min_w_0()
+                    .h(px(28.))
+                    .px(px(8.))
+                    .border_1()
+                    .border_color(theme_rgb(&self.theme, "divider"))
+                    .rounded(px(7.))
+                    .bg(theme_rgb(&self.theme, "input"))
+                    .text_color(theme_rgb(&self.theme, "text.body"))
+                    .id("browser-url-field")
+                    .track_focus(&self.browser_url_focus_handle)
+                    .key_context("BrowserUrl")
+                    .on_action(cx.listener(Self::text_copy))
+                    .on_action(cx.listener(Self::text_cut))
+                    .on_action(cx.listener(Self::text_paste))
+                    .on_action(cx.listener(Self::text_select_all))
+                    .role(Role::TextInput)
+                    .aria_label("Browser URL")
+                    .cursor(gpui::CursorStyle::IBeam)
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|shell, _, window, cx| {
+                            shell.browser_url_mouse_down(window, cx);
+                        }),
+                    )
+                    .on_click(cx.listener(|shell, _, window, cx| {
+                        shell.browser_url_mouse_down(window, cx);
+                    }))
+                    .on_key_down(cx.listener(Self::browser_url_key_down))
+                    .child(ComposerElement {
+                        shell: cx.entity(),
+                        target: TextInputTarget::BrowserUrl,
+                    }),
+            )
+            .child(
+                div()
+                    .id("navigate-native-browser")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(26.))
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .role(Role::Button)
+                    .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+                    .aria_label("Navigate browser")
+                    .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
+                    .on_click(cx.listener(|shell, _, _, cx| {
+                        shell.navigate_browser_to(cx);
+                    }))
+                    .child(tabler_icon(
+                        TablerIcon::ChevronRight,
+                        theme_rgb(&self.theme, "text.muted"),
+                        px(14.),
+                    )),
+            )
+            .into_any_element()
+    }
+
     pub(super) fn render_browser_panel(
         &mut self,
         _window: &mut Window,
@@ -333,92 +391,7 @@ impl DesktopShell {
             .min_h_0()
             .border_b_1()
             .border_color(theme_rgb(&self.theme, "divider"))
-            .child(
-                div()
-                    .id("native-browser-toolbar")
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .h(px(38.))
-                    .px(px(10.))
-                    .text_xs()
-                    .text_color(theme_rgb(&self.theme, "text.muted"))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .h(px(28.))
-                            .px(px(8.))
-                            .border_1()
-                            .border_color(theme_rgb(&self.theme, "divider"))
-                            .rounded(px(7.))
-                            .bg(theme_rgb(&self.theme, "input"))
-                            .text_color(theme_rgb(&self.theme, "text.body"))
-                            .id("browser-url-field")
-                            .track_focus(&self.browser_url_focus_handle)
-                            .key_context("BrowserUrl")
-                            .on_action(cx.listener(Self::text_copy))
-                            .on_action(cx.listener(Self::text_cut))
-                            .on_action(cx.listener(Self::text_paste))
-                            .on_action(cx.listener(Self::text_select_all))
-                            .role(Role::TextInput)
-                            .aria_label("Browser URL")
-                            .cursor(gpui::CursorStyle::IBeam)
-                            .on_mouse_down(
-                                gpui::MouseButton::Left,
-                                cx.listener(|shell, _, window, cx| {
-                                    shell.browser_url_mouse_down(window, cx);
-                                }),
-                            )
-                            .on_click(cx.listener(|shell, _, window, cx| {
-                                shell.browser_url_mouse_down(window, cx);
-                            }))
-                            .on_key_down(cx.listener(Self::browser_url_key_down))
-                            .child(ComposerElement {
-                                shell: cx.entity(),
-                                target: TextInputTarget::BrowserUrl,
-                            }),
-                    )
-                    .child(
-                        div()
-                            .id("navigate-native-browser")
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .size(px(26.))
-                            .rounded(px(6.))
-                            .cursor_pointer()
-                            .role(Role::Button)
-                            .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                            .aria_label("Navigate browser")
-                            .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
-                            .on_click(cx.listener(|shell, _, _, cx| {
-                                shell.navigate_browser_to(cx);
-                            }))
-                            .child(tabler_icon(
-                                TablerIcon::ChevronRight,
-                                theme_rgb(&self.theme, "text.muted"),
-                                px(14.),
-                            )),
-                    )
-                    .child(
-                        div()
-                            .id("close-native-browser")
-                            .cursor_pointer()
-                            .role(Role::Button)
-                            .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                            .aria_label("Close browser")
-                            .text_lg()
-                            .on_click(cx.listener(|shell, _, _, cx| {
-                                shell.close_browser_panel(cx);
-                            }))
-                            .child(tabler_icon(
-                                TablerIcon::X,
-                                theme_rgb(&self.theme, "text.muted"),
-                                px(13.),
-                            )),
-                    ),
-            )
+            .child(self.render_browser_toolbar(cx))
             .child(
                 div()
                     .id("native-browser-viewport")
@@ -879,7 +852,8 @@ impl DesktopShell {
         } else {
             format!("Changes · {file_count} files")
         };
-        let active_view = self.auxiliary_view;
+        let active_view = self.work_tabs.active().kind;
+        let content_visible = !self.layout.workbench_collapsed;
         let session_path = selected_session_path(
             &self.model.ui.conversations,
             self.model.ui.selected_session.as_deref(),
@@ -914,65 +888,6 @@ impl DesktopShell {
         } else {
             "Activity will appear while a turn is running."
         };
-        let auxiliary_tabs = [
-            (AuxiliaryView::Browser, TablerIcon::Browser, "Browser"),
-            (AuxiliaryView::Changes, TablerIcon::FileCode, "Changes"),
-            (AuxiliaryView::Local, TablerIcon::Folder, "Files"),
-            (AuxiliaryView::Activity, TablerIcon::GitBranch, "Activity"),
-        ]
-        .into_iter()
-        .map(|(view, icon, label)| {
-            let selected = active_view == view;
-            div()
-                .id(format!("auxiliary-view-{}", label.to_lowercase()))
-                .debug_selector(move || format!("work-tab-{}", label.to_lowercase()))
-                .flex()
-                .flex_none()
-                .min_w_0()
-                .items_center()
-                .justify_center()
-                .gap(px(4.))
-                .h_full()
-                .px(px(8.))
-                .border_b_2()
-                .border_color(if selected {
-                    theme_rgb(&self.theme, "text.accent")
-                } else {
-                    theme_rgb(&self.theme, "divider")
-                })
-                .cursor_pointer()
-                .role(Role::Tab)
-                .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                .aria_selected(selected)
-                .aria_label(SharedString::from(format!(
-                    "{} work pane{}",
-                    label,
-                    if selected { ", selected" } else { "" }
-                )))
-                .text_xs()
-                .text_color(if selected {
-                    theme_rgb(&self.theme, "text.accent")
-                } else {
-                    theme_rgb(&self.theme, "text.muted")
-                })
-                .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
-                .on_click(cx.listener(move |shell, _, _, cx| {
-                    shell.select_auxiliary_view(view, cx);
-                }))
-                .child(tabler_icon(
-                    icon,
-                    if selected {
-                        theme_rgb(&self.theme, "text.accent")
-                    } else {
-                        theme_rgb(&self.theme, "text.muted")
-                    },
-                    px(13.),
-                ))
-                .child(div().min_w_0().truncate().child(label))
-                .into_any_element()
-        })
-        .collect::<Vec<_>>();
-
         let workbench = div()
             .id("review-workbench")
             .flex()
@@ -981,265 +896,252 @@ impl DesktopShell {
             .flex_1()
             .min_h_0()
             .min_w_0()
-            .when(active_view == AuxiliaryView::Browser, |element| {
-                element
-                    .child(
-                        div()
-                            .id("browser-launch")
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .h(px(38.))
-                            .px(px(7.))
-                            .cursor_pointer()
-                            .role(Role::Button)
-                            .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                            .aria_label("Open browser")
-                            .text_sm()
-                            .on_click(cx.listener(|shell, _, _, cx| {
-                                shell.open_browser_panel(cx);
-                            }))
-                            .child(tabler_icon(
-                                TablerIcon::Browser,
-                                theme_rgb(&self.theme, "text.muted"),
-                                px(15.),
-                            ))
-                            .child(div().flex_1())
-                            .child(if self.browser_panel_open {
-                                "open"
-                            } else {
-                                "open page"
-                            }),
-                    )
-                    .when(self.browser_panel_open, |element| {
-                        element.child(self.render_browser_panel(window, cx))
-                    })
-            })
-            .when(active_view == AuxiliaryView::Changes, |element| {
-                element
-                    .child(
-                        div()
-                            .id("changes-disclosure")
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .h(px(44.))
-                            .px(px(7.))
-                            .cursor_pointer()
-                            .role(Role::Button)
-                            .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                            .aria_expanded(self.layout.changes_expanded)
-                            .aria_label(SharedString::from(change_label.clone()))
-                            .border_b_1()
-                            .border_color(theme_rgb(&self.theme, "divider"))
-                            .text_sm()
-                            .on_click(cx.listener(|shell, _, _, cx| shell.toggle_changes(cx)))
-                            .child(if self.layout.changes_expanded {
-                                tabler_icon(
-                                    TablerIcon::ChevronDown,
-                                    theme_rgb(&self.theme, "text.muted"),
-                                    px(14.),
+            .when(
+                content_visible && active_view == WorkTabKind::NewTab,
+                |element| element.child(self.render_new_work_tab(cx)),
+            )
+            .when(
+                content_visible && active_view == WorkTabKind::Terminal,
+                |element| element.child(self.render_remote_terminal_strip(cx)),
+            )
+            .when(
+                content_visible && active_view == WorkTabKind::Browser,
+                |element| element.child(self.render_browser_panel(window, cx)),
+            )
+            .when(
+                content_visible && active_view == WorkTabKind::Changes,
+                |element| {
+                    element
+                        .child(
+                            div()
+                                .id("changes-disclosure")
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .h(px(44.))
+                                .px(px(7.))
+                                .cursor_pointer()
+                                .role(Role::Button)
+                                .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+                                .aria_expanded(self.layout.changes_expanded)
+                                .aria_label(SharedString::from(change_label.clone()))
+                                .border_b_1()
+                                .border_color(theme_rgb(&self.theme, "divider"))
+                                .text_sm()
+                                .on_click(cx.listener(|shell, _, _, cx| shell.toggle_changes(cx)))
+                                .child(if self.layout.changes_expanded {
+                                    tabler_icon(
+                                        TablerIcon::ChevronDown,
+                                        theme_rgb(&self.theme, "text.muted"),
+                                        px(14.),
+                                    )
+                                } else {
+                                    tabler_icon(
+                                        TablerIcon::ChevronRight,
+                                        theme_rgb(&self.theme, "text.muted"),
+                                        px(14.),
+                                    )
+                                })
+                                .child(SharedString::from(change_label))
+                                .child(div().flex_1())
+                                .child(
+                                    div()
+                                        .text_color(theme_rgb(&self.theme, "green.fg"))
+                                        .child(format!("+{added}")),
                                 )
-                            } else {
-                                tabler_icon(
-                                    TablerIcon::ChevronRight,
-                                    theme_rgb(&self.theme, "text.muted"),
-                                    px(14.),
-                                )
-                            })
-                            .child(SharedString::from(change_label))
-                            .child(div().flex_1())
-                            .child(
-                                div()
-                                    .text_color(theme_rgb(&self.theme, "green.fg"))
-                                    .child(format!("+{added}")),
-                            )
-                            .child(
-                                div()
-                                    .text_color(theme_rgb(&self.theme, "red.fg"))
-                                    .child(format!("−{removed}")),
-                            ),
-                    )
-                    .child(if file_count == 0 {
-                        div()
-                            .id("review-file-list-empty")
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .items_center()
-                            .justify_center()
-                            .gap(px(8.))
-                            .child(div().text_sm().child(review_message))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme_rgb(&self.theme, "text.muted"))
-                                    .child(SharedString::from(review_detail)),
-                            )
-                            .into_any_element()
-                    } else {
-                        let wide = expanded_workbench_width >= 680.;
-                        let file_list = div()
-                            .id("review-files")
-                            .debug_selector(|| "review-files".into())
-                            .flex()
-                            .flex_none()
-                            .min_h_0()
-                            .when(wide, |element| element.w(px(232.)).h_full().border_l_1())
-                            .when(!wide, |element| element.w_full().h(px(144.)).border_b_1())
-                            .border_color(theme_rgb(&self.theme, "divider"))
-                            .child(
-                                gpui::uniform_list(
-                                    "review-file-list",
-                                    file_count,
-                                    cx.processor(Self::render_review_rows),
-                                )
+                                .child(
+                                    div()
+                                        .text_color(theme_rgb(&self.theme, "red.fg"))
+                                        .child(format!("−{removed}")),
+                                ),
+                        )
+                        .child(if file_count == 0 {
+                            div()
+                                .id("review-file-list-empty")
+                                .flex()
+                                .flex_col()
                                 .flex_1()
-                                .min_w_0()
-                                .min_h_0(),
-                            );
-                        let document = div()
-                            .id("review-document")
-                            .debug_selector(|| "review-document".into())
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w_0()
-                            .min_h_0()
-                            .overflow_hidden()
-                            .child(self.render_diff_preview(cx));
-                        let content = div().flex().flex_1().min_w_0().min_h_0();
-                        if wide {
-                            content
-                                .child(document)
-                                .when(changes_expanded, |element| element.child(file_list))
+                                .items_center()
+                                .justify_center()
+                                .gap(px(8.))
+                                .child(div().text_sm().child(review_message))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme_rgb(&self.theme, "text.muted"))
+                                        .child(SharedString::from(review_detail)),
+                                )
                                 .into_any_element()
                         } else {
-                            content
+                            let wide = expanded_workbench_width >= 680.;
+                            let file_list = div()
+                                .id("review-files")
+                                .debug_selector(|| "review-files".into())
+                                .flex()
+                                .flex_none()
+                                .min_h_0()
+                                .when(wide, |element| element.w(px(232.)).h_full().border_l_1())
+                                .when(!wide, |element| element.w_full().h(px(144.)).border_b_1())
+                                .border_color(theme_rgb(&self.theme, "divider"))
+                                .child(
+                                    gpui::uniform_list(
+                                        "review-file-list",
+                                        file_count,
+                                        cx.processor(Self::render_review_rows),
+                                    )
+                                    .flex_1()
+                                    .min_w_0()
+                                    .min_h_0(),
+                                );
+                            let document = div()
+                                .id("review-document")
+                                .debug_selector(|| "review-document".into())
+                                .flex()
                                 .flex_col()
-                                .when(changes_expanded, |element| element.child(file_list))
-                                .child(document)
-                                .into_any_element()
-                        }
-                    })
-            })
-            .when(active_view == AuxiliaryView::Local, |element| {
-                element
-                    .child(
-                        div()
-                            .id("local-disclosure")
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .h(px(42.))
-                            .px(px(14.))
-                            .cursor_pointer()
-                            .role(Role::Button)
-                            .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                            .aria_expanded(self.layout.local_expanded)
-                            .aria_label(if self.layout.local_expanded {
-                                "Collapse local checkout"
+                                .flex_1()
+                                .min_w_0()
+                                .min_h_0()
+                                .overflow_hidden()
+                                .child(self.render_diff_preview(cx));
+                            let content = div().flex().flex_1().min_w_0().min_h_0();
+                            if wide {
+                                content
+                                    .child(document)
+                                    .when(changes_expanded, |element| element.child(file_list))
+                                    .into_any_element()
                             } else {
-                                "Expand local checkout"
-                            })
-                            .border_t_1()
-                            .border_color(theme_rgb(&self.theme, "divider"))
-                            .text_sm()
-                            .on_click(cx.listener(|shell, _, _, cx| shell.toggle_local(cx)))
-                            .child(if self.layout.local_expanded {
-                                tabler_icon(
-                                    TablerIcon::ChevronDown,
+                                content
+                                    .flex_col()
+                                    .when(changes_expanded, |element| element.child(file_list))
+                                    .child(document)
+                                    .into_any_element()
+                            }
+                        })
+                },
+            )
+            .when(
+                content_visible && active_view == WorkTabKind::Files,
+                |element| {
+                    element
+                        .child(
+                            div()
+                                .id("local-disclosure")
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .h(px(42.))
+                                .px(px(14.))
+                                .cursor_pointer()
+                                .role(Role::Button)
+                                .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+                                .aria_expanded(self.layout.local_expanded)
+                                .aria_label(if self.layout.local_expanded {
+                                    "Collapse local checkout"
+                                } else {
+                                    "Expand local checkout"
+                                })
+                                .border_t_1()
+                                .border_color(theme_rgb(&self.theme, "divider"))
+                                .text_sm()
+                                .on_click(cx.listener(|shell, _, _, cx| shell.toggle_local(cx)))
+                                .child(if self.layout.local_expanded {
+                                    tabler_icon(
+                                        TablerIcon::ChevronDown,
+                                        theme_rgb(&self.theme, "text.muted"),
+                                        px(14.),
+                                    )
+                                } else {
+                                    tabler_icon(
+                                        TablerIcon::ChevronRight,
+                                        theme_rgb(&self.theme, "text.muted"),
+                                        px(14.),
+                                    )
+                                })
+                                .child(tabler_icon(
+                                    TablerIcon::Folder,
                                     theme_rgb(&self.theme, "text.muted"),
                                     px(14.),
-                                )
-                            } else {
-                                tabler_icon(
-                                    TablerIcon::ChevronRight,
+                                ))
+                                .child("Workspace")
+                                .child(div().flex_1())
+                                .child(
+                                    div()
+                                        .max_w(px(150.))
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .text_xs()
+                                        .text_color(theme_rgb(&self.theme, "text.muted"))
+                                        .child(SharedString::from(
+                                            session_path
+                                                .as_deref()
+                                                .unwrap_or("path not set")
+                                                .to_owned(),
+                                        )),
+                                ),
+                        )
+                        .when(self.layout.local_expanded, |element| {
+                            element.child(self.render_file_tree(session_path.is_some(), cx))
+                        })
+                },
+            )
+            .when(
+                content_visible && active_view == WorkTabKind::Activity,
+                |element| {
+                    element
+                        .child(
+                            div()
+                                .id("activity-disclosure")
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .h(px(42.))
+                                .px(px(7.))
+                                .cursor_pointer()
+                                .role(Role::Button)
+                                .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+                                .aria_expanded(self.layout.activity_expanded)
+                                .aria_label(if self.layout.activity_expanded {
+                                    "Collapse activity"
+                                } else {
+                                    "Expand activity"
+                                })
+                                .border_t_1()
+                                .border_color(theme_rgb(&self.theme, "divider"))
+                                .text_sm()
+                                .on_click(cx.listener(|shell, _, _, cx| shell.toggle_activity(cx)))
+                                .child(if self.layout.activity_expanded {
+                                    tabler_icon(
+                                        TablerIcon::ChevronDown,
+                                        theme_rgb(&self.theme, "text.muted"),
+                                        px(14.),
+                                    )
+                                } else {
+                                    tabler_icon(
+                                        TablerIcon::ChevronRight,
+                                        theme_rgb(&self.theme, "text.muted"),
+                                        px(14.),
+                                    )
+                                })
+                                .child(tabler_icon(
+                                    TablerIcon::GitBranch,
                                     theme_rgb(&self.theme, "text.muted"),
                                     px(14.),
-                                )
-                            })
-                            .child(tabler_icon(
-                                TablerIcon::Folder,
-                                theme_rgb(&self.theme, "text.muted"),
-                                px(14.),
-                            ))
-                            .child("Workspace")
-                            .child(div().flex_1())
-                            .child(
-                                div()
-                                    .max_w(px(150.))
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .text_xs()
-                                    .text_color(theme_rgb(&self.theme, "text.muted"))
-                                    .child(SharedString::from(
-                                        session_path
-                                            .as_deref()
-                                            .unwrap_or("path not set")
-                                            .to_owned(),
-                                    )),
-                            ),
-                    )
-                    .when(self.layout.local_expanded, |element| {
-                        element.child(self.render_file_tree(session_path.is_some(), cx))
-                    })
-            })
-            .when(active_view == AuxiliaryView::Activity, |element| {
-                element
-                    .child(
-                        div()
-                            .id("activity-disclosure")
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .h(px(42.))
-                            .px(px(7.))
-                            .cursor_pointer()
-                            .role(Role::Button)
-                            .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                            .aria_expanded(self.layout.activity_expanded)
-                            .aria_label(if self.layout.activity_expanded {
-                                "Collapse activity"
-                            } else {
-                                "Expand activity"
-                            })
-                            .border_t_1()
-                            .border_color(theme_rgb(&self.theme, "divider"))
-                            .text_sm()
-                            .on_click(cx.listener(|shell, _, _, cx| shell.toggle_activity(cx)))
-                            .child(if self.layout.activity_expanded {
-                                tabler_icon(
-                                    TablerIcon::ChevronDown,
-                                    theme_rgb(&self.theme, "text.muted"),
-                                    px(14.),
-                                )
-                            } else {
-                                tabler_icon(
-                                    TablerIcon::ChevronRight,
-                                    theme_rgb(&self.theme, "text.muted"),
-                                    px(14.),
-                                )
-                            })
-                            .child(tabler_icon(
-                                TablerIcon::GitBranch,
-                                theme_rgb(&self.theme, "text.muted"),
-                                px(14.),
-                            ))
-                            .child("Activity")
-                            .child(div().flex_1())
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme_rgb(&self.theme, "text.muted"))
-                                    .child(activity_label),
-                            ),
-                    )
-                    .when(self.layout.activity_expanded, |element| {
-                        element.child(self.render_activity_body(activity_detail, cx))
-                    })
-            })
+                                ))
+                                .child("Activity")
+                                .child(div().flex_1())
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme_rgb(&self.theme, "text.muted"))
+                                        .child(activity_label),
+                                ),
+                        )
+                        .when(self.layout.activity_expanded, |element| {
+                            element.child(self.render_activity_body(activity_detail, cx))
+                        })
+                },
+            )
             .into_any_element();
 
         let workbench = div()
@@ -1248,52 +1150,14 @@ impl DesktopShell {
             .flex()
             .flex_col()
             .flex_none()
+            .track_focus(&self.workbench_focus_handle)
+            .key_context("Workbench")
             .relative()
             .h_full()
             .overflow_hidden()
             .bg(theme_rgb(&self.theme, "panel.background"))
-            .child(
-                div()
-                    .id("work-header")
-                    .debug_selector(|| "work-header".into())
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .w_full()
-                    .h(px(PANE_HEADER_HEIGHT))
-                    .child(
-                        div()
-                            .id("auxiliary-view-tabs")
-                            .role(Role::TabList)
-                            .aria_label("Work views")
-                            .flex()
-                            .flex_none()
-                            .min_w_0()
-                            .h_full()
-                            .children(auxiliary_tabs),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .h_full()
-                            .border_b_1()
-                            .border_color(theme_rgb(&self.theme, "divider")),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .h_full()
-                            .px(px(4.))
-                            .border_b_1()
-                            .border_color(theme_rgb(&self.theme, "divider"))
-                            .child(self.render_terminal_toggle(cx)),
-                    ),
-            )
-            .child(workbench)
-            .when(!self.layout.workbench_collapsed, |element| {
-                element.child(self.render_terminal_dock(cx))
-            });
+            .child(self.render_work_tab_bar(cx))
+            .child(workbench);
         let workbench_width = if self.layout.workbench_collapsed {
             WORKBENCH_COLLAPSED_WIDTH
         } else {

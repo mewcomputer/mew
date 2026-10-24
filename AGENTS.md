@@ -145,10 +145,13 @@ packaging is handled by `scripts/package-desktop-native.sh`; the native browser
 portal uses `native/cef-host` behind `mew-browser-host` and does not share the
 web client’s host bridge.
 
-Each confirmed local desktop conversation owns a retained CEF page. Page callbacks
-carry the connection profile, session and page generation; hidden pages keep the
-app's main-thread pump. The daemon receives the ready loopback CDP endpoint and
-exact target before browser tools become available. Native packaging bundles the
+Each browser or new-tab view in a confirmed local desktop conversation owns a
+retained CEF page. Page callbacks carry the connection profile, session, tab and
+page generation; hidden pages keep the app's main-thread pump. The daemon's
+browser tool target follows the last selected browser tab for that conversation.
+Registration and revocation replies are drained before reusing a page identity.
+The daemon receives the ready loopback CDP endpoint and exact target before
+browser tools become available. Native packaging bundles the
 standalone `agent-browser` executable, version 0.34 or newer, beside the daemon.
 Remote profiles do not register native browser pages.
 

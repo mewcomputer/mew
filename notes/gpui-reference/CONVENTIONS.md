@@ -19,9 +19,16 @@ Relevant mew files:
 - `shell/browser.rs` and `native/cef-host`: owned CEF pages and native embedding.
 - `terminal/terminal_view.rs`: terminal projection and GPUI entity.
 
-Keep CEF page callbacks scoped to connection profile, session and page instance.
+Keep CEF page callbacks scoped to connection profile, session, tab and page instance.
 A late response must not replace another draft, attachment, connection or page.
 Use the existing generation and owner checks rather than adding another identity.
+
+Each open browser/new-tab view retains its own CEF page, including while a tool
+tab is selected. The daemon advertises one browser tool target per conversation,
+following its last selected browser tab. Registration and revocation replies
+share a page identity; finish both before registering that identity again.
+Closing a tab revokes its target and closes only its page. Keep the native pump
+mounted while any retained page needs it.
 
 ## Entities and notifications
 

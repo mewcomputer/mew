@@ -2128,9 +2128,11 @@ impl DesktopShell {
             .min_w_0()
             .min_h_0()
             .child(conversation)
-            .when(self.layout.workbench_collapsed, |element| {
-                element.child(self.render_terminal_dock(cx))
-            })
+            .when(
+                self.layout.workbench_collapsed
+                    && self.work_tabs.active().kind == WorkTabKind::Terminal,
+                |element| element.child(self.render_terminal_dock(cx)),
+            )
     }
 
     pub(super) fn render_picker_overlays(

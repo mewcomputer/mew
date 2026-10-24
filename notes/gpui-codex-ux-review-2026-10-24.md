@@ -306,3 +306,34 @@ and reduced-motion pane toggles. Config tests cover legacy layout loading and
 new sizing persistence. Native inspection was retried and still fails with the
 OS permission error above; these tests do not establish live appearance,
 VoiceOver behavior or motion quality.
+
+## Tab workspace implementation follow-up
+
+The user's second screenshot refines the work pane into a browser-style tab
+workspace. The fixed category strip is replaced by closable tabs and a plus
+control. New tab provides URL entry and a launcher for existing Changes,
+Terminal, Files and Activity tools. Tool views reuse an open tab; browser pages
+remain independent, including URL drafts, titles, errors and native lifetimes.
+Transcript links open a separate browser tab. File-tree actions retain their
+existing external-open behavior.
+
+The terminal fills its work tab and keeps the narrow-window fallback below the
+conversation. Chat navigation remains in the left pane. Command-T opens a work
+tab, and Command-W closes work content within its focus scope while retaining
+chat-close behavior in the conversation. Tab order, selection and browser target
+are retained per chat; new chats start with a fresh tab workspace.
+
+CEF ownership now includes the tab identity. The agent's browser target follows
+the last selected browser/new-tab page for that chat. Closing a page revokes
+only its target and controller. Asynchronous registration and revocation replies
+are drained before reactivating the same page identity, preventing an old
+registration failure from marking a reselected page unavailable. Late page
+callbacks cannot overwrite another tab's metadata or address draft.
+
+GPUI tests cover opening/closing tools, keyboard routing, overflow, full-pane
+terminal geometry, hidden-field editing, per-chat restoration and browser target
+selection. Browser-host tests cover independent same-session pages and stale
+callbacks. The real-daemon browser test passes with isolated headless Chrome and
+the bundled agent-browser executable. These checks still leave live native
+appearance, CEF embedding, VoiceOver and motion unverified because native
+computer use remains blocked by the OS permission error.

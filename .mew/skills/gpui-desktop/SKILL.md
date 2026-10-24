@@ -47,7 +47,7 @@ not by itself isolate root render work.
 
 Keep blocking work off the foreground thread. Retain subscriptions and task
 ownership intentionally, use weak completion handles, and reject obsolete
-connection/session/page results through existing identities.
+connection/session/tab/page results through existing identities.
 
 Test framework behavior with actual GPUI entities/shaping and transport behavior
 with real local connections. Run the affected tests first, then the desktop

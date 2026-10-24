@@ -6,6 +6,8 @@ fn set_app_menus(cx: &mut App) {
     cx.bind_keys([
         gpui::KeyBinding::new("cmd-q", Quit, None),
         gpui::KeyBinding::new("cmd-n", NewConversation, None),
+        gpui::KeyBinding::new("cmd-t", NewWorkTab, None),
+        gpui::KeyBinding::new("cmd-w", CloseWorkTab, Some("Workbench")),
         gpui::KeyBinding::new("cmd-w", CloseConversation, None),
         gpui::KeyBinding::new("cmd-b", ToggleSidebar, None),
         gpui::KeyBinding::new("cmd-j", ToggleTerminal, None),
@@ -28,6 +30,8 @@ fn set_app_menus(cx: &mut App) {
         Menu::new("mew").items([MenuItem::action("Quit", Quit)]),
         Menu::new("File").items([
             MenuItem::action("New Chat", NewConversation),
+            MenuItem::action("New Work Tab", NewWorkTab),
+            MenuItem::action("Close Work Tab", CloseWorkTab),
             MenuItem::action("Close Chat", CloseConversation),
         ]),
         Menu::new("Edit").items([

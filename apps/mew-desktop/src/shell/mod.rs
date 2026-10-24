@@ -68,14 +68,17 @@ mod sidebar;
 mod tests;
 mod topbar;
 mod types;
+mod work_tabs;
 mod workbench;
 
+use browser::BrowserRegistration;
 use composer::{ComposerElement, TextInputTarget};
 use drafts::{DraftOwner, PromptDraft, TaskDrafts};
 use helpers::*;
 pub(crate) use platform::run;
 use session_requests::SessionRequests;
 use types::*;
+use work_tabs::{WorkTabKind, WorkTabs};
 
 actions!(
     mew_desktop,
@@ -83,6 +86,8 @@ actions!(
         Quit,
         NewConversation,
         CloseConversation,
+        NewWorkTab,
+        CloseWorkTab,
         ToggleSidebar,
         ToggleTerminal,
         ToggleWorkbench,

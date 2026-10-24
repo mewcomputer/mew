@@ -35,7 +35,7 @@ impl DesktopShell {
             self.clear_review();
             return;
         }
-        if self.auxiliary_view != AuxiliaryView::Changes || self.layout.workbench_collapsed {
+        if self.work_tabs.active().kind != WorkTabKind::Changes || self.layout.workbench_collapsed {
             return;
         }
         let Some(session_id) = self.model.attached_session.as_deref() else {
@@ -457,8 +457,8 @@ impl DesktopShell {
 
     pub(super) fn sync_workspace_watch(&mut self) {
         let desired = if matches!(
-            self.auxiliary_view,
-            AuxiliaryView::Local | AuxiliaryView::Changes
+            self.work_tabs.active().kind,
+            WorkTabKind::Files | WorkTabKind::Changes
         ) && !self.layout.workbench_collapsed
             && self.model.session_is_ready()
         {
@@ -488,7 +488,7 @@ impl DesktopShell {
                 enabled: true,
             });
             self.watching_workspace_session = desired;
-            if self.auxiliary_view == AuxiliaryView::Local {
+            if self.work_tabs.active().kind == WorkTabKind::Files {
                 self.request_dir_listing(None);
             }
         }
@@ -507,7 +507,7 @@ impl DesktopShell {
     }
 
     pub(super) fn refresh_file_tree(&mut self, session_id: &str) {
-        if self.auxiliary_view != AuxiliaryView::Local
+        if self.work_tabs.active().kind != WorkTabKind::Files
             || self.watching_workspace_session.as_deref() != Some(session_id)
         {
             return;

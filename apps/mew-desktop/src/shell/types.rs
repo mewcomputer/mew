@@ -87,10 +87,11 @@ pub(super) struct DesktopShell {
     pub(super) rename_marked_range: Option<Range<usize>>,
     pub(super) sidebar_animation_id: u64,
     pub(super) workbench_animation_id: u64,
-    pub(super) terminal_animation_id: u64,
     pub(super) window_width: f32,
     pub(super) conversation_width: f32,
-    pub(super) auxiliary_view: AuxiliaryView,
+    pub(super) work_tabs: WorkTabs,
+    pub(super) workbench_focus_handle: FocusHandle,
+    pub(super) work_tab_scroll: gpui::ScrollHandle,
     pub(super) transcript_list: gpui::ListState,
     pub(super) transcript_scrolled_away: bool,
     pub(super) transcript_scrollbar_grab_offset: Option<f32>,
@@ -169,7 +170,7 @@ pub(super) struct DesktopShell {
     pub(super) browser_title: String,
     pub(super) browser_error: Option<String>,
     pub(super) browser_confirmed_sessions: BTreeSet<String>,
-    pub(super) browser_registration_attempts: BTreeMap<BrowserOwner, String>,
+    pub(super) browser_registration_attempts: BTreeMap<BrowserOwner, BrowserRegistration>,
     pub(super) browser_pump: Option<Entity<BrowserPumpView>>,
     pub(super) settings_open: bool,
     pub(super) settings_page: SettingsPage,
@@ -449,17 +450,23 @@ impl Drop for DesktopShell {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct SessionViewState {
     pub(super) layout: ShellLayoutState,
-    pub(super) auxiliary_view: AuxiliaryView,
+    pub(super) work_tabs: WorkTabs,
     pub(super) conversation_width: f32,
     pub(super) expanded_chat_parts: BTreeSet<String>,
-    pub(super) browser_panel_open: bool,
-    pub(super) browser_url: String,
-    pub(super) browser_title: String,
     pub(super) transcript_scroll_anchor: Option<mew_config::DesktopTranscriptScrollAnchor>,
 }
 
 impl SessionViewState {
     pub(super) fn from_persisted(state: &mew_config::DesktopSessionViewState) -> Self {
+        let mut work_tabs = WorkTabs::from_persisted(
+            state.work_tabs.as_ref(),
+            &state.auxiliary_view,
+            !state.terminal_collapsed,
+        );
+        if state.work_tabs.is_none() && work_tabs.active().kind == WorkTabKind::Browser {
+            work_tabs.active_mut().url = state.browser_url.clone();
+            work_tabs.active_mut().title = state.browser_title.clone();
+        }
         Self {
             layout: ShellLayoutState {
                 sidebar_collapsed: state.sidebar_collapsed,
@@ -469,17 +476,9 @@ impl SessionViewState {
                 local_expanded: state.local_expanded,
                 activity_expanded: state.activity_expanded,
             },
-            auxiliary_view: match state.auxiliary_view.as_str() {
-                "browser" => AuxiliaryView::Browser,
-                "local" => AuxiliaryView::Local,
-                "activity" => AuxiliaryView::Activity,
-                _ => AuxiliaryView::Changes,
-            },
+            work_tabs,
             conversation_width: state.conversation_width.max(CHAT_MIN_WIDTH),
             expanded_chat_parts: state.expanded_chat_parts.iter().cloned().collect(),
-            browser_panel_open: state.browser_panel_open,
-            browser_url: state.browser_url.clone(),
-            browser_title: state.browser_title.clone(),
             transcript_scroll_anchor: state.transcript_scroll_anchor,
         }
     }
@@ -492,18 +491,21 @@ impl SessionViewState {
             changes_expanded: self.layout.changes_expanded,
             local_expanded: self.layout.local_expanded,
             activity_expanded: self.layout.activity_expanded,
-            auxiliary_view: match self.auxiliary_view {
-                AuxiliaryView::Browser => "browser",
-                AuxiliaryView::Changes => "changes",
-                AuxiliaryView::Local => "local",
-                AuxiliaryView::Activity => "activity",
-            }
-            .into(),
+            auxiliary_view: self.work_tabs.active().kind.key().into(),
+            work_tabs: Some(self.work_tabs.to_persisted()),
             conversation_width: self.conversation_width,
             expanded_chat_parts: self.expanded_chat_parts.iter().cloned().collect(),
-            browser_panel_open: self.browser_panel_open,
-            browser_url: self.browser_url.clone(),
-            browser_title: self.browser_title.clone(),
+            browser_panel_open: self.work_tabs.active().kind == WorkTabKind::Browser,
+            browser_url: self
+                .work_tabs
+                .browser_tab()
+                .map(|tab| tab.url.clone())
+                .unwrap_or_default(),
+            browser_title: self
+                .work_tabs
+                .browser_tab()
+                .map(|tab| tab.title.clone())
+                .unwrap_or_default(),
             transcript_scroll_anchor: self.transcript_scroll_anchor,
         }
     }
@@ -593,14 +595,6 @@ pub(super) const UNGROUPED_GROUP_ID: &str = "__ungrouped__";
 pub(super) const ARCHIVED_GROUP_ID: &str = "__archived__";
 /// Pseudo-group id for pinned sessions kept at the top of the rail.
 pub(super) const PINNED_GROUP_ID: &str = "__pinned__";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum AuxiliaryView {
-    Browser,
-    Changes,
-    Local,
-    Activity,
-}
 
 pub(super) struct WorkbenchResizeDrag;
 
@@ -906,6 +900,8 @@ impl PromptHistory {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ShellCommand {
+    NewWorkTab,
+    CloseWorkTab,
     ToggleSidebar,
     ToggleTerminal,
     ToggleWorkbench,

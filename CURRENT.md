@@ -3042,3 +3042,37 @@ Updated design, animation and comparison notes after verification. Native
 inspection was retried and still fails with the computer-use OS permission
 error, so live appearance, motion, VoiceOver and packaged CEF smoke remain
 unverified.
+
+# 2026-10-24 - add a tabbed work workspace with independent browser pages
+
+Used the user's new-tab screenshot to replace the fixed work-view category
+strip with closable tabs, a persistent plus control and a new-tab launcher.
+The launcher provides URL entry and existing Changes, Terminal, Files and
+Activity tools. Tools reuse their open tab; each browser/new-tab view owns an
+independent retained page, URL draft, title and error state. Transcript links
+open separate browser tabs. File-tree actions retain their external-open behavior.
+
+Terminal now fills its selected work tab and keeps the narrow-window fallback
+below the conversation. The tab strip scrolls the selected tab into view while
+keeping the plus control accessible. Command-T opens a work tab and Command-W
+closes work content in its focus scope; conversation closing and drafts retain
+their existing behavior. Tab order, selection and browser target persist per
+chat. First visits inherit pane sizing with a fresh work workspace, and legacy
+saved views migrate into tool tabs.
+
+Extended native browser ownership with the tab identity. The daemon target
+follows each chat's last selected browser tab, and closing a tab revokes only
+its page. Registration and revocation replies drain before reactivation so late
+registration failures cannot mark a reselected page unavailable. Background
+metadata preserves address drafts and updates the matching tab. Folded work
+content unmounts input fields and avoids mounting the terminal entity twice.
+Removed the obsolete browser panel entry points and terminal dock animation.
+
+All 217 desktop, 131 config and 10 browser-host tests pass. The opt-in real-daemon
+browser test also passes with isolated headless Chrome and the bundled
+agent-browser 0.39.2. Strict all-target Clippy for the affected crates, native
+desktop build, formatting, architecture and generated-theme checks pass.
+Updated the design, ownership, skill and comparison guidance after verification.
+Native inspection was retried and still fails with the computer-use OS
+permission error; live appearance, CEF embedding, VoiceOver and motion remain
+unverified.

@@ -5,9 +5,39 @@ fn page(profile: &str, session: &str, generation: &str) -> BrowserPage {
         owner: BrowserOwner {
             connection_profile: profile.into(),
             session_id: session.into(),
+            tab_id: "browser".into(),
         },
         page_instance: generation.into(),
     }
+}
+
+#[test]
+fn browser_tabs_in_one_session_keep_independent_pages_and_callbacks() {
+    let mut state = BrowserState::default();
+    let mut first = page("local", "chat", "first");
+    first.owner.tab_id = "tab-a".into();
+    let mut second = page("local", "chat", "second");
+    second.owner.tab_id = "tab-b".into();
+    state.insert_page(first.clone());
+    state.insert_page(second.clone());
+    state.set_visible(&second.owner, true);
+    enqueue_event(
+        &mut state,
+        &first,
+        CefBrowserEvent::TitleChanged {
+            title: "first page, still loading".into(),
+            url: "https://first.example".into(),
+        },
+    );
+    assert_eq!(state.pages.len(), 2);
+    assert_eq!(state.pages[&first.owner].title, "first page, still loading");
+    assert_eq!(state.pages[&second.owner].url, "about:blank");
+    assert!(state.pages[&second.owner].visible);
+    assert!(state.remove_page(&first));
+    enqueue_event(&mut state, &first, CefBrowserEvent::Closed);
+    assert!(state.pages[&second.owner].visible);
+    assert!(!state.pages[&second.owner].closed);
+    assert!(state.events.is_empty());
 }
 
 #[test]

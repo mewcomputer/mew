@@ -253,6 +253,7 @@ pub(super) fn shell_command_for_key(key: &str, platform_modifier: bool) -> Optio
         return None;
     }
     match key {
+        "t" => Some(ShellCommand::NewWorkTab),
         "b" => Some(ShellCommand::ToggleSidebar),
         "j" => Some(ShellCommand::ToggleTerminal),
         "n" => Some(ShellCommand::NewConversation),
