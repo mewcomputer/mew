@@ -30,7 +30,7 @@ impl DesktopShell {
         cx.notify();
     }
 
-    pub(super) fn reset_browser_for_unattached_tab(&mut self) {
+    pub(super) fn reset_browser_for_new_conversation(&mut self) {
         self.browser_panel_open = false;
         self.browser_native_rect = None;
         self.browser_url_focus_requested = false;

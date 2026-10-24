@@ -1311,7 +1311,7 @@ impl DesktopShell {
                         .child(if selected_session {
                             "Send a message to begin this conversation."
                         } else {
-                            "Choose a conversation or create a new one from the rail."
+                            "Choose a chat in the sidebar, or start a new chat."
                         }),
                 )
                 .into_any_element()
@@ -1400,9 +1400,6 @@ impl DesktopShell {
             .flex_1()
             .min_w_0()
             .min_h_0()
-            .rounded(px(SHELL_SURFACE_RADIUS))
-            .border_1()
-            .border_color(theme_rgb(&self.theme, "divider"))
             .overflow_hidden()
             .bg(theme_rgb(&self.theme, "background"))
             .child(

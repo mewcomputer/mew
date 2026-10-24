@@ -1,5 +1,8 @@
 # GPUI UX comparison with Codex, 2026-10-24
 
+This review records the initial source snapshot. The sidebar implementation
+follow-up at the end records changes made after the user supplied a Codex screenshot.
+
 This is a provisional comparison. Native computer use failed with an operating
 system permission error, so neither installed app could be inspected live.
 Mew findings below come from the current source and behavior-test inspection.
@@ -253,3 +256,24 @@ Native inspection is currently blocked by computer-use error `-10005`, reporting
 Screenshots of the installed apps can establish layout, but interaction and
 motion still require working native access. The official example cannot replace
 this comparison.
+
+## Sidebar implementation follow-up
+
+The user supplied an installed Codex screenshot and chose to consolidate chat
+navigation into the sidebar. The native shell now uses a continuous sidebar and
+titlebar surface, a workspace/chat title in place of the conversation tab strip,
+New chat above the workspace list, and search/filter controls revealed on demand.
+Idle workspace-root chats use compact rows; path and age remain available in
+tooltips and accessible labels, while nested directories and attention states
+retain visible detail. Selected highlighting spans the full rounded row.
+
+New chat inherits the selected workspace. Selecting a chat reveals a collapsed
+workspace, reselecting an attached chat retains loaded content, and closing a
+chat preserves its draft for reopening from the sidebar. Obsolete conversation
+tab state, title synchronization, and numeric tab shortcuts are removed. Browser
+page ownership, per-chat drafts, and retained transcript/workbench state remain
+in their existing layers. The resize short-circuit identified above is fixed.
+
+Actual GPUI entity and painted-geometry regression tests cover these behaviors.
+The user screenshot establishes the Codex reference; native mew appearance and
+motion still require a live pass because computer use remains unavailable.

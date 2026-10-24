@@ -731,6 +731,7 @@ impl DesktopShell {
                         .map(display_session_path)
                         .map(SharedString::from);
                     let path_label = path.clone();
+                    let path = path.filter(|_| conversation.cwd != conversation.workspace_path);
                     let session_time =
                         session_time_label(conversation.last_message_at).map(SharedString::from);
                     let status_color = if conversation.needs_attention {
@@ -757,9 +758,27 @@ impl DesktopShell {
                     } else {
                         None
                     };
-                    let has_meta =
-                        path.is_some() || session_time.is_some() || status_label.is_some();
-                    let row_height = if has_meta { 48. } else { 36. };
+                    let has_meta = path.is_some() || status_label.is_some();
+                    let row_height = if has_meta { 46. } else { 30. };
+                    let details: SharedString = format!(
+                        "Chat: {}{}{}{}",
+                        title,
+                        path_label
+                            .as_deref()
+                            .map(|path| format!(" · {path}"))
+                            .unwrap_or_default(),
+                        status_label
+                            .map(|status| format!(" · {status}"))
+                            .unwrap_or_default(),
+                        session_time
+                            .as_deref()
+                            .map(|time| format!(" · {time}"))
+                            .unwrap_or_default(),
+                    )
+                    .into();
+                    let tooltip_details = details.clone();
+                    let tooltip_background = theme_rgb(&self.theme, "panel.background");
+                    let tooltip_foreground = theme_rgb(&self.theme, "text.body");
                     let menu_open = self.session_menu_session.as_deref() == Some(&session_id);
                     let renaming = self.rename_session_id.as_deref() == Some(&session_id);
                     let pinned = conversation.pinned;
@@ -824,6 +843,10 @@ impl DesktopShell {
                     let select_session_id = session_id.clone();
                     let row = div()
                         .id(format!("session-{session_id}"))
+                        .debug_selector({
+                            let session_id = session_id.clone();
+                            move || format!("sidebar-chat-{session_id}")
+                        })
                         .flex()
                         .flex_col()
                         .w_full()
@@ -835,7 +858,20 @@ impl DesktopShell {
                         .rounded(px(6.))
                         .relative()
                         .group(session_group.clone())
-                        .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
+                        .tooltip(move |_, cx| {
+                            cx.new(|_| TooltipLabel {
+                                text: tooltip_details.clone(),
+                                background: tooltip_background,
+                                foreground: tooltip_foreground,
+                            })
+                            .into()
+                        })
+                        .when(selected, |element| {
+                            element.bg(theme_rgb(&self.theme, "accent"))
+                        })
+                        .when(!selected, |element| {
+                            element.hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
+                        })
                         .child(
                             div()
                                 .id(format!("select-session-{select_session_id}"))
@@ -859,20 +895,7 @@ impl DesktopShell {
                                         == Some(select_session_id.as_str()),
                                     |element| element.aria_active_descendant(),
                                 )
-                                .aria_label(SharedString::from(format!(
-                                    "Conversation: {}{}{}",
-                                    title,
-                                    path_label
-                                        .as_deref()
-                                        .map(|path| format!(" · {path}"))
-                                        .unwrap_or_default(),
-                                    status_label
-                                        .map(|status| format!(" · {status}"))
-                                        .unwrap_or_default()
-                                )))
-                                .when(selected, |element| {
-                                    element.bg(theme_rgb(&self.theme, "accent"))
-                                })
+                                .aria_label(details)
                                 .on_drag(
                                     SessionDrag::new(
                                         session_id.clone(),
@@ -1397,7 +1420,11 @@ impl DesktopShell {
         }
     }
 
-    pub(super) fn render_sidebar(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(super) fn render_sidebar(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         if self.sidebar_rows.is_empty() {
             self.rebuild_sidebar_rows();
         }
@@ -1495,9 +1522,86 @@ impl DesktopShell {
                 .h_full()
                 .min_h_0()
                 .gap(px(10.))
-                .p(px(16.))
-                .child(self.render_sidebar_search(cx))
-                .child(self.render_sidebar_filters(cx))
+                .p(px(12.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .h(px(28.))
+                        .px(px(6.))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child("mew"),
+                        )
+                        .child(
+                            div()
+                                .id("sidebar-search-toggle")
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .size(px(26.))
+                                .rounded(px(6.))
+                                .cursor_pointer()
+                                .role(Role::Button)
+                                .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+                                .aria_label("Search chats")
+                                .aria_keyshortcuts("Command+K")
+                                .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
+                                .on_click(cx.listener(|shell, _, window, cx| {
+                                    shell.action_focus_sidebar_search(
+                                        &FocusSidebarSearch,
+                                        window,
+                                        cx,
+                                    );
+                                }))
+                                .child(tabler_icon(
+                                    TablerIcon::Search,
+                                    theme_rgb(&self.theme, "text.muted"),
+                                    px(14.),
+                                )),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("new-conversation")
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .h(px(34.))
+                        .rounded(px(7.))
+                        .cursor_pointer()
+                        .role(Role::Button)
+                        .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+                        .aria_label("New chat")
+                        .text_sm()
+                        .text_color(theme_rgb(&self.theme, "text.body"))
+                        .border_1()
+                        .border_color(theme_rgb(&self.theme, "divider"))
+                        .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
+                        .on_click(cx.listener(|shell, _, _, cx| {
+                            shell.dispatch_shell_command(ShellCommand::NewConversation, cx);
+                        }))
+                        .child(tabler_icon(
+                            TablerIcon::Plus,
+                            theme_rgb(&self.theme, "text.body"),
+                            px(15.),
+                        ))
+                        .child("New chat"),
+                )
+                .when(
+                    self.sidebar_search_open
+                        || self.sidebar_search_focus_handle.is_focused(window)
+                        || !self.sidebar_search.is_empty()
+                        || self.sidebar_filter != SidebarFilter::All,
+                    |element| {
+                        element
+                            .child(self.render_sidebar_search(cx))
+                            .child(self.render_sidebar_filters(cx))
+                    },
+                )
                 .child(
                     div()
                         .flex()
@@ -1553,33 +1657,6 @@ impl DesktopShell {
                 )
                 .child(
                     div()
-                        .id("new-conversation")
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .h(px(34.))
-                        .rounded(px(7.))
-                        .cursor_pointer()
-                        .role(Role::Button)
-                        .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                        .aria_label("New conversation")
-                        .text_sm()
-                        .text_color(theme_rgb(&self.theme, "text.body"))
-                        .border_1()
-                        .border_color(theme_rgb(&self.theme, "divider"))
-                        .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
-                        .on_click(cx.listener(|shell, _, _, cx| {
-                            shell.dispatch_shell_command(ShellCommand::NewConversation, cx);
-                        }))
-                        .child(tabler_icon(
-                            TablerIcon::Plus,
-                            theme_rgb(&self.theme, "text.body"),
-                            px(15.),
-                        ))
-                        .child("New conversation"),
-                )
-                .child(
-                    div()
                         .flex()
                         .items_center()
                         .justify_end()
@@ -1624,8 +1701,7 @@ impl DesktopShell {
             .relative()
             .h_full()
             .overflow_hidden()
-            .rounded(px(SHELL_SURFACE_RADIUS))
-            .border_1()
+            .border_r_1()
             .border_color(theme_rgb(&self.theme, "divider"))
             .bg(theme_rgb(&self.theme, "sidebar.background"))
             .child(sidebar);

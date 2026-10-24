@@ -2,7 +2,21 @@ use super::*;
 
 impl DesktopShell {
     pub(super) fn new_conversation(&mut self, cx: &mut Context<Self>) {
-        self.begin_new_conversation(None, None, cx);
+        let workspace = self
+            .model
+            .ui
+            .selected_session
+            .as_deref()
+            .and_then(|selected| {
+                self.model
+                    .ui
+                    .conversations
+                    .iter()
+                    .find(|chat| chat.session_id == selected)
+            })
+            .and_then(|chat| chat.workspace_path.as_ref().or(chat.cwd.as_ref()))
+            .cloned();
+        self.begin_new_conversation(workspace, None, cx);
     }
 
     pub(super) fn new_conversation_in_group(&mut self, group_id: String, cx: &mut Context<Self>) {
@@ -28,10 +42,13 @@ impl DesktopShell {
             cx.notify();
             return;
         }
+        if let Some(workspace) = cwd.as_ref() {
+            self.collapsed_groups.remove(workspace);
+            self.rebuild_sidebar_rows();
+        }
         self.capture_session_view_state();
         self.close_terminal();
-        self.open_new_tab();
-        self.reset_unbound_tab_view();
+        self.reset_new_conversation_view();
         self.pending_model = None;
         self.awaiting_model_switch = None;
         self.create_session(cwd, group_id);
@@ -43,14 +60,14 @@ impl DesktopShell {
         cx.notify();
     }
 
-    fn reset_unbound_tab_view(&mut self) {
+    fn reset_new_conversation_view(&mut self) {
         self.initial_auto_attach = false;
         self.switch_draft_owner(None);
         self.session_requests.navigate();
         self.model
             .prepare_attachment(self.session_requests.needs_reconnect());
         self.model.ui.selected_session = None;
-        self.reset_browser_for_unattached_tab();
+        self.reset_browser_for_new_conversation();
         self.markdown_cache.clear();
         self.tool_text_lists.borrow_mut().clear();
         self.tool_text_cache.borrow_mut().clear();
@@ -94,8 +111,28 @@ impl DesktopShell {
     }
 
     pub(super) fn attach_session(&mut self, session_id: String, cx: &mut Context<Self>) {
+        self.settings_open = false;
+        if let Some(workspace) = self
+            .model
+            .ui
+            .conversations
+            .iter()
+            .find(|chat| chat.session_id == session_id)
+            .and_then(|chat| chat.workspace_path.as_ref())
+        {
+            self.collapsed_groups.remove(workspace);
+        }
+        if self.model.ui.selected_session.as_deref() == Some(session_id.as_str())
+            && self.model.session_is_ready()
+            && !self.session_requests.is_pending()
+        {
+            self.rebuild_sidebar_rows();
+            cx.notify();
+            return;
+        }
         self.capture_session_view_state();
         if self.model.ui.select_session(&session_id).is_some() {
+            self.rebuild_sidebar_rows();
             self.initial_auto_attach = false;
             self.switch_draft_owner(Some(&session_id));
             self.restore_session_view_state(&session_id, cx);
@@ -108,7 +145,6 @@ impl DesktopShell {
             if self.model.attached_session.as_deref() != Some(session_id.as_str()) {
                 self.close_terminal();
             }
-            self.open_session_tab(&session_id);
             self.dispatch_attachment(&session_id);
             cx.notify();
         }
@@ -147,62 +183,10 @@ impl DesktopShell {
             .unwrap_or_else(|| "New conversation".into())
     }
 
-    pub(super) fn refresh_open_tab_titles(&mut self) {
-        for tab in &mut self.open_tabs {
-            refresh_tab_title(tab, &self.model.ui.conversations);
-        }
-    }
-
-    pub(super) fn open_session_tab(&mut self, session_id: &str) {
-        let title = self.conversation_title(session_id);
-        self.active_tab = Some(open_tab_for_session(
-            &mut self.open_tabs,
-            self.active_tab,
-            OpenConversationTab {
-                session_id: Some(session_id.to_owned()),
-                title,
-            },
-        ));
-    }
-
-    pub(super) fn bind_new_tab_to_session(&mut self, session_id: &str) {
-        self.open_session_tab(session_id);
-    }
-
-    pub(super) fn open_new_tab(&mut self) {
-        if let Some(index) = self
-            .open_tabs
-            .iter()
-            .position(|tab| tab.session_id.is_none())
-        {
-            self.active_tab = Some(index);
-            return;
-        }
-        self.open_tabs.push(OpenConversationTab {
-            session_id: None,
-            title: "New conversation".into(),
-        });
-        self.active_tab = Some(self.open_tabs.len() - 1);
-    }
-
-    pub(super) fn close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index >= self.open_tabs.len() {
-            return;
-        }
-        self.open_tabs.remove(index);
-        if self.open_tabs.is_empty() {
-            self.active_tab = None;
-            self.reset_unbound_tab_view();
-        } else {
-            let next_index = active_tab_after_close(self.active_tab, index, self.open_tabs.len())
-                .unwrap_or_default();
-            self.active_tab = Some(next_index);
-            if let Some(session_id) = self.open_tabs[next_index].session_id.clone() {
-                self.attach_session(session_id, cx);
-            } else {
-                self.reset_unbound_tab_view();
-            }
-        }
+    pub(super) fn close_conversation(&mut self, cx: &mut Context<Self>) {
+        self.capture_session_view_state();
+        self.close_terminal();
+        self.reset_new_conversation_view();
         cx.notify();
     }
 
@@ -287,7 +271,8 @@ impl DesktopShell {
     pub(super) fn update_window_width(&mut self, width: f32) -> bool {
         let width_changed = (self.window_width - width).abs() > 0.5;
         self.window_width = width;
-        width_changed || self.collapse_workbench_if_needed()
+        let collapsed = self.collapse_workbench_if_needed();
+        width_changed || collapsed
     }
 
     fn collapse_workbench_if_needed(&mut self) -> bool {
@@ -390,12 +375,7 @@ impl DesktopShell {
             ShellCommand::ToggleTerminal => self.toggle_terminal(cx),
             ShellCommand::ToggleWorkbench => self.toggle_workbench(cx),
             ShellCommand::NewConversation => self.new_conversation(cx),
-            ShellCommand::CloseActiveTab => {
-                if let Some(index) = self.active_tab {
-                    self.close_tab(index, cx);
-                }
-            }
-            ShellCommand::SelectTab(index) => self.select_tab(index, cx),
+            ShellCommand::CloseConversation => self.close_conversation(cx),
         }
     }
 
@@ -414,7 +394,7 @@ impl DesktopShell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.dispatch_shell_command(ShellCommand::CloseActiveTab, cx);
+        self.dispatch_shell_command(ShellCommand::CloseConversation, cx);
     }
 
     pub(super) fn action_toggle_sidebar(
@@ -450,9 +430,12 @@ impl DesktopShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.settings_open = false;
         if self.layout.sidebar_collapsed {
             self.toggle_sidebar(cx);
         }
+        self.sidebar_search_open = true;
+        cx.notify();
         let focus_handle = self.sidebar_search_focus_handle.clone();
         window.defer(cx, move |window, cx| {
             window.focus(&focus_handle, cx);
@@ -467,19 +450,6 @@ impl DesktopShell {
     ) {
         if self.close_shell_popovers() {
             window.focus(&self.composer_focus_handle, cx);
-            cx.notify();
-        }
-    }
-
-    pub(super) fn select_tab(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(tab) = self.open_tabs.get(index).cloned() else {
-            return;
-        };
-        self.active_tab = Some(index);
-        if let Some(session_id) = tab.session_id {
-            self.attach_session(session_id, cx);
-        } else {
-            self.reset_unbound_tab_view();
             cx.notify();
         }
     }
@@ -894,6 +864,9 @@ impl DesktopShell {
         let key = event.keystroke.key.as_str();
         if key == "escape" {
             self.clear_sidebar_search(cx);
+            self.sidebar_search_open = false;
+            self.sidebar_filter = SidebarFilter::All;
+            self.rebuild_sidebar_rows();
             window.focus(&self.composer_focus_handle, cx);
             cx.stop_propagation();
         } else if key == "backspace" {
@@ -1311,7 +1284,6 @@ impl DesktopShell {
                 self.task_drafts
                     .bind_created_task(&owner, session_id, ready.follow_creation);
                 if ready.follow_creation {
-                    self.bind_new_tab_to_session(session_id);
                     initial_prompt = ready.initial_prompt;
                 }
             }
@@ -1383,18 +1355,6 @@ impl DesktopShell {
         if has_browser_event {
             self.capture_session_view_state();
         }
-        if events.iter().any(|event| {
-            matches!(
-                event,
-                ClientEvent::SessionListChanged
-                    | ClientEvent::SessionMetaChanged { .. }
-                    | ClientEvent::SessionReady { .. }
-                    | ClientEvent::SessionHistoryLoaded { .. }
-                    | ClientEvent::SessionHistoryPageLoaded { .. }
-            )
-        }) {
-            self.refresh_open_tab_titles();
-        }
         if let Some(session_id) = events.iter().find_map(|event| match event {
             ClientEvent::SessionHistoryPageLoaded { session_id, .. } => Some(session_id),
             _ => None,
@@ -1403,15 +1363,6 @@ impl DesktopShell {
                 .session(session_id)
                 .and_then(|session| session.history_before);
             self.history_loading = false;
-        }
-        if let Some(session_id) = self.model.ui.selected_session.clone() {
-            if !self
-                .open_tabs
-                .iter()
-                .any(|tab| tab.session_id.as_deref() == Some(session_id.as_str()))
-            {
-                self.open_session_tab(&session_id);
-            }
         }
         if events.iter().any(client_event_is_text_delta) {
             for event in events.iter() {
@@ -1554,79 +1505,6 @@ impl DesktopShell {
     }
 }
 
-fn refresh_tab_title(tab: &mut OpenConversationTab, conversations: &[ConversationItem]) {
-    let Some(session_id) = tab.session_id.as_deref() else {
-        return;
-    };
-    let Some(conversation) = conversations
-        .iter()
-        .find(|conversation| conversation.session_id == session_id)
-    else {
-        return;
-    };
-    tab.title.clone_from(&conversation.title);
-}
-
-fn remove_unbound_tabs(tabs: &mut Vec<OpenConversationTab>) {
-    tabs.retain(|tab| tab.session_id.is_some());
-}
-
-fn active_tab_after_close(
-    active_tab: Option<usize>,
-    removed_index: usize,
-    remaining_len: usize,
-) -> Option<usize> {
-    let last_index = remaining_len.checked_sub(1)?;
-    let current_index = active_tab.unwrap_or(removed_index);
-    let adjusted_index = if current_index > removed_index {
-        current_index - 1
-    } else {
-        current_index
-    };
-    Some(adjusted_index.min(last_index))
-}
-
-fn open_tab_for_session(
-    tabs: &mut Vec<OpenConversationTab>,
-    active_tab: Option<usize>,
-    tab: OpenConversationTab,
-) -> usize {
-    let Some(session_id) = tab.session_id.as_deref() else {
-        return active_tab.unwrap_or_else(|| {
-            tabs.push(tab);
-            tabs.len() - 1
-        });
-    };
-
-    if tabs
-        .iter()
-        .any(|existing| existing.session_id.as_deref() == Some(session_id))
-    {
-        remove_unbound_tabs(tabs);
-        let Some(index) = tabs
-            .iter()
-            .position(|existing| existing.session_id.as_deref() == Some(session_id))
-        else {
-            tabs.push(tab);
-            return tabs.len() - 1;
-        };
-        tabs[index].title = tab.title;
-        return index;
-    }
-
-    let index = active_tab.filter(|index| {
-        tabs.get(*index)
-            .is_some_and(|existing| existing.session_id.is_none())
-    });
-    if let Some(index) = index {
-        tabs[index] = tab;
-        index
-    } else {
-        tabs.push(tab);
-        tabs.len() - 1
-    }
-}
-
 fn restore_session_layout(current: &mut ShellLayoutState, saved: ShellLayoutState) {
     let sidebar_collapsed = current.sidebar_collapsed;
     *current = saved;
@@ -1656,33 +1534,6 @@ fn should_track_session_ready(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn refreshes_fallback_tab_title_after_session_metadata_arrives() {
-        let mut tab = OpenConversationTab {
-            session_id: Some("session-1".into()),
-            title: "New conversation".into(),
-        };
-        let conversations = [ConversationItem {
-            session_id: "session-1".into(),
-            title: "A real session".into(),
-            cwd: None,
-            workspace_path: None,
-            last_message_at: None,
-            state: mew_protocol::SessionState::Idle,
-            last_turn_failed: false,
-            failure_detail: None,
-            unread_completion: false,
-            needs_attention: false,
-            archived: false,
-            pinned: false,
-            group_id: None,
-        }];
-
-        refresh_tab_title(&mut tab, &conversations);
-
-        assert_eq!(tab.title, "A real session");
-    }
 
     #[test]
     fn first_visit_inherits_current_session_view_state() {
@@ -1751,86 +1602,5 @@ mod tests {
             Some("session-2"),
             "session-1"
         ));
-    }
-
-    #[test]
-    fn removes_placeholder_tabs_when_opening_an_existing_session() {
-        let mut tabs = vec![
-            OpenConversationTab {
-                session_id: Some("session-1".into()),
-                title: "A real session".into(),
-            },
-            OpenConversationTab {
-                session_id: None,
-                title: "New conversation".into(),
-            },
-        ];
-
-        remove_unbound_tabs(&mut tabs);
-
-        assert_eq!(
-            tabs,
-            vec![OpenConversationTab {
-                session_id: Some("session-1".into()),
-                title: "A real session".into(),
-            }]
-        );
-    }
-
-    #[test]
-    fn opening_a_session_does_not_require_a_placeholder_tab() {
-        let mut tabs = Vec::new();
-        let session_tab = OpenConversationTab {
-            session_id: Some("session-1".into()),
-            title: "A real session".into(),
-        };
-
-        let index = open_tab_for_session(&mut tabs, None, session_tab.clone());
-
-        assert_eq!(index, 0);
-        assert_eq!(tabs, vec![session_tab]);
-        assert!(tabs.iter().all(|tab| tab.session_id.is_some()));
-    }
-
-    #[test]
-    fn opening_a_session_reuses_only_the_active_placeholder() {
-        let mut tabs = vec![
-            OpenConversationTab {
-                session_id: None,
-                title: "New conversation".into(),
-            },
-            OpenConversationTab {
-                session_id: None,
-                title: "New conversation".into(),
-            },
-        ];
-        let session_tab = OpenConversationTab {
-            session_id: Some("session-1".into()),
-            title: "A real session".into(),
-        };
-
-        let index = open_tab_for_session(&mut tabs, Some(1), session_tab.clone());
-
-        assert_eq!(index, 1);
-        assert_eq!(
-            tabs,
-            vec![
-                OpenConversationTab {
-                    session_id: None,
-                    title: "New conversation".into(),
-                },
-                session_tab,
-            ]
-        );
-    }
-
-    #[test]
-    fn closing_a_tab_adjusts_the_active_index_for_the_removed_tab() {
-        assert_eq!(active_tab_after_close(Some(2), 0, 2), Some(1));
-        assert_eq!(active_tab_after_close(Some(2), 1, 2), Some(1));
-        assert_eq!(active_tab_after_close(Some(0), 1, 2), Some(0));
-        assert_eq!(active_tab_after_close(Some(1), 1, 2), Some(1));
-        assert_eq!(active_tab_after_close(None, 1, 2), Some(1));
-        assert_eq!(active_tab_after_close(Some(1), 1, 0), None);
     }
 }

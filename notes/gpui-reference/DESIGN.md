@@ -10,6 +10,19 @@ and workbench. Layout constants live in `shell/types.rs`; width constraints and
 transition math live in `shell/helpers.rs`. Preserve the minimum usable chat
 width when opening auxiliary panels and verify the narrow-window behavior.
 
+The workspace-grouped sidebar owns chat navigation. The titlebar shows the
+selected workspace and chat; conversation tabs are not a second navigation
+surface. Keep the sidebar flush with its titlebar segment and use a shared
+vertical divider instead of an enclosing rounded panel.
+
+New chat sits above the workspace list and inherits the selected workspace.
+Search and task filters open through the sidebar search control or Command-K.
+Keep idle workspace-root chats compact; expose their path and age through
+accessible labels and tooltips. Nested working directories and attention states
+remain visible. Selecting a chat reveals its workspace, and selecting the
+already-attached chat preserves its loaded content. Closing a chat returns to
+the unbound composer while retaining its draft and view state for later use.
+
 Use shared neutral surfaces and semantic accents from the theme manifest in both
 light and dark modes. Existing desktop typography uses the platform UI font for
 chrome and the bundled mono font for terminal/code content; do not apply the

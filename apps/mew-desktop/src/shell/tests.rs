@@ -6,6 +6,236 @@ mod shell_tests {
     use super::super::session_data::transcript_part_block_count;
     use super::super::*;
 
+    fn navigation_conversation(session_id: &str) -> ConversationItem {
+        ConversationItem {
+            session_id: session_id.into(),
+            title: format!("Chat {session_id}"),
+            cwd: Some("/workspace/mew/subdirectory".into()),
+            workspace_path: Some("/workspace/mew".into()),
+            last_message_at: None,
+            state: mew_protocol::SessionState::Idle,
+            last_turn_failed: false,
+            failure_detail: None,
+            unread_completion: false,
+            needs_attention: false,
+            archived: false,
+            pinned: false,
+            group_id: None,
+        }
+    }
+
+    #[test]
+    fn numeric_shortcuts_do_not_select_hidden_conversations() {
+        for key in ["1", "2", "3", "4", "5", "6", "7", "8", "9"] {
+            assert_eq!(shell_command_for_key(key, true), None);
+        }
+    }
+
+    #[gpui::test]
+    fn new_chat_inherits_the_selected_workspace(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        shell.update(cx, |shell, cx| {
+            shell.command_tx = Some(sender);
+            shell.model.ui.conversations = vec![navigation_conversation("a")];
+            shell.model.ui.selected_session = Some("a".into());
+            shell.new_conversation(cx);
+            shell.quitting = true;
+        });
+        let command = commands.try_recv().unwrap();
+        assert!(
+            matches!(command, ClientMessage::NewSession { cwd: Some(path), .. }
+            if path == "/workspace/mew")
+        );
+    }
+
+    #[gpui::test]
+    fn closing_a_chat_preserves_its_draft_for_sidebar_navigation(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        shell.update(cx, |shell, _| {
+            shell.model.ui.conversations = vec![navigation_conversation("a")];
+            shell.switch_draft_owner(Some("a"));
+            shell.model.ui.selected_session = Some("a".into());
+            shell.model.ui.composer = "keep this follow-up".into();
+            shell.attachments = vec![Attachment {
+                path: "a.txt".into(),
+                mime: None,
+            }];
+        });
+        cx.update(|window, cx| {
+            let focus = shell.read(cx).composer_focus_handle.clone();
+            window.focus(&focus, cx);
+        });
+        cx.run_until_parked();
+        cx.dispatch_action(CloseConversation);
+        shell.update(cx, |shell, cx| {
+            assert!(shell.model.ui.selected_session.is_none());
+            assert!(shell.model.ui.composer.is_empty());
+            assert!(shell.attachments.is_empty());
+            shell.attach_session("a".into(), cx);
+            assert_eq!(shell.model.ui.composer, "keep this follow-up");
+            assert_eq!(shell.attachments[0].path, "a.txt");
+            shell.quitting = true;
+        });
+    }
+
+    #[gpui::test]
+    fn sidebar_surface_continues_into_the_titlebar(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = false;
+            shell.layout.workbench_collapsed = true;
+            shell.layout.terminal_collapsed = true;
+            cx.notify();
+        });
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let shell = shell.read(cx);
+            let sidebar: gpui::Hsla = theme_rgb(&shell.theme, "sidebar.background").into();
+            let scale = window.scale_factor();
+            assert!(
+                window.painted_quads().iter().any(|quad| {
+                    quad.background.as_solid() == Some(sidebar)
+                        && quad.bounds.origin.x.as_f32() == 0.
+                        && quad.bounds.origin.y.as_f32() == 0.
+                        && quad.bounds.size.width.as_f32() == shell.sidebar_width * scale
+                        && quad.bounds.size.height.as_f32() >= 38. * scale
+                }),
+                "the sidebar must share the window's top-left surface"
+            );
+        });
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn selecting_the_current_sidebar_chat_preserves_loaded_content(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        shell.update(cx, |shell, cx| {
+            shell.model.ui.conversations = vec![navigation_conversation("a")];
+            shell.model.ui.selected_session = Some("a".into());
+            shell.model.attached_session = Some("a".into());
+            shell.browser_title = "retained page".into();
+            shell.history_before = Some(10);
+            shell.attach_session("a".into(), cx);
+            assert!(shell.model.session_is_ready());
+            assert_eq!(shell.history_before, Some(10));
+            assert_eq!(shell.browser_title, "retained page");
+            shell.quitting = true;
+        });
+    }
+
+    #[gpui::test]
+    fn narrowing_the_window_collapses_the_workbench(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        shell.update(cx, |shell, _| {
+            shell.layout.sidebar_collapsed = false;
+            shell.layout.workbench_collapsed = false;
+            shell.window_width = 1240.;
+            assert!(shell.update_window_width(720.));
+            assert!(shell.layout.workbench_collapsed);
+            shell.quitting = true;
+        });
+    }
+
+    #[gpui::test]
+    fn sidebar_search_leaves_settings_and_reveals_navigation(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        shell.update(cx, |shell, _| {
+            shell.settings_open = true;
+            shell.layout.sidebar_collapsed = true;
+        });
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.action_focus_sidebar_search(&FocusSidebarSearch, window, cx);
+                assert!(!shell.settings_open);
+                assert!(!shell.layout.sidebar_collapsed);
+                assert!(shell.sidebar_search_open);
+                shell.quitting = true;
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn idle_workspace_chats_use_compact_sidebar_rows(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        shell.update(cx, |shell, cx| {
+            let mut chat = navigation_conversation("a");
+            chat.cwd = chat.workspace_path.clone();
+            chat.last_message_at = Some(1);
+            shell.model.ui.conversations = vec![chat];
+            shell.collapsed_groups.clear();
+            shell.layout.sidebar_collapsed = false;
+            shell.rebuild_sidebar_rows();
+            cx.notify();
+        });
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+        let bounds = cx
+            .debug_bounds("sidebar-chat-a")
+            .expect("chat row must be visible");
+        assert_eq!(bounds.size.height, px(30.));
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn selecting_a_chat_reveals_its_collapsed_workspace(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        shell.update(cx, |shell, cx| {
+            shell.model.ui.conversations = vec![navigation_conversation("a")];
+            shell.collapsed_groups.insert("/workspace/mew".into());
+            shell.rebuild_sidebar_rows();
+            assert!(!shell
+                .sidebar_rows
+                .iter()
+                .any(|row| matches!(row, SidebarRow::Session(_))));
+            shell.attach_session("a".into(), cx);
+            assert!(shell
+                .sidebar_rows
+                .iter()
+                .any(|row| { matches!(row, SidebarRow::Session(chat) if chat.session_id == "a") }));
+            shell.quitting = true;
+        });
+    }
+
+    #[gpui::test]
+    fn selected_chat_highlight_spans_its_sidebar_row(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        shell.update(cx, |shell, cx| {
+            let mut chat = navigation_conversation("a");
+            chat.cwd = chat.workspace_path.clone();
+            shell.model.ui.conversations = vec![chat];
+            shell.model.ui.selected_session = Some("a".into());
+            shell.collapsed_groups.clear();
+            shell.layout.sidebar_collapsed = false;
+            shell.rebuild_sidebar_rows();
+            cx.notify();
+        });
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+        let row = cx.debug_bounds("sidebar-chat-a").unwrap();
+        cx.update(|window, cx| {
+            let selected: gpui::Hsla = theme_rgb(&shell.read(cx).theme, "accent").into();
+            let row = row.scale(window.scale_factor());
+            assert!(
+                window.painted_quads().iter().any(|quad| {
+                    quad.background.as_solid() == Some(selected) && quad.bounds == row
+                }),
+                "selection must follow the complete rounded row"
+            );
+        });
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
     #[test]
     fn frame_trace_percentile_uses_nearest_rank() {
         let mut samples = [
@@ -855,12 +1085,12 @@ mod shell_tests {
 
     #[test]
     fn sidebar_width_stays_within_rail_bounds() {
-        assert_eq!(sidebar_width_from_pointer(SHELL_GUTTER), SIDEBAR_MIN_WIDTH);
+        assert_eq!(sidebar_width_from_pointer(0.), SIDEBAR_MIN_WIDTH);
         assert_eq!(
-            sidebar_width_from_pointer(SHELL_GUTTER + SIDEBAR_MAX_WIDTH + 80.),
+            sidebar_width_from_pointer(SIDEBAR_MAX_WIDTH + 80.),
             SIDEBAR_MAX_WIDTH
         );
-        assert_eq!(sidebar_width_from_pointer(SHELL_GUTTER + 312.), 312.);
+        assert_eq!(sidebar_width_from_pointer(312.), 312.);
     }
 
     #[test]
@@ -1147,7 +1377,7 @@ mod shell_tests {
     }
 
     #[test]
-    fn tab_shortcuts_require_platform_modifier() {
+    fn shell_shortcuts_require_platform_modifier() {
         assert_eq!(shell_command_for_key("b", false), None);
         assert_eq!(
             shell_command_for_key("b", true),
@@ -1163,12 +1393,9 @@ mod shell_tests {
         );
         assert_eq!(
             shell_command_for_key("w", true),
-            Some(ShellCommand::CloseActiveTab)
+            Some(ShellCommand::CloseConversation)
         );
-        assert_eq!(
-            shell_command_for_key("2", true),
-            Some(ShellCommand::SelectTab(1))
-        );
+        assert_eq!(shell_command_for_key("2", true), None);
         assert_eq!(shell_command_for_key("0", true), None);
     }
 

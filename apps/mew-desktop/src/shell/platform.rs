@@ -27,8 +27,8 @@ fn set_app_menus(cx: &mut App) {
     cx.set_menus([
         Menu::new("mew").items([MenuItem::action("Quit", Quit)]),
         Menu::new("File").items([
-            MenuItem::action("New Conversation", NewConversation),
-            MenuItem::action("Close Conversation", CloseConversation),
+            MenuItem::action("New Chat", NewConversation),
+            MenuItem::action("Close Chat", CloseConversation),
         ]),
         Menu::new("Edit").items([
             MenuItem::os_action("Cut", TextCut, gpui::OsAction::Cut),

@@ -2986,3 +2986,29 @@ operating-system permission error, so installed-app side-by-side inspection,
 visual scoring, motion, and native interaction verification remain outstanding.
 The official documentation example is explicitly distinguished from the installed
 Codex app throughout the report.
+
+# 2026-10-24 — integrate the GPUI sidebar and consolidate chat navigation
+
+Used the user's Codex screenshot as the layout reference and their explicit
+decision to remove open-chat tabs. The workspace sidebar now owns chat
+navigation, continues into its titlebar surface, and places New chat above the
+project list. The titlebar shows workspace/chat context. Search and task filters
+open on demand through the search control or Command-K. Idle workspace-root
+chats use compact rows with full-row selection; path and age remain in tooltips
+and accessible labels, and nested directories/attention states retain detail.
+
+New chat inherits the selected workspace. Selecting a chat reveals its workspace;
+reselecting an attached chat keeps its loaded content. Closing a chat returns
+to the unbound composer while preserving its draft for reopening. Removed
+conversation-tab state, synchronization, and numeric tab shortcuts while
+retaining the existing draft, request, browser-page, and view-state ownership.
+Fixed the resize short-circuit so narrowing the window checks workbench collapse.
+
+Behavior regressions were reproduced before their fixes. All 199 desktop tests
+pass, including GPUI entity/navigation and painted-layout checks. Strict desktop
+all-target Clippy, native build, formatting, architecture, generated-theme, and
+diff checks pass. Tests used isolated settings/session directories and the
+installed CEF SDK. The compiler-cache wrapper failed with an OS permission error;
+running rustc directly completed the same checks. Updated desktop design guidance
+and the review follow-up after verification. Live native visual, pointer, and
+motion checks remain blocked by the computer-use OS permission error.

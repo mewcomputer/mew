@@ -157,7 +157,7 @@ pub(super) fn sidebar_transition_offset(collapsed: bool, delta: f32, expanded_wi
 }
 
 pub(super) fn sidebar_width_from_pointer(pointer_x: f32) -> f32 {
-    (pointer_x - SHELL_GUTTER).clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH)
+    pointer_x.clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH)
 }
 
 pub(super) fn workbench_transition_width(collapsed: bool, delta: f32) -> f32 {
@@ -271,13 +271,7 @@ pub(super) fn shell_command_for_key(key: &str, platform_modifier: bool) -> Optio
         "b" => Some(ShellCommand::ToggleSidebar),
         "j" => Some(ShellCommand::ToggleTerminal),
         "n" => Some(ShellCommand::NewConversation),
-        "w" => Some(ShellCommand::CloseActiveTab),
-        key if key.chars().count() == 1 => key
-            .chars()
-            .next()
-            .and_then(|character| character.to_digit(10))
-            .and_then(|number| number.checked_sub(1))
-            .map(|index| ShellCommand::SelectTab(index as usize)),
+        "w" => Some(ShellCommand::CloseConversation),
         _ => None,
     }
 }

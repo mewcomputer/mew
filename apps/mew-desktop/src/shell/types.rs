@@ -42,9 +42,6 @@ pub(super) struct DesktopShell {
     pub(super) theme_mode: DesktopThemeMode,
     pub(super) light_theme: String,
     pub(super) dark_theme: String,
-    pub(super) open_tabs: Vec<OpenConversationTab>,
-    pub(super) active_tab: Option<usize>,
-    pub(super) tab_scroll_handle: gpui::ScrollHandle,
     pub(super) layout: ShellLayoutState,
     pub(super) sidebar_rows: Vec<SidebarRow>,
     pub(super) sidebar_list: gpui::ListState,
@@ -55,6 +52,7 @@ pub(super) struct DesktopShell {
     pub(super) workspace_open_destinations: Vec<WorkspaceOpenDestination>,
     pub(super) remembered_editor: Option<String>,
     pub(super) sidebar_search: String,
+    pub(super) sidebar_search_open: bool,
     pub(super) sidebar_filter: SidebarFilter,
     pub(super) sidebar_search_focus_handle: FocusHandle,
     pub(super) sidebar_focus_handle: FocusHandle,
@@ -446,12 +444,6 @@ impl Drop for DesktopShell {
     fn drop(&mut self) {
         self.prepare_for_quit();
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct OpenConversationTab {
-    pub(super) session_id: Option<String>,
-    pub(super) title: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -920,8 +912,7 @@ pub(super) enum ShellCommand {
     ToggleTerminal,
     ToggleWorkbench,
     NewConversation,
-    CloseActiveTab,
-    SelectTab(usize),
+    CloseConversation,
 }
 
 pub(super) const SIDEBAR_COLLAPSED_WIDTH: f32 = 0.;
