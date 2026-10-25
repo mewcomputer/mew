@@ -1014,3 +1014,128 @@ The QA app and owned daemon are stopped and the fixture is restored. Direct
 Codex inspection was not retried; its supplied screenshot remains the visual
 reference. Secondary-menu height estimation remains a separate unverified
 follow-up from the review.
+
+## Composer comparison, 2026-10-25
+
+The default layout is close. Keep the 15 px draft text, 24 px leading, 11 px
+controls and current toolbar structure. Native checks at 420, 480 and 600 px
+conversation widths found no default toolbar overflow. Long-draft scrolling and
+expansion remain useful at 420 × 800. Solo Yield is absent and empty Send is
+disabled. Codex's supplied screenshot has a more distinct filled composer
+surface; a subtle neutral fill is an optional finishing detail.
+
+This comparison uses fresh Mew native captures and source inspection against
+the supplied Codex screenshot. It does not establish Codex's narrow-window,
+keyboard or menu behavior. Independent design and control assessments were
+merged with native interaction probes. The deterministic Impeccable detector
+does not support Rust/GPUI, so no unrelated web frontend was scanned.
+
+### Priority findings
+
+1. **P1: native editing shortcuts are incomplete.** With `alpha beta gamma` in
+   the draft, Command-Left and Option-Left followed by pasted `|` append the
+   marker rather than moving the caret. Option-Backspace and Command-Backspace
+   leave the draft unchanged. Plain Left works as a positive control. The
+   platform bindings cover bare arrows/deletion and Shift selection, but omit
+   word and line variants. Implement native movement, deletion and selection
+   with Unicode and wrapped-line regressions. Source inspection also finds
+   modified Up/Down can fall into history recall for single-paragraph drafts;
+   that case was not reproduced with native prompt history. Suggested pass:
+   `/harden`.
+2. **P1: attachment height can hide Send.** Eight long filenames plus a long
+   draft in a 480 px conversation within a 480 px-tall window put the toolbar
+   below the window. Actual GPUI measurements place the composer bottom at
+   514 px. Bound the attachment tray, using scrolling or an overflow summary
+   while reserving room for drafting and Send. This also exposed the scrollbar
+   crash fixed below; the attachment layout itself remains unfixed. Suggested
+   pass: `/adapt`.
+3. **P2: persona and permission selection lose drafting focus.** Reselecting
+   builder or Standard, then immediately pasting, does not update the draft.
+   Clicking the editor restores typing. These paths close the popover without
+   focusing the composer, unlike model selection. Opening the model menu and
+   clearing its search both focus correctly in native checks. Suggested pass:
+   `/harden`.
+4. **P2: model-picker geometry shifts while in use.** At first open, the High
+   effort label and selected thumb differ by roughly 83 px; filtering redraws
+   them into alignment. Labels use a cached/fallback track width while the
+   thumb uses live relative width. The measurement callback notifies during
+   prepaint, which does not schedule the necessary redraw at this GPUI pin.
+   Filtering also moves the search field about 160 px down as the bottom-anchored
+   popup shrinks. Keep open-picker height/search placement stable within the
+   viewport and calculate effort positions from the same measured track.
+   Current selection and keyboard target also look similarly filled; add a
+   clear current-model mark. Source shows opening targets the first recent
+   choice, so Enter can choose a different model without navigation; this
+   specific Enter sequence was not exercised natively. Suggested pass:
+   `/polish`. Raw model IDs and `200000 ctx · standard` can be quieter later.
+5. **P2: restored panes defeat narrow-window fitting.** A fresh 720 × 480
+   window with saved sidebar/chat widths restores a roughly 35 px work pane
+   where Activity wraps vertically. Manually hiding it restores usable space.
+   Startup checks fit, but per-chat restoration reapplies saved layout without
+   that check. Reapply the existing fit rule after restoration and resize.
+   This is adjacent window layout work, rather than composer chrome. Suggested
+   pass: `/adapt`.
+
+Source-only follow-up: opening a previously collapsed work pane while selecting
+a distant tab can reveal against stale zero-width scroll bounds. The full-suite
+investigation exposed this when a new resize test leaked saved layout settings.
+The test now restores its prior settings; no tab implementation was changed.
+The GPUI pin consumes the active-item scroll before publishing current bounds.
+Retest a normal user open/select sequence before designing a correction.
+
+### Design assessment
+
+The restrained native composition does not read as a generic generated UI.
+There are no gratuitous gradients, glows or repeated card grids. The main
+opportunity is predictable interaction and bounded content. The cognitive-load
+check has one borderline failure out of eight: five toolbar actions are visible,
+but related settings use progressive disclosure. This is low load in the
+default state; attachment overload is a separate height failure.
+
+Provisional heuristic scores apply to the composer and its controls, including
+the interaction failures above. They are a review aid, not a measured benchmark.
+
+| Heuristic | Score / 4 | Main observation |
+| --- | --- | --- |
+| System status | 3 | Draft overflow and disabled Send are visible in normal layouts |
+| Real-world match | 3 | Readable model names; raw metadata remains prominent |
+| User control | 2 | Attachments can push controls offscreen |
+| Consistency | 2 | Native word/line shortcuts fail |
+| Error prevention | 3 | Empty Send disabled; narrow height remains vulnerable |
+| Recognition | 3 | Model target/current selection needs distinction |
+| Efficiency | 2 | Focus return and editing interrupt drafting |
+| Minimalism | 3 | Compact toolbar holds up; picker metadata can be quieter |
+| Recovery | 3 | Undo works; attachment removal remains available |
+| Help | 3 | Draft hints and expansion are discoverable |
+| **Total** | **27/40** | **Usable, with interaction gaps** |
+
+A keyboard-heavy developer encounters broken editing and focus loss during
+ordinary drafting. A newcomer has difficulty separating the current model from
+the keyboard target. A small-window user can lose Send after adding files and
+inherit an unusable work strip. The default experience feels calm; these sudden
+losses of control make populated states feel less trustworthy. VoiceOver and
+physical IME candidate placement remain unverified.
+
+### Crash fixed during the review
+
+Native attachment selection aborted the original QA build. Its crash report
+points to `transcript_scrollbar_metrics`: the 28 px minimum thumb exceeded the
+remaining 24 px viewport, violating `f32::clamp` bounds. The minimum now caps at
+the actual viewport height. Two tests failed before the fix and pass afterward:
+real measured list viewports from 0 to 200 px, and an actual short DesktopShell
+receiving eight wrapped attachments at 420/480 px widths. The latter restores
+its prior saved state to avoid contaminating subsequent layout tests.
+
+All 319 desktop tests pass, as do strict all-target desktop Clippy, native build
+and packaging, formatting, architecture and generated-theme checks. Repeating
+the eight-file selection in the rebuilt native app confirms it stays alive and
+still exposes the separate height overflow. No provider prompt was submitted.
+The isolated app and owned daemon are stopped; original fixture settings are
+restored.
+
+Evidence: [default 420 px](/private/tmp/mew-composer-review-2026-10-25/420-default.png),
+[picker first open](/private/tmp/mew-composer-review-2026-10-25/420-picker-first.png),
+[picker filtered](/private/tmp/mew-composer-review-2026-10-25/420-picker-filtered.png),
+[eight attachments after crash fix](/private/tmp/mew-composer-review-2026-10-25/480x480-eight-attachments-fixed.png),
+[narrow restored panes](/private/tmp/mew-composer-review-2026-10-25/720x480-default.png),
+[work pane folded](/private/tmp/mew-composer-review-2026-10-25/720x480-work-folded.png).

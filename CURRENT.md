@@ -3566,3 +3566,25 @@ fitting the short picker, arrow-key selection, Unicode Undo/Redo and native menu
 availability. No provider prompt was submitted. The QA app and owned daemon are
 stopped; the original fixture sizing, model and empty draft are restored.
 Physical IME candidates and VoiceOver remain unverified.
+
+## 2026-10-25: composer comparison and tiny-viewport crash
+
+Reviewed the composer against the supplied Codex screenshot with fresh native
+QA at 420/480/600 px conversation widths and 480/800 px window heights. The
+current default typography and toolbar hold up. Remaining priorities are native
+word/line editing, focus return after persona/permission choices, bounded
+attachment height, stable model-picker geometry and fit checks after saved pane
+restoration. Details and captures are in
+`notes/gpui-codex-ux-review-2026-10-24.md`. These findings remain review work,
+except for the crash below.
+
+Eight wrapped attachments and a long draft exposed an abort: the transcript
+scrollbar clamped a 28 px minimum into a 24 px viewport. Cap the minimum at the
+actual viewport height. Two real GPUI regressions failed before the fix and
+pass afterward. The crowded-shell test restores prior saved settings to avoid
+leaking its resize state into later tests. All 319 desktop tests, strict
+all-target desktop Clippy, native build/packaging, formatting, architecture and
+generated-theme checks pass. The rebuilt native app survives the same eight-file
+selection. Attachment height still pushes Send below a 480 px-tall window and
+requires a separate layout fix. No provider prompt was submitted. The isolated
+app/owned daemon are stopped and original fixture settings restored.

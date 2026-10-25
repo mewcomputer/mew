@@ -5575,3 +5575,121 @@ mod composer_question_response_regressions {
         shell.update(cx, |shell, _| shell.quitting = true);
     }
 }
+
+#[cfg(test)]
+mod transcript_scrollbar_tiny_viewport_regressions {
+    use super::super::chat_render::transcript_scrollbar_metrics;
+    use super::super::*;
+
+    struct MeasuredList {
+        state: gpui::ListState,
+        height: Pixels,
+    }
+
+    impl Render for MeasuredList {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().child(
+                gpui::list(self.state.clone(), |_, _, _| {
+                    div()
+                        .h(px(100.))
+                        .child("scrollable content")
+                        .into_any_element()
+                })
+                .w(px(200.))
+                .h(self.height),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn transcript_scrollbar_stays_inside_tiny_measured_viewports(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| MeasuredList {
+            state: gpui::ListState::new(2, gpui::ListAlignment::Top, px(200.)),
+            height: px(100.),
+        });
+        for height in [0., 1., 2., 13.5, 27., 28., 29., 100., 200.] {
+            view.update(cx, |view, cx| {
+                view.height = px(height);
+                cx.notify();
+            });
+            cx.run_until_parked();
+            view.update(cx, |view, _| {
+                let viewport = f32::from(view.state.viewport_bounds().size.height);
+                assert!((viewport - height).abs() <= 0.5);
+                let metrics = transcript_scrollbar_metrics(&view.state);
+                if height <= 1. || height == 200. {
+                    assert!(metrics.is_none());
+                } else {
+                    let metrics = metrics.unwrap_or_else(|| panic!(
+                        "overflowing content retains scrollbar metrics, height {height}, viewport {viewport}, max offset {:?}",
+                        view.state.max_offset_for_scrollbar()
+                    ));
+                    assert!(metrics.thumb_height > 0. && metrics.thumb_height <= viewport);
+                    assert!(metrics.thumb_top >= 0.);
+                    assert!(metrics.thumb_top + metrics.thumb_height <= viewport);
+                    assert!(metrics.travel >= 0.);
+                    if height < 28. {
+                        assert_eq!(metrics.thumb_height, viewport);
+                        assert_eq!(metrics.travel, 0.);
+                    } else {
+                        assert!(metrics.thumb_height >= 28.);
+                    }
+                }
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn adding_eight_wrapped_attachments_keeps_tiny_transcript_viewports_safe(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let persisted_state = mew_config::load_state().unwrap();
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            shell.model.ui.transcript = (0..16).map(|index| TranscriptItem {
+                role: TranscriptRole::Assistant,
+                text: format!("Paragraph {index}: retained conversation content that overflows the remaining viewport."),
+                parts: Vec::new(),
+            }).collect();
+            shell.model.ui.composer = "draft line with preserved details\n".repeat(12);
+            let end = shell.model.ui.composer.len();
+            shell.composer_selection = end..end;
+            shell.sync_markdown_cache();
+            cx.notify();
+        });
+        let attachments = (0..8).map(|index| Attachment {
+            path: format!("/tmp/{index}-a-very-long-attachment-filename-which-takes-one-row-in-the-narrow-composer-é中.txt"),
+            mime: Some("text/plain".into()),
+        }).collect::<Vec<_>>();
+        let mut saw_tiny_viewport = false;
+        for width in [420., 480.] {
+            cx.simulate_resize(gpui::size(px(width), px(480.)));
+            for count in 0..=8 {
+                shell.update(cx, |shell, cx| {
+                    shell.attachments = attachments[..count].to_vec();
+                    cx.notify();
+                });
+                cx.run_until_parked();
+                shell.update(cx, |shell, _| {
+                    let viewport = shell.transcript_list.viewport_bounds();
+                    let height = f32::from(viewport.size.height);
+                    saw_tiny_viewport |= height > 1. && height < 28.;
+                    if let Some(metrics) = transcript_scrollbar_metrics(&shell.transcript_list) {
+                        assert!(metrics.thumb_height <= height);
+                        assert!(metrics.thumb_top + metrics.thumb_height <= height);
+                    }
+                });
+            }
+        }
+        assert!(
+            saw_tiny_viewport,
+            "the crowded composer must exercise the reported tiny viewport"
+        );
+        shell.update(cx, |shell, _| shell.quitting = true);
+        mew_config::save_state(&persisted_state).unwrap();
+    }
+}

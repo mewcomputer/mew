@@ -23,8 +23,10 @@ pub(super) fn transcript_scrollbar_metrics(
         return None;
     }
 
-    let thumb_height = (viewport_height * viewport_height / (viewport_height + max_offset))
-        .clamp(TRANSCRIPT_SCROLLBAR_MIN_THUMB, viewport_height);
+    let thumb_height = (viewport_height * viewport_height / (viewport_height + max_offset)).clamp(
+        TRANSCRIPT_SCROLLBAR_MIN_THUMB.min(viewport_height),
+        viewport_height,
+    );
     let travel = (viewport_height - thumb_height).max(0.);
     let scroll_offset = (-f32::from(list.scroll_px_offset_for_scrollbar().y)).clamp(0., max_offset);
     let thumb_top = if travel > 0. {
