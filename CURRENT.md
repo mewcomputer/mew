@@ -3467,3 +3467,35 @@ legible model/effort, compact/expanded persona, attachment removal, popup fit
 and accessible disabled Send. No provider prompt was submitted. The QA app and
 owned daemon are stopped, draft cleared and fixture restored. Physical IME and
 VoiceOver remain unverified. Long-draft overflow cues remain a separate item.
+
+
+# 2026-10-24 - long-draft overflow cues and composer expansion
+
+Long drafts now show their visual-line count and a persistent draggable scrollbar
+in the existing right padding. A conditional Expand/Collapse control grows the
+editor upward without changing the settings row or draft typography. The expanded
+viewport uses at most half the conversation area and 360 px, with a measured
+budget for attachments, errors, controls and terminal fallback. Short drafts
+return to the original layout; short windows omit Expand when no growth fits.
+
+Toggling preserves text, selection, marked ranges and an offscreen reading
+position, and restores editor focus. A visible caret remains visible after
+collapse. Track clicks and dragging scroll without starting text selection,
+including release outside the editor. Accepted submission and actual draft-owner
+changes reset expansion and dragging; failed sends and same-chat reselection
+preserve expansion. The input hint now includes Shift+Enter and long-draft use.
+
+Six new actual-GPUI tests cover four/five visual-row boundaries, soft wrapping,
+Unicode, trailing newline, pointer/keyboard toggles, native range geometry,
+manual reading positions, track/drag behavior, submission/navigation ownership,
+short/tall windows, terminal fallback and eight wrapped attachments with an error.
+All 297 desktop tests and strict all-target desktop Clippy pass. Native build and
+packaging pass, as do formatting, architecture and generated-theme checks.
+
+Isolated native QA confirmed the 420 px dark composer shows overflow, preserves
+reading position on expansion and retains Collapse when all twelve lines fit.
+Dragging a forty-line draft reaches its first line. A 480 px-tall light window
+keeps the expanded editor and controls inside the pane with conversation space
+above. Clearing the draft removes the information row and scrollbar. No provider
+turn was submitted. The QA app and owned daemon are stopped and the fixture is
+restored. Physical IME and VoiceOver remain unverified.

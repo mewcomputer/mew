@@ -88,11 +88,21 @@ services. These notifications complement GPUI redraw; use them when changing the
 registered input through application commands.
 
 The composer shapes the complete draft, measures against its available width
-and caps its editing viewport at 96 px. Paint text, selection and caret through
+and normally caps its editing viewport at 96 px. Long drafts expose a measured
+visual-line count, a persistent scrollbar and an Expand/Collapse control. The
+expanded viewport is capped at 360 px and half the conversation area, accounting
+for measured attachments, errors, controls and a folded terminal. Keep space for
+the transcript; omit Expand when the available budget cannot grow the editor.
+Paint text, selection and caret through
 the same content mask and scroll offset used by pointer lookup and native range
 geometry. Retain composer geometry separately from the focused shell field so
 scrolling an unfocused draft cannot reuse a URL or search layout. Manual scroll
 holds until editing, selection, focus or geometry requires revealing the caret.
+Expanding or collapsing preserves an offscreen reading position. When the caret
+was visible, keep it visible in the new viewport. Toggling preserves selection
+and marked text and returns keyboard focus to the editor. Successful submission
+and an actual draft-owner change reset expansion and scrollbar dragging; failed
+submissions and reselecting the current chat retain expansion.
 
 Vertical draft movement keeps the preferred horizontal position across short
 lines and tracks the downstream side of soft wraps. Refresh retained geometry

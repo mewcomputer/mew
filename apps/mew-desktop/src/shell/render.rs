@@ -45,6 +45,15 @@ impl Render for DesktopShell {
                 cx.listener(|shell, _, _, _| shell.release_browser_focus()),
             )
             .on_key_down(cx.listener(Self::shell_key_down))
+            .on_mouse_move(cx.listener(Self::composer_scrollbar_mouse_move))
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(Self::composer_scrollbar_mouse_up),
+            )
+            .on_mouse_up_out(
+                gpui::MouseButton::Left,
+                cx.listener(Self::composer_scrollbar_mouse_up),
+            )
             .on_action(cx.listener(Self::action_new_conversation))
             .on_action(cx.listener(Self::action_close_conversation))
             .on_action(cx.listener(Self::action_new_work_tab))

@@ -2478,11 +2478,11 @@ mod shell_tests {
 
     #[test]
     fn composer_height_tracks_wrapped_lines_with_a_small_cap() {
-        assert_eq!(composer_input_height(0, 20.), 48.);
-        assert_eq!(composer_input_height(1, 20.), 48.);
-        assert_eq!(composer_input_height(2, 20.), 48.);
-        assert_eq!(composer_input_height(3, 20.), 60.);
-        assert_eq!(composer_input_height(6, 20.), 96.);
+        assert_eq!(composer_input_height(0, 20., 96.), 48.);
+        assert_eq!(composer_input_height(1, 20., 96.), 48.);
+        assert_eq!(composer_input_height(2, 20., 96.), 48.);
+        assert_eq!(composer_input_height(3, 20., 96.), 60.);
+        assert_eq!(composer_input_height(6, 20., 96.), 96.);
     }
 
     #[test]

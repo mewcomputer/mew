@@ -142,6 +142,12 @@ label. Follow the measured composer width through pane animations and resizing.
 Wider panes show the selected persona text. Unset values use concise Model/Persona placeholders.
 Composer footer labels are also 11 px; draft text remains 15 px with 24 px leading.
 Long workspace paths truncate while preserving the full accessible label.
+Long drafts reveal a quiet 24 px information row with visual-line count and an
+Expand/Collapse control. Keep the scrollbar visible while text overflows, inside
+the composer's existing right padding. Expansion grows upward within a measured
+height budget, retaining conversation space and the same toolbar. Short drafts
+keep their original composition without this row. Preserve an offscreen reading
+position when toggling; scrollbars must not alter the draft's text selection.
 Use provider-scoped catalog model names in the composer and picker, falling back
 to the raw model ID when no name is supplied. Search matches names and IDs;
 picker details retain the fully qualified identity used for switching models.

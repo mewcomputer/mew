@@ -788,3 +788,32 @@ The owned QA app and daemon are stopped, the draft cleared and the fixture's
 420 px/system appearance restored. Long-draft overflow cues, contextual Yield
 and picker header density remain outside this pass. Physical IME and VoiceOver
 were not exercised.
+
+
+## Composer follow-up: long drafts
+
+Addressed the remaining long-draft overflow finding. A quiet information row
+shows the measured visual-line count and Expand/Collapse, while a persistent
+scrollbar in existing padding shows position and supports dragging/track clicks.
+Short drafts have neither extra row nor scrollbar.
+
+Expansion grows the same editor upward, capped at 360 px and half the conversation
+area. Its budget includes measured attachments, errors, controls and folded
+terminal space. Manual reading positions, Unicode selections and marked ranges
+survive toggling. Accepted sends and actual chat navigation reset expansion;
+failed sends and reselecting the current chat retain it.
+
+Six new actual-GPUI regressions and all 297 desktop tests pass, including a case
+with eight wrapped attachments and an error that exposed the initial fixed
+height reservation. Strict desktop Clippy, native build/packaging and repository
+checks pass. Native QA used the isolated real daemon fixture without submitting
+a provider prompt.
+
+Evidence: [collapsed twelve-line draft](/private/tmp/mew-long-drafts-2026-10-24/420-collapsed.png),
+[expanded draft](/private/tmp/mew-long-drafts-2026-10-24/420-expanded.png),
+[forty-line draft scrolled to its start](/private/tmp/mew-long-drafts-2026-10-24/420-scrolled-top.png),
+[expanded editor in a short light window](/private/tmp/mew-long-drafts-2026-10-24/420-short-light-expanded.png).
+
+The owned QA app and daemon are stopped, draft cleared and fixture restored.
+Physical IME and VoiceOver were not exercised. Contextual Yield and picker header
+density remain separate observations.

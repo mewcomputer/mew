@@ -1829,9 +1829,16 @@ impl DesktopShell {
         let can_submit =
             !self.model.ui.composer.trim().is_empty() && self.awaiting_model_switch.is_none();
         let composer_focused = self.composer_focus_handle.is_focused(window);
+        let expanded_composer_max_height = self.composer_expanded_max_height(window);
+        let composer_max_height = if self.composer_expanded {
+            expanded_composer_max_height
+        } else {
+            96.
+        };
         let attachments = self.attachments.clone();
         let attachment_error = self.attachment_error.clone();
         let composer_focus_handle = self.composer_focus_handle.clone();
+        let composer_area_shell = cx.entity().downgrade();
         let model_picker_trigger_shell = cx.entity().downgrade();
         let persona_picker_trigger_shell = cx.entity().downgrade();
         let permission_picker_trigger_shell = cx.entity().downgrade();
@@ -1919,6 +1926,7 @@ impl DesktopShell {
             .child(
                 div()
                     .id("composer-area")
+                    .relative()
                     .flex()
                     .flex_col()
                     .w_full()
@@ -1927,6 +1935,13 @@ impl DesktopShell {
                     .gap(px(8.))
                     .px(px(CHAT_TRANSCRIPT_PADDING))
                     .pb(px(12.))
+                    .child(canvas(move |bounds, window, cx| {
+                        composer_area_shell.update(cx, |shell, cx| {
+                            let height_changed = shell.composer_area_bounds.is_none_or(|previous| previous.size.height != bounds.size.height);
+                            shell.composer_area_bounds = Some(bounds);
+                            if height_changed { cx.defer_in(window, |_, _, cx| cx.notify()); }
+                        }).ok();
+                    }, |_bounds, _state, _window, _cx| {}).absolute().inset_0().size_full())
                     .when_some(last_error, |element, error| {
                         element.child(
                             div()
@@ -2155,14 +2170,39 @@ impl DesktopShell {
                             } else {
                                 theme_rgb(&self.theme, "text.body")
                             })
+                            .when(self.composer_line_count > 4 || self.composer_expanded, |element| {
+                                element.child(div()
+                                    .id("composer-draft-info")
+                                    .debug_selector(|| "composer-draft-info".into())
+                                    .flex().items_center().justify_between().h(px(24.)).flex_none()
+                                    .text_size(px(11.)).line_height(px(16.))
+                                    .text_color(theme_rgb(&self.theme, "text.muted"))
+                                    .child(SharedString::from(format!("{} lines", self.composer_line_count)))
+                                    .when(expanded_composer_max_height > 96. || self.composer_expanded, |element| {
+                                        element.child(div()
+                                            .id("composer-expand-toggle")
+                                            .debug_selector(|| "composer-expand-toggle".into())
+                                            .h(px(24.)).px(px(6.)).rounded(px(4.))
+                                            .flex().items_center().cursor_pointer()
+                                            .role(Role::Button)
+                                            .aria_label(if self.composer_expanded { "Collapse composer" } else { "Expand composer" })
+                                            .aria_expanded(self.composer_expanded)
+                                            .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+                                            .text_color(theme_rgb(&self.theme, "secondary_foreground"))
+                                            .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
+                                            .on_click(cx.listener(|shell, _, window, cx| shell.toggle_composer_expanded(window, cx)))
+                                            .child(if self.composer_expanded { "Collapse" } else { "Expand" }))
+                                    }))
+                            })
                             .child(
                                 div()
                                     .id("composer-input-surface")
+                                    .relative()
                                     .flex()
                                     .w_full()
                                     .flex_none()
                                     .min_h(px(48.))
-                                    .max_h(px(96.))
+                                    .max_h(px(composer_max_height))
                                     .items_start()
                                     .key_context("Composer")
                                     .track_focus(&composer_focus_handle)
@@ -2174,7 +2214,7 @@ impl DesktopShell {
                                     .aria_label("Message composer")
                                     .aria_value(composer_value.clone())
                                     .aria_placeholder("Do anything…")
-                                    .aria_description("Type a message, then press Enter to send.")
+                                    .aria_description("Enter sends. Shift+Enter adds a new line. Long drafts scroll; use Expand composer for more space.")
                                     .cursor(gpui::CursorStyle::IBeam)
                                     .on_click(cx.listener(|shell, _, window, cx| {
                                         shell.release_browser_focus();
@@ -2208,7 +2248,8 @@ impl DesktopShell {
                                     .child(ComposerElement {
                                         shell: cx.entity(),
                                         target: TextInputTarget::Composer,
-                                    }),
+                                    })
+                                    .when_some(self.render_composer_scrollbar(cx), |element, scrollbar| element.child(scrollbar)),
                             )
                             .child(
                                 div()

@@ -505,6 +505,11 @@ impl DesktopShell {
         let end = self.model.ui.composer.len();
         self.composer_scroll_offset = Pixels::ZERO;
         self.composer_scroll_max = Pixels::ZERO;
+        self.composer_line_count = 1;
+        self.composer_expanded = false;
+        self.composer_preserve_scroll_on_resize = false;
+        self.composer_scrollbar_grab_offset = None;
+        self.composer_area_bounds = None;
         self.composer_preferred_column = None;
         self.composer_cursor_downstream = false;
         self.text_input_layout = None;

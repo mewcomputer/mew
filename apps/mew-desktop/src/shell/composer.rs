@@ -118,6 +118,175 @@ fn normalized_browser_url_range(text: &str, range: &Range<usize>) -> Range<usize
 }
 
 impl DesktopShell {
+    pub(super) fn composer_expanded_max_height(&self, window: &Window) -> f32 {
+        let dock_height = if self.layout.workbench_collapsed
+            && self.work_tabs.active().kind == WorkTabKind::Terminal
+        {
+            TERMINAL_EXPANDED_HEIGHT
+        } else {
+            0.
+        };
+        let height = f32::from(window.bounds().size.height) - PANE_HEADER_HEIGHT - dock_height;
+        let chrome_height = self
+            .composer_area_bounds
+            .zip(self.composer_bounds)
+            .map(|(area, input)| {
+                f32::from((area.size.height - input.size.height).max(Pixels::ZERO))
+            })
+            .unwrap_or(104.);
+        // Reserve four transcript lines alongside the measured attachments, errors and controls.
+        (height * 0.5)
+            .min(height - chrome_height - 96.)
+            .clamp(96., 360.)
+    }
+
+    pub(super) fn toggle_composer_expanded(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer_preserve_scroll_on_resize =
+            self.composer_text_layout.as_ref().is_some_and(|layout| {
+                cursor_position_with_affinity(
+                    &layout.lines,
+                    &self.model.ui.composer,
+                    self.composer_cursor_offset(),
+                    layout.line_height,
+                    self.composer_cursor_downstream,
+                )
+                .is_some_and(|caret| {
+                    caret.y < self.composer_scroll_offset
+                        || caret.y + layout.line_height
+                            > self.composer_scroll_offset + layout.bounds.size.height
+                })
+            });
+        self.composer_expanded = !self.composer_expanded;
+        self.composer_scrollbar_grab_offset = None;
+        window.focus(&self.composer_focus_handle, cx);
+        cx.notify();
+    }
+
+    pub(super) fn render_composer_scrollbar(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let bounds = self.composer_bounds?;
+        let (thumb_height, thumb_top) = composer_scrollbar_thumb(
+            bounds.size.height,
+            self.composer_scroll_max,
+            self.composer_scroll_offset,
+        )?;
+        Some(
+            div()
+                .id("composer-scrollbar")
+                .debug_selector(|| "composer-scrollbar".into())
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .right(px(-10.))
+                .w(px(10.))
+                .cursor(gpui::CursorStyle::Arrow)
+                .role(Role::ScrollBar)
+                .aria_label("Draft scroll")
+                .aria_orientation(gpui::Orientation::Vertical)
+                .aria_min_numeric_value(0.)
+                .aria_max_numeric_value(100.)
+                .aria_numeric_value(f64::from(
+                    (self.composer_scroll_offset / self.composer_scroll_max) * 100.,
+                ))
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(Self::composer_scrollbar_mouse_down),
+                )
+                .child(
+                    div()
+                        .id("composer-scrollbar-thumb")
+                        .debug_selector(|| "composer-scrollbar-thumb".into())
+                        .absolute()
+                        .top(thumb_top)
+                        .right(px(2.))
+                        .w(px(5.))
+                        .h(thumb_height)
+                        .rounded(px(2.5))
+                        .bg(theme_rgb(&self.theme, "text.muted").opacity(0.48)),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn composer_scrollbar_mouse_down(
+        &mut self,
+        event: &gpui::MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(bounds) = self.composer_bounds else {
+            return;
+        };
+        let Some((height, top)) = composer_scrollbar_thumb(
+            bounds.size.height,
+            self.composer_scroll_max,
+            self.composer_scroll_offset,
+        ) else {
+            return;
+        };
+        let y = event.position.y - bounds.top();
+        let grab = if y >= top && y <= top + height {
+            y - top
+        } else {
+            height * 0.5
+        };
+        self.composer_scrollbar_grab_offset = Some(grab);
+        self.composer_is_selecting = false;
+        self.update_composer_scrollbar(event.position.y, grab, cx);
+        window.prevent_default();
+        cx.stop_propagation();
+    }
+
+    fn update_composer_scrollbar(
+        &mut self,
+        pointer_y: Pixels,
+        grab: Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(bounds) = self.composer_bounds else {
+            return;
+        };
+        let Some((height, _)) = composer_scrollbar_thumb(
+            bounds.size.height,
+            self.composer_scroll_max,
+            self.composer_scroll_offset,
+        ) else {
+            return;
+        };
+        let travel = bounds.size.height - height;
+        if travel > Pixels::ZERO {
+            self.composer_scroll_offset = ((pointer_y - bounds.top() - grab) / travel)
+                .clamp(0., 1.)
+                * self.composer_scroll_max;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn composer_scrollbar_mouse_move(
+        &mut self,
+        event: &gpui::MouseMoveEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(grab) = self.composer_scrollbar_grab_offset {
+            if event.dragging() {
+                self.update_composer_scrollbar(event.position.y, grab, cx);
+                cx.stop_propagation();
+            }
+        }
+    }
+
+    pub(super) fn composer_scrollbar_mouse_up(
+        &mut self,
+        _event: &gpui::MouseUpEvent,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        self.composer_scrollbar_grab_offset = None;
+    }
+
     // Native text services can request candidate bounds before the next paint.
     fn refresh_text_input_layout(&mut self, target: TextInputTarget, window: &Window) {
         let text = self.text_input_value(target);
@@ -1186,6 +1355,11 @@ impl Element for ComposerElement {
         let font_size = text_style.font_size.to_pixels(window.rem_size());
         let line_height = window.line_height();
         let run = text_style.to_run(content.len());
+        let max_height = if self.shell.read(cx).composer_expanded {
+            self.shell.read(cx).composer_expanded_max_height(window)
+        } else {
+            96.
+        };
         let layout = window.request_measured_layout(style, move |known, available, window, _| {
             let width = known
                 .width
@@ -1216,7 +1390,11 @@ impl Element for ComposerElement {
             };
             gpui::size(
                 width,
-                px(composer_input_height(line_count, f32::from(line_height))),
+                px(composer_input_height(
+                    line_count,
+                    f32::from(line_height),
+                    max_height,
+                )),
             )
         });
         (layout, ())
@@ -1314,10 +1492,12 @@ impl Element for ComposerElement {
             let reveal = shell.composer_text_layout.as_ref().is_none_or(|layout| {
                 layout.target != self.target
                     || layout.text.as_ref() != content
-                    || layout.bounds != bounds
+                    || (layout.bounds != bounds && !shell.composer_preserve_scroll_on_resize)
                     || layout.cursor_offset != cursor
                     || layout.selection != selection
-                    || (shell.composer_focus_handle.is_focused(window) && !layout.focused)
+                    || (shell.composer_focus_handle.is_focused(window)
+                        && !layout.focused
+                        && !shell.composer_preserve_scroll_on_resize)
             });
             if reveal {
                 if let Some(caret) = caret {
@@ -1353,9 +1533,25 @@ impl Element for ComposerElement {
                 .iter()
                 .map(|line| line.size(prepaint.line_height).height)
                 .sum::<Pixels>();
-            self.shell.update(cx, |shell, _| {
+            let line_count = prepaint
+                .lines
+                .iter()
+                .map(|line| line.wrap_boundaries().len() + 1)
+                .sum();
+            self.shell.update(cx, |shell, cx| {
+                let max_scroll = (content_height - bounds.size.height).max(Pixels::ZERO);
+                let changed = shell.composer_scroll_offset != scroll_offset
+                    || shell.composer_scroll_max != max_scroll
+                    || shell.composer_line_count != line_count;
                 shell.composer_scroll_offset = scroll_offset;
-                shell.composer_scroll_max = (content_height - bounds.size.height).max(Pixels::ZERO);
+                shell.composer_scroll_max = max_scroll;
+                shell.composer_line_count = line_count;
+                if content_height <= px(96.) {
+                    shell.composer_expanded = false;
+                }
+                if changed {
+                    cx.defer_in(window, |_, _, cx| cx.notify());
+                }
             });
         }
         prepaint
@@ -1380,8 +1576,12 @@ impl Element for ComposerElement {
         self.shell.update(cx, |shell, cx| match target {
             TextInputTarget::Composer => {
                 let was_compact = composer_settings_are_compact(shell.composer_bounds);
+                let height_changed = shell
+                    .composer_bounds
+                    .is_none_or(|previous| previous.size.height != bounds.size.height);
                 shell.composer_bounds = Some(bounds);
-                if composer_settings_are_compact(Some(bounds)) != was_compact {
+                shell.composer_preserve_scroll_on_resize = false;
+                if height_changed || composer_settings_are_compact(Some(bounds)) != was_compact {
                     cx.defer_in(window, |_, _, cx| cx.notify());
                 }
             }
@@ -1483,8 +1683,23 @@ impl Element for ComposerElement {
     }
 }
 
-pub(super) fn composer_input_height(line_count: usize, line_height: f32) -> f32 {
-    (line_count.max(1) as f32 * line_height).clamp(48., 96.)
+pub(super) fn composer_input_height(line_count: usize, line_height: f32, max_height: f32) -> f32 {
+    (line_count.max(1) as f32 * line_height).clamp(48., max_height)
+}
+
+fn composer_scrollbar_thumb(
+    viewport: Pixels,
+    max_scroll: Pixels,
+    offset: Pixels,
+) -> Option<(Pixels, Pixels)> {
+    if viewport <= px(1.) || max_scroll <= px(1.) {
+        return None;
+    }
+    let height = (viewport * (viewport / (viewport + max_scroll))).clamp(px(24.), viewport);
+    Some((
+        height,
+        (viewport - height) * (offset / max_scroll).clamp(0., 1.),
+    ))
 }
 
 fn revealed_composer_scroll(
@@ -2996,5 +3211,366 @@ mod tests {
             normalized_browser_url_range("short", &std::ops::Range { start: 99, end: 3 },),
             3..5
         );
+    }
+}
+
+#[cfg(test)]
+mod long_draft_tests {
+    use super::*;
+
+    fn set_draft(shell: &Entity<DesktopShell>, cx: &mut gpui::VisualTestContext, text: &str) {
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            shell.model.ui.composer = text.into();
+            shell.composer_selection = text.len()..text.len();
+            cx.notify();
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn expansion_keeps_wrapped_attachments_and_errors_inside_the_pane(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        cx.simulate_resize(gpui::size(px(420.), px(800.)));
+        set_draft(&shell, cx, &"draft line\n".repeat(40));
+        shell.update(cx, |shell, cx| {
+            shell.attachments = (0..8).map(|index| mew_protocol::Attachment {
+                path: format!("/tmp/{index}-a-very-long-filename-that-wraps-into-its-own-attachment-row-é中.txt"),
+                mime: None,
+            }).collect();
+            shell.model.last_error = Some("The connection was interrupted. Your draft is saved; reconnect to try again.".into());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let first = cx.debug_bounds("attachment-0").unwrap();
+        assert!(
+            first.top() >= px(PANE_HEADER_HEIGHT),
+            "the ordinary draft and its attachments fit"
+        );
+        let toggle = cx
+            .debug_bounds("composer-expand-toggle")
+            .expect("there is still some room to grow");
+        cx.simulate_click(toggle.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        let first = cx.debug_bounds("attachment-0").unwrap();
+        let composer = cx.debug_bounds("composer").unwrap();
+        assert!(
+            first.top() >= px(PANE_HEADER_HEIGHT),
+            "expansion must not push attachments above the pane"
+        );
+        assert!(composer.bottom() <= px(800.));
+        let toggle = cx.debug_bounds("composer-expand-toggle").unwrap();
+        assert!(toggle.top() >= composer.top() && toggle.bottom() <= composer.bottom());
+        shell.update(cx, |shell, _| {
+            assert!(shell.composer_bounds.unwrap().size.height > px(96.));
+            assert!(shell.composer_bounds.unwrap().size.height < px(360.));
+            shell.quitting = true;
+        });
+    }
+
+    #[gpui::test]
+    fn expanded_drafts_fit_short_and_tall_windows_with_the_terminal_folded_below(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        for width in [420., 900.] {
+            for height in [480., 800.] {
+                for terminal in [false, true] {
+                    cx.simulate_resize(gpui::size(px(width), px(height)));
+                    shell.update(cx, |shell, cx| {
+                        shell.composer_expanded = false;
+                        shell.work_tabs.open_tool(if terminal {
+                            WorkTabKind::Terminal
+                        } else {
+                            WorkTabKind::Activity
+                        });
+                        shell.attachments = vec![mew_protocol::Attachment {
+                            path: "/tmp/long-draft-notes-é中.txt".into(),
+                            mime: None,
+                        }];
+                        cx.notify();
+                    });
+                    set_draft(&shell, cx, &"long draft\n".repeat(80));
+                    if let Some(toggle) = cx.debug_bounds("composer-expand-toggle") {
+                        cx.simulate_click(toggle.center(), gpui::Modifiers::none());
+                        cx.run_until_parked();
+                    }
+                    let composer = cx.debug_bounds("composer").unwrap();
+                    let available = height
+                        - PANE_HEADER_HEIGHT
+                        - if terminal {
+                            TERMINAL_EXPANDED_HEIGHT
+                        } else {
+                            0.
+                        };
+                    shell.update(cx, |shell, _| {
+                        let field = shell.composer_bounds.unwrap();
+                        assert!(field.size.height <= px(360.) && field.size.height <= px(available * 0.5));
+                        assert!(field.top() >= px(PANE_HEADER_HEIGHT + 24.), "the transcript retains room: {width}x{height}, terminal {terminal}, {field:?}");
+                        assert!(field.bottom() <= px(PANE_HEADER_HEIGHT + available));
+                    });
+                    assert!(composer.top() >= px(PANE_HEADER_HEIGHT));
+                    assert!(composer.bottom() <= px(PANE_HEADER_HEIGHT + available));
+                }
+            }
+        }
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn expansion_survives_failed_send_and_same_chat_but_resets_after_send_or_navigation(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        cx.simulate_resize(gpui::size(px(420.), px(800.)));
+        shell.update(cx, |shell, _| {
+            shell.switch_draft_owner(Some("a"));
+            shell.model.ui.selected_session = Some("a".into());
+            shell.model.attached_session = Some("a".into());
+        });
+        let text = "long draft é中\n".repeat(30);
+        set_draft(&shell, cx, &text);
+        let toggle = cx.debug_bounds("composer-expand-toggle").unwrap();
+        cx.simulate_click(toggle.center(), gpui::Modifiers::none());
+        shell.update(cx, |shell, cx| {
+            assert!(shell.composer_expanded);
+            shell.submit_prompt(cx);
+            assert!(shell.composer_expanded);
+            assert_eq!(shell.model.ui.composer, text);
+        });
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        shell.update(cx, |shell, cx| {
+            shell.command_tx = Some(sender);
+            shell.submit_prompt(cx);
+            assert!(!shell.composer_expanded);
+            assert!(shell.model.ui.composer.is_empty());
+        });
+        assert!(
+            matches!(commands.try_recv().unwrap(), ClientMessage::Prompt { text: sent, .. } if sent == text)
+        );
+        set_draft(&shell, cx, &text);
+        let toggle = cx.debug_bounds("composer-expand-toggle").unwrap();
+        cx.simulate_click(toggle.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        shell.update(cx, |shell, _| {
+            shell.switch_draft_owner(Some("a"));
+            assert!(shell.composer_expanded);
+        });
+        let thumb = cx.debug_bounds("composer-scrollbar-thumb").unwrap();
+        cx.simulate_mouse_down(
+            thumb.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        shell.update(cx, |shell, cx| {
+            assert!(shell.composer_scrollbar_grab_offset.is_some());
+            shell.switch_draft_owner(Some("b"));
+            assert!(!shell.composer_expanded);
+            assert!(shell.composer_scrollbar_grab_offset.is_none());
+            cx.notify();
+        });
+        cx.simulate_mouse_move(
+            thumb.origin,
+            gpui::MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        shell.update(cx, |shell, cx| {
+            assert_eq!(shell.composer_scroll_offset, Pixels::ZERO);
+            assert!(shell.model.ui.composer.is_empty());
+            shell.switch_draft_owner(Some("a"));
+            assert_eq!(shell.model.ui.composer, text);
+            assert!(!shell.composer_expanded);
+            shell.quitting = true;
+            cx.notify();
+        });
+    }
+
+    #[gpui::test]
+    fn overflow_cues_follow_visual_rows_and_disappear_when_the_draft_fits(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        for width in [420., 900.] {
+            cx.simulate_resize(gpui::size(px(width), px(800.)));
+            for (text, overflow) in [
+                ("one\ntwo\nthree\nfour", false),
+                ("one\ntwo\nthree\nfour\n", true),
+                ("", false),
+            ] {
+                set_draft(&shell, cx, text);
+                assert_eq!(cx.debug_bounds("composer-scrollbar").is_some(), overflow);
+                assert_eq!(
+                    cx.debug_bounds("composer-expand-toggle").is_some(),
+                    overflow
+                );
+                assert_eq!(cx.debug_bounds("composer-draft-info").is_some(), overflow);
+            }
+            set_draft(&shell, cx, &"wrapped draft é中🙂 ".repeat(100));
+            let thumb = cx
+                .debug_bounds("composer-scrollbar-thumb")
+                .expect("soft-wrapped drafts reveal their overflow");
+            let track = cx.debug_bounds("composer-scrollbar").unwrap();
+            assert!(thumb.top() >= track.top() && thumb.bottom() <= track.bottom());
+            let composer = cx.debug_bounds("composer").unwrap();
+            assert!(track.left() >= composer.left() && track.right() <= composer.right());
+        }
+        let text = "line with wrapped text é中 ".repeat(10);
+        for (width, overflow) in [(420., true), (900., false), (420., true)] {
+            cx.simulate_resize(gpui::size(px(width), px(800.)));
+            set_draft(&shell, cx, &text);
+            assert_eq!(
+                cx.debug_bounds("composer-scrollbar").is_some(),
+                overflow,
+                "wrapping determines overflow at {width}px"
+            );
+            shell.update(cx, |shell, _| {
+                assert_eq!(shell.composer_line_count > 4, overflow)
+            });
+        }
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn expansion_and_keyboard_collapse_preserve_unicode_selection_and_native_geometry(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        cx.simulate_resize(gpui::size(px(420.), px(800.)));
+        let text = "first é🙂\nsecond\nthird\nfourth\nfifth\nsixth\nseventh\nlast 拼音";
+        set_draft(&shell, cx, text);
+        shell.update(cx, |shell, cx| {
+            shell.composer_selection = 0..text.len();
+            shell.composer_selection_reversed = true;
+            shell.composer_marked_range = Some(0.."first é🙂".len());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let expand = cx
+            .debug_bounds("composer-expand-toggle")
+            .expect("long drafts can expand");
+        cx.simulate_click(expand.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                let field = shell.composer_bounds.unwrap();
+                assert_eq!(field.size.height, px(192.));
+                assert_eq!(shell.model.ui.composer, text);
+                assert_eq!(shell.composer_selection, 0..text.len());
+                assert!(shell.composer_selection_reversed);
+                assert_eq!(shell.composer_marked_range, Some(0.."first é🙂".len()));
+                assert!(shell.composer_focus_handle.is_focused(window));
+                let caret = shell.bounds_for_range(0..0, field, window, cx).unwrap();
+                assert!(caret.top() >= field.top() && caret.bottom() <= field.bottom());
+                window.focus_prev(cx);
+            });
+        });
+        assert!(
+            cx.debug_bounds("composer-expand-toggle").is_some(),
+            "Collapse remains available when expansion removes scrolling"
+        );
+        cx.run_until_parked();
+        let keystroke = gpui::Keystroke::parse("enter").unwrap();
+        cx.simulate_event(gpui::KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        cx.simulate_event(gpui::KeyUpEvent { keystroke });
+        cx.run_until_parked();
+        shell.update(cx, |shell, _| {
+            assert_eq!(shell.composer_bounds.unwrap().size.height, px(96.));
+            assert_eq!(shell.model.ui.composer, text);
+            shell.quitting = true;
+        });
+    }
+
+    #[gpui::test]
+    fn manual_scroll_survives_toggling_and_scrollbar_drag_does_not_select_text(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        cx.simulate_resize(gpui::size(px(420.), px(800.)));
+        let text = "a draft line é中\n".repeat(40);
+        set_draft(&shell, cx, &text);
+        let field = shell.update(cx, |shell, _| shell.composer_bounds.unwrap());
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: field.center(),
+            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(10000.))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        for _ in 0..2 {
+            let toggle = cx
+                .debug_bounds("composer-expand-toggle")
+                .expect("long drafts can expand and collapse");
+            cx.simulate_click(toggle.center(), gpui::Modifiers::none());
+            cx.run_until_parked();
+            shell.update(cx, |shell, _| {
+                assert_eq!(
+                    shell.composer_scroll_offset,
+                    Pixels::ZERO,
+                    "reading the beginning must survive toggling"
+                )
+            });
+        }
+        let track = cx.debug_bounds("composer-scrollbar").unwrap();
+        let thumb = cx.debug_bounds("composer-scrollbar-thumb").unwrap();
+        let target = point(track.center().x, track.bottom() + px(40.));
+        cx.simulate_mouse_down(
+            thumb.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        cx.simulate_mouse_move(target, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_up(target, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.run_until_parked();
+        shell.update(cx, |shell, _| {
+            assert_eq!(shell.composer_scroll_offset, shell.composer_scroll_max);
+            assert_eq!(shell.composer_selection, text.len()..text.len());
+            assert!(!shell.composer_is_selecting);
+            assert_eq!(shell.model.ui.composer, text);
+        });
+        cx.simulate_mouse_move(
+            track.origin,
+            gpui::MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        cx.run_until_parked();
+        shell.update(cx, |shell, _| {
+            assert_eq!(
+                shell.composer_scroll_offset, shell.composer_scroll_max,
+                "release outside ends the drag"
+            );
+        });
+        let track = cx.debug_bounds("composer-scrollbar").unwrap();
+        cx.simulate_click(
+            point(track.center().x, track.top() + px(1.)),
+            gpui::Modifiers::none(),
+        );
+        cx.run_until_parked();
+        shell.update(cx, |shell, _| {
+            assert_eq!(
+                shell.composer_scroll_offset,
+                Pixels::ZERO,
+                "the track can return to the beginning"
+            );
+            assert_eq!(shell.composer_selection, text.len()..text.len());
+            shell.quitting = true;
+        });
     }
 }

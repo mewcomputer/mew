@@ -1178,6 +1178,9 @@ impl DesktopShell {
     pub(super) fn finish_prompt_submission(&mut self, accepted: bool, cx: &mut Context<Self>) {
         self.model.finish_prompt_submission(accepted);
         if accepted {
+            self.composer_expanded = false;
+            self.composer_scrollbar_grab_offset = None;
+            self.composer_preserve_scroll_on_resize = false;
             self.composer_selection = 0..0;
             self.composer_selection_reversed = false;
             self.composer_marked_range = None;
