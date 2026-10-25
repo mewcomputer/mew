@@ -817,3 +817,149 @@ Evidence: [collapsed twelve-line draft](/private/tmp/mew-long-drafts-2026-10-24/
 The owned QA app and daemon are stopped, draft cleared and fixture restored.
 Physical IME and VoiceOver were not exercised. Contextual Yield and picker header
 density remain separate observations.
+
+
+## Composer comparison after long-draft work, at 91c617d
+
+The default composition now holds up at 420, 480 and 600 px. Keep its structure.
+The next pass should repair editing and question interactions, then reduce menu
+density and explain secondary controls. This review adds question/editing paths
+to the earlier visual coverage; these findings do not all originate in the last
+layout change. Product code is unchanged by this review.
+
+### Evidence and limits
+
+Codex appearance comes from the user's supplied screenshot,
+[codex reference](/var/folders/ph/xnrw3k1x1lj426bxsv2vyw9h0000gn/T/codex-clipboard-17a51304-6fdd-4c4a-90c0-343f81387361.png).
+Direct Codex inspection was denied in an earlier pass and was not retried. The
+screenshot cannot establish Codex's narrow-width behavior, keyboard handling or
+question flow. Those behavior findings below concern mew and native editing
+expectations, rather than claims about observed Codex behavior.
+
+Fresh native mew captures used the isolated real daemon/catalog fixture at
+420, 480 and 600 px conversation widths, plus a 480 px-tall window. Two temporary
+actual-GPUI probes exercised question submission, rendered request geometry and
+Escape routing. Their tests and selectors were removed after capturing results.
+Independent design and source assessments were merged with this native pass.
+The deterministic HTML/JSX detector does not support native Rust GPUI and was not
+run against an unrelated frontend. No provider prompt was submitted.
+
+### What remains
+
+1. **P1: a multiline answer to one question silently loses its later lines.**
+   Pointer Send answer and Enter both send only the first physical line, then
+   clear the complete composer. The actual GPUI/command-channel probe submitted
+   `first paragraph é中` followed by a second paragraph; the received response
+   contained only `answers: ["first paragraph é中"]`. Preserve multiline content
+   for a single answer; give multiple questions explicit answer boundaries.
+   Source: [answer construction](/Users/natalie/code/mew/apps/mew-desktop/src/shell/chat.rs:1151).
+   Evidence: [wire repro](/private/tmp/mew-multiline-question-wire-repro-91c617d.log).
+
+2. **P1: draft editing has no Undo/Redo path.** Native Backspace changed
+   `foreground undo probe` to `foreground undo prob`; Command-Z left it unchanged
+   after raising the QA window and clicking the field. The native Edit menu
+   exposes Cut, Copy, Paste and Select All, with no Undo/Redo entries. Restore
+   normal editing recovery with per-draft history, native menu actions and
+   shortcuts; undo must never restore another chat's draft. This is an editing
+   capability gap, not a result of narrower typography.
+   Source: [key bindings and Edit menu](/Users/natalie/code/mew/apps/mew-desktop/src/shell/platform.rs:4).
+
+3. **P1: a main-agent question has no visible cancel/stop exit.** The actual GPUI
+   probe finds Send, with neither Stop nor close-question. Escape emits no
+   command and leaves the request running at both 420 and 480 px. Stop is hidden
+   while awaiting an answer; the close-question action exists only for subagent
+   questions. Provide a secondary cancellation action with clear request/turn
+   semantics so users can decline instead of inventing an answer.
+   Source: [subagent-only close action](/Users/natalie/code/mew/apps/mew-desktop/src/shell/chat_render.rs:365).
+   Evidence: [request-state repro](/private/tmp/mew-required-action-overlap-repro-91c617d.log).
+
+4. **P2: request cards overlap the long-draft information row.** The card uses
+   editor-field bounds rather than the complete composer. With an overflowing
+   draft, its bottom reaches 15 px into the outer composer and 4 px into the
+   information row at 420 px; at 480 px the overlaps are 15.5 and 4.5 px. Short
+   drafts retain a gap. Anchor the request surface to the actual composer top,
+   including the information row, and cover expanded/overflowing combinations.
+   Suggested design command: `/adapt`.
+   Source: [anchor](/Users/natalie/code/mew/apps/mew-desktop/src/shell/helpers.rs:829),
+   [editor-bound placement](/Users/natalie/code/mew/apps/mew-desktop/src/shell/chat_render.rs:2812).
+   Evidence: [measured bounds](/private/tmp/mew-required-action-overlap-repro-91c617d.log).
+
+5. **P2: the model picker is still too large for the choices it exposes.** In a
+   480 px-tall window, only two model rows are fully visible; the All Models
+   heading is followed by a clipped row. Recent entries repeat in All Models,
+   and each section header remains 64 px tall. Its placement is now correct, but
+   its information density is poor. Compact headers, remove duplicate choices
+   and simplify secondary metadata while preserving provider identity and effort.
+   Suggested design command: `/distill`.
+   Source: [header height](/Users/natalie/code/mew/apps/mew-desktop/src/shell/preferences.rs:544).
+   Evidence: [short-window menu](/private/tmp/mew-composer-second-comparison-2026-10-24/420-short-model-picker.png),
+   [normal-height menu](/private/tmp/mew-composer-second-comparison-2026-10-24/420-model-picker.png).
+
+### Secondary differences
+
+At 420 px the persona control becomes a person-in-circle icon with no visible
+selected-value cue or hover tooltip. Its accessible label correctly says
+`Choose persona: builder`, but sighted users can mistake it for an account
+control. Add a compact hover/focus explanation retaining the selected value.
+Permanent Yield still adds a decision beneath an ordinary single-client chat;
+show collaboration actions when they are relevant. These are P2 disclosure
+issues. Suggested commands: `/clarify`, then `/distill`.
+
+Source review also finds that Up/Down in model search do not move a highlighted
+result: Enter chooses the first filtered index, while Tab remains available.
+This is a source-backed keyboard-navigation gap, not a native repro in this
+pass. Secondary picker rows also have independently estimated placement heights;
+that is a follow-up geometry scenario, not a confirmed failure here.
+Source: [model search routing](/Users/natalie/code/mew/apps/mew-desktop/src/shell/preferences.rs:148).
+
+### What is working
+
+- Ordinary model and effort values remain readable at 420 px; persona text
+  returns at 480 px, and the 600 px view keeps useful control grouping.
+- Empty Send is visibly and accessibly disabled. Attachments and long drafts
+  retain their removal, scroll and expansion affordances.
+- Long-draft typography and the settings baseline remain stable. The recent
+  short-window expanded capture retains conversation space above the editor.
+
+Evidence: [420 px](/private/tmp/mew-composer-second-comparison-2026-10-24/420-empty.png),
+[480 px](/private/tmp/mew-composer-second-comparison-2026-10-24/480-empty.png),
+[600 px](/private/tmp/mew-composer-second-comparison-2026-10-24/600-empty.png),
+[short expanded view](/private/tmp/mew-long-drafts-2026-10-24/420-short-light-expanded.png).
+
+### Heuristic assessment
+
+The native styling is coherent; there is no strong ornamental-template pattern
+behind the remaining discomfort. Cognitive load is moderate, with 2 of 8 checklist
+items failing: minimal choices and progressive disclosure. Focus, chunking,
+grouping, hierarchy, sequencing and working-memory support pass for the observed
+writing flow. This is a design heuristic rather than a measured cognitive study.
+
+These provisional, composer-only scores include the newly inspected question
+and editing flows. They should not be read as a before/after visual regression.
+
+| Heuristic | Score / 4 | Main evidence |
+| --- | --- | --- |
+| System status | 3 | Model, effort and draft extent are visible. |
+| Real-world match | 3 | Familiar writing controls; persona/Yield need explanation. |
+| Control and freedom | 2 | Missing Undo and main-question cancellation. |
+| Consistency | 2 | Command-Z and multiline answer behavior violate editing expectations. |
+| Error prevention | 2 | Disabled Send works; multiline answers still lose content. |
+| Recognition | 2 | Compact persona selection requires opening its picker. |
+| Efficiency | 3 | Good draft navigation; model-search arrow behavior remains weak. |
+| Minimalism | 3 | Composer is calm; menus/footer retain excess structure. |
+| Error recovery | 2 | Failed drafts persist, but deletion and answer loss lack recovery. |
+| Help | 3 | Input hints and expansion help long-draft use. |
+| **Total** | **25 / 40** | **Editing/question recovery is the main weakness.** |
+
+Power users encounter missing Undo and model-search arrow navigation. Newcomers
+can mistake the persona icon for account settings and cannot infer Yield's role.
+Keyboard and assistive-technology users lack a main-question cancellation path.
+Physical IME, VoiceOver and display scaling were not exercised.
+
+Recommended order: repair answer preservation, Undo/Redo and question exits; use
+`/adapt` for request-card geometry, `/distill` for model-menu density, `/clarify`
+for compact controls, then `/polish` for state/width combinations. Preserve the
+current composer structure. No product implementation changed in this pass.
+
+All owned QA processes are stopped, the draft is empty and the fixture is
+restored to 420 px conversation width, 800 px window height and system appearance.

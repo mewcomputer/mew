@@ -3499,3 +3499,26 @@ keeps the expanded editor and controls inside the pane with conversation space
 above. Clearing the draft removes the information row and scrollbar. No provider
 turn was submitted. The QA app and owned daemon are stopped and the fixture is
 restored. Physical IME and VoiceOver remain unverified.
+
+
+# 2026-10-24 - composer comparison after long-draft improvements
+
+Reviewed commit `91c617d` against the supplied Codex screenshot, with fresh native
+mew checks at 420, 480 and 600 px plus a short-window model menu. The default
+layout now holds up; remaining visual issues are model-menu density, an
+unexplained compact persona icon and permanent Yield. Direct Codex inspection
+was previously denied; this pass makes no claim about its live behavior.
+
+Two temporary actual-GPUI probes confirmed that multiline single-question
+answers send only their first line and clear the draft; top-level questions
+offer neither Stop nor close-question, and Escape leaves them running. Rendered
+request cards overlap the long-draft information row by 4–4.5 px at 420/480 px.
+Native mew checks also found Command-Z ineffective after Backspace and no
+Undo/Redo items in the Edit menu. Both temporary probes and their selectors were
+removed, leaving production code and the committed test suite unchanged.
+
+The appended review records source/evidence links, scope limits, priorities,
+heuristic scores and next actions. The HTML/JSX detector does not support native
+Rust. No provider prompt was submitted. The QA app and owned daemon are stopped,
+the draft is empty and the fixture is restored. Physical IME and VoiceOver were
+not exercised.
