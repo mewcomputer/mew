@@ -1139,3 +1139,51 @@ Evidence: [default 420 px](/private/tmp/mew-composer-review-2026-10-25/420-defau
 [eight attachments after crash fix](/private/tmp/mew-composer-review-2026-10-25/480x480-eight-attachments-fixed.png),
 [narrow restored panes](/private/tmp/mew-composer-review-2026-10-25/720x480-default.png),
 [work pane folded](/private/tmp/mew-composer-review-2026-10-25/720x480-work-folded.png).
+
+## Composer editing, focus and overflow fixes, 2026-10-25
+
+Implemented the accepted composer follow-up while preserving the default text
+size and toolbar structure:
+
+- Option-Left/Right moves by Unicode words; Shift extends selection. Option
+  deletion removes a word or the selection. Command-Left/Right moves to visual
+  line boundaries, including soft wraps; Command-Up/Down moves to document
+  boundaries. Shift selection and Command deletion use the same geometry.
+  Deletions retain Undo, selection direction and native input notifications.
+  Modified arrows cannot fall through into prompt-history recall; marked text
+  retains ownership of its navigation and submission keys.
+- Persona and permission choices return focus to the draft, matching model
+  selection. Native paste immediately after each choice now edits the draft.
+- The attachment tray scrolls within a two-row, 70 px cap. Actual overflow shows
+  a quiet file count and scroll hint. Retained removal-button focus reveals each
+  file while tabbing; removing a file retains draft text and editor focus.
+- The model popup retains its inventory-based height while filtering, bounded
+  by the window. Search and effort controls remain stationary. Effort-track
+  measurement schedules a deferred redraw, aligning labels, dots and thumb
+  without another input. The current model has a checkmark and is the initial
+  empty-query target; typed searches target the first match. Inventory height
+  calculation avoids constructing a second row list.
+
+Six additional desktop tests bring the suite to 325 passing tests. The attachment
+regression also replaces the prior crowded-shell crash setup with stronger
+layout assertions: at least four transcript lines and visible Send at 420/480
+px conversation widths in 480 px-tall windows, expanded and collapsed drafts,
+all eight attachments, keyboard reveal, wheel scrolling and removal. The tiny
+measured-list scrollbar regression remains intact. Resizing tests restore their
+prior persisted settings. The final isolated picker rerun passes all three tests.
+Strict all-target desktop Clippy, native build/packaging, formatting, architecture
+and generated-theme checks pass.
+
+Native QA in the rebuilt isolated app confirmed word/line movement, Option and
+Command deletion, immediate drafting after persona/permission choices, scroll
+and removal of lower attachments, expanded drafting, and stable picker search
+and effort placement in the short window. No provider prompt was submitted.
+The owned app and daemon are stopped and fixture settings restored. Physical
+IME candidates and VoiceOver remain unverified. The narrow restored work-pane
+fit issue from the review remains a separate follow-up.
+
+Captures: [bounded attachments](/private/tmp/mew-composer-fixes-2026-10-25/480-short-attachments.png),
+[lower files](/private/tmp/mew-composer-fixes-2026-10-25/480-short-attachments-scrolled.png),
+[picker open](/private/tmp/mew-composer-fixes-2026-10-25/480-short-picker-open.png),
+[picker filtered](/private/tmp/mew-composer-fixes-2026-10-25/480-short-picker-filtered.png),
+[expanded composer](/private/tmp/mew-composer-fixes-2026-10-25/480-short-expanded.png).

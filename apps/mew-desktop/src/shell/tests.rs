@@ -5640,13 +5640,16 @@ mod transcript_scrollbar_tiny_viewport_regressions {
     }
 
     #[gpui::test]
-    fn adding_eight_wrapped_attachments_keeps_tiny_transcript_viewports_safe(
+    fn attachment_tray_keeps_send_and_transcript_visible_in_short_windows(
         cx: &mut gpui::TestAppContext,
     ) {
         let persisted_state = mew_config::load_state().unwrap();
         let (shell, cx) =
             cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
-        cx.update(|_, cx| cx.set_reduce_motion(true));
+        cx.update(|window, cx| {
+            window.activate_window();
+            cx.set_reduce_motion(true);
+        });
         shell.update(cx, |shell, cx| {
             shell.layout.sidebar_collapsed = true;
             shell.layout.workbench_collapsed = true;
@@ -5665,8 +5668,11 @@ mod transcript_scrollbar_tiny_viewport_regressions {
             path: format!("/tmp/{index}-a-very-long-attachment-filename-which-takes-one-row-in-the-narrow-composer-é中.txt"),
             mime: Some("text/plain".into()),
         }).collect::<Vec<_>>();
-        let mut saw_tiny_viewport = false;
-        for width in [420., 480.] {
+        for (width, expanded) in [(420., false), (480., false), (420., true), (480., true)] {
+            shell.update(cx, |shell, cx| {
+                shell.composer_expanded = expanded;
+                cx.notify();
+            });
             cx.simulate_resize(gpui::size(px(width), px(480.)));
             for count in 0..=8 {
                 shell.update(cx, |shell, cx| {
@@ -5677,18 +5683,83 @@ mod transcript_scrollbar_tiny_viewport_regressions {
                 shell.update(cx, |shell, _| {
                     let viewport = shell.transcript_list.viewport_bounds();
                     let height = f32::from(viewport.size.height);
-                    saw_tiny_viewport |= height > 1. && height < 28.;
+                    assert!(
+                        height >= 96.,
+                        "retain four transcript lines at {width}px with {count} files"
+                    );
                     if let Some(metrics) = transcript_scrollbar_metrics(&shell.transcript_list) {
                         assert!(metrics.thumb_height <= height);
                         assert!(metrics.thumb_top + metrics.thumb_height <= height);
                     }
                 });
+                let composer = cx.debug_bounds("composer").unwrap();
+                let send = cx.debug_bounds("submit-prompt").unwrap();
+                assert!(composer.bottom() <= px(480.));
+                assert!(send.top() >= composer.top() && send.bottom() <= composer.bottom());
+                if count > 0 {
+                    let tray = cx.debug_bounds("attachment-chips").unwrap();
+                    assert!(tray.size.height <= px(70.));
+                }
+                if count > 2 {
+                    assert!(cx.debug_bounds("attachment-overflow-hint").is_some());
+                } else {
+                    assert!(cx.debug_bounds("attachment-overflow-hint").is_none());
+                }
             }
+            cx.update(|window, cx| {
+                let focus = shell.read(cx).attachment_remove_focus[0].0.clone();
+                window.focus(&focus, cx);
+            });
+            for (index, selector) in [
+                "remove-attachment-0",
+                "remove-attachment-1",
+                "remove-attachment-2",
+                "remove-attachment-3",
+                "remove-attachment-4",
+                "remove-attachment-5",
+                "remove-attachment-6",
+                "remove-attachment-7",
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if index > 0 {
+                    cx.update(|window, cx| window.focus_next(cx));
+                }
+                cx.run_until_parked();
+                let tray = cx.debug_bounds("attachment-chips").unwrap();
+                let remove = cx.debug_bounds(selector).unwrap();
+                cx.update(|window, cx| {
+                    assert!(shell.read(cx).attachment_remove_focus[index]
+                        .0
+                        .is_focused(window));
+                });
+                assert!(
+                    remove.top() >= tray.top() && remove.bottom() <= tray.bottom(),
+                    "keyboard focus reveals attachment {index} at {width}px"
+                );
+            }
+            let tray = cx.debug_bounds("attachment-chips").unwrap();
+            cx.simulate_event(gpui::ScrollWheelEvent {
+                position: tray.center(),
+                delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-1000.))),
+                ..Default::default()
+            });
+            cx.run_until_parked();
+            let last_remove = cx.debug_bounds("remove-attachment-7").unwrap();
+            assert!(last_remove.top() >= tray.top() && last_remove.bottom() <= tray.bottom());
+            cx.simulate_click(last_remove.center(), gpui::Modifiers::none());
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let shell = shell.read(cx);
+                assert_eq!(shell.attachments, attachments[..7]);
+                assert_eq!(
+                    shell.model.ui.composer,
+                    "draft line with preserved details\n".repeat(12)
+                );
+                assert!(shell.composer_focus_handle.is_focused(window));
+            });
         }
-        assert!(
-            saw_tiny_viewport,
-            "the crowded composer must exercise the reported tiny viewport"
-        );
         shell.update(cx, |shell, _| shell.quitting = true);
         mew_config::save_state(&persisted_state).unwrap();
     }

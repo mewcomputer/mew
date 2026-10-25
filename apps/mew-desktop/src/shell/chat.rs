@@ -1260,6 +1260,13 @@ impl DesktopShell {
     ) {
         let key = event.keystroke.key.as_str();
         let shift = event.keystroke.modifiers.shift;
+        if self.composer_marked_range.is_some() {
+            return;
+        }
+        if self.composer_modified_key_down(event, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if self.mention_menu_is_open() {
             match key {
                 "down" => {
@@ -1345,11 +1352,15 @@ impl DesktopShell {
             cx.stop_propagation();
             return;
         }
-        if key == "up" && self.recall_prompt_history(true, cx) {
+        let unmodified = !event.keystroke.modifiers.platform
+            && !event.keystroke.modifiers.control
+            && !event.keystroke.modifiers.alt
+            && !shift;
+        if unmodified && key == "up" && self.recall_prompt_history(true, cx) {
             cx.stop_propagation();
             return;
         }
-        if key == "down" && self.recall_prompt_history(false, cx) {
+        if unmodified && key == "down" && self.recall_prompt_history(false, cx) {
             cx.stop_propagation();
         }
     }

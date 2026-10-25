@@ -1871,8 +1871,25 @@ impl DesktopShell {
         } else {
             96.
         };
+        self.attachment_remove_focus
+            .truncate(self.attachments.len());
+        while self.attachment_remove_focus.len() < self.attachments.len() {
+            let index = self.attachment_remove_focus.len();
+            let focus = cx.focus_handle().tab_stop(true);
+            let subscription = cx.on_focus(&focus, window, move |shell, window, cx| {
+                shell.attachment_scroll.scroll_to_item(index);
+                cx.defer_in(window, |_, _, cx| cx.notify());
+            });
+            self.attachment_remove_focus.push((focus, subscription));
+        }
+        if self.attachments.is_empty() {
+            self.attachment_scroll.set_offset(point(px(0.), px(0.)));
+            self.attachment_scroll.scroll_to_item(0);
+        }
         let attachments = self.attachments.clone();
         let attachment_error = self.attachment_error.clone();
+        let attachments_overflowing = self.attachment_scroll.max_offset().y > Pixels::ZERO;
+        let attachment_tray_shell = cx.entity().downgrade();
         let composer_focus_handle = self.composer_focus_handle.clone();
         let composer_area_shell = cx.entity().downgrade();
         let composer_container_shell = cx.entity().downgrade();
@@ -2095,10 +2112,28 @@ impl DesktopShell {
                         )
                     })
                     .when(!attachments.is_empty(), |element| {
-                        element.child(
+                        element
+                            .when(attachments_overflowing, |element| {
+                                element.child(
+                                    div()
+                                        .debug_selector(|| "attachment-overflow-hint".into())
+                                        .text_size(px(11.))
+                                        .line_height(px(16.))
+                                        .text_color(theme_rgb(&self.theme, "text.muted"))
+                                        .child(format!("{} files · scroll for more", attachments.len())),
+                                )
+                            })
+                            .child(
                             div()
                                 .id("attachment-chips")
+                                .relative()
                                 .debug_selector(|| "attachment-chips".into())
+                                .max_h(px(70.))
+                                .flex_shrink_0()
+                                .overflow_y_scroll()
+                                .track_scroll(&self.attachment_scroll)
+                                .role(Role::Group)
+                                .aria_label("Attached files. Scroll to see more files.")
                                 .flex()
                                 .flex_wrap()
                                 .min_w_0()
@@ -2149,6 +2184,7 @@ impl DesktopShell {
                                                     .cursor_pointer()
                                                     .role(Role::Button)
                                                     .aria_label(format!("Remove attachment {label}"))
+                                                    .track_focus(&self.attachment_remove_focus[index].0)
                                                     .desktop_focus(theme_rgb(
                                                         &self.theme,
                                                         "text.accent",
@@ -2174,7 +2210,14 @@ impl DesktopShell {
                                             )
                                             .into_any_element()
                                     },
-                                )),
+                                ))
+                                .child(canvas(move |_, window, cx| {
+                                    attachment_tray_shell.update(cx, |shell, cx| {
+                                        if (shell.attachment_scroll.max_offset().y > Pixels::ZERO) != attachments_overflowing {
+                                            cx.defer_in(window, |_, _, cx| cx.notify());
+                                        }
+                                    }).ok();
+                                }, |_, _, _, _| {}).absolute().inset_0()),
                         )
                     })
                     .child(
@@ -2799,7 +2842,7 @@ impl DesktopShell {
                     .clamp(Pixels::ZERO, available_height);
                 let popup_size = gpui::size(
                     px(400.).min((window_width - px(16.)).max(Pixels::ZERO)),
-                    model_picker_height(&self.model_picker_rows, effort_option_count)
+                    self.model_picker_inventory_height(effort_option_count)
                         .min(available_above.max(available_below)),
                 );
                 let position = picker_popup_position_in_window_right_aligned(

@@ -169,9 +169,52 @@ impl DesktopShell {
             .model_picker_highlighted_index
             .is_some_and(|index| self.model_picker_filtered_indices.contains(&index))
         {
-            self.model_picker_highlighted_index =
-                self.model_picker_filtered_indices.first().copied();
+            self.model_picker_highlighted_index = self
+                .model_picker_filtered_indices
+                .iter()
+                .copied()
+                .find(|index| {
+                    let model = &self.model.ui.models[*index];
+                    self.model_picker_query.trim().is_empty()
+                        && self.model.ui.current_provider.as_deref()
+                            == Some(model.provider.as_str())
+                        && self.model.ui.model.as_deref() == Some(model.model.as_str())
+                })
+                .or_else(|| self.model_picker_filtered_indices.first().copied());
+            if let Some(index) = self.model_picker_highlighted_index {
+                if let Some(row) = self.model_picker_rows.iter().position(|row| {
+                    matches!(row, ModelPickerRow::Model { index: candidate, .. } if *candidate == index)
+                }) {
+                    self.model_picker_list.scroll_to_reveal_item(row);
+                }
+            }
         }
+    }
+
+    pub(super) fn model_picker_inventory_height(&self, effort_option_count: usize) -> Pixels {
+        let model_count = self.model.ui.models.len();
+        if model_count == 0 {
+            return model_picker_height(&[], effort_option_count);
+        }
+        let recent_count = self
+            .model
+            .ui
+            .models
+            .iter()
+            .filter(|model| self.recent_models.contains(&model.id))
+            .count()
+            .min(RECENT_MODEL_LIMIT);
+        let section_count = usize::from(recent_count > 0)
+            + usize::from(recent_count > 0 && recent_count < model_count);
+        let list_height = (ModelPickerRow::Model {
+            index: 0,
+            recent: false,
+        }
+        .height()
+            * model_count as f32
+            + ModelPickerRow::Header("Recent").height() * section_count as f32)
+            .min(px(320.));
+        model_picker_popup_height(list_height, effort_option_count)
     }
 
     pub(super) fn model_picker_search_key_down(
@@ -376,9 +419,15 @@ impl DesktopShell {
         cx.notify();
     }
 
-    pub(super) fn choose_persona(&mut self, name: String, cx: &mut Context<Self>) {
+    pub(super) fn choose_persona(
+        &mut self,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.persona_picker_open = false;
         self.terminal_font_picker_open = false;
+        window.focus(&self.composer_focus_handle, cx);
         if self.model.session_is_ready() {
             self.send_command(ClientMessage::SwitchPersona { name });
         }
@@ -401,8 +450,14 @@ impl DesktopShell {
         cx.notify();
     }
 
-    pub(super) fn choose_permission_mode(&mut self, mode: String, cx: &mut Context<Self>) {
+    pub(super) fn choose_permission_mode(
+        &mut self,
+        mode: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.permission_picker_open = false;
+        window.focus(&self.composer_focus_handle, cx);
         if self.model.session_is_ready() {
             self.send_command(ClientMessage::SetPermissionMode { mode });
         }
@@ -564,12 +619,29 @@ impl DesktopShell {
                 }))
                 .child(
                     div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
                         .min_w_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .text_xs()
-                        .child(label),
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_xs()
+                                .child(label),
+                        )
+                        .when(selected, |element| {
+                            element.child(
+                                div()
+                                    .flex_none()
+                                    .text_xs()
+                                    .text_color(theme_rgb(&self.theme, "text.accent"))
+                                    .child("✓"),
+                            )
+                        }),
                 )
                 .child(
                     div()
@@ -701,6 +773,7 @@ impl DesktopShell {
                 let selected = selected_effort_index == index;
                 div()
                     .id(thinking_effort_option_id(index))
+                    .debug_selector(move || format!("model-picker-effort-option-{index}"))
                     .absolute()
                     .left(px(stop_offset))
                     .ml(px(-12.))
@@ -746,6 +819,7 @@ impl DesktopShell {
                         effort_stop_offset(index, effort_track_width, effort_values.len())
                             .unwrap_or(0.);
                     div()
+                        .debug_selector(move || format!("model-picker-effort-label-{index}"))
                         .absolute()
                         .left(px(stop_offset))
                         .ml(px(-effort_label_slot_width / 2.))
@@ -804,6 +878,7 @@ impl DesktopShell {
                 _ => effort_track.into_any_element(),
             };
             let effort_thumb = div()
+                .debug_selector(|| "model-picker-effort-thumb".into())
                 .absolute()
                 .top_0()
                 .left(relative(display_effort_position))
@@ -947,11 +1022,11 @@ impl DesktopShell {
                             .child(effort_thumb)
                             .child(
                                 canvas(
-                                    move |bounds, _, cx| {
+                                    move |bounds, window, cx| {
                                         track_bounds_shell.update(cx, |shell, cx| {
                                             if shell.thinking_effort_track_bounds != Some(bounds) {
                                                 shell.thinking_effort_track_bounds = Some(bounds);
-                                                cx.notify();
+                                                cx.defer_in(window, |_, _, cx| cx.notify());
                                             }
                                         });
                                     },
@@ -1110,8 +1185,8 @@ impl DesktopShell {
                     element.bg(theme_rgb(&self.theme, "accent"))
                 })
                 .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
-                .on_click(cx.listener(move |shell, _, _, cx| {
-                    shell.choose_persona(persona_name.clone(), cx);
+                .on_click(cx.listener(move |shell, _, window, cx| {
+                    shell.choose_persona(persona_name.clone(), window, cx);
                 }))
                 .child(
                     div()
@@ -1201,8 +1276,8 @@ impl DesktopShell {
                         element.bg(theme_rgb(&self.theme, "accent"))
                     })
                     .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
-                    .on_click(cx.listener(move |shell, _, _, cx| {
-                        shell.choose_permission_mode(mode.clone(), cx);
+                    .on_click(cx.listener(move |shell, _, window, cx| {
+                        shell.choose_permission_mode(mode.clone(), window, cx);
                     }))
                     .child(
                         div()
@@ -1412,5 +1487,129 @@ impl DesktopShell {
             .on_key_down(cx.listener(Self::shell_key_down))
             .track_focus(&self.popover_focus_handle)
             .children(options)
+    }
+}
+
+#[cfg(test)]
+mod composer_picker_stability_regressions {
+    use super::*;
+
+    fn prepare(shell: &mut DesktopShell) {
+        shell.layout.sidebar_collapsed = true;
+        shell.layout.workbench_collapsed = true;
+        shell.model.ui.models = serde_json::from_value(serde_json::json!([
+            {"id":"a/alpha", "provider":"a", "model":"alpha", "display_name":"Alpha"},
+            {"id":"b/beta", "provider":"b", "model":"beta", "display_name":"Beta"},
+            {"id":"c/gamma", "provider":"c", "model":"gamma", "display_name":"Gamma"}
+        ]))
+        .unwrap();
+        shell.model.ui.current_provider = Some("c".into());
+        shell.model.ui.model = Some("gamma".into());
+        shell.recent_models = vec!["a/alpha".into()];
+    }
+
+    #[gpui::test]
+    fn secondary_choices_return_keyboard_input_to_the_draft(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.run_until_parked();
+        for persona in [true, false] {
+            cx.update(|window, cx| {
+                shell.update(cx, |shell, cx| {
+                    window.focus(&shell.popover_focus_handle, cx);
+                    if persona {
+                        shell.choose_persona("builder".into(), window, cx);
+                    } else {
+                        shell.choose_permission_mode("standard".into(), window, cx);
+                    }
+                    assert!(shell.composer_focus_handle.is_focused(window));
+                });
+            });
+        }
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn effort_labels_and_thumb_align_after_open_without_another_input(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let persisted_state = mew_config::load_state().unwrap();
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        shell.update(cx, |shell, cx| {
+            prepare(shell);
+            shell.model.ui.models[2].thinking_variants = vec![
+                mew_protocol::ThinkingVariantInfo { name: "low".into() },
+                mew_protocol::ThinkingVariantInfo {
+                    name: "high".into(),
+                },
+            ];
+            shell.model.ui.thinking_variant = Some("high".into());
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(420.), px(760.)));
+        cx.run_until_parked();
+        cx.update(|window, cx| shell.update(cx, |shell, cx| shell.toggle_model_picker(window, cx)));
+        cx.run_until_parked();
+        for width in [420., 600.] {
+            if width != 420. {
+                cx.simulate_resize(gpui::size(px(width), px(760.)));
+                cx.run_until_parked();
+            }
+            let thumb = cx.debug_bounds("model-picker-effort-thumb").unwrap();
+            let label = cx.debug_bounds("model-picker-effort-label-2").unwrap();
+            let dot = cx.debug_bounds("model-picker-effort-option-2").unwrap();
+            assert!((thumb.center().x - label.center().x).abs() < px(1.));
+            assert!((thumb.center().x - dot.center().x).abs() < px(1.));
+        }
+        shell.update(cx, |shell, _| shell.quitting = true);
+        mew_config::save_state(&persisted_state).unwrap();
+    }
+
+    #[gpui::test]
+    fn opening_targets_the_current_identity_and_search_stays_in_place(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let persisted_state = mew_config::load_state().unwrap();
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        shell.update(cx, |shell, cx| {
+            prepare(shell);
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(420.), px(760.)));
+        cx.run_until_parked();
+        cx.update(|window, cx| shell.update(cx, |shell, cx| shell.toggle_model_picker(window, cx)));
+        cx.run_until_parked();
+        shell.update(cx, |shell, _| {
+            assert_eq!(shell.model_picker_highlighted_index, Some(2))
+        });
+        let popup = cx.debug_bounds("model-picker").unwrap();
+        let search = cx.debug_bounds("model-picker-search-frame").unwrap();
+        for query in ["a", "beta", "no matches", ""] {
+            shell.update(cx, |shell, cx| {
+                shell.model_picker_selection = 0..shell.model_picker_query.len();
+                shell.replace_model_picker_query_text(None, query, cx);
+            });
+            cx.run_until_parked();
+            assert_eq!(cx.debug_bounds("model-picker").unwrap(), popup);
+            assert_eq!(
+                cx.debug_bounds("model-picker-search-frame").unwrap(),
+                search
+            );
+            shell.update(cx, |shell, _| {
+                assert_eq!(
+                    shell.model_picker_highlighted_index,
+                    match query {
+                        "a" => Some(0),
+                        "beta" => Some(1),
+                        "" => Some(2),
+                        _ => None,
+                    }
+                );
+            });
+        }
+        shell.update(cx, |shell, _| shell.quitting = true);
+        mew_config::save_state(&persisted_state).unwrap();
     }
 }

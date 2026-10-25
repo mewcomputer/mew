@@ -165,6 +165,8 @@ pub(super) struct DesktopShell {
     pub(super) task_drafts: TaskDrafts,
     pub(super) initial_auto_attach: bool,
     pub(super) attachments: Vec<Attachment>,
+    pub(super) attachment_scroll: gpui::ScrollHandle,
+    pub(super) attachment_remove_focus: Vec<(FocusHandle, Subscription)>,
     pub(super) attachment_error: Option<String>,
     pub(super) pending_model: Option<(String, String)>,
     pub(super) awaiting_model_switch: Option<(String, String)>,

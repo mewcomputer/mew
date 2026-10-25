@@ -1,5 +1,6 @@
 use super::session_data::save_clipboard_image;
 use super::*;
+use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TextInputTarget {
@@ -1265,6 +1266,109 @@ impl DesktopShell {
         content.len()
     }
 
+    pub(super) fn composer_modified_key_down(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let modifiers = event.keystroke.modifiers;
+        if modifiers.control || modifiers.platform == modifiers.alt {
+            return false;
+        }
+        let key = event.keystroke.key.as_str();
+        if !matches!(
+            key,
+            "left" | "right" | "up" | "down" | "backspace" | "delete"
+        ) {
+            return false;
+        }
+        if modifiers.alt && matches!(key, "up" | "down") {
+            return false;
+        }
+        let forward = matches!(key, "right" | "down" | "delete");
+        let deleting = matches!(key, "backspace" | "delete");
+        let cursor = self.composer_cursor_offset();
+        let text = &self.model.ui.composer;
+        let mut downstream = false;
+        let offset = if modifiers.platform && matches!(key, "up" | "down") {
+            if forward {
+                text.len()
+            } else {
+                0
+            }
+        } else if modifiers.alt {
+            if forward {
+                text.unicode_word_indices()
+                    .map(|(start, word)| start + word.len())
+                    .find(|end| *end > cursor)
+                    .unwrap_or(text.len())
+            } else {
+                text.unicode_word_indices()
+                    .rev()
+                    .find_map(|(start, _)| (start < cursor).then_some(start))
+                    .unwrap_or(0)
+            }
+        } else {
+            self.refresh_text_input_layout(TextInputTarget::Composer, window);
+            let Some(layout) = self.composer_text_layout.as_ref() else {
+                return true;
+            };
+            let Some(position) = cursor_position_with_affinity(
+                &layout.lines,
+                &self.model.ui.composer,
+                cursor,
+                layout.line_height,
+                self.composer_cursor_downstream,
+            ) else {
+                return true;
+            };
+            let target = layout.bounds.origin
+                + point(
+                    if forward {
+                        layout.bounds.size.width
+                    } else {
+                        Pixels::ZERO
+                    },
+                    position.y + layout.line_height * 0.5 - self.composer_scroll_offset,
+                );
+            let offset = self.composer_index_for_position(target, window);
+            downstream = !forward
+                && cursor_position(
+                    &layout.lines,
+                    &self.model.ui.composer,
+                    offset,
+                    layout.line_height,
+                )
+                .is_some_and(|upstream| upstream.y < position.y);
+            offset
+        };
+        if deleting {
+            let range = if self.composer_selection.is_empty() {
+                cursor.min(offset)..cursor.max(offset)
+            } else {
+                self.composer_selection.clone()
+            };
+            if !range.is_empty() {
+                self.task_drafts.edits.end_group();
+                self.apply_composer_edit(range, "", DraftEditKind::Replace, cx);
+                self.task_drafts.edits.end_group();
+                window.notify_text_input_changed(&self.composer_focus_handle);
+            }
+        } else {
+            if modifiers.shift {
+                self.select_composer_to(offset, cx);
+                self.restart_composer_cursor_blink(cx);
+            } else {
+                self.move_composer_to(offset, cx);
+            }
+            self.composer_cursor_downstream = downstream;
+            self.refresh_text_input_layout(TextInputTarget::Composer, window);
+            window.notify_text_selection_changed(&self.composer_focus_handle);
+        }
+        true
+    }
+
     pub(super) fn composer_move_vertical(
         &mut self,
         older: bool,
@@ -2138,6 +2242,185 @@ mod tests {
 
     fn input_bounds() -> Bounds<Pixels> {
         Bounds::new(point(px(80.), px(120.)), gpui::size(px(400.), px(96.)))
+    }
+
+    #[gpui::test]
+    fn composer_native_word_and_document_shortcuts_edit_and_select(cx: &mut gpui::TestAppContext) {
+        cx.update(super::super::platform::set_app_menus);
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.model.ui.composer = "alpha café e\u{301}cho gamma".into();
+                let end = shell.model.ui.composer.len();
+                shell.composer_selection = end..end;
+                shell.composer_focus_handle.focus(window, cx);
+            })
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("alt-left");
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(
+                shell.composer_cursor_offset(),
+                "alpha café e\u{301}cho ".len()
+            )
+        });
+        cx.simulate_keystrokes("alt-shift-left");
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(
+                &shell.model.ui.composer[shell.composer_selection.clone()],
+                "e\u{301}cho "
+            )
+        });
+        cx.simulate_keystrokes("alt-backspace");
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.model.ui.composer, "alpha café gamma")
+        });
+        cx.simulate_keystrokes("cmd-z");
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.model.ui.composer, "alpha café e\u{301}cho gamma")
+        });
+        cx.simulate_keystrokes("cmd-up");
+        shell.read_with(cx, |shell, _| assert_eq!(shell.composer_selection, 0..0));
+        cx.simulate_keystrokes("alt-delete");
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.model.ui.composer, " café e\u{301}cho gamma")
+        });
+        cx.simulate_keystrokes("cmd-shift-down");
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.composer_selection, 0..shell.model.ui.composer.len())
+        });
+        cx.simulate_keystrokes("cmd-backspace");
+        shell.update(cx, |shell, _| {
+            assert!(shell.model.ui.composer.is_empty());
+            shell.quitting = true;
+        });
+    }
+
+    #[gpui::test]
+    fn composer_command_arrows_and_deletion_follow_wrapped_visual_lines(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.skip_drawing();
+        let cx = cx.add_empty_window();
+        let shell = cx
+            .new_window_entity(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        let text = "alpha beta gamma delta epsilon zeta eta theta\nlast line";
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.model.ui.composer = text.into();
+                shell.composer_selection = 12..12;
+                shell.composer_focus_handle.focus(window, cx);
+            })
+        });
+        cx.draw(
+            point(px(80.), px(120.)),
+            gpui::size(px(160.), px(96.)),
+            |_, _| ComposerElement {
+                shell: shell.clone(),
+                target: TextInputTarget::Composer,
+            },
+        );
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                let press = |shell: &mut DesktopShell,
+                             key: &str,
+                             window: &mut Window,
+                             cx: &mut Context<DesktopShell>| {
+                    shell.composer_key_down(
+                        &gpui::KeyDownEvent {
+                            keystroke: gpui::Keystroke::parse(key).unwrap(),
+                            is_held: false,
+                            prefer_character_input: false,
+                        },
+                        window,
+                        cx,
+                    )
+                };
+                press(shell, "cmd-left", window, cx);
+                let start = shell.composer_cursor_offset();
+                assert!(start < 12);
+                press(shell, "cmd-shift-right", window, cx);
+                let end = shell.composer_cursor_offset();
+                assert!(
+                    end > 12 && end < text.find('\n').unwrap(),
+                    "command movement follows a visual row, not the whole paragraph"
+                );
+                assert_eq!(shell.composer_selection, start..end);
+                shell.composer_selection = 12..12;
+                shell.composer_selection_reversed = false;
+                press(shell, "cmd-backspace", window, cx);
+                assert_eq!(
+                    shell.model.ui.composer,
+                    format!("{}{}", &text[..start], &text[12..])
+                );
+                shell.quitting = true;
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn modified_draft_navigation_preserves_history_and_native_composition(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.skip_drawing();
+        let cx = cx.add_empty_window();
+        let shell = cx
+            .new_window_entity(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.prompt_history.record("old prompt".into());
+                shell.model.ui.composer = "draft é中".into();
+                let end = shell.model.ui.composer.len();
+                shell.composer_selection = end..end;
+                let press = |shell: &mut DesktopShell,
+                             key: &str,
+                             window: &mut Window,
+                             cx: &mut Context<DesktopShell>| {
+                    shell.composer_key_down(
+                        &gpui::KeyDownEvent {
+                            keystroke: gpui::Keystroke::parse(key).unwrap(),
+                            is_held: false,
+                            prefer_character_input: false,
+                        },
+                        window,
+                        cx,
+                    )
+                };
+                for key in [
+                    "ctrl-up",
+                    "ctrl-down",
+                    "alt-up",
+                    "alt-down",
+                    "shift-up",
+                    "shift-down",
+                    "cmd-up",
+                    "cmd-down",
+                ] {
+                    press(shell, key, window, cx);
+                    assert_eq!(shell.model.ui.composer, "draft é中");
+                    assert!(!shell.prompt_history.is_recalling());
+                }
+                shell.composer_marked_range = Some(6..end);
+                for key in ["cmd-up", "alt-backspace", "enter", "up"] {
+                    press(shell, key, window, cx);
+                    assert_eq!(shell.model.ui.composer, "draft é中");
+                    assert_eq!(shell.composer_selection, end..end);
+                    assert_eq!(shell.composer_marked_range, Some(6..end));
+                }
+                shell.composer_marked_range = None;
+                shell.model.ui.composer = "one\ntwo\nthree".into();
+                shell.composer_selection = 0..0;
+                press(shell, "alt-left", window, cx);
+                press(shell, "alt-backspace", window, cx);
+                assert_eq!(shell.model.ui.composer, "one\ntwo\nthree");
+                shell.composer_selection = 13..13;
+                press(shell, "alt-right", window, cx);
+                press(shell, "alt-delete", window, cx);
+                assert_eq!(shell.model.ui.composer, "one\ntwo\nthree");
+                shell.quitting = true;
+            })
+        });
     }
 
     #[gpui::test]

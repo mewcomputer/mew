@@ -3588,3 +3588,27 @@ generated-theme checks pass. The rebuilt native app survives the same eight-file
 selection. Attachment height still pushes Send below a 480 px-tall window and
 requires a separate layout fix. No provider prompt was submitted. The isolated
 app/owned daemon are stopped and original fixture settings restored.
+
+## 2026-10-25: composer editing, focus, attachments and picker stability
+
+Added native word/visual-line/document movement, Shift selection and word/line
+deletion with Undo and native input notifications. Modified navigation cannot
+recall prompt history, and native composition owns its keys. Persona and
+permission selection return typing focus to the draft.
+
+Attachments now scroll within two rows with a measured overflow count/hint;
+keyboard focus reveals removal buttons. Short-window tests preserve four
+transcript lines and visible Send with eight files in expanded/collapsed drafts.
+The model picker keeps search/effort positions stable while filtering, aligns its
+measured effort controls through deferred redraw, marks the current model and
+targets it on open. Typed searches still start at their first match.
+
+All 325 desktop tests pass; final isolated picker rerun passes 3/3. Strict
+all-target desktop Clippy, native build/packaging, formatting, architecture and
+generated-theme checks pass. Native isolated QA confirmed editing/deletion,
+immediate typing after choices, attachment scrolling/removal, expansion and
+stable picker filtering at 480 px conversation width in a 480 px-tall window. No
+provider prompt was submitted. The QA app/owned daemon are stopped and original
+fixture settings restored. Details/captures are in the existing Codex UX review.
+Physical IME candidates and VoiceOver remain unverified; saved narrow work-pane
+fitting remains separate.

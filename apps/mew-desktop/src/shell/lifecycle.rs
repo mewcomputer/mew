@@ -393,6 +393,8 @@ impl DesktopShell {
             task_drafts: TaskDrafts::new(DraftOwner::new_task(&draft_profile)),
             initial_auto_attach: true,
             attachments: Vec::new(),
+            attachment_scroll: gpui::ScrollHandle::new(),
+            attachment_remove_focus: Vec::new(),
             attachment_error: None,
             pending_model: None,
             awaiting_model_switch: None,

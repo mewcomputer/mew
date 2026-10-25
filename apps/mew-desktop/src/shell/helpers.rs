@@ -352,8 +352,12 @@ pub(super) fn model_picker_list_height(rows: &[ModelPickerRow]) -> Pixels {
 }
 
 pub(super) fn model_picker_height(rows: &[ModelPickerRow], effort_option_count: usize) -> Pixels {
+    model_picker_popup_height(model_picker_list_height(rows), effort_option_count)
+}
+
+pub(super) fn model_picker_popup_height(list_height: Pixels, effort_option_count: usize) -> Pixels {
     let effort_height = if effort_option_count > 0 { 72. } else { 0. };
-    model_picker_list_height(rows) + px(52. + effort_height)
+    list_height + px(52. + effort_height)
 }
 
 pub(super) fn recent_model_indices(
