@@ -382,6 +382,23 @@ impl Session {
             .collect()
     }
 
+    /// Notify the other attached clients that a connection joined.
+    pub(crate) async fn notify_client_attached(
+        &self,
+        client_id: u64,
+        client_kind: mew_protocol::ClientKind,
+    ) {
+        self.clients.lock().await.retain(|(id, sender, _)| {
+            *id == client_id
+                || sender
+                    .send(ServerMessage::ClientAttached {
+                        client_id,
+                        client_kind,
+                    })
+                    .is_ok()
+        });
+    }
+
     /// Broadcast a message to all attached clients. Removes any sender that fails.
     pub async fn broadcast(&self, mut msg: ServerMessage) {
         let mut activity = if matches!(

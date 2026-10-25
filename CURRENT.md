@@ -3522,3 +3522,15 @@ heuristic scores and next actions. The HTML/JSX detector does not support native
 Rust. No provider prompt was submitted. The QA app and owned daemon are stopped,
 the draft is empty and the fixture is restored. Physical IME and VoiceOver were
 not exercised.
+
+
+# 2026-10-24 - peer-only collaboration presence
+
+ClientAttached announcements now exclude the joining connection in both daemon
+paths. This keeps presence limited to other clients after attach, disconnect and
+reconnect, so desktop collaboration controls can depend on the peer count.
+
+A real two-client Unix/WebSocket regression failed with a peer plus self before
+the fix and passes afterward. It covers both disconnect directions and reconnect
+with a fresh client identity. All 152 daemon tests pass, with the existing opt-in
+browser integration test left ignored. Strict all-target daemon Clippy passes.

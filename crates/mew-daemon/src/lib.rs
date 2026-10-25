@@ -1244,12 +1244,7 @@ where
                         drop(actions);
                         // Notify other clients that a new client joined.
                         if !was_first {
-                            session
-                                .broadcast(ServerMessage::ClientAttached {
-                                    client_id: cid,
-                                    client_kind,
-                                })
-                                .await;
+                            session.notify_client_attached(cid, client_kind).await;
                         }
                     }
                     Err(e) => {
@@ -1438,12 +1433,7 @@ where
                         drop(actions);
                         // Notify other clients that a new client joined.
                         if !was_first {
-                            session
-                                .broadcast(ServerMessage::ClientAttached {
-                                    client_id: cid,
-                                    client_kind,
-                                })
-                                .await;
+                            session.notify_client_attached(cid, client_kind).await;
                         }
                     }
                     Err(AttachError::NotFound) => {
