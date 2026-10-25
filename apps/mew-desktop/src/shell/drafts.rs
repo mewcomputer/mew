@@ -1,5 +1,9 @@
 use mew_protocol::Attachment;
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, VecDeque},
+    ops::Range,
+    time::{Duration, Instant},
+};
 
 pub(super) fn may_auto_attach(
     initial_allowed: bool,
@@ -37,9 +41,134 @@ pub(super) struct PromptDraft {
     pub(super) attachments: Vec<Attachment>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum DraftEditKind {
+    Insert,
+    Backspace,
+    Delete,
+    Replace,
+    Composition,
+}
+
+struct DraftSnapshot {
+    text: String,
+    selection: Range<usize>,
+    reversed: bool,
+}
+
+#[derive(Default)]
+pub(super) struct DraftEdits {
+    undo: VecDeque<DraftSnapshot>,
+    redo: Vec<DraftSnapshot>,
+    group: Option<(DraftEditKind, Instant, Range<usize>)>,
+}
+
+impl DraftEdits {
+    pub(super) fn record(
+        &mut self,
+        text: &str,
+        selection: Range<usize>,
+        reversed: bool,
+        kind: DraftEditKind,
+        now: Instant,
+    ) {
+        let merge = self.group.as_ref().is_some_and(|(previous, time, cursor)| {
+            *previous == kind
+                && kind != DraftEditKind::Replace
+                && (kind == DraftEditKind::Composition
+                    || (now.duration_since(*time) < Duration::from_secs(1)
+                        && selection.is_empty()
+                        && *cursor == selection))
+        });
+        if !merge {
+            if self.undo.len() == 100 {
+                self.undo.pop_front();
+            }
+            self.undo.push_back(DraftSnapshot {
+                text: text.to_owned(),
+                selection: selection.clone(),
+                reversed,
+            });
+        }
+        self.redo.clear();
+        self.group = Some((kind, now, selection));
+    }
+
+    pub(super) fn finish_edit(&mut self, selection: &Range<usize>) {
+        if let Some((_, _, cursor)) = self.group.as_mut() {
+            *cursor = selection.clone();
+        }
+    }
+
+    pub(super) fn end_group(&mut self) {
+        self.group = None;
+    }
+
+    pub(super) fn restore(
+        &mut self,
+        redo: bool,
+        text: &mut String,
+        selection: &mut Range<usize>,
+        reversed: &mut bool,
+    ) -> bool {
+        let snapshot = if redo {
+            self.redo.pop()
+        } else {
+            self.undo.pop_back()
+        };
+        let Some(mut snapshot) = snapshot else {
+            return false;
+        };
+        std::mem::swap(text, &mut snapshot.text);
+        std::mem::swap(selection, &mut snapshot.selection);
+        std::mem::swap(reversed, &mut snapshot.reversed);
+        if redo {
+            self.undo.push_back(snapshot);
+        } else {
+            self.redo.push(snapshot);
+        }
+        self.end_group();
+        true
+    }
+
+    pub(super) fn end_composition(&mut self, text: &str) {
+        if self
+            .group
+            .as_ref()
+            .is_some_and(|(kind, _, _)| *kind == DraftEditKind::Composition)
+            && self
+                .undo
+                .back()
+                .is_some_and(|snapshot| snapshot.text == text)
+        {
+            self.undo.pop_back();
+        }
+        self.end_group();
+    }
+
+    pub(super) fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    pub(super) fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
+    pub(super) fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
+#[derive(Default)]
+struct SavedDraft {
+    draft: PromptDraft,
+    edits: DraftEdits,
+}
+
 pub(super) struct TaskDrafts {
     owner: DraftOwner,
-    saved: BTreeMap<DraftOwner, PromptDraft>,
+    saved: BTreeMap<DraftOwner, SavedDraft>,
+    pub(super) edits: DraftEdits,
 }
 
 impl TaskDrafts {
@@ -47,6 +176,7 @@ impl TaskDrafts {
         Self {
             owner,
             saved: BTreeMap::new(),
+            edits: DraftEdits::default(),
         }
     }
 
@@ -86,11 +216,25 @@ impl TaskDrafts {
         if self.owner == owner {
             return current;
         }
-        if !current.text.is_empty() || !current.attachments.is_empty() {
-            self.saved.insert(self.owner.clone(), current);
+        self.edits.end_group();
+        let edits = std::mem::take(&mut self.edits);
+        if !current.text.is_empty()
+            || !current.attachments.is_empty()
+            || !edits.undo.is_empty()
+            || !edits.redo.is_empty()
+        {
+            self.saved.insert(
+                self.owner.clone(),
+                SavedDraft {
+                    draft: current,
+                    edits,
+                },
+            );
         }
         self.owner = owner;
-        self.saved.remove(&self.owner).unwrap_or_default()
+        let restored = self.saved.remove(&self.owner).unwrap_or_default();
+        self.edits = restored.edits;
+        restored.draft
     }
 
     pub(super) fn bind_created_task(
@@ -121,6 +265,57 @@ mod tests {
                 mime: None,
             }],
         }
+    }
+
+    #[test]
+    fn undo_groups_nearby_typing_but_splits_after_a_pause_or_cursor_move() {
+        let mut edits = DraftEdits::default();
+        let now = Instant::now();
+        edits.record("", 0..0, false, DraftEditKind::Insert, now);
+        edits.finish_edit(&(1..1));
+        edits.record(
+            "a",
+            1..1,
+            false,
+            DraftEditKind::Insert,
+            now + Duration::from_millis(100),
+        );
+        edits.finish_edit(&(2..2));
+        edits.record(
+            "ab",
+            2..2,
+            false,
+            DraftEditKind::Insert,
+            now + Duration::from_millis(1100),
+        );
+        edits.finish_edit(&(3..3));
+        let mut text = "abc".to_owned();
+        let mut selection = 3..3;
+        let mut reversed = false;
+        assert!(edits.restore(false, &mut text, &mut selection, &mut reversed));
+        assert_eq!(text, "ab");
+        assert_eq!(selection, 2..2);
+        assert!(edits.restore(false, &mut text, &mut selection, &mut reversed));
+        assert_eq!(text, "");
+        assert!(!edits.restore(false, &mut text, &mut selection, &mut reversed));
+        assert!(edits.restore(true, &mut text, &mut selection, &mut reversed));
+        assert_eq!(text, "ab");
+        edits.end_group();
+        edits.record(
+            &text,
+            0..0,
+            false,
+            DraftEditKind::Insert,
+            now + Duration::from_millis(1200),
+        );
+        text.insert(0, 'x');
+        selection = 1..1;
+        assert!(edits.restore(false, &mut text, &mut selection, &mut reversed));
+        assert_eq!(text, "ab");
+        assert_eq!(selection, 0..0);
+        assert!(edits.restore(true, &mut text, &mut selection, &mut reversed));
+        assert_eq!(text, "xab");
+        assert!(!edits.restore(true, &mut text, &mut selection, &mut reversed));
     }
 
     #[test]

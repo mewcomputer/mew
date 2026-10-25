@@ -151,6 +151,7 @@ impl DesktopShell {
         tone: ActionButtonTone,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let id = SharedString::from(id);
         let label = label.into();
         let (background, foreground, hover) = match tone {
             ActionButtonTone::Primary => (
@@ -170,7 +171,8 @@ impl DesktopShell {
             ),
         };
         div()
-            .id(id)
+            .id(id.clone())
+            .debug_selector(move || id.to_string())
             .px(px(10.))
             .py(px(6.))
             .rounded(px(7.))
@@ -300,6 +302,12 @@ impl DesktopShell {
                 subagent,
                 ..
             } => {
+                let draft = self.model.ui.composer.trim();
+                let answer_lines = draft.lines();
+                let invalid_answers = questions.len() > 1
+                    && !draft.is_empty()
+                    && (answer_lines.clone().count() != questions.len()
+                        || answer_lines.clone().any(|line| line.trim().is_empty()));
                 let question_views = questions
                     .iter()
                     .enumerate()
@@ -362,26 +370,47 @@ impl DesktopShell {
                                 .unwrap_or_else(|| "input needed".into()),
                         )),
                     )
-                    .when(subagent.is_some(), |element| {
-                        element.child(self.render_action_button(
-                            format!("action-{request_id}-close-question"),
-                            "close question",
-                            ClientMessage::AskUserResponse {
-                                request_id: request_id.clone(),
-                                answers: vec![],
-                                cancelled: true,
-                            },
-                            ActionButtonTone::Secondary,
-                            cx,
-                        ))
-                    })
+                    .child(self.render_action_button(
+                        format!("action-{request_id}-close-question"),
+                        if subagent.is_some() {
+                            "close question"
+                        } else {
+                            "cancel question"
+                        },
+                        ClientMessage::AskUserResponse {
+                            request_id: request_id.clone(),
+                            answers: vec![],
+                            cancelled: true,
+                        },
+                        ActionButtonTone::Secondary,
+                        cx,
+                    ))
                     .children(question_views)
                     .when_some(option_views, |element, options| element.child(options))
+                    .when(invalid_answers, |element| {
+                        let id =
+                            SharedString::from(format!("question-answer-validation-{request_id}"));
+                        element.child(
+                            div()
+                                .id(id.clone())
+                                .debug_selector(move || id.to_string())
+                                .text_xs()
+                                .text_color(theme_rgb(&self.theme, "red.fg"))
+                                .child(SharedString::from(format!(
+                                    "Enter exactly {} nonempty answer lines, one per question.",
+                                    questions.len()
+                                ))),
+                        )
+                    })
                     .child(
                         div()
                             .text_xs()
                             .text_color(theme_rgb(&self.theme, "text.muted"))
-                            .child("answer each question on a new line, then press Enter"),
+                            .child(if questions.len() == 1 {
+                                "write your answer below, then press Enter"
+                            } else {
+                                "answer each question on its own line, then press Enter"
+                            }),
                     )
                     .into_any_element()
             }
@@ -447,6 +476,7 @@ impl DesktopShell {
             .join(",");
         div()
             .id("required-actions")
+            .debug_selector(|| "required-actions".into())
             .flex()
             .flex_col()
             .gap(px(8.))
@@ -1805,6 +1835,10 @@ impl DesktopShell {
             format!("{model_display_label} · {thinking_label}")
         };
         let persona_display = non_empty_label(self.model.ui.current_persona.as_deref(), "Persona");
+        let persona_hint_text: SharedString = format!("Persona: {persona_display}").into();
+        let persona_hint_background = theme_rgb(&self.theme, "popover");
+        let persona_hint_foreground = theme_rgb(&self.theme, "text.body");
+        let persona_hint_border = theme_rgb(&self.theme, "border");
         let compact_settings = composer_settings_are_compact(self.composer_bounds);
         let permission_display = permission_mode_label(self.model.ui.permission_mode.as_deref());
         let session_path: SharedString = selected_session_path(
@@ -1839,6 +1873,7 @@ impl DesktopShell {
         let attachment_error = self.attachment_error.clone();
         let composer_focus_handle = self.composer_focus_handle.clone();
         let composer_area_shell = cx.entity().downgrade();
+        let composer_container_shell = cx.entity().downgrade();
         let model_picker_trigger_shell = cx.entity().downgrade();
         let persona_picker_trigger_shell = cx.entity().downgrade();
         let permission_picker_trigger_shell = cx.entity().downgrade();
@@ -2144,6 +2179,7 @@ impl DesktopShell {
                         div()
                             .id("composer")
                             .debug_selector(|| "composer".into())
+                            .relative()
                             .flex_col()
                             .items_stretch()
                             .gap(px(8.))
@@ -2165,6 +2201,17 @@ impl DesktopShell {
                             .on_drop(cx.listener(|shell, path: &PathBuf, _, cx| {
                                 shell.add_attachment(path.clone(), cx);
                             }))
+                            // Absolute children otherwise measure inside the 1 px border.
+                            .child(canvas(move |bounds, window, cx| {
+                                composer_container_shell.update(cx, |shell, cx| {
+                                    if shell.composer_container_bounds != Some(bounds) {
+                                        shell.composer_container_bounds = Some(bounds);
+                                        if !shell.model.ui.pending_actions.is_empty() {
+                                            cx.defer_in(window, |_, _, cx| cx.notify());
+                                        }
+                                    }
+                                }).ok();
+                            }, |_bounds, _state, _window, _cx| {}).absolute().inset(px(-1.)))
                             .text_color(if composer_is_empty {
                                 theme_rgb(&self.theme, "text.muted")
                             } else {
@@ -2206,6 +2253,8 @@ impl DesktopShell {
                                     .items_start()
                                     .key_context("Composer")
                                     .track_focus(&composer_focus_handle)
+                                    .when(self.task_drafts.edits.can_undo(), |element| element.on_action(cx.listener(Self::text_undo)))
+                                    .when(self.task_drafts.edits.can_redo(), |element| element.on_action(cx.listener(Self::text_redo)))
                                     .on_action(cx.listener(Self::text_copy))
                                     .on_action(cx.listener(Self::text_cut))
                                     .on_action(cx.listener(Self::text_paste))
@@ -2384,6 +2433,14 @@ impl DesktopShell {
                                             .cursor_pointer()
                                             .id("persona-picker-trigger")
                                             .debug_selector(|| "persona-picker-trigger".into())
+                                            .tooltip(move |_, cx| {
+                                                cx.new(|_| PersonaHint {
+                                                    text: persona_hint_text.clone(),
+                                                    background: persona_hint_background,
+                                                    foreground: persona_hint_foreground,
+                                                    border: persona_hint_border,
+                                                }).into()
+                                            })
                                             .min_w_0()
                                             .max_w(px(96.))
                                             .relative()
@@ -2596,10 +2653,12 @@ impl DesktopShell {
                     .child(
                         div()
                             .id("checkout-context")
+                            .debug_selector(|| "checkout-context".into())
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .justify_between()
-                            .gap(px(12.))
+                            .gap(px(8.))
                             .px(px(4.))
                             .text_size(px(11.))
                             .text_color(theme_rgb(&self.theme, "text.muted"))
@@ -2608,7 +2667,7 @@ impl DesktopShell {
                                     .flex()
                                     .items_center()
                                     .gap(px(5.))
-                                    .min_w_0()
+                                    .min_w(px(138.))
                                     .flex_1()
                                     .child(tabler_icon(
                                         TablerIcon::Folder,
@@ -2627,12 +2686,17 @@ impl DesktopShell {
                                     .debug_selector(|| "session-status".into())
                                     .flex()
                                     .flex_none()
+                                    .max_w_full()
+                                    .flex_wrap()
                                     .items_center()
-                                    .gap(px(10.))
+                                    .gap(px(8.))
                                     .when_some(usage_label, |element, label| {
                                         element.child(
                                             div()
                                                 .id("session-usage")
+                                                .min_w_0()
+                                                .max_w_full()
+                                                .truncate()
                                                 .child(SharedString::from(label)),
                                         )
                                     })
@@ -2658,15 +2722,17 @@ impl DesktopShell {
                                                 ))),
                                         )
                                     })
-                                    .child(if control_yielded {
+                                    .when(control_yielded || presence_count > 0, |element| element.child(if control_yielded {
                                         div()
                                             .id("control-yielded")
+                                            .debug_selector(|| "control-yielded".into())
                                             .text_color(theme_rgb(&self.theme, "text.warning"))
                                             .child("control yielded")
                                             .into_any_element()
                                     } else {
                                         div()
                                             .id("yield-control")
+                                            .debug_selector(|| "yield-control".into())
                                             .px(px(6.))
                                             .py(px(3.))
                                             .rounded(px(6.))
@@ -2682,7 +2748,7 @@ impl DesktopShell {
                                             }))
                                             .child("Yield")
                                             .into_any_element()
-                                    }),
+                                    })),
                             ),
                     ),
             );
@@ -2713,13 +2779,7 @@ impl DesktopShell {
             .model_picker_bounds
             .filter(|_| self.model_picker_open)
             .map(|bounds| {
-                let (indices, rows) = build_model_picker_rows(
-                    &self.model.ui.models,
-                    &self.recent_models,
-                    &self.model_picker_query,
-                );
-                self.model_picker_filtered_indices = indices;
-                self.model_picker_rows = rows;
+                self.refresh_model_picker_rows();
                 let thinking_variants = thinking_variants_for_model(
                     &self.model.ui.models,
                     self.model.ui.current_provider.as_deref(),
@@ -2737,7 +2797,7 @@ impl DesktopShell {
                     .clamp(Pixels::ZERO, available_height);
                 let popup_size = gpui::size(
                     px(400.).min((window_width - px(16.)).max(Pixels::ZERO)),
-                    model_picker_height(self.model_picker_rows.len(), effort_option_count)
+                    model_picker_height(&self.model_picker_rows, effort_option_count)
                         .min(available_above.max(available_below)),
                 );
                 let position = picker_popup_position_in_window_right_aligned(
@@ -2811,8 +2871,8 @@ impl DesktopShell {
         });
         let pending_actions_position = (self.model.session_is_ready()
             && !self.model.ui.pending_actions.is_empty())
-        .then(|| self.composer_bounds.map(pending_actions_anchor));
-        let pending_actions_width = self.composer_bounds.map(pending_actions_width);
+        .then(|| self.composer_container_bounds.map(pending_actions_anchor));
+        let pending_actions_width = self.composer_container_bounds.map(pending_actions_width);
 
         div()
             .id("picker-overlays")
@@ -2912,6 +2972,33 @@ fn tool_line_offsets(lines: &[SharedString]) -> Vec<usize> {
             start
         })
         .collect()
+}
+
+struct PersonaHint {
+    text: SharedString,
+    background: gpui::Rgba,
+    foreground: gpui::Rgba,
+    border: gpui::Rgba,
+}
+
+impl Render for PersonaHint {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("composer-persona-hint")
+            .debug_selector(|| "composer-persona-hint".into())
+            .px(px(8.))
+            .py(px(5.))
+            .max_w(px(280.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(self.border)
+            .bg(self.background)
+            .text_color(self.foreground)
+            .text_size(px(12.))
+            .role(Role::Tooltip)
+            .aria_label(self.text.clone())
+            .child(self.text.clone())
+    }
 }
 
 #[cfg(test)]

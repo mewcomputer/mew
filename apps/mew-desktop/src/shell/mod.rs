@@ -74,7 +74,7 @@ mod workbench;
 
 use browser::BrowserRegistration;
 use composer::{ComposerElement, TextInputTarget};
-use drafts::{DraftOwner, PromptDraft, TaskDrafts};
+use drafts::{DraftEditKind, DraftOwner, PromptDraft, TaskDrafts};
 use helpers::*;
 pub(crate) use platform::run;
 use session_requests::SessionRequests;
@@ -94,6 +94,8 @@ actions!(
         ToggleWorkbench,
         FocusSidebarSearch,
         DismissPopovers,
+        TextUndo,
+        TextRedo,
         TextCopy,
         TextCut,
         TextPaste,

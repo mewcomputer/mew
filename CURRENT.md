@@ -3534,3 +3534,35 @@ A real two-client Unix/WebSocket regression failed with a peer plus self before
 the fix and passes afterward. It covers both disconnect directions and reconnect
 with a fresh client identity. All 152 daemon tests pass, with the existing opt-in
 browser integration test left ignored. Strict all-target daemon Clippy passes.
+
+
+# 2026-10-24 - composer editing, questions and compact controls
+
+Added draft-owned Undo/Redo with native Edit menu actions and Command-Z /
+Command-Shift-Z. Text and Unicode selection restore together; typing and deletion
+group, paste and replacements remain separate, and IME updates form one step.
+Canceled compositions leave no empty undo step. History follows each chat,
+including empty drafts with redo, and clears only after accepted submission.
+Menu availability follows the active draft's history.
+
+Single-question responses now retain internal paragraphs. Multiple questions
+require exactly one nonempty line per answer, show inline validation and preserve
+invalid drafts. Main and child questions expose scoped cancellation without
+clearing text. Required actions measure the outer composer and keep an 8 px gap
+above short, overflowing and expanded drafts.
+
+The model picker uses retained variable-height rows, 24 px headers and 56 px
+model options. Recents do not repeat in Other models. Arrow navigation skips
+headers and reveals offscreen choices, Enter selects the highlighted identity,
+and marked search text retains IME ownership. Compact persona controls have a
+selected-value tooltip. Yield requires a peer; footer metadata wraps before
+squeezing out the workspace path.
+
+All 317 desktop tests and 152 daemon tests pass. Strict all-target desktop/daemon
+Clippy, native desktop/daemon build and packaging, formatting, architecture and
+generated-theme checks pass. Native isolated QA at a 420 px conversation width
+in 480/800 px-tall windows confirmed the default layout, all three fixture models
+fitting the short picker, arrow-key selection, Unicode Undo/Redo and native menu
+availability. No provider prompt was submitted. The QA app and owned daemon are
+stopped; the original fixture sizing, model and empty draft are restored.
+Physical IME candidates and VoiceOver remain unverified.

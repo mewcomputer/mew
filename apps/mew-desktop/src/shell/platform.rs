@@ -1,6 +1,6 @@
 use super::*;
 
-fn set_app_menus(cx: &mut App) {
+pub(super) fn set_app_menus(cx: &mut App) {
     let text_input =
         Some("Composer || BrowserUrl || RenameSession || SidebarSearch || ModelPickerSearch");
     cx.bind_keys([
@@ -13,6 +13,8 @@ fn set_app_menus(cx: &mut App) {
         gpui::KeyBinding::new("cmd-j", ToggleTerminal, None),
         gpui::KeyBinding::new("cmd-k", FocusSidebarSearch, None),
         gpui::KeyBinding::new("escape", DismissPopovers, None),
+        gpui::KeyBinding::new("cmd-z", TextUndo, Some("Composer")),
+        gpui::KeyBinding::new("cmd-shift-z", TextRedo, Some("Composer")),
         gpui::KeyBinding::new("cmd-x", TextCut, text_input),
         gpui::KeyBinding::new("cmd-c", TextCopy, text_input),
         gpui::KeyBinding::new("cmd-c", TextCopy, Some("Transcript")),
@@ -36,6 +38,9 @@ fn set_app_menus(cx: &mut App) {
             MenuItem::action("Close Chat", CloseConversation),
         ]),
         Menu::new("Edit").items([
+            MenuItem::os_action("Undo", TextUndo, gpui::OsAction::Undo),
+            MenuItem::os_action("Redo", TextRedo, gpui::OsAction::Redo),
+            MenuItem::separator(),
             MenuItem::os_action("Cut", TextCut, gpui::OsAction::Cut),
             MenuItem::os_action("Copy", TextCopy, gpui::OsAction::Copy),
             MenuItem::os_action("Paste", TextPaste, gpui::OsAction::Paste),
@@ -328,6 +333,25 @@ mod tests {
                 }
             }
         });
+    }
+
+    #[gpui::test]
+    fn native_edit_menu_includes_composer_undo_and_redo(cx: &mut gpui::TestAppContext) {
+        cx.update(set_app_menus);
+        let menus = cx.update(|cx| cx.get_menus()).unwrap();
+        let edit = menus.iter().find(|menu| menu.name == "Edit").unwrap();
+        for (name, expected) in [
+            ("Undo", gpui::OsAction::Undo),
+            ("Redo", gpui::OsAction::Redo),
+        ] {
+            assert!(
+                edit.items.iter().any(|item| matches!(item,
+                    gpui::OwnedMenuItem::Action { name: label, os_action: Some(action), .. }
+                    if label == name && *action == expected
+                )),
+                "missing native {name}"
+            );
+        }
     }
 
     #[gpui::test]

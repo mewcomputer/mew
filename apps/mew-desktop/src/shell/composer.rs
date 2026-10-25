@@ -467,6 +467,52 @@ impl DesktopShell {
         }
     }
 
+    pub(super) fn text_undo(&mut self, _: &TextUndo, window: &mut Window, cx: &mut Context<Self>) {
+        self.restore_composer_edit(false, window, cx);
+    }
+
+    pub(super) fn text_redo(&mut self, _: &TextRedo, window: &mut Window, cx: &mut Context<Self>) {
+        self.restore_composer_edit(true, window, cx);
+    }
+
+    fn restore_composer_edit(&mut self, redo: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.composer_focus_handle.is_focused(window) {
+            cx.propagate();
+            return;
+        }
+        if !self.task_drafts.edits.restore(
+            redo,
+            &mut self.model.ui.composer,
+            &mut self.composer_selection,
+            &mut self.composer_selection_reversed,
+        ) {
+            return;
+        }
+        self.initial_auto_attach = false;
+        self.session_requests.cancel_initial_prompt();
+        self.composer_marked_range = None;
+        self.composer_preferred_column = None;
+        self.composer_cursor_downstream = false;
+        self.composer_is_selecting = false;
+        self.composer_preserve_scroll_on_resize = false;
+        self.prompt_history.reset_recall();
+        self.sync_slash_menu_after_edit();
+        self.sync_mention_menu_after_edit();
+        self.refresh_text_input_layout(TextInputTarget::Composer, window);
+        self.restart_composer_cursor_blink(cx);
+        window.notify_text_input_changed(&self.composer_focus_handle);
+    }
+
+    fn record_composer_edit(&mut self, kind: DraftEditKind) {
+        self.task_drafts.edits.record(
+            &self.model.ui.composer,
+            self.composer_selection.clone(),
+            self.composer_selection_reversed,
+            kind,
+            std::time::Instant::now(),
+        );
+    }
+
     pub(super) fn text_copy(&mut self, _: &TextCopy, window: &mut Window, cx: &mut Context<Self>) {
         let target = self.text_input_target(window);
         if !self.text_input_focus_handle(target).is_focused(window) {
@@ -531,7 +577,13 @@ impl DesktopShell {
             }
         }
         if let Some(text) = item.text() {
+            if target == TextInputTarget::Composer {
+                self.task_drafts.edits.end_group();
+            }
             self.replace_text_in_range(None, &text, window, cx);
+            if target == TextInputTarget::Composer {
+                self.task_drafts.edits.end_group();
+            }
             window.notify_text_input_changed(self.text_input_focus_handle(target));
         }
     }
@@ -565,6 +617,9 @@ impl DesktopShell {
     /// Used by slash completion and history recall; unlike
     /// `replace_composer_text` this does not reset the recall position.
     pub(super) fn set_composer_text(&mut self, text: String, cx: &mut Context<Self>) {
+        if self.model.ui.composer != text {
+            self.record_composer_edit(DraftEditKind::Replace);
+        }
         self.composer_preferred_column = None;
         self.composer_cursor_downstream = false;
         self.initial_auto_attach = false;
@@ -744,6 +799,7 @@ impl DesktopShell {
     }
 
     fn move_composer_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.task_drafts.edits.end_group();
         self.composer_preferred_column = None;
         self.composer_cursor_downstream = false;
         self.composer_selection = offset..offset;
@@ -752,6 +808,7 @@ impl DesktopShell {
     }
 
     fn select_composer_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.task_drafts.edits.end_group();
         self.composer_preferred_column = None;
         self.composer_cursor_downstream = false;
         if self.composer_selection_reversed {
@@ -843,16 +900,22 @@ impl DesktopShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.composer_selection.is_empty() {
-            let cursor = self.composer_cursor_offset();
-            let start = previous_utf8_boundary(&self.model.ui.composer, cursor);
-            if start == cursor {
-                window.play_system_bell();
-                return;
-            }
-            self.select_composer_to(start, cx);
+        if self.composer_marked_range.is_some() {
+            self.replace_composer_text(None, "", cx);
+            return;
         }
-        self.replace_composer_text(None, "", cx);
+        let mut range = self.composer_selection.clone();
+        let kind = if range.is_empty() {
+            range.start = previous_utf8_boundary(&self.model.ui.composer, range.start);
+            DraftEditKind::Backspace
+        } else {
+            DraftEditKind::Replace
+        };
+        if range.is_empty() {
+            window.play_system_bell();
+            return;
+        }
+        self.apply_composer_edit(range, "", kind, cx);
     }
 
     pub(super) fn composer_delete(
@@ -861,16 +924,22 @@ impl DesktopShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.composer_selection.is_empty() {
-            let cursor = self.composer_cursor_offset();
-            let end = next_utf8_boundary(&self.model.ui.composer, cursor);
-            if end == cursor {
-                window.play_system_bell();
-                return;
-            }
-            self.select_composer_to(end, cx);
+        if self.composer_marked_range.is_some() {
+            self.replace_composer_text(None, "", cx);
+            return;
         }
-        self.replace_composer_text(None, "", cx);
+        let mut range = self.composer_selection.clone();
+        let kind = if range.is_empty() {
+            range.end = next_utf8_boundary(&self.model.ui.composer, range.end);
+            DraftEditKind::Delete
+        } else {
+            DraftEditKind::Replace
+        };
+        if range.is_empty() {
+            window.play_system_bell();
+            return;
+        }
+        self.apply_composer_edit(range, "", kind, cx);
     }
 
     fn replace_composer_text(
@@ -879,16 +948,32 @@ impl DesktopShell {
         replacement: &str,
         cx: &mut Context<Self>,
     ) {
-        let current = self.model.ui.composer.clone();
+        let current = &self.model.ui.composer;
         let range = range_utf16
             .as_ref()
             .map(|range| {
-                byte_offset_for_utf16(&current, range.start)
-                    ..byte_offset_for_utf16(&current, range.end)
+                byte_offset_for_utf16(current, range.start)
+                    ..byte_offset_for_utf16(current, range.end)
             })
             .or_else(|| self.composer_marked_range.clone())
             .unwrap_or_else(|| self.composer_selection.clone());
-        self.replace_composer_byte_range(range, replacement, cx);
+        let composing = self.composer_marked_range.is_some();
+        let kind = if composing {
+            DraftEditKind::Composition
+        } else if range.is_empty()
+            && !replacement.is_empty()
+            && replacement.chars().nth(1).is_none()
+        {
+            DraftEditKind::Insert
+        } else {
+            DraftEditKind::Replace
+        };
+        self.apply_composer_edit(range, replacement, kind, cx);
+        if composing {
+            self.task_drafts
+                .edits
+                .end_composition(&self.model.ui.composer);
+        }
     }
 
     /// Replaces a byte range of the composer text and moves the cursor to
@@ -899,9 +984,22 @@ impl DesktopShell {
         replacement: &str,
         cx: &mut Context<Self>,
     ) {
+        self.apply_composer_edit(range, replacement, DraftEditKind::Replace, cx);
+    }
+
+    fn apply_composer_edit(
+        &mut self,
+        range: Range<usize>,
+        replacement: &str,
+        kind: DraftEditKind,
+        cx: &mut Context<Self>,
+    ) {
+        if self.model.ui.composer.get(range.clone()) != Some(replacement) {
+            self.record_composer_edit(kind);
+        }
         self.composer_preferred_column = None;
         self.composer_cursor_downstream = false;
-        let mut updated = self.model.ui.composer.clone();
+        let mut updated = std::mem::take(&mut self.model.ui.composer);
         self.initial_auto_attach = false;
         self.session_requests.cancel_initial_prompt();
         updated.replace_range(range.clone(), replacement);
@@ -910,6 +1008,7 @@ impl DesktopShell {
         self.composer_selection_reversed = false;
         self.composer_marked_range = None;
         self.model.ui.set_composer(updated);
+        self.task_drafts.edits.finish_edit(&self.composer_selection);
         self.prompt_history.reset_recall();
         self.sync_slash_menu_after_edit();
         self.sync_mention_menu_after_edit();
@@ -923,20 +1022,21 @@ impl DesktopShell {
         new_selected_range_utf16: Option<Range<usize>>,
         cx: &mut Context<Self>,
     ) {
+        self.record_composer_edit(DraftEditKind::Composition);
         self.composer_preferred_column = None;
         self.composer_cursor_downstream = false;
-        let current = self.model.ui.composer.clone();
+        let current = &self.model.ui.composer;
         self.initial_auto_attach = false;
         self.session_requests.cancel_initial_prompt();
         let range = range_utf16
             .as_ref()
             .map(|range| {
-                byte_offset_for_utf16(&current, range.start)
-                    ..byte_offset_for_utf16(&current, range.end)
+                byte_offset_for_utf16(current, range.start)
+                    ..byte_offset_for_utf16(current, range.end)
             })
             .or_else(|| self.composer_marked_range.clone())
             .unwrap_or_else(|| self.composer_selection.clone());
-        let mut updated = current;
+        let mut updated = std::mem::take(&mut self.model.ui.composer);
         updated.replace_range(range.clone(), replacement);
         let replacement_end = range.start + replacement.len();
         self.composer_marked_range =
@@ -950,6 +1050,11 @@ impl DesktopShell {
             .unwrap_or(replacement_end..replacement_end);
         self.composer_selection_reversed = false;
         self.model.ui.set_composer(updated);
+        if self.composer_marked_range.is_none() {
+            self.task_drafts
+                .edits
+                .end_composition(&self.model.ui.composer);
+        }
         self.prompt_history.reset_recall();
         self.sync_slash_menu_after_edit();
         self.sync_mention_menu_after_edit();
@@ -1861,7 +1966,12 @@ impl EntityInputHandler for DesktopShell {
 
     fn unmark_text(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
         match self.text_input_target(window) {
-            TextInputTarget::Composer => self.composer_marked_range = None,
+            TextInputTarget::Composer => {
+                self.composer_marked_range = None;
+                self.task_drafts
+                    .edits
+                    .end_composition(&self.model.ui.composer);
+            }
             TextInputTarget::BrowserUrl => self.browser_url_marked_range = None,
             TextInputTarget::Rename => self.rename_marked_range = None,
             TextInputTarget::SidebarSearch => self.sidebar_search_marked_range = None,
@@ -1964,6 +2074,7 @@ impl EntityInputHandler for DesktopShell {
         self.set_text_input_selection(target, selection);
         match target {
             TextInputTarget::Composer => {
+                self.task_drafts.edits.end_group();
                 self.composer_selection_reversed = false;
                 self.composer_preferred_column = None;
                 self.composer_cursor_downstream = false;
@@ -2027,6 +2138,335 @@ mod tests {
 
     fn input_bounds() -> Bounds<Pixels> {
         Bounds::new(point(px(80.), px(120.)), gpui::size(px(400.), px(96.)))
+    }
+
+    #[gpui::test]
+    fn composer_undo_redo_restores_unicode_replacement_and_selection(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(super::super::platform::set_app_menus);
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|window, cx| {
+            let focus = shell.update(cx, |shell, cx| {
+                shell.layout.sidebar_collapsed = true;
+                shell.layout.workbench_collapsed = true;
+                shell.model.ui.composer = "before é中 after".into();
+                shell.composer_selection = 7..12;
+                shell.composer_selection_reversed = true;
+                shell.composer_focus_handle.focus(window, cx);
+                shell.replace_text_in_range(None, "replacement", window, cx);
+                shell.composer_focus_handle.clone()
+            });
+            window.focus(&focus, cx);
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-z");
+        shell.update(cx, |shell, _| {
+            assert_eq!(shell.model.ui.composer, "before é中 after");
+            assert_eq!(shell.composer_selection, 7..12);
+            assert!(shell.composer_selection_reversed);
+        });
+        cx.simulate_keystrokes("cmd-shift-z");
+        shell.update(cx, |shell, _| {
+            assert_eq!(shell.model.ui.composer, "before replacement after");
+            assert_eq!(shell.composer_selection, 18..18);
+            shell.quitting = true;
+        });
+    }
+
+    #[gpui::test]
+    fn composer_undo_menu_availability_tracks_the_active_drafts_history(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|window, cx| {
+            let focus = shell.read(cx).composer_focus_handle.clone();
+            window.focus(&focus, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            assert!(!window.is_action_available(&TextUndo, cx));
+            assert!(!window.is_action_available(&TextRedo, cx));
+            shell.update(cx, |shell, cx| {
+                shell.replace_text_in_range(None, "draft", window, cx)
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            assert!(window.is_action_available(&TextUndo, cx));
+            assert!(!window.is_action_available(&TextRedo, cx));
+        });
+        cx.dispatch_action(TextUndo);
+        cx.update(|window, cx| {
+            assert!(!window.is_action_available(&TextUndo, cx));
+            assert!(window.is_action_available(&TextRedo, cx));
+        });
+        shell.update(cx, |shell, cx| shell.finish_prompt_submission(true, cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            assert!(!window.is_action_available(&TextUndo, cx));
+            assert!(!window.is_action_available(&TextRedo, cx));
+        });
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn composer_undo_groups_typing_deletion_and_ime_but_keeps_paste_separate(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                window.focus(&shell.composer_focus_handle, cx);
+                for text in ["h", "é", "中"] {
+                    shell.replace_text_in_range(None, text, window, cx);
+                }
+            })
+        });
+        cx.run_until_parked();
+        cx.dispatch_action(TextUndo);
+        shell.update(cx, |shell, _| assert!(shell.model.ui.composer.is_empty()));
+        cx.dispatch_action(TextRedo);
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                assert_eq!(shell.model.ui.composer, "hé中");
+                shell.composer_backspace(&ComposerBackspace, window, cx);
+                shell.composer_backspace(&ComposerBackspace, window, cx);
+                assert_eq!(shell.model.ui.composer, "h");
+            })
+        });
+        cx.dispatch_action(TextUndo);
+        shell.update(cx, |shell, _| assert_eq!(shell.model.ui.composer, "hé中"));
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string("!".into()));
+                shell.text_paste(&TextPaste, window, cx);
+                shell.replace_and_mark_text_in_range(None, "ni", Some(2..2), window, cx);
+                shell.replace_and_mark_text_in_range(None, "nihao", Some(5..5), window, cx);
+                shell.replace_text_in_range(None, "你好", window, cx);
+                assert_eq!(shell.model.ui.composer, "hé中!你好");
+            })
+        });
+        cx.dispatch_action(TextUndo);
+        shell.update(cx, |shell, _| {
+            assert_eq!(shell.model.ui.composer, "hé中!");
+            assert!(shell.composer_marked_range.is_none());
+        });
+        cx.dispatch_action(TextUndo);
+        shell.update(cx, |shell, _| assert_eq!(shell.model.ui.composer, "hé中"));
+        cx.dispatch_action(TextRedo);
+        cx.dispatch_action(TextRedo);
+        shell.update(cx, |shell, _| {
+            assert_eq!(shell.model.ui.composer, "hé中!你好");
+            shell.quitting = true;
+        });
+    }
+
+    #[gpui::test]
+    fn composer_undo_belongs_to_each_draft_and_survives_only_failed_submission(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.switch_draft_owner(Some("a"));
+                window.focus(&shell.composer_focus_handle, cx);
+                shell.replace_text_in_range(None, "a draft", window, cx);
+                shell.switch_draft_owner(Some("b"));
+                shell.replace_text_in_range(None, "b draft", window, cx);
+            })
+        });
+        cx.run_until_parked();
+        cx.dispatch_action(TextUndo);
+        shell.update(cx, |shell, cx| {
+            assert!(shell.model.ui.composer.is_empty());
+            shell.switch_draft_owner(Some("a"));
+            assert_eq!(shell.model.ui.composer, "a draft");
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.dispatch_action(TextUndo);
+        shell.update(cx, |shell, cx| {
+            assert!(shell.model.ui.composer.is_empty());
+            shell.switch_draft_owner(Some("b"));
+            assert!(shell.model.ui.composer.is_empty());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.dispatch_action(TextRedo);
+        shell.update(cx, |shell, cx| {
+            assert_eq!(shell.model.ui.composer, "b draft");
+            shell.finish_prompt_submission(false, cx);
+        });
+        cx.dispatch_action(TextUndo);
+        shell.update(cx, |shell, _| assert!(shell.model.ui.composer.is_empty()));
+        cx.dispatch_action(TextRedo);
+        shell.update(cx, |shell, cx| shell.finish_prompt_submission(true, cx));
+        cx.dispatch_action(TextUndo);
+        shell.update(cx, |shell, _| {
+            assert!(
+                shell.model.ui.composer.is_empty(),
+                "sent prompts must not return through draft undo"
+            );
+            shell.quitting = true;
+        });
+    }
+
+    #[gpui::test]
+    fn composer_undo_skips_cancelled_ime_and_does_not_edit_other_fields(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                window.focus(&shell.composer_focus_handle, cx);
+                shell.replace_text_in_range(None, "before ", window, cx);
+                shell.replace_and_mark_text_in_range(None, "nihao", Some(5..5), window, cx);
+                shell.composer_backspace(&ComposerBackspace, window, cx);
+                assert_eq!(shell.model.ui.composer, "before ");
+            })
+        });
+        cx.run_until_parked();
+        cx.dispatch_action(TextUndo);
+        shell.update(cx, |shell, _| {
+            assert!(
+                shell.model.ui.composer.is_empty(),
+                "cancelled composition must not leave an empty undo step"
+            );
+            assert!(shell.composer_marked_range.is_none());
+        });
+        cx.dispatch_action(TextUndo);
+        shell.update(cx, |shell, _| assert!(shell.model.ui.composer.is_empty()));
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.replace_text_in_range(None, "retained draft", window, cx);
+                shell.model_picker_open = true;
+                window.focus(&shell.model_picker_focus_handle, cx);
+            })
+        });
+        cx.run_until_parked();
+        cx.dispatch_action(TextUndo);
+        shell.update(cx, |shell, _| {
+            assert_eq!(shell.model.ui.composer, "retained draft");
+            shell.quitting = true;
+        });
+    }
+
+    #[gpui::test]
+    fn composer_new_edit_after_undo_discards_redo_without_touching_attachments(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                window.focus(&shell.composer_focus_handle, cx);
+                shell.attachments.push(Attachment {
+                    path: "keep.txt".into(),
+                    mime: None,
+                });
+                shell.replace_text_in_range(None, "old draft", window, cx);
+            })
+        });
+        cx.run_until_parked();
+        cx.dispatch_action(TextUndo);
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.replace_text_in_range(None, "new draft", window, cx)
+            })
+        });
+        cx.dispatch_action(TextRedo);
+        shell.update(cx, |shell, _| {
+            assert_eq!(shell.model.ui.composer, "new draft");
+            assert_eq!(shell.attachments[0].path, "keep.txt");
+            shell.quitting = true;
+        });
+    }
+
+    #[gpui::test]
+    fn composer_secondary_controls_follow_peer_presence_and_keep_the_path_readable(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        cx.simulate_resize(gpui::size(px(420.), px(800.)));
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("yield-control").is_none(),
+            "solo chats should not offer yielding"
+        );
+        shell.update(cx, |shell, cx| {
+            shell.model.ui.presence = vec![mew_client_core::PresenceEntry {
+                client_id: 9,
+                client_kind: mew_protocol::ClientKind::Tui,
+            }];
+            shell.model.ui.usage = Some(UsageSummary {
+                input_tokens: 2_500_000,
+                output_tokens: 999_999,
+                cost: 123.45,
+                turns: 20,
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("yield-control").is_some());
+        let path = cx.debug_bounds("checkout-path").unwrap();
+        let status = cx.debug_bounds("session-status").unwrap();
+        let footer = cx.debug_bounds("checkout-context").unwrap();
+        assert!(
+            path.size.width >= px(100.),
+            "metadata must leave room for the checkout path: {path:?}"
+        );
+        assert!(!path.intersects(&status));
+        assert!(status.left() >= footer.left() && status.right() <= footer.right());
+        shell.update(cx, |shell, cx| {
+            shell.model.ui.presence.clear();
+            shell.model.ui.control_yielded_by = Some(9);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("yield-control").is_none());
+        assert!(cx.debug_bounds("control-yielded").is_some());
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn compact_persona_control_reveals_a_hint_without_moving_the_toolbar(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        cx.simulate_resize(gpui::size(px(420.), px(800.)));
+        shell.update(cx, |shell, _| {
+            shell.model.ui.current_persona = Some("builder".into())
+        });
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let trigger = cx.debug_bounds("persona-picker-trigger").unwrap();
+        assert_eq!(trigger.size.width, px(26.));
+        cx.simulate_mouse_move(trigger.center(), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.dispatcher.advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("composer-persona-hint").is_some());
+        assert_eq!(cx.debug_bounds("persona-picker-trigger").unwrap(), trigger);
+        shell.update(cx, |shell, _| shell.quitting = true);
     }
 
     #[gpui::test]

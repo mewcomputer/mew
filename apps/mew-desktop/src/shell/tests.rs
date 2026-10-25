@@ -2497,8 +2497,8 @@ mod shell_tests {
     #[test]
     fn pending_actions_anchor_to_the_outer_composer_box() {
         let composer = Bounds::new(point(px(120.), px(400.)), gpui::size(px(200.), px(80.)));
-        assert_eq!(pending_actions_anchor(composer), point(px(108.), px(380.)));
-        assert_eq!(pending_actions_width(composer), px(224.));
+        assert_eq!(pending_actions_anchor(composer), point(px(120.), px(392.)));
+        assert_eq!(pending_actions_width(composer), px(200.));
     }
 
     #[test]
@@ -2547,11 +2547,18 @@ mod shell_tests {
 
     #[test]
     fn picker_viewports_match_and_stay_bounded() {
-        assert_eq!(model_picker_list_height(0), px(64.));
-        assert_eq!(model_picker_list_height(5), px(320.));
-        assert_eq!(model_picker_list_height(32), px(320.));
-        assert_eq!(model_picker_height(32, 0), px(372.));
-        assert_eq!(model_picker_height(32, 3), px(444.));
+        let model_rows = vec![
+            ModelPickerRow::Model {
+                index: 0,
+                recent: false
+            };
+            32
+        ];
+        assert_eq!(model_picker_list_height(&[]), px(64.));
+        assert_eq!(model_picker_list_height(&model_rows[..5]), px(280.));
+        assert_eq!(model_picker_list_height(&model_rows), px(320.));
+        assert_eq!(model_picker_height(&model_rows, 0), px(372.));
+        assert_eq!(model_picker_height(&model_rows, 3), px(444.));
         assert_eq!(effort_index_for_pointer(0., 200., 3), Some(0));
         assert_eq!(effort_index_for_pointer(100., 200., 3), Some(1));
         assert_eq!(effort_index_for_pointer(200., 200., 3), Some(2));
@@ -2661,7 +2668,7 @@ mod shell_tests {
     }
 
     #[test]
-    fn model_picker_rows_put_recent_models_before_all_models() {
+    fn model_picker_rows_put_unique_recent_models_before_other_models() {
         let models = vec![
             mew_protocol::ModelInfo {
                 id: "openai/gpt-5".into(),
@@ -2689,8 +2696,8 @@ mod shell_tests {
 
         assert_eq!(
             selectable,
-            vec![1, 0, 1],
-            "recent rows should be selected before the all-model rows"
+            vec![1, 0],
+            "each model appears once, with recent choices first"
         );
         assert_eq!(
             rows,
@@ -2700,13 +2707,9 @@ mod shell_tests {
                     index: 1,
                     recent: true,
                 },
-                ModelPickerRow::Header("All Models"),
+                ModelPickerRow::Header("Other models"),
                 ModelPickerRow::Model {
                     index: 0,
-                    recent: false,
-                },
-                ModelPickerRow::Model {
-                    index: 1,
                     recent: false,
                 },
             ]
@@ -4702,6 +4705,251 @@ mod composer_model_picker_geometry_regressions {
 }
 
 #[cfg(test)]
+mod composer_picker_navigation_regressions {
+    use super::super::*;
+
+    fn prepare(shell: &mut DesktopShell) {
+        shell.layout.sidebar_collapsed = true;
+        shell.layout.workbench_collapsed = true;
+        shell.model.ui.models = serde_json::from_value(serde_json::json!([
+            {"id":"first/shared", "provider":"first", "model":"shared", "display_name":"Alpha"},
+            {"id":"second/shared", "provider":"second", "model":"shared", "display_name":"Beta é中"},
+            {"id":"third/gamma", "provider":"third", "model":"gamma", "display_name":"Gamma"}
+        ])).unwrap();
+        shell.recent_models = vec!["second/shared".into(), "first/shared".into()];
+    }
+
+    fn open(shell: &Entity<DesktopShell>, cx: &mut gpui::VisualTestContext) {
+        shell.update(cx, |shell, cx| {
+            prepare(shell);
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(420.), px(760.)));
+        cx.run_until_parked();
+        let trigger = cx.debug_bounds("model-picker-trigger").unwrap();
+        cx.simulate_click(trigger.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    #[test]
+    fn recent_models_do_not_leave_duplicate_choices_or_an_empty_other_section() {
+        let models: Vec<mew_protocol::ModelInfo> = serde_json::from_value(serde_json::json!([
+            {"id":"first/shared", "provider":"first", "model":"shared"},
+            {"id":"second/shared", "provider":"second", "model":"shared"}
+        ]))
+        .unwrap();
+        let (indices, rows) = build_model_picker_rows(
+            &models,
+            &[
+                "missing/model".into(),
+                "second/shared".into(),
+                "first/shared".into(),
+                "second/shared".into(),
+            ],
+            "  ",
+        );
+        assert_eq!(indices, vec![1, 0]);
+        assert_eq!(
+            rows,
+            vec![
+                ModelPickerRow::Header("Recent"),
+                ModelPickerRow::Model {
+                    index: 1,
+                    recent: true
+                },
+                ModelPickerRow::Model {
+                    index: 0,
+                    recent: true
+                },
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn picker_headers_are_compact_and_model_rows_keep_their_reading_height(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        open(&shell, cx);
+        let list = cx.debug_bounds("model-picker-list").unwrap();
+        let model = cx.debug_bounds("model-option-recent-1").unwrap();
+        assert_eq!(model.top() - list.top(), px(24.));
+        assert_eq!(model.size.height, px(56.));
+        assert!(cx.debug_bounds("model-option-all-0").is_none());
+        assert!(cx.debug_bounds("model-option-all-1").is_none());
+        assert!(cx.debug_bounds("model-option-all-2").is_some());
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn arrows_skip_section_headers_and_enter_selects_the_highlighted_identity(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        open(&shell, cx);
+        for key in ["up", "down", "down", "down", "up", "enter"] {
+            cx.simulate_keystrokes(key);
+            cx.run_until_parked();
+        }
+        shell.update(cx, |shell, _| {
+            assert_eq!(shell.pending_model, Some(("first".into(), "shared".into())));
+            assert!(!shell.model_picker_open);
+            shell.quitting = true;
+        });
+    }
+
+    #[gpui::test]
+    fn changing_a_query_resets_keyboard_choice_and_empty_results_cannot_submit(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(super::super::platform::set_app_menus);
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        open(&shell, cx);
+        for key in ["down", "down"] {
+            cx.simulate_keystrokes(key);
+        }
+        cx.simulate_input("a");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        shell.update(cx, |shell, _| {
+            assert_eq!(shell.pending_model, Some(("first".into(), "shared".into())));
+        });
+        open(&shell, cx);
+        shell.update(cx, |shell, _| shell.pending_model = None);
+        cx.simulate_input("no matching model");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("down");
+        cx.simulate_keystrokes("up");
+        cx.simulate_keystrokes("enter");
+        shell.update(cx, |shell, _| {
+            assert!(shell.pending_model.is_none());
+            assert!(shell.model_picker_open);
+        });
+        cx.simulate_keystrokes("cmd-a");
+        cx.simulate_input("é中");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        shell.update(cx, |shell, _| {
+            assert_eq!(
+                shell.pending_model,
+                Some(("second".into(), "shared".into()))
+            );
+            shell.quitting = true;
+        });
+    }
+
+    #[gpui::test]
+    fn marked_model_search_keeps_composition_keys_out_of_model_navigation(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        open(&shell, cx);
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.replace_and_mark_text_in_range(None, "a", Some(1..1), window, cx);
+            })
+        });
+        cx.run_until_parked();
+        for key in [
+            "down",
+            "up",
+            "left",
+            "right",
+            "backspace",
+            "delete",
+            "enter",
+        ] {
+            // IME key events do not imply a plain-text newline commit.
+            let keystroke = gpui::Keystroke::parse(key).unwrap();
+            cx.simulate_event(gpui::KeyDownEvent {
+                keystroke: keystroke.clone(),
+                is_held: false,
+                prefer_character_input: false,
+            });
+            cx.simulate_event(gpui::KeyUpEvent { keystroke });
+            cx.run_until_parked();
+            shell.update(cx, |shell, _| {
+                assert!(
+                    shell.model_picker_open,
+                    "{key} must not close a composing picker"
+                );
+                assert!(
+                    shell.pending_model.is_none(),
+                    "{key} must not select a model during composition"
+                );
+                assert_eq!(shell.model_picker_query, "a");
+                assert_eq!(shell.model_picker_marked_range, Some(0..1));
+                assert_eq!(
+                    shell.model_picker_highlighted_index,
+                    Some(0),
+                    "{key} belongs to the composing input method"
+                );
+            });
+        }
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.replace_text_in_range(None, "é中", window, cx);
+            })
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        shell.update(cx, |shell, _| {
+            assert_eq!(
+                shell.pending_model,
+                Some(("second".into(), "shared".into()))
+            );
+            shell.quitting = true;
+        });
+    }
+
+    #[gpui::test]
+    fn keyboard_navigation_reveals_models_beyond_the_short_picker_viewport(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = true;
+            shell.layout.workbench_collapsed = true;
+            shell.model.ui.models = serde_json::from_value(serde_json::Value::Array(
+                (0..50).map(|index| serde_json::json!({
+                    "id":format!("many/model-{index}"), "provider":"many",
+                    "model":format!("model-{index}"), "display_name":format!("Model {index}")
+                })).collect()
+            )).unwrap();
+            shell.recent_models.clear();
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(420.), px(340.)));
+        cx.run_until_parked();
+        let trigger = cx.debug_bounds("model-picker-trigger").unwrap();
+        cx.simulate_click(trigger.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        for _ in 0..49 {
+            cx.simulate_keystrokes("down");
+            cx.run_until_parked();
+        }
+        let list = cx.debug_bounds("model-picker-list").unwrap();
+        let last = cx
+            .debug_bounds("model-option-all-49")
+            .expect("keyboard target is rendered");
+        assert!(last.top() >= list.top() && last.bottom() <= list.bottom());
+        cx.simulate_keystrokes("enter");
+        shell.update(cx, |shell, _| {
+            assert_eq!(
+                shell.pending_model,
+                Some(("many".into(), "model-49".into()))
+            );
+            shell.quitting = true;
+        });
+    }
+}
+
+#[cfg(test)]
 mod composer_primary_action_regressions {
     use super::super::*;
 
@@ -5099,5 +5347,231 @@ mod composer_narrow_settings_regressions {
             );
             shell.quitting = true;
         });
+    }
+}
+
+#[cfg(test)]
+mod composer_question_response_regressions {
+    use super::super::*;
+
+    fn request(id: &str, count: usize) -> PendingAction {
+        PendingAction {
+            request_id: id.into(),
+            kind: ActionKind::AskUser {
+                subagent: None,
+                call_id: format!("call-{id}"),
+                questions: (0..count)
+                    .map(|index| mew_protocol::Question {
+                        prompt: format!("Question {}", index + 1),
+                        options: Vec::new(),
+                    })
+                    .collect(),
+            },
+        }
+    }
+
+    fn configure(shell: &mut DesktopShell) {
+        shell.layout.sidebar_collapsed = true;
+        shell.layout.workbench_collapsed = true;
+        shell.model.attached_session = Some("question-test".into());
+        shell.model.ui.selected_session = Some("question-test".into());
+        shell.model.ui.running = true;
+    }
+
+    #[gpui::test]
+    fn one_question_preserves_every_paragraph_for_pointer_and_enter(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        shell.update(cx, |shell, cx| {
+            configure(shell);
+            shell.command_tx = Some(sender);
+            shell.model.ui.pending_actions = vec![request("one-question", 1)];
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(420.), px(760.)));
+        for pointer in [true, false] {
+            shell.update(cx, |shell, cx| {
+                shell.model.ui.composer = " first é中\n\n  second paragraph\nthird\t ".into();
+                cx.notify();
+            });
+            cx.run_until_parked();
+            if pointer {
+                let send = cx.debug_bounds("submit-prompt").unwrap();
+                cx.simulate_click(send.center(), gpui::Modifiers::none());
+            } else {
+                cx.update(|window, cx| {
+                    let focus = shell.read(cx).composer_focus_handle.clone();
+                    window.focus(&focus, cx);
+                });
+                cx.run_until_parked();
+                cx.simulate_keystrokes("enter");
+            }
+            assert!(matches!(commands.try_recv().unwrap(),
+                ClientMessage::AskUserResponse { request_id, answers, cancelled: false }
+                if request_id == "one-question" && answers == ["first é中\n\n  second paragraph\nthird"]
+            ));
+            assert!(commands.try_recv().is_err());
+            shell.update(cx, |shell, _| assert!(shell.model.ui.composer.is_empty()));
+        }
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn multiple_questions_reject_missing_blank_and_extra_answers_without_losing_draft(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        shell.update(cx, |shell, _| {
+            configure(shell);
+            shell.command_tx = Some(sender);
+        });
+        cx.simulate_resize(gpui::size(px(420.), px(760.)));
+        for (count, draft) in [
+            (2, "first\nsecond\nextra"),
+            (2, "only one"),
+            (3, "first\n \nthird"),
+        ] {
+            shell.update(cx, |shell, cx| {
+                shell.model.ui.pending_actions = vec![request("several-questions", count)];
+                shell.model.ui.composer = draft.into();
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let send = cx.debug_bounds("submit-prompt").unwrap();
+            cx.simulate_click(send.center(), gpui::Modifiers::none());
+            assert!(
+                commands.try_recv().is_err(),
+                "invalid answers must not be sent"
+            );
+            shell.update(cx, |shell, _| assert_eq!(shell.model.ui.composer, draft));
+            assert!(cx
+                .debug_bounds("question-answer-validation-several-questions")
+                .is_some());
+        }
+        shell.update(cx, |shell, cx| {
+            shell.model.ui.pending_actions = vec![request("several-questions", 2)];
+            shell.model.ui.composer = " first é中 \r\n second ".into();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx
+            .debug_bounds("question-answer-validation-several-questions")
+            .is_none());
+        let send = cx.debug_bounds("submit-prompt").unwrap();
+        cx.simulate_click(send.center(), gpui::Modifiers::none());
+        assert!(matches!(commands.try_recv().unwrap(),
+            ClientMessage::AskUserResponse { request_id, answers, cancelled: false }
+            if request_id == "several-questions" && answers == ["first é中", "second"]
+        ));
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn question_cancel_is_scoped_and_preserves_the_draft_for_main_and_child_requests(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        shell.update(cx, |shell, _| {
+            configure(shell);
+            shell.command_tx = Some(sender);
+        });
+        cx.simulate_resize(gpui::size(px(420.), px(760.)));
+        for (id, selector, child) in [
+            (
+                "question-main",
+                "action-question-main-close-question",
+                false,
+            ),
+            (
+                "question-child",
+                "action-question-child-close-question",
+                true,
+            ),
+        ] {
+            shell.update(cx, |shell, cx| {
+                let mut action = request(id, 1);
+                if let ActionKind::AskUser { subagent, .. } = &mut action.kind {
+                    *subagent = child.then(|| mew_protocol::SubagentQuestionSource {
+                        parent_call_id: "parent-call".into(),
+                        child_session_id: "child-session".into(),
+                        name: "researcher".into(),
+                        display_name: Some("Researcher".into()),
+                    });
+                }
+                shell.model.ui.pending_actions = vec![action];
+                shell.model.ui.composer = "keep these notes\nand this paragraph".into();
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let cancel = cx
+                .debug_bounds(selector)
+                .expect("every question has a cancel action");
+            cx.simulate_click(cancel.center(), gpui::Modifiers::none());
+            assert!(matches!(commands.try_recv().unwrap(),
+                ClientMessage::AskUserResponse { request_id, answers, cancelled: true }
+                if request_id == id && answers.is_empty()
+            ));
+            assert!(commands.try_recv().is_err());
+            shell.update(cx, |shell, _| {
+                assert_eq!(
+                    shell.model.ui.composer,
+                    "keep these notes\nand this paragraph"
+                );
+                assert!(shell.model.ui.running);
+            });
+        }
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn required_actions_stay_above_the_outer_composer_for_short_and_long_drafts(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        shell.update(cx, |shell, cx| {
+            configure(shell);
+            shell.model.ui.pending_actions = vec![request("geometry-question", 1)];
+            cx.notify();
+        });
+        for width in [420., 480.] {
+            cx.simulate_resize(gpui::size(px(width), px(800.)));
+            for long in [false, true] {
+                shell.update(cx, |shell, cx| {
+                    shell.model.ui.composer = if long {
+                        "draft line\n".repeat(30)
+                    } else {
+                        "short draft".into()
+                    };
+                    shell.composer_expanded = false;
+                    cx.notify();
+                });
+                cx.run_until_parked();
+                let outer = cx.debug_bounds("composer").unwrap();
+                let actions = cx.debug_bounds("required-actions").unwrap();
+                assert_eq!(actions.left(), outer.left());
+                assert_eq!(actions.size.width, outer.size.width);
+                assert!(actions.bottom() <= outer.top() - px(8.), "requests retain a gap above the complete composer, width {width}, long {long}: {actions:?}, {outer:?}");
+                if long {
+                    if let Some(expand) = cx.debug_bounds("composer-expand-toggle") {
+                        cx.simulate_click(expand.center(), gpui::Modifiers::none());
+                        cx.run_until_parked();
+                        let outer = cx.debug_bounds("composer").unwrap();
+                        let actions = cx.debug_bounds("required-actions").unwrap();
+                        assert!(actions.bottom() <= outer.top() - px(8.));
+                    }
+                }
+            }
+        }
+        shell.update(cx, |shell, _| shell.quitting = true);
     }
 }

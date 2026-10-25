@@ -67,6 +67,8 @@ pub(super) struct DesktopShell {
     pub(super) model_picker_marked_range: Option<Range<usize>>,
     pub(super) model_picker_filtered_indices: Vec<usize>,
     pub(super) model_picker_rows: Vec<ModelPickerRow>,
+    pub(super) model_picker_list: gpui::ListState,
+    pub(super) model_picker_highlighted_index: Option<usize>,
     pub(super) recent_models: Vec<String>,
     pub(super) thinking_effort_drag_index: Option<usize>,
     pub(super) thinking_effort_drag_position: Option<f32>,
@@ -133,6 +135,7 @@ pub(super) struct DesktopShell {
     pub(super) composer_marked_range: Option<Range<usize>>,
     pub(super) composer_is_selecting: bool,
     pub(super) composer_bounds: Option<Bounds<Pixels>>,
+    pub(super) composer_container_bounds: Option<Bounds<Pixels>>,
     pub(super) composer_area_bounds: Option<Bounds<Pixels>>,
     pub(super) text_input_layout: Option<Rc<composer::TextInputLayout>>,
     pub(super) composer_text_layout: Option<Rc<composer::TextInputLayout>>,
@@ -355,6 +358,15 @@ pub(super) fn percentile_duration(samples: &mut [Duration], percentile: usize) -
 pub(super) enum ModelPickerRow {
     Header(&'static str),
     Model { index: usize, recent: bool },
+}
+
+impl ModelPickerRow {
+    pub(super) fn height(&self) -> Pixels {
+        px(match self {
+            Self::Header(_) => 24.,
+            Self::Model { .. } => 56.,
+        })
+    }
 }
 
 /// Pumps native CEF work without invalidating the entire shell at a fixed

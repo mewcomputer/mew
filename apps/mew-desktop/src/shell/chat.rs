@@ -1148,15 +1148,19 @@ impl DesktopShell {
             let ActionKind::AskUser { questions, .. } = &action.kind else {
                 return;
             };
-            let mut answers = self
-                .model
-                .ui
-                .composer
-                .lines()
-                .map(str::trim)
-                .map(str::to_owned)
-                .collect::<Vec<_>>();
-            answers.resize(questions.len(), String::new());
+            let draft = self.model.ui.composer.trim();
+            let answers = if questions.len() == 1 {
+                vec![draft.to_owned()]
+            } else {
+                let lines = draft.lines();
+                if lines.clone().count() != questions.len()
+                    || lines.clone().any(|line| line.trim().is_empty())
+                {
+                    cx.notify();
+                    return;
+                }
+                lines.map(|line| line.trim().to_owned()).collect()
+            };
             self.send_command(ClientMessage::AskUserResponse {
                 cancelled: false,
                 request_id: action.request_id.clone(),
@@ -1178,6 +1182,7 @@ impl DesktopShell {
     pub(super) fn finish_prompt_submission(&mut self, accepted: bool, cx: &mut Context<Self>) {
         self.model.finish_prompt_submission(accepted);
         if accepted {
+            self.task_drafts.edits.clear();
             self.composer_expanded = false;
             self.composer_scrollbar_grab_offset = None;
             self.composer_preserve_scroll_on_resize = false;

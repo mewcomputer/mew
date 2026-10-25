@@ -29,9 +29,9 @@ the intended single-character input.
 ## Native editing commands
 
 Register key bindings before creating menus. GPUI uses those bindings to assign
-native menu key equivalents. Use `MenuItem::os_action` for Cut, Copy, Paste and
-Select All so AppKit can dispatch to the native first responder, with typed GPUI
-actions handling the shell fields. Keep clipboard image attachments in the
+native menu key equivalents. Use `MenuItem::os_action` for Undo, Redo, Cut, Copy,
+Paste and Select All so AppKit can dispatch to the native first responder, with
+typed GPUI actions handling the rendered shell fields. Keep clipboard image attachments in the
 composer's paste path.
 
 GPUI focus and AppKit's first responder can differ while a CEF page is active.
@@ -39,6 +39,20 @@ The native CEF host offers editing key equivalents to its visible focused native
 view before GPUI handles them. Chromium's macOS clipboard commands also depend
 on the application's native Edit menu. Preserve both routes and keep global
 application commands in the existing window handler.
+
+Composer Undo/Redo use Command-Z and Command-Shift-Z. Register their field
+listeners only while the active draft has the corresponding history, keeping
+native menu availability accurate. `TaskDrafts` retains up to 100 in-memory undo
+steps with each draft, including empty drafts that still have undo or redo.
+Typing and consecutive deletions group while the caret stays contiguous and
+pauses remain under one second; paste, selection replacement and recall are
+separate steps. IME updates form one composition step, and canceled compositions
+leave no empty step. Restore text and selection together, clear marked ranges,
+refresh native geometry and notify the input system. Accepted submission clears
+history; failed sends preserve it. Attachments retain their independent ownership.
+
+Model-search marked text also owns its navigation and submission keys until
+composition commits. Candidate arrows and Enter must not choose a model.
 
 ## Native text input
 

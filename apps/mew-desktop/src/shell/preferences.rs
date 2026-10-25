@@ -138,11 +138,40 @@ impl DesktopShell {
             self.model_picker_selection = 0..0;
             self.model_picker_selection_reversed = false;
             self.model_picker_marked_range = None;
+            self.reset_model_picker_navigation();
             window.focus(&self.model_picker_focus_handle, cx);
         } else {
             window.focus(&self.composer_focus_handle, cx);
         }
         cx.notify();
+    }
+
+    fn reset_model_picker_navigation(&mut self) {
+        self.model_picker_highlighted_index = None;
+        self.model_picker_list.scroll_to(gpui::ListOffset {
+            item_ix: 0,
+            offset_in_item: Pixels::ZERO,
+        });
+    }
+
+    pub(super) fn refresh_model_picker_rows(&mut self) {
+        let (indices, rows) = build_model_picker_rows(
+            &self.model.ui.models,
+            &self.recent_models,
+            &self.model_picker_query,
+        );
+        if self.model_picker_rows != rows {
+            self.model_picker_list.reset(rows.len());
+            self.model_picker_rows = rows;
+        }
+        self.model_picker_filtered_indices = indices;
+        if !self
+            .model_picker_highlighted_index
+            .is_some_and(|index| self.model_picker_filtered_indices.contains(&index))
+        {
+            self.model_picker_highlighted_index =
+                self.model_picker_filtered_indices.first().copied();
+        }
     }
 
     pub(super) fn model_picker_search_key_down(
@@ -151,6 +180,9 @@ impl DesktopShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.model_picker_marked_range.is_some() {
+            return;
+        }
         let key = event.keystroke.key.as_str();
         if key == "escape" {
             self.close_shell_popovers();
@@ -169,8 +201,32 @@ impl DesktopShell {
         } else if key == "right" {
             self.model_picker_query_move_right(cx);
             cx.stop_propagation();
+        } else if matches!(key, "up" | "down") {
+            self.refresh_model_picker_rows();
+            if !self.model_picker_filtered_indices.is_empty() {
+                let current = self
+                    .model_picker_filtered_indices
+                    .iter()
+                    .position(|index| Some(*index) == self.model_picker_highlighted_index)
+                    .unwrap_or(0);
+                let next = if key == "up" {
+                    current.saturating_sub(1)
+                } else {
+                    (current + 1).min(self.model_picker_filtered_indices.len() - 1)
+                };
+                let index = self.model_picker_filtered_indices[next];
+                self.model_picker_highlighted_index = Some(index);
+                if let Some(row) = self.model_picker_rows.iter().position(|row| {
+                    matches!(row, ModelPickerRow::Model { index: candidate, .. } if *candidate == index)
+                }) {
+                    self.model_picker_list.scroll_to_reveal_item(row);
+                }
+                cx.notify();
+            }
+            cx.stop_propagation();
         } else if key == "enter" {
-            if let Some(index) = self.model_picker_filtered_indices.first().copied() {
+            self.refresh_model_picker_rows();
+            if let Some(index) = self.model_picker_highlighted_index {
                 if let Some(model) = self.model.ui.models.get(index) {
                     self.choose_model(model.provider.clone(), model.model.clone(), window, cx);
                 }
@@ -282,6 +338,7 @@ impl DesktopShell {
         self.model_picker_selection_reversed = false;
         self.model_picker_marked_range = None;
         self.model_picker_query = updated;
+        self.reset_model_picker_navigation();
         cx.notify();
     }
 
@@ -315,6 +372,7 @@ impl DesktopShell {
             .unwrap_or(replacement_end..replacement_end);
         self.model_picker_selection_reversed = false;
         self.model_picker_query = updated;
+        self.reset_model_picker_navigation();
         cx.notify();
     }
 
@@ -463,6 +521,7 @@ impl DesktopShell {
         let model_id = model.model.clone();
         let selected = self.model.ui.current_provider.as_deref() == Some(model.provider.as_str())
             && self.model.ui.model.as_deref() == Some(model.model.as_str());
+        let highlighted = self.model_picker_highlighted_index == Some(index);
         let label = SharedString::from(model_display_name(model).to_owned());
         let accessible_label = format!("{label} ({})", model.id);
         let description = match model
@@ -482,8 +541,8 @@ impl DesktopShell {
                 .flex_col()
                 .justify_center()
                 .gap(px(3.))
-                .h_auto()
-                .min_h(px(54.))
+                .h(ModelPickerRow::Model { index, recent }.height())
+                .line_height(px(16.))
                 .w_full()
                 .min_w_0()
                 .p(px(10.))
@@ -495,6 +554,9 @@ impl DesktopShell {
                 .aria_selected(selected)
                 .when(selected, |element| {
                     element.bg(theme_rgb(&self.theme, "accent"))
+                })
+                .when(highlighted && !selected, |element| {
+                    element.bg(theme_rgb(&self.theme, "muted"))
                 })
                 .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
                 .on_click(cx.listener(move |shell, _, window, cx| {
@@ -523,22 +585,19 @@ impl DesktopShell {
         )
     }
 
-    fn render_model_option_rows(
+    fn render_model_picker_row(
         &mut self,
-        range: Range<usize>,
+        row_index: usize,
         _window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Vec<gpui::AnyElement> {
-        range
-            .filter_map(
-                |row_index| match self.model_picker_rows.get(row_index).cloned()? {
-                    ModelPickerRow::Header(label) => Some(self.render_model_picker_header(label)),
-                    ModelPickerRow::Model { index, recent } => {
-                        self.render_model_option(index, recent, cx)
-                    }
-                },
-            )
-            .collect()
+    ) -> gpui::AnyElement {
+        match self.model_picker_rows.get(row_index).cloned() {
+            Some(ModelPickerRow::Header(label)) => self.render_model_picker_header(label),
+            Some(ModelPickerRow::Model { index, recent }) => self
+                .render_model_option(index, recent, cx)
+                .unwrap_or_else(|| div().into_any_element()),
+            None => div().into_any_element(),
+        }
     }
 
     fn render_model_picker_header(&self, label: &'static str) -> gpui::AnyElement {
@@ -549,11 +608,12 @@ impl DesktopShell {
             ))
             .flex()
             .items_end()
-            .h(px(64.))
+            .h(ModelPickerRow::Header(label).height())
             .w_full()
             .px(px(10.))
-            .pb(px(8.))
+            .pb(px(4.))
             .text_xs()
+            .line_height(px(16.))
             .text_color(theme_rgb(&self.theme, "text.muted"))
             .child(label)
             .into_any_element()
@@ -568,15 +628,23 @@ impl DesktopShell {
         let option_count = self.model_picker_rows.len();
         let current_thinking_variant = self.model.ui.thinking_variant.clone();
         let options = if option_count > 0 {
-            gpui::uniform_list(
-                "model-picker-list",
-                option_count,
-                cx.processor(Self::render_model_option_rows),
-            )
-            .debug_selector(|| "model-picker-list".into())
-            .flex_1()
-            .min_h_0()
-            .into_any_element()
+            div()
+                .id("model-picker-list")
+                .debug_selector(|| "model-picker-list".into())
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .child(
+                    gpui::list(
+                        self.model_picker_list.clone(),
+                        cx.processor(Self::render_model_picker_row),
+                    )
+                    .with_sizing_behavior(gpui::ListSizingBehavior::Auto)
+                    .flex_1()
+                    .min_h_0(),
+                )
+                .into_any_element()
         } else {
             let message = if self.model_picker_query.trim().is_empty() {
                 "No models reported by the daemon"
@@ -920,6 +988,7 @@ impl DesktopShell {
                     shell.model_picker_selection = 0..0;
                     shell.model_picker_selection_reversed = false;
                     shell.model_picker_marked_range = None;
+                    shell.reset_model_picker_navigation();
                     cx.notify();
                 }))
                 .child(tabler_icon(

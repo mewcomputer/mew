@@ -340,13 +340,20 @@ pub(super) fn model_display_name(model: &mew_protocol::ModelInfo) -> &str {
         .unwrap_or(&model.model)
 }
 
-pub(super) fn model_picker_list_height(option_count: usize) -> Pixels {
-    px((option_count.clamp(1, 5) as f32 * 64.).min(320.))
+pub(super) fn model_picker_list_height(rows: &[ModelPickerRow]) -> Pixels {
+    if rows.is_empty() {
+        px(64.)
+    } else {
+        rows.iter()
+            .map(ModelPickerRow::height)
+            .sum::<Pixels>()
+            .min(px(320.))
+    }
 }
 
-pub(super) fn model_picker_height(option_count: usize, effort_option_count: usize) -> Pixels {
+pub(super) fn model_picker_height(rows: &[ModelPickerRow], effort_option_count: usize) -> Pixels {
     let effort_height = if effort_option_count > 0 { 72. } else { 0. };
-    model_picker_list_height(option_count) + px(52. + effort_height)
+    model_picker_list_height(rows) + px(52. + effort_height)
 }
 
 pub(super) fn recent_model_indices(
@@ -383,21 +390,31 @@ pub(super) fn build_model_picker_rows(
 
     let mut selectable = Vec::with_capacity(filtered_indices.len());
     let mut rows = Vec::with_capacity(filtered_indices.len() + 2);
-    if query.trim().is_empty() {
-        let recent_indices = recent_model_indices(models, recent_models);
-        if !recent_indices.is_empty() {
-            rows.push(ModelPickerRow::Header("Recent"));
-            for index in recent_indices {
-                rows.push(ModelPickerRow::Model {
-                    index,
-                    recent: true,
-                });
-                selectable.push(index);
-            }
-            rows.push(ModelPickerRow::Header("All Models"));
+    let recent_indices = if query.trim().is_empty() {
+        recent_model_indices(models, recent_models)
+    } else {
+        Vec::new()
+    };
+    if !recent_indices.is_empty() {
+        rows.push(ModelPickerRow::Header("Recent"));
+        for &index in &recent_indices {
+            rows.push(ModelPickerRow::Model {
+                index,
+                recent: true,
+            });
+            selectable.push(index);
+        }
+        if filtered_indices
+            .iter()
+            .any(|index| !recent_indices.contains(index))
+        {
+            rows.push(ModelPickerRow::Header("Other models"));
         }
     }
     for index in filtered_indices {
+        if recent_indices.contains(&index) {
+            continue;
+        }
         rows.push(ModelPickerRow::Model {
             index,
             recent: false,
@@ -827,14 +844,11 @@ pub(super) fn picker_popup_position_in_window_right_aligned(
 }
 
 pub(super) fn pending_actions_anchor(composer_bounds: Bounds<Pixels>) -> Point<Pixels> {
-    point(
-        composer_bounds.origin.x - px(12.),
-        composer_bounds.origin.y - px(20.),
-    )
+    point(composer_bounds.origin.x, composer_bounds.origin.y - px(8.))
 }
 
 pub(super) fn pending_actions_width(composer_bounds: Bounds<Pixels>) -> Pixels {
-    composer_bounds.size.width + px(24.)
+    composer_bounds.size.width
 }
 
 pub(super) fn cached_markdown_source_unchanged(

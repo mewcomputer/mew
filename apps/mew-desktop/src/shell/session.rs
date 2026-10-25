@@ -510,6 +510,7 @@ impl DesktopShell {
         self.composer_preserve_scroll_on_resize = false;
         self.composer_scrollbar_grab_offset = None;
         self.composer_area_bounds = None;
+        self.composer_container_bounds = None;
         self.composer_preferred_column = None;
         self.composer_cursor_downstream = false;
         self.text_input_layout = None;

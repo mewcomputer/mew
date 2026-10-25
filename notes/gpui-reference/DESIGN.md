@@ -138,10 +138,14 @@ control at its natural width beside Send, without stretching a short name into
 an empty button. Effort has a separate fixed-width suffix so only the model name
 truncates. Below 480 px of conversation space, replace the persona label with a
 26 px icon control that opens the same picker and retains its full accessible
-label. Follow the measured composer width through pane animations and resizing.
+label. A hover tooltip explains the selected persona in the compact state.
+Follow the measured composer width through pane animations and resizing.
 Wider panes show the selected persona text. Unset values use concise Model/Persona placeholders.
 Composer footer labels are also 11 px; draft text remains 15 px with 24 px leading.
-Long workspace paths truncate while preserving the full accessible label.
+Long workspace paths truncate while preserving the full accessible label. Let
+populated footer metadata wrap before squeezing out the workspace path. Yield
+appears only with another attached client; retain the yielded status separately.
+Daemon presence contains peers only, including after reconnect.
 Long drafts reveal a quiet 24 px information row with visual-line count and an
 Expand/Collapse control. Keep the scrollbar visible while text overflows, inside
 the composer's existing right padding. Expansion grows upward within a measured
@@ -159,12 +163,21 @@ clickable. Removing a file preserves the draft and returns focus to the editor.
 Empty or whitespace-only drafts and pending model switches show a disabled Send
 surface, without click or Tab activation. Running questions expose Send answer
 or Send answers; ordinary running turns retain Stop. Pointer submission and
-Enter use the same question ownership and submission path.
+Enter use the same question ownership and submission path. One question accepts
+a multiline answer. Multiple questions require one nonempty line per answer;
+invalid drafts remain intact with inline guidance. Every question offers scoped
+cancellation without discarding the draft. Measure the complete outer composer
+for required-action placement, including its border and overflow information row,
+and retain an 8 px gap above it.
 
 The model picker uses one row inventory and popup size for layout and placement,
-including Recent entries and headers. Constrain its 400 px width to the window
-and its height to space above or below the trigger. Keep search and effort fixed
-while the model list scrolls. Picker trigger measurements request their redraw
+including unique Recent entries and the remaining Other models. Use a retained
+variable-height list with 24 px section headers and 56 px model rows. Keep its
+state across renders; reset only when the inventory changes. Up/Down navigates
+selectable models and reveals offscreen targets; Enter chooses the highlighted
+provider/model identity. Query changes reset navigation. Constrain the picker's
+400 px width to the window and its height to space above or below the trigger.
+Keep search and effort fixed while the model list scrolls. Picker trigger measurements request their redraw
 after painting so open menus follow resizing.
 
 Display connection and browser failures through the existing stateful surfaces.

@@ -963,3 +963,54 @@ current composer structure. No product implementation changed in this pass.
 
 All owned QA processes are stopped, the draft is empty and the fixture is
 restored to 420 px conversation width, 800 px window height and system appearance.
+
+
+## Composer interaction fixes following the 4021150 review
+
+Implemented the accepted editing/question fixes and picker/secondary-control
+cleanup. The existing toolbar size and draft typography remain unchanged.
+
+- Draft Undo/Redo now follows each chat, restores text and selection together,
+  groups typing/deletion and IME composition, and keeps paste/replacements
+  separate. Canceled compositions leave no empty undo step. Native menu actions
+  and Command-Z / Command-Shift-Z reflect the available history. Failed sends
+  retain history; accepted sends clear it.
+- Single-question answers retain internal newlines. Multiple questions keep their
+  one-answer-per-line format with exact-count/nonempty validation and visible
+  guidance instead of truncating or padding responses. Both main and child
+  questions have scoped cancellation; cancel preserves the draft.
+- Request cards measure the complete composer border box and retain an 8 px gap
+  in short, overflowing and expanded states.
+- The model list uses 24 px section headers and 56 px options. Recent choices
+  appear once, with remaining choices under Other models. Retained list state
+  preserves scrolling; Up/Down skips headers and reveals the target, Enter
+  selects its canonical identity, and search changes reset navigation. Native
+  marked text owns candidate-navigation and submission keys until commit.
+- Compact persona controls show a selected-value tooltip. Yield appears when a
+  peer is attached, and populated footer metadata wraps to preserve path space.
+  The underlying daemon self-presence echo was fixed separately in d34c7b4.
+
+The regressions failed before their fixes. The final suite passes 317 desktop
+and 152 daemon tests, including real two-client attach/detach/reconnect traffic.
+Strict all-target desktop/daemon Clippy, native build/packaging, formatting,
+architecture and generated-theme checks pass. One existing opt-in daemon browser
+integration test remains ignored by the standard suite.
+
+Native QA used the isolated app and real daemon at 420 px conversation width,
+in 480 and 800 px-tall windows. The short picker now displays all three fixture
+models completely. Native arrow selection chose GPT-5.2, then search restored
+Claude Sonnet 4.5/high. Backspace removed the final character in
+`native undo probe é中`; Command-Z restored it and Command-Shift-Z reapplied the
+deletion. Native Edit > Undo also restored it. At the beginning of history,
+Undo was disabled and Redo enabled. The solo footer contained no Yield action.
+
+Captures: [short default](/private/tmp/mew-composer-interactions-2026-10-24/420-short-default.png),
+[short picker](/private/tmp/mew-composer-interactions-2026-10-24/420-short-picker.png),
+[tall default](/private/tmp/mew-composer-interactions-2026-10-24/420-tall-default.png).
+Question flows, populated footer wrapping, hover hints and IME ownership were
+verified through actual GPUI/command-channel tests. Physical IME candidate
+placement and VoiceOver were not exercised. No provider prompt was submitted.
+The QA app and owned daemon are stopped and the fixture is restored. Direct
+Codex inspection was not retried; its supplied screenshot remains the visual
+reference. Secondary-menu height estimation remains a separate unverified
+follow-up from the review.
