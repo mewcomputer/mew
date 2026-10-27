@@ -36,20 +36,16 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 
-const WORKBENCH_SURFACES: ReadonlyArray<{
+const NEW_TAB_TOOLS: ReadonlyArray<{
   kind: WorkbenchTabKind;
   label: string;
   description: string;
-  shortcut?: string;
   icon: LucideIcon;
 }> = [
-  { kind: "review", label: "Review", description: "Inspect and review working-tree changes", shortcut: "⌃⇧G", icon: GitPullRequest },
-  { kind: "terminal", label: "Terminal", description: "Run and inspect background commands", icon: Terminal },
-  { kind: "browser", label: "Browser", description: "Open a browser tab in the workbench", shortcut: "⌘T", icon: Globe },
-  { kind: "file", label: "Files", description: "Browse the active project files", shortcut: "⌘P", icon: Folder },
-  { kind: "agents", label: "Agents", description: "Watch delegated work in progress", icon: Loader2 },
-  { kind: "jobs", label: "Jobs", description: "Track long-running background commands", icon: Terminal },
   { kind: "changes", label: "Changes", description: "Inspect the active working tree", icon: GitBranch },
+  { kind: "terminal", label: "Terminal", description: "Run and inspect background commands", icon: Terminal },
+  { kind: "file", label: "Files", description: "Browse the active project files", icon: Folder },
+  { kind: "review", label: "Review", description: "Inspect and review working-tree changes", icon: GitPullRequest },
 ];
 
 interface RightRailProps {
@@ -298,7 +294,7 @@ export function RightRail({
           launcher={<div className="mx-auto w-full max-w-[44rem] px-6 py-8">
             <h2 className="mb-4 text-[11px] font-medium">Tools</h2>
             <div className="grid grid-cols-2 gap-x-3 gap-y-1">
-              {WORKBENCH_SURFACES.filter((surface) => surface.kind !== "browser").sort((a, b) => ["changes", "terminal", "file", "agents", "review", "jobs"].indexOf(a.kind) - ["changes", "terminal", "file", "agents", "review", "jobs"].indexOf(b.kind)).map((surface) => {
+              {NEW_TAB_TOOLS.map((surface) => {
                 const Icon = surface.icon;
                 return <button key={surface.kind} type="button" title={surface.description} className="flex h-9 min-w-0 items-center gap-2 rounded-md bg-muted/35 px-2.5 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => {
                   const next = createWorkbenchTab(surface.kind, { sessionId: sessionId ?? undefined, cwd: sessionCwd ?? undefined });

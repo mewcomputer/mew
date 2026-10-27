@@ -109,6 +109,17 @@ describe("RightRail", () => {
     expect(screen.getByRole("textbox", { name: "Browser URL" })).toBeTruthy();
   });
 
+  it.each([false, true])("keeps activity out of the launcher (explicit new tab: %s)", (newTab) => {
+    render(<RightRail mode="dock" open onOpenChange={vi.fn()} />);
+    if (newTab) addWorkbenchTab("Browser");
+
+    expect(screen.queryByRole("button", { name: /^Agents\b/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Jobs\b/ })).toBeNull();
+    for (const label of ["Changes", "Terminal", "Files", "Review"]) {
+      expect(screen.getByRole("button", { name: new RegExp(`^${label}\\b`) })).toBeTruthy();
+    }
+  });
+
   it("switches between workbench surfaces without closing the rail", () => {
     render(<RightRail mode="dock" open onOpenChange={vi.fn()} />);
 

@@ -3787,3 +3787,14 @@ remaining acceptance work in `notes/chat-ui-baseline-checklist.md`. The current
 milestone stops at the UI; direct subagent messaging and full migration parity
 remain required before replacement release. The build retains its existing
 large-chunk warning.
+
+## 2026-10-27: keep activity in the corner summary
+
+Removed Agents and Jobs from the new-tab launcher. Its remaining tools are
+Changes, Terminal, Files and Review; subagent and background-process details
+remain accessible through the summary. Kept the launcher inventory in display
+order so rendering no longer filters or sorts it.
+
+The regression failed before the change for both the empty workbench launcher
+and an explicit new tab. All 22 related launcher, summary and navigation tests
+passed afterward, along with the production UI build and debug packaging.
