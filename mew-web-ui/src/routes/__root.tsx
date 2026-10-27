@@ -33,42 +33,35 @@ function RootComponent() {
     };
   }, [router]);
 
-  // ⌘K → command palette, ⌘N → new session
   useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
-        e.preventDefault();
-        setPaletteOpen((v) => !v);
+    const action = (name: string) => {
+      if (name === "search") setPaletteOpen((open) => !open);
+      if (name !== "new-chat") return;
+      const client = getClient();
+      const store = useSessionStore.getState();
+      if (store.connectionState !== "connected") {
+        store.setConnectionError("Connect to the daemon before creating a chat.");
+        return;
       }
-      if ((e.metaKey || e.ctrlKey) && e.key === "n") {
-        e.preventDefault();
-        // Delegate to the command palette's new-session action.
-        const client = getClient();
-        if (!client) return;
-        const store = useSessionStore.getState();
-        if (store.connectionState !== "connected") {
-          store.setConnectionError("Connect to the daemon before creating a session.");
-          return;
-        }
-        store.reset();
-        client
-          .newSession()
-          .then((newId) => {
-            localStorage.setItem("mew.sessionId", newId);
-            router.navigate({
-              to: "/session/$sessionId",
-              params: { sessionId: newId },
-            });
-          })
-          .catch((error: unknown) => {
-            useSessionStore
-              .getState()
-              .onError(error instanceof Error ? error.message : "Could not create a session.");
-          });
-      }
+      store.reset();
+      void client.newSession().then((newId) => {
+        localStorage.setItem("mew.sessionId", newId);
+        router.navigate({ to: "/session/$sessionId", params: { sessionId: newId } });
+      }).catch((error: unknown) => {
+        useSessionStore.getState().onError(error instanceof Error ? error.message : "Could not create a chat.");
+      });
     };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
+    const keyboard = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey)) return;
+      const key = event.key.toLowerCase();
+      if (key !== "k" && key !== "n") return;
+      event.preventDefault();
+      action(key === "k" ? "search" : "new-chat");
+    };
+    const menu = (event: Event) => action((event as CustomEvent<string>).detail);
+    window.addEventListener("keydown", keyboard);
+    window.addEventListener("mew:menu-action", menu);
+    return () => { window.removeEventListener("keydown", keyboard); window.removeEventListener("mew:menu-action", menu); };
   }, [router]);
 
   return (

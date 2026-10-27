@@ -71,10 +71,12 @@ async function expandInspector() {
 describe("MessageInspector", () => {
   afterEach(cleanup);
 
-  it("renders summary line with ~ prefix and token counts", () => {
+  it("reveals the token counts through message details", () => {
     const manifest = makeManifest();
     render(<MessageInspector manifest={manifest} />);
 
+    expect(screen.queryByText(/~9\.7k ↓/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Message details" }));
     // Should show input tokens with ~ prefix
     expect(screen.getByText(/~9\.7k ↓/)).toBeTruthy();
     // Should show output tokens
@@ -91,6 +93,7 @@ describe("MessageInspector", () => {
     });
     render(<MessageInspector manifest={manifest} />);
 
+    fireEvent.click(screen.getByRole("button", { name: "Message details" }));
     expect(screen.getByText("error · structure below")).toBeTruthy();
   });
 

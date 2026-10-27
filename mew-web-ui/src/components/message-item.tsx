@@ -111,12 +111,6 @@ export const MessageItem = memo(function MessageItem({
         isUser ? "items-end" : "items-start",
       )}
     >
-      {!isUser && copyText && (
-        <CopyButton
-          text={copyText}
-          className="self-end opacity-0 group-hover:opacity-100"
-        />
-      )}
       {groupParts(message.parts).map((group, i) => {
         if (group.kind === "single") {
           const part = group.parts[0];
@@ -139,6 +133,7 @@ export const MessageItem = memo(function MessageItem({
       {!isUser && message.assistantMeta?.manifest && (
         <MessageInspector manifest={message.assistantMeta.manifest} />
       )}
+      {!isUser && copyText && <CopyButton text={copyText} className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100" />}
     </div>
   );
 });
@@ -159,8 +154,8 @@ function PartRenderer({
       return (
         <div
           className={cn(
-            "min-w-0 max-w-full rounded-lg py-2.5",
-            isUser ? "bg-primary text-primary-foreground px-4" : "",
+            "min-w-0 max-w-full py-1",
+            isUser ? "max-w-[90%] rounded-2xl bg-muted px-3.5 py-2 text-foreground" : "",
           )}
         >
           {part.streaming ? (

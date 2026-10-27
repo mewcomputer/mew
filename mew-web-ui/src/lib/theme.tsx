@@ -2,10 +2,12 @@ import {
   createContext,
   useContext,
   useEffect,
+  useMemo,
   useState,
   type ReactNode,
 } from "react";
 import themes from "../themes.json";
+import { getHostBootstrap, hostRequest, type HostTheme } from "./host";
 
 // ---------------------------------------------------------------------------
 // Theme definitions — loaded from themes.json
@@ -62,6 +64,9 @@ interface ThemeContextValue {
   theme: ThemeDef;
   /** Whether the current theme is light or dark. */
   mode: ResolvedMode;
+  themes: ThemeDef[];
+  themeMode: "system" | ResolvedMode;
+  setThemeMode: (mode: "system" | ResolvedMode) => void;
   fontId: FontChoiceId;
   setFontId: (id: FontChoiceId) => void;
 }
@@ -69,15 +74,16 @@ interface ThemeContextValue {
 const ThemeContext = createContext<ThemeContextValue | null>(null);
 
 const STORAGE_KEY = "mew-theme-id";
-const DEFAULT_THEME = "catppuccin-mocha";
+const DEFAULT_THEME = "codex-dark";
+const APPEARANCE_STORAGE_KEY = "mew-appearance";
 const FONT_STORAGE_KEY = "mew-font-choice";
-const DEFAULT_FONT: FontChoiceId = "mi-sans";
+const DEFAULT_FONT: FontChoiceId = "system";
 
-function getInitialThemeId(): string {
-  if (typeof window === "undefined") return DEFAULT_THEME;
-  const stored = localStorage.getItem(STORAGE_KEY);
-  if (stored && THEMES.some((t) => t.id === stored)) return stored;
-  return DEFAULT_THEME;
+function hostThemeDefinition(value: HostTheme): ThemeDef {
+  const builtin = THEMES.find((theme) => theme.id === value.id);
+  if (builtin) return builtin;
+  const color = (name: string, fallback: string) => value.css.match(new RegExp(`--${name}:\\s*(#[a-fA-F0-9]{6})`))?.[1] ?? fallback;
+  return { id: value.id, name: value.id, description: "Installed theme", category: "Custom", baseText: color("foreground", "#ffffff"), preview: [color("background", "#181818"), color("primary", "#aaaaaa"), color("text-success", "#888888")] };
 }
 
 function getInitialFontId(): FontChoiceId {
@@ -89,17 +95,66 @@ function getInitialFontId(): FontChoiceId {
 }
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [themeId, setThemeIdState] = useState<string>(getInitialThemeId);
+  const host = getHostBootstrap();
+  const availableThemes = useMemo(() => host?.themes.length ? host.themes.map(hostThemeDefinition) : THEMES, [host]);
+  const [preferences, setPreferences] = useState(() => {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    const validStored = availableThemes.find((theme) => theme.id === stored);
+    const storedMode = validStored && luminance(validStored.preview[0] ?? "#000000") < 0.5 ? "dark" : "light";
+    const defaults = {
+      themeMode: host?.themeMode ?? (validStored ? storedMode : "system") as "system" | ResolvedMode,
+      lightTheme: host?.lightTheme ?? (validStored && storedMode === "light" ? validStored.id : "codex-light"),
+      darkTheme: host?.darkTheme ?? (validStored && storedMode === "dark" ? validStored.id : DEFAULT_THEME),
+    };
+    if (host) return defaults;
+    try {
+      const saved: unknown = JSON.parse(localStorage.getItem(APPEARANCE_STORAGE_KEY) ?? "null");
+      if (saved && typeof saved === "object" && "themeMode" in saved && "lightTheme" in saved && "darkTheme" in saved
+        && ["system", "light", "dark"].includes(String(saved.themeMode))
+        && typeof saved.lightTheme === "string" && typeof saved.darkTheme === "string") {
+        return { themeMode: saved.themeMode as "system" | ResolvedMode, lightTheme: saved.lightTheme, darkTheme: saved.darkTheme };
+      }
+    } catch { /* Use the last valid preference after malformed browser storage. */ }
+    return defaults;
+  });
+  const [systemDark, setSystemDark] = useState(() => window.matchMedia("(prefers-color-scheme: dark)").matches);
   const [fontId, setFontIdState] = useState<FontChoiceId>(getInitialFontId);
+  const mode: ResolvedMode = preferences.themeMode === "system" ? (systemDark ? "dark" : "light") : preferences.themeMode;
+  const themeId = mode === "dark" ? preferences.darkTheme : preferences.lightTheme;
+  const theme = availableThemes.find((item) => item.id === themeId) ?? availableThemes[0]!;
 
-  const theme = THEMES.find((t) => t.id === themeId) ?? THEMES[0]!;
-  const mode: ResolvedMode =
-    luminance(theme.preview[0] ?? "#000000") < 0.5 ? "dark" : "light";
-
-  const setThemeId = (id: string) => {
-    setThemeIdState(id);
-    localStorage.setItem(STORAGE_KEY, id);
+  const savePreferences = (next: typeof preferences) => {
+    setPreferences(next);
+    localStorage.setItem(APPEARANCE_STORAGE_KEY, JSON.stringify(next));
+    localStorage.setItem(STORAGE_KEY, next.themeMode === "dark" ? next.darkTheme : next.lightTheme);
+    if (host) void hostRequest({ type: "set_theme", ...next }).catch((error: unknown) => {
+      console.error("Could not save appearance preferences", error);
+    });
   };
+  const setThemeId = (id: string) => {
+    const selected = availableThemes.find((item) => item.id === id);
+    if (!selected) return;
+    const selectedMode = host?.themes.find((item) => item.id === id)?.mode
+      ?? (luminance(selected.preview[0] ?? "#000000") < 0.5 ? "dark" : "light");
+    savePreferences({ ...preferences, themeMode: selectedMode, [selectedMode === "dark" ? "darkTheme" : "lightTheme"]: id });
+  };
+  const setThemeMode = (themeMode: "system" | ResolvedMode) => savePreferences({ ...preferences, themeMode });
+
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const update = () => setSystemDark(media.matches);
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+
+  useEffect(() => {
+    if (!host) return;
+    const style = document.createElement("style");
+    style.dataset.mewHostThemes = "";
+    style.textContent = host.themes.map((item) => `[data-theme="${CSS.escape(item.id)}"] { ${item.css} }`).join("\n");
+    document.head.append(style);
+    return () => style.remove();
+  }, [host]);
 
   const setFontId = (id: FontChoiceId) => {
     setFontIdState(id);
@@ -108,14 +163,16 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme.id);
-  }, [theme]);
+    document.documentElement.classList.toggle("dark", mode === "dark");
+    document.documentElement.style.colorScheme = mode;
+  }, [theme.id, mode]);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-font", fontId);
   }, [fontId]);
 
   return (
-    <ThemeContext.Provider value={{ themeId, setThemeId, theme, mode, fontId, setFontId }}>
+    <ThemeContext.Provider value={{ themeId: theme.id, setThemeId, theme, mode, themes: availableThemes, themeMode: preferences.themeMode, setThemeMode, fontId, setFontId }}>
       {children}
     </ThemeContext.Provider>
   );

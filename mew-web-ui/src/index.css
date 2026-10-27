@@ -98,6 +98,17 @@
 
 /* Context inspector color palette — shared across all themes. */
 :root {
+  --mew-code-background: var(--markdown-code-fence-bg);
+  --mew-code-foreground: var(--text-body);
+  --mew-code-token-constant: var(--syntax-constant, var(--purple-fg));
+  --mew-code-token-string: var(--syntax-string, var(--green-fg));
+  --mew-code-token-comment: var(--syntax-comment, var(--text-muted));
+  --mew-code-token-keyword: var(--syntax-keyword, var(--red-fg));
+  --mew-code-token-parameter: var(--syntax-variable, var(--text-body));
+  --mew-code-token-function: var(--syntax-function, var(--blue-fg));
+  --mew-code-token-string-expression: var(--syntax-string, var(--green-fg));
+  --mew-code-token-punctuation: var(--syntax-operator, var(--text-body));
+  --mew-code-token-link: var(--markdown-link-text);
   --radius: 0.625rem;
   --radius-control: 0.5rem;
   --radius-panel: 0.75rem;
@@ -120,9 +131,9 @@
 }
 
 @theme inline {
-  --font-sans: "MiSans", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: ui-sans-serif, system-ui, sans-serif;
   --font-serif: ui-serif, Georgia, serif;
-  --font-display: "Banga", "MiSans", ui-sans-serif, system-ui, sans-serif;
+  --font-display: ui-sans-serif, system-ui, sans-serif;
   --font-mono:
     "IoskeleyMono", ui-monospace, SF Mono, SF Mono Regular, Consolas,
     "Liberation Mono", Menlo, Courier, monospace;
@@ -233,6 +244,17 @@ body {
   background-color: var(--background);
   color: var(--foreground);
   font-family: var(--font-sans);
+  font-size: 13px;
+}
+
+.mew-conversation-width {
+  width: 100%;
+  max-width: 46rem;
+}
+
+.chat-scroll-container .typeset {
+  --typeset-size: 14px;
+  --typeset-leading: 1.65;
 }
 
 .chat-scroll-container {

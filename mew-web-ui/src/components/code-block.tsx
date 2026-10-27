@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { CopyButton } from "./copy-button";
-import { useTheme } from "../lib/theme";
 import { highlightCode } from "../lib/shiki";
 import { cn } from "../lib/utils";
 
@@ -21,18 +20,17 @@ export function CodeBlock({
   flush?: boolean;
   fill?: boolean;
 }) {
-  const { mode } = useTheme();
   const [html, setHtml] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    highlightCode(code, lang, mode).then((h) => {
+    highlightCode(code, lang).then((h) => {
       if (!cancelled) setHtml(h);
     });
     return () => {
       cancelled = true;
     };
-  }, [code, lang, mode]);
+  }, [code, lang]);
 
   return (
     <div className={cn(

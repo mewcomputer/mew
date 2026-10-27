@@ -34,15 +34,7 @@ import {
   SheetContent,
 } from "@/components/ui/sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import {
-  CommandDialog,
-  CommandEmpty,
-  CommandGroup,
-  CommandInput,
-  CommandItem,
-  CommandList,
-  CommandShortcut,
-} from "@/components/ui/command";
+
 
 const WORKBENCH_SURFACES: ReadonlyArray<{
   kind: WorkbenchTabKind;
@@ -78,7 +70,6 @@ export function RightRail({
   onWorkbenchTabsAction,
 }: RightRailProps) {
   const isMobile = useIsMobile();
-  const [surfacePickerOpen, setSurfacePickerOpen] = useState(false);
   const [uncontrolledWorkbenchTabs, setUncontrolledWorkbenchTabs] = useState(DEFAULT_WORKBENCH_TABS);
   const selectedWorkbenchTabs = onWorkbenchTabsChange || onWorkbenchTabsAction
     ? workbenchTabs
@@ -113,10 +104,8 @@ export function RightRail({
   };
 
   const openAddWorkbenchMenu = () => {
-    setSurfacePickerOpen(true);
+    addWorkbenchTab("browser");
   };
-
-  // When the Files or Changes tab is opened, enable workspace watching so
 
   // When the Files or Changes tab is opened, enable workspace watching so
   // fs_changed events keep the listings/git status live. Stop watching
@@ -168,28 +157,26 @@ export function RightRail({
   ]);
 
   useEffect(() => {
-    if (!open) return;
-    if (!selectedWorkbenchTab) return;
+    const action = (name: string) => {
+      if (name === "new-tab") addWorkbenchTab("browser");
+      if (name === "terminal") addWorkbenchTab("terminal");
+      if (name === "close-tab" && selectedWorkbenchTab?.closable) applyWorkbenchAction({ type: "close", id: selectedWorkbenchTab.id });
+    };
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (!(event.metaKey || event.ctrlKey)) return;
+      if (!open || !(event.metaKey || event.ctrlKey)) return;
       const key = event.key.toLowerCase();
-      if (key === "w" && selectedWorkbenchTab.closable) {
-        event.preventDefault();
-        applyWorkbenchAction({ type: "close", id: selectedWorkbenchTab.id });
-      } else if (key === "t") {
-        event.preventDefault();
-        if (selectedWorkbenchTab.kind === "browser") addWorkbenchTab("browser");
-        else openAddWorkbenchMenu();
-      } else if (/^[1-9]$/.test(key)) {
+      if (key === "w" && selectedWorkbenchTab?.closable) { event.preventDefault(); action("close-tab"); }
+      else if (key === "t") { event.preventDefault(); action("new-tab"); }
+      else if (/^[1-9]$/.test(key)) {
         const tab = selectedWorkbenchTabs.tabs[Number(key) - 1];
-        if (!tab) return;
-        event.preventDefault();
-        applyWorkbenchAction({ type: "select", id: tab.id });
+        if (tab) { event.preventDefault(); applyWorkbenchAction({ type: "select", id: tab.id }); }
       }
     };
+    const menu = (event: Event) => action((event as CustomEvent<string>).detail);
     window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [open, selectedWorkbenchTab, selectedWorkbenchTabs]);
+    window.addEventListener("mew:menu-action", menu);
+    return () => { window.removeEventListener("keydown", handleKeyDown); window.removeEventListener("mew:menu-action", menu); };
+  }, [open, selectedWorkbenchTab, selectedWorkbenchTabs, sessionId]);
 
   const workbenchContent = (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -201,13 +188,10 @@ export function RightRail({
           selectedWorkbenchTab?.kind === "browser" && "bg-background",
         )}
       >
-        <div className="flex min-w-0 shrink-0 items-center border-b border-border">
+        <div className="flex h-9 min-w-0 shrink-0 items-center border-b border-border/70 bg-sidebar/60">
           <TabsList
             aria-label="Workbench tabs"
-            className={cn(
-              "min-w-0 flex-1 justify-start gap-0 overflow-x-auto rounded-none border-0 bg-transparent p-0",
-              selectedWorkbenchTab?.kind === "browser" ? "h-10 px-1" : "h-11",
-            )}
+            className="h-9 min-w-0 max-w-[calc(100%_-_4.5rem)] flex-none justify-start gap-0.5 overflow-x-auto rounded-none border-0 bg-transparent p-0 px-1"
           >
             {selectedWorkbenchTabs.tabs.map((tab) => {
               const meta = workbenchTabMeta(tab.kind);
@@ -219,26 +203,16 @@ export function RightRail({
                   : tab.kind === "changes"
                     ? gitStatus.length
                     : 0;
-              const isBrowserChrome = selectedWorkbenchTab?.kind === "browser";
               return (
                 <div
                   key={tab.id}
-                  className={cn(
-                    "group flex h-full shrink-0 items-center",
-                    !isBrowserChrome && "border-b-2",
-                    !isBrowserChrome && (tab.id === selectedWorkbenchTab?.id ? "border-primary" : "border-transparent"),
-                  )}
+                  className={cn("group my-1 flex h-7 shrink-0 items-center rounded-md border border-transparent", tab.id === selectedWorkbenchTab?.id && "border-border bg-muted/70")}
                 >
                   <TabsTrigger
                     value={tab.id}
                     aria-label={tab.title}
                     onClick={() => applyWorkbenchAction({ type: "select", id: tab.id })}
-                    className={cn(
-                      "gap-1.5 border-0 border-transparent px-2.5 text-[11px] font-medium text-muted-foreground shadow-none transition-colors duration-150 data-[state=active]:text-foreground data-[state=active]:shadow-none",
-                      isBrowserChrome
-                        ? "my-1 h-8 rounded-lg data-[state=active]:bg-muted/80"
-                        : "h-full rounded-none data-[state=active]:bg-transparent",
-                    )}
+                    className="h-7 gap-1.5 rounded-md border-0 px-2 text-[11px] font-normal text-muted-foreground shadow-none data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none"
                   >
                     <Icon className="h-3.5 w-3.5" aria-hidden="true" />
                     <span className="max-w-32 truncate">{tab.title}</span>
@@ -248,7 +222,7 @@ export function RightRail({
                     <button
                       type="button"
                       onClick={() => applyWorkbenchAction({ type: "close", id: tab.id })}
-                      className="motion-pressable mr-1 rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover:opacity-100"
+                      className={cn("motion-pressable mr-1 rounded p-1 text-muted-foreground opacity-0 hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100", tab.id === selectedWorkbenchTab?.id && "opacity-100")}
                       aria-label={`Close ${tab.title}`}
                       title={`Close ${tab.title}`}
                     >
@@ -266,12 +240,11 @@ export function RightRail({
               className="motion-pressable ml-1 rounded p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               aria-label="Add workbench tab"
               title="Add workbench tab"
-              aria-expanded={surfacePickerOpen}
-              aria-haspopup="dialog"
             >
               <Plus className="h-3.5 w-3.5" />
             </button>
           </div>
+          <div className="flex-1" />
           <button
             type="button"
             onClick={() => onOpenChange(false)}
@@ -284,11 +257,7 @@ export function RightRail({
         </div>
         <div className="min-h-0 flex-1 overflow-hidden">
           {selectedWorkbenchTabs.tabs.length === 0 ? (
-            <EmptyState
-              icon={<Plus className="h-4 w-4" />}
-              title="No workbench tabs"
-              description="Use + to add a browser, terminal, file, change, review, agent, or job surface."
-            />
+            renderWorkbenchSurface(createWorkbenchTab("browser", { id: "launcher" }), true)
           ) : selectedWorkbenchTabs.tabs.map((tab) => (
             <TabsContent
               key={tab.id}
@@ -305,37 +274,7 @@ export function RightRail({
           ))}
         </div>
       </Tabs>
-      <CommandDialog open={surfacePickerOpen} onOpenChange={setSurfacePickerOpen}>
-        <CommandInput autoFocus placeholder="Choose a workbench surface…" />
-        <CommandList className="max-h-[min(28rem,65vh)] p-2">
-          <CommandEmpty>No matching surfaces.</CommandEmpty>
-          <CommandGroup heading="Open in workbench">
-            {WORKBENCH_SURFACES.map((surface) => {
-              const Icon = surface.icon;
-              return (
-                <CommandItem
-                  key={surface.kind}
-                  value={`${surface.label} ${surface.description}`}
-                  onSelect={() => {
-                    addWorkbenchTab(surface.kind);
-                    setSurfacePickerOpen(false);
-                  }}
-                  className="min-h-12 gap-3 rounded-lg px-3 py-2.5"
-                >
-                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
-                    <Icon className="h-4 w-4" />
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block text-sm font-medium">{surface.label}</span>
-                    <span className="block truncate text-xs text-muted-foreground">{surface.description}</span>
-                  </span>
-                  {surface.shortcut && <CommandShortcut>{surface.shortcut}</CommandShortcut>}
-                </CommandItem>
-              );
-            })}
-          </CommandGroup>
-        </CommandList>
-      </CommandDialog>
+
     </div>
   );
 
@@ -351,7 +290,27 @@ export function RightRail({
           connected={connected}
           active={open && active}
           tab={tab}
-          onTabChange={(patch) => applyWorkbenchAction({ type: "update", id: tab.id, patch })}
+          onTabChange={(patch) => {
+            if (tab.id === "launcher") applyWorkbenchAction({ type: "add", tab: createWorkbenchTab("browser", { ...patch, sessionId: sessionId ?? undefined }) });
+            else applyWorkbenchAction({ type: "update", id: tab.id, patch });
+          }}
+          sessionId={tab.sessionId ?? sessionId ?? undefined}
+          launcher={<div className="mx-auto w-full max-w-[44rem] px-6 py-8">
+            <h2 className="mb-4 text-[11px] font-medium">Tools</h2>
+            <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+              {WORKBENCH_SURFACES.filter((surface) => surface.kind !== "browser").sort((a, b) => ["changes", "terminal", "file", "agents", "review", "jobs"].indexOf(a.kind) - ["changes", "terminal", "file", "agents", "review", "jobs"].indexOf(b.kind)).map((surface) => {
+                const Icon = surface.icon;
+                return <button key={surface.kind} type="button" title={surface.description} className="flex h-9 min-w-0 items-center gap-2 rounded-md bg-muted/35 px-2.5 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => {
+                  const next = createWorkbenchTab(surface.kind, { sessionId: sessionId ?? undefined, cwd: sessionCwd ?? undefined });
+                  if (tab.id !== "launcher" && !tab.payload?.url) applyWorkbenchAction({ type: "update", id: tab.id, patch: next });
+                  else applyWorkbenchAction({ type: "add", tab: next });
+                }}>
+                  <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span className="truncate">{surface.label}<span className="sr-only"> {surface.description}</span></span>
+                </button>;
+              })}
+            </div>
+          </div>}
         />;
       case "file":
         return (
@@ -386,7 +345,7 @@ export function RightRail({
         aria-label="Workspace workbench"
         data-open={open}
         aria-hidden={!open}
-        className="motion-panel-size flex h-full min-w-0 overflow-hidden border-l border-border bg-panel-background md:my-2 md:mr-2 md:rounded-[var(--radius-shell)] md:shadow-sm"
+        className="motion-panel-size @container flex h-full min-w-0 overflow-hidden border-l border-border bg-background"
       >
         <div className="flex min-w-0 flex-1 flex-col">{workbenchContent}</div>
       </aside>

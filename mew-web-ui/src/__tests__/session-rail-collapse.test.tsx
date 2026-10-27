@@ -26,9 +26,9 @@ function makeSession(overrides: Partial<SessionInfo> = {}): SessionInfo {
   };
 }
 
-function renderRail(client: Parameters<typeof SessionRail>[0]["client"] = null) {
+function renderRail(client: Parameters<typeof SessionRail>[0]["client"] = null, defaultOpen = true) {
   return render(
-    <SidebarProvider>
+    <SidebarProvider defaultOpen={defaultOpen}>
       <SessionRail client={client} />
     </SidebarProvider>,
   );
@@ -37,7 +37,7 @@ function renderRail(client: Parameters<typeof SessionRail>[0]["client"] = null) 
 /** Choose Workspace from the labeled ViewSwitcher menu. */
 async function switchToWorkspace() {
   const user = userEvent.setup();
-  const trigger = screen.getAllByRole("button", { name: "Session view: Timeline" })[0]!;
+  const trigger = screen.getAllByRole("button", { name: "mew menu" })[0]!;
   await user.click(trigger);
   await user.click(await screen.findByRole("menuitem", { name: "Workspace" }));
 }
@@ -58,23 +58,71 @@ describe("SessionRail workspace collapse", () => {
     });
   });
 
-  it("reserves space for session actions so they cannot cover the title", () => {
-    useSessionStore.setState({
-      availableSessions: [
-        makeSession({
-          session_id: "sess_actions",
-          first_message: "can you create a function to reverse this?",
-          cwd: "/projects/mew",
-        }),
-      ],
-      connectionState: "connected",
-    });
+  it("renders an icon rail without expanded controls or chat titles when collapsed", () => {
+    useSessionStore.setState({ availableSessions: [makeSession({ first_message: "A chat title that should not clip", model: "fake" })] });
+    renderRail(null, false);
+    for (const name of ["Expand sidebar", "New chat", "Search chats", "Show archived sessions", "Open settings"]) {
+      expect(screen.getByRole("button", { name }).textContent?.trim()).toBe("");
+    }
+    expect(screen.queryByRole("textbox", { name: "Search sessions" })).toBeNull();
+    expect(screen.queryByText("A chat title that should not clip")).toBeNull();
+    expect(screen.queryByText("Continue latest")).toBeNull();
+    expect(screen.queryByRole("button", { name: "mew menu" })).toBeNull();
+  });
 
+  it("expands the compact rail and focuses its real chat search", async () => {
+    renderRail(null, false);
+    fireEvent.click(screen.getByRole("button", { name: "Search chats" }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Search sessions" })));
+    fireEvent.change(screen.getByRole("textbox", { name: "Search sessions" }), { target: { value: "missing chat" } });
+    expect(screen.getByText("No sessions match “missing chat”")).toBeTruthy();
+  });
+
+  it("creates a real new chat from the compact icon button", async () => {
+    const newSession = vi.fn().mockResolvedValue("compact-new");
+    useSessionStore.setState({ connectionState: "connected" });
+    renderRail({ newSession, listSessions: vi.fn().mockResolvedValue([]) } as never, false);
+    await userEvent.setup().click(screen.getByRole("button", { name: "New chat" }));
+    expect(newSession).toHaveBeenCalledOnce();
+  });
+
+  it("groups pinned chats ahead of recent chats in the notifications view", () => {
+    useSessionStore.setState({ availableSessions: [makeSession({ session_id: "pinned", first_message: "Priority work", pinned: true }), makeSession({ session_id: "recent", first_message: "Recent work", created_at: Date.now() })] });
     renderRail();
+    expect(screen.getByText("Priority")).toBeTruthy();
+    expect(screen.getByText("Today")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "mew menu" })).toBeTruthy();
+  });
 
-    const title = screen.getByText("can you create a function to reverse this?");
-    const titleRow = title.parentElement?.parentElement;
-    expect(titleRow?.className).toContain("pr-24");
+  it("labels recent chat groups by their local calendar date", () => {
+    const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1);
+    const weekday = new Date(); weekday.setDate(weekday.getDate() - 3);
+    const older = new Date(); older.setDate(older.getDate() - 10);
+    useSessionStore.setState({ availableSessions: [makeSession({ session_id: "yesterday", created_at: yesterday.getTime() }), makeSession({ session_id: "weekday", created_at: weekday.getTime() }), makeSession({ session_id: "older", created_at: older.getTime() })] });
+    renderRail();
+    expect(screen.getByText("Yesterday")).toBeTruthy();
+    expect(screen.getByText(weekday.toLocaleDateString(undefined, { weekday: "long" }))).toBeTruthy();
+    expect(screen.getByText(older.toLocaleDateString(undefined, { month: "short", day: "numeric" }))).toBeTruthy();
+  });
+
+  it("reloads the canonical chat list after a new chat is confirmed", async () => {
+    const listSessions = vi.fn().mockResolvedValueOnce([]).mockResolvedValue([makeSession({ session_id: "confirmed-chat", first_message: "A real new chat" })]);
+    useSessionStore.setState({ connectionState: "connected" });
+    renderRail({ listSessions } as never);
+    await waitFor(() => expect(screen.getByText("No sessions yet")).toBeTruthy());
+    act(() => useSessionStore.getState().setSessionId("confirmed-chat"));
+    await waitFor(() => expect(screen.getByRole("button", { name: /^A real new chat$/ })).toBeTruthy());
+    expect(listSessions).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps chat management actions in the row menu", async () => {
+    const pinSession = vi.fn();
+    useSessionStore.setState({ availableSessions: [makeSession({ first_message: "Review the UI", cwd: "/projects/mew" })] });
+    renderRail({ pinSession } as never);
+    expect(screen.queryByRole("button", { name: "Pin session" })).toBeNull();
+    await userEvent.setup().click(screen.getByRole("button", { name: "Chat actions: Review the UI" }));
+    await userEvent.setup().click(screen.getByRole("menuitem", { name: "Pin chat" }));
+    expect(pinSession).toHaveBeenCalledWith("sess_test1", true);
   });
 
   it("clears the previous session before creating a new one", async () => {
@@ -95,7 +143,7 @@ describe("SessionRail workspace collapse", () => {
     });
 
     renderRail({ newSession, listSessions: vi.fn(() => Promise.resolve([])) } as never);
-    await userEvent.setup().click(screen.getByRole("button", { name: "New session" }));
+    await userEvent.setup().click(screen.getByRole("button", { name: "New chat" }));
 
     expect(newSession).toHaveBeenCalledOnce();
   });

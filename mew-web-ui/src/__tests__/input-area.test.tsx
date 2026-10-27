@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { render, screen, fireEvent, waitFor, act, cleanup } from "@testing-library/react";
 import { InputArea } from "../components/input-area";
 import { useSessionStore } from "../stores/session";
 import type { PersonaInfo } from "@mew/web-client";
@@ -37,8 +37,11 @@ function renderInputArea(overrides: Partial<{ onSend: ReturnType<typeof vi.fn>; 
 }
 
 describe("InputArea", () => {
+  let chatIndex = 0;
+  afterEach(cleanup);
   beforeEach(() => {
     useSessionStore.setState({
+      sessionId: `composer-test-${++chatIndex}`,
       availablePersonas: [],
       currentPersona: null,
       streamingPartId: null,
@@ -50,10 +53,48 @@ describe("InputArea", () => {
   it("keeps composer controls inside the primary composer surface", () => {
     renderInputArea();
 
+    expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Message prompt" }));
     const surface = screen.getByTestId("composer-surface");
     expect(surface.contains(screen.getByTitle("Persona"))).toBe(true);
     expect(surface.contains(screen.getByTitle("Switch model"))).toBe(true);
     expect(surface.contains(screen.getByTitle("Send"))).toBe(true);
+  });
+
+  it("keeps unsent text and attachments owned by their chat across navigation", () => {
+    useSessionStore.setState({ sessionId: "draft-a" });
+    const { container } = renderInputArea();
+    fireEvent.change(container.querySelector("textarea")!, { target: { value: "keep this draft" } });
+    fireEvent.change(container.querySelector('input[type="file"]')!, { target: { files: [new File(["hello"], "draft.txt", { type: "text/plain" })] } });
+    act(() => useSessionStore.setState({ sessionId: "draft-b" }));
+    fireEvent.change(container.querySelector("textarea")!, { target: { value: "another chat" } });
+    act(() => useSessionStore.setState({ sessionId: "draft-a" }));
+    expect((container.querySelector("textarea") as HTMLTextAreaElement).value).toBe("keep this draft");
+    expect(screen.getByText("draft.txt")).toBeTruthy();
+  });
+
+  it("sends with Enter, keeps Shift+Enter for a newline, and ignores composing Enter", () => {
+    const { container, onSend } = renderInputArea();
+    const input = container.querySelector("textarea")!;
+    fireEvent.change(input, { target: { value: "hello" } });
+    fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
+    expect(onSend).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+    expect(onSend).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onSend).toHaveBeenCalledWith("hello", undefined);
+  });
+
+  it("retains the draft until an asynchronous send succeeds and displays a failed send", async () => {
+    let rejectSend!: (error: Error) => void;
+    const onSend = vi.fn(() => new Promise<void>((_, reject) => { rejectSend = reject; }));
+    const { container } = renderInputArea({ onSend });
+    const input = container.querySelector("textarea")!;
+    fireEvent.change(input, { target: { value: "keep my prompt" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(input.value).toBe("keep my prompt");
+    await act(async () => rejectSend(new Error("Could not create the chat")));
+    expect(input.value).toBe("keep my prompt");
+    expect(screen.getByRole("alert").textContent).toContain("Could not create the chat");
   });
 
   it("shows store personas in @ menu", () => {
@@ -122,6 +163,21 @@ describe("InputArea", () => {
     expect(attachments!.length).toBe(1);
     expect(attachments![0]!.path).toMatch(/^data:image\/png;base64,/);
     expect(attachments![0]!.mime).toBe("image/png");
+  });
+
+  it("preserves the source draft if navigation happens while an attachment is read", async () => {
+    useSessionStore.setState({ sessionId: "reading-source" });
+    const { container, onSend } = renderInputArea();
+    fireEvent.change(container.querySelector("textarea")!, { target: { value: "source prompt" } });
+    fireEvent.change(container.querySelector('input[type="file"]')!, { target: { files: [new File(["data"], "reading.txt", { type: "text/plain" })] } });
+    fireEvent.click(screen.getByRole("button", { name: "Send prompt" }));
+    act(() => useSessionStore.setState({ sessionId: "reading-destination" }));
+    fireEvent.change(container.querySelector("textarea")!, { target: { value: "destination draft" } });
+    await waitFor(() => expect((screen.getByRole("button", { name: "Send prompt" }) as HTMLButtonElement).disabled).toBe(false));
+    expect(onSend).not.toHaveBeenCalled();
+    act(() => useSessionStore.setState({ sessionId: "reading-source" }));
+    expect((container.querySelector("textarea") as HTMLTextAreaElement).value).toBe("source prompt");
+    expect(screen.getByText("reading.txt")).toBeTruthy();
   });
 
   it("prevents double-submit while sending", async () => {

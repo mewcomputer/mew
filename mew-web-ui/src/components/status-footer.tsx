@@ -1,13 +1,18 @@
 import { useSessionStore } from "../stores/session";
+import { useRef, useState } from "react";
+import { useOutsideClick } from "../lib/useOutsideClick";
 import { cn } from "../lib/utils";
 import { contextPercent, formatTokens } from "../lib/format";
 import { getClient } from "../lib/client-ref";
-import { Users, Hand } from "lucide-react";
+import { Users, Hand, Ellipsis } from "lucide-react";
 
 /** A slim status bar that sits beneath the input area as a natural
  *  extension of the composer. Left: connection dot + metrics.
  *  Right: presence chips + yield control + daemon version. */
 export function StatusFooter() {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useOutsideClick(ref, open, () => setOpen(false));
   const connectionState = useSessionStore((s) => s.connectionState);
   const contextTokens = useSessionStore((s) => s.contextTokens);
   const contextWindow = useSessionStore((s) => s.contextWindow);
@@ -46,7 +51,7 @@ export function StatusFooter() {
   };
 
   return (
-    <div className="shrink-0">
+    <div ref={ref} className="mew-conversation-width relative mx-auto shrink-0 px-4 pb-2">
       {/* Yielded-control banner */}
       {yieldedByClient !== null && (
         <div className="flex items-center justify-between gap-2 border-t border-amber-500/30 bg-amber-500/10 px-3 py-1 text-[10px] text-amber-600 dark:text-amber-400 sm:px-4">
@@ -64,7 +69,10 @@ export function StatusFooter() {
         </div>
       )}
 
-      <footer className="mx-auto flex w-full items-center justify-between px-3 pb-2 pt-1 text-[10px] text-muted-foreground tabular-nums sm:px-4">
+      <button type="button" aria-label="Session details" aria-expanded={open} onClick={() => setOpen((value) => !value)} className="flex h-4 items-center rounded px-1 text-muted-foreground/60 hover:bg-accent hover:text-foreground">
+        <Ellipsis className="h-3.5 w-3.5" />
+      </button>
+      {open && <footer data-mew-overlay="" className="absolute bottom-full left-4 z-30 mb-2 flex min-w-72 flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-popover p-3 text-[10px] text-muted-foreground shadow-lg tabular-nums">
         {/* Left: connection dot + metrics */}
         <div className="flex min-w-0 items-center gap-2 sm:gap-3">
           <div className="flex items-center gap-1.5">
@@ -117,7 +125,7 @@ export function StatusFooter() {
             <span className="hidden text-muted-foreground/60 sm:inline">v{daemonVersion}</span>
           )}
         </div>
-      </footer>
+      </footer>}
     </div>
   );
 }

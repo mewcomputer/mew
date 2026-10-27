@@ -1,10 +1,12 @@
 import { createFileRoute, useRouter } from "@tanstack/react-router";
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import type { Attachment } from "@mew/web-client";
 import { getClient, SESSION_ID_KEY } from "@/lib/client";
-import { FakeHeader } from "@/components/fake-header";
+import { ConversationHeader } from "@/components/conversation-header";
 import { Button } from "@/components/ui/button";
+import { InputArea } from "@/components/input-area";
 import { useSessionStore } from "@/stores/session";
-import { CircleAlert, LoaderCircle, Plus, RefreshCw } from "lucide-react";
+import { CircleAlert, LoaderCircle, RefreshCw } from "lucide-react";
 
 export const Route = createFileRoute("/")({
   component: HomeComponent,
@@ -17,8 +19,6 @@ function HomeComponent() {
   const retryConnection = useSessionStore((s) => s.retryConnection);
   const attemptedResume = useRef(false);
   const [resumeState, setResumeState] = useState<"idle" | "loading" | "failed">("idle");
-  const [actionState, setActionState] = useState<"idle" | "loading" | "failed">("idle");
-  const [actionError, setActionError] = useState<string | null>(null);
 
   useEffect(() => {
     if (connectionState !== "connected" || attemptedResume.current) return;
@@ -37,27 +37,21 @@ function HomeComponent() {
     }
   }, [router, connectionState]);
 
-  const createNew = async () => {
-    if (connectionState !== "connected") return;
-    setActionState("loading");
-    setActionError(null);
-    try {
-      const newId = await getClient().newSession();
-      localStorage.setItem(SESSION_ID_KEY, newId);
-      router.navigate({ to: "/session/$sessionId", params: { sessionId: newId } });
-    } catch (error) {
-      setActionState("failed");
-      setActionError(error instanceof Error ? error.message : "Could not create a session.");
-    }
+  const sendNewMessage = async (text: string, attachments?: Attachment[]) => {
+    const client = getClient();
+    const newId = await client.newSession();
+    localStorage.setItem(SESSION_ID_KEY, newId);
+    useSessionStore.getState().addUserMessage(text);
+    client.prompt(text, attachments);
+    await router.navigate({ to: "/session/$sessionId", params: { sessionId: newId } });
   };
 
-  const busy = connectionState !== "connected" || actionState === "loading" || resumeState === "loading";
   const showResumeFailure = resumeState === "failed";
 
   return (
     <>
-      <FakeHeader />
-      <main className="flex flex-1 items-center justify-center px-6 py-10">
+      <ConversationHeader />
+      <main className="flex flex-1 items-center justify-center px-6 pb-16">
         <section className="w-full max-w-md space-y-5 text-center">
           {connectionState === "connecting" && (
             <HomeStatus icon={<LoaderCircle className="h-5 w-5 animate-spin" />} title="starting the local daemon" detail="mew is preparing your coding workspace." />
@@ -77,18 +71,9 @@ function HomeComponent() {
           {connectionState === "connected" && resumeState !== "loading" && (
             <>
               <div className="space-y-2">
-                <h1 className="text-xl font-semibold tracking-tight">start a coding session</h1>
-                <p className="text-sm text-muted-foreground">
-                  {showResumeFailure
-                    ? "Your previous session is unavailable. Start a new workspace to continue."
-                    : "Open a local workspace, inspect a codebase, and keep the daemon working beside you."}
-                </p>
+                <h1 className="text-[24px] font-medium tracking-tight">What can we work on?</h1>
+                {showResumeFailure && <p className="text-sm text-muted-foreground">Start a new chat to continue.</p>}
               </div>
-              <Button onClick={createNew} disabled={busy} size="lg" className="w-full">
-                <Plus className="h-4 w-4" />
-                {actionState === "loading" ? "Creating session…" : "New session"}
-              </Button>
-              {actionError && <p className="text-xs text-destructive">{actionError}</p>}
             </>
           )}
           {connectionState !== "connected" && (
@@ -97,14 +82,9 @@ function HomeComponent() {
               {connectionState === "reconnecting" ? "Retrying…" : "Retry connection"}
             </Button>
           )}
-          {connectionState === "connected" && showResumeFailure && (
-            <Button onClick={createNew} disabled={busy}>
-              <Plus className="h-3.5 w-3.5" />
-              Start a new session
-            </Button>
-          )}
         </section>
       </main>
+      <InputArea connected={connectionState === "connected" && resumeState !== "loading"} onSend={sendNewMessage} onCancel={() => getClient().cancel()} />
     </>
   );
 }

@@ -63,6 +63,8 @@ export function MessageInspector({ manifest }: { manifest: TurnManifest }) {
           onClick={() => setOpen(!open)}
           className="flex items-center gap-1 hover:text-foreground transition-colors"
           aria-expanded={open}
+          aria-label="Message details"
+          title="Message details"
         >
           {open ? (
             <ChevronDown className="size-3" />
@@ -71,7 +73,7 @@ export function MessageInspector({ manifest }: { manifest: TurnManifest }) {
           )}
         </button>
 
-        {isError ? (
+        {open && (isError ? (
           <span className="text-destructive/70">error · structure below</span>
         ) : (
           <TooltipProvider>
@@ -98,7 +100,7 @@ export function MessageInspector({ manifest }: { manifest: TurnManifest }) {
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
-        )}
+        ))}
       </div>
 
       {open && (

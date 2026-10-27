@@ -54,7 +54,7 @@ describe("RightRail", () => {
   function addWorkbenchTab(label: string) {
     const trigger = screen.getByRole("button", { name: "Add workbench tab" });
     fireEvent.click(trigger);
-    fireEvent.click(screen.getByRole("option", { name: new RegExp(`^${label}\\b`) }));
+    if (label !== "Browser") fireEvent.click(screen.getByRole("button", { name: new RegExp(`^${label}\\b`) }));
   }
 
   afterEach(() => {
@@ -102,11 +102,11 @@ describe("RightRail", () => {
     expect(screen.getByRole("tablist", { name: "Workbench tabs" })).toBeTruthy();
     expect(screen.queryByRole("tablist", { name: "Activity sections" })).toBeNull();
     expect(screen.queryAllByRole("tab")).toHaveLength(0);
-    expect(screen.getByText("No workbench tabs")).toBeTruthy();
+    expect(screen.getByText("Tools")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Add workbench tab" }));
-    expect(screen.getAllByRole("option")).toHaveLength(7);
-    expect(screen.getByRole("option", { name: /Browser Open a browser tab/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Files Browse the active project files/ })).toBeTruthy();
+    expect(screen.getByRole("textbox", { name: "Browser URL" })).toBeTruthy();
   });
 
   it("switches between workbench surfaces without closing the rail", () => {
@@ -126,6 +126,14 @@ describe("RightRail", () => {
     addWorkbenchTab("Review");
     expect(screen.getByRole("tab", { name: "Review" }).getAttribute("aria-selected")).toBe("true");
     expect(screen.getByText("Choose a workspace first")).toBeTruthy();
+  });
+
+  it("focuses a new tab URL and handles the native terminal menu action", () => {
+    render(<RightRail mode="dock" open onOpenChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Add workbench tab" }));
+    expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Browser URL" }));
+    fireEvent(window, new CustomEvent("mew:menu-action", { detail: "terminal" }));
+    expect(screen.getByRole("tab", { name: "Terminal" }).getAttribute("aria-selected")).toBe("true");
   });
 
   it("supports multiple browser workbench tabs", () => {

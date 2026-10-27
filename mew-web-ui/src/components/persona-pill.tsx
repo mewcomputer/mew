@@ -28,7 +28,7 @@ export function PersonaPill() {
     <div ref={ref} className="relative">
       <button
         onClick={() => setOpen((o) => !o)}
-        className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[10px] text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+        className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[10px] text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
         title="Persona"
       >
         <User className="h-3 w-3" />
@@ -36,7 +36,7 @@ export function PersonaPill() {
       </button>
 
       {open && (
-        <div className="absolute bottom-full right-0 z-50 mb-1 w-36 rounded-lg border border-border bg-popover shadow-lg">
+        <div data-mew-overlay="" className="absolute bottom-full right-0 z-50 mb-1 w-36 rounded-lg border border-border bg-popover shadow-lg">
           {options.map((p) => (
             <button
               key={p.name}

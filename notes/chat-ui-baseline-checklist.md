@@ -1,7 +1,7 @@
 # Chat UI baseline checklist
 
 Date: 2026-10-27
-Status: acceptance inventory; packaged React acceptance is pending
+Status: packaged chat/browser UI proof verified; full migration acceptance pending
 
 This checklist implements the baseline step of the
 [migration plan](cef-ui-migration-plan.md). The current milestone is the familiar
@@ -19,14 +19,46 @@ previews do not satisfy these cases.
 
 - [x] Inventory the baseline, owning layers, existing coverage and remaining
   acceptance cases below.
-- [ ] Rebuild the familiar frame and composer in the existing `mew-web-ui`
+- [x] Rebuild the familiar frame and composer in the existing `mew-web-ui`
   package using React, Tailwind and shadcn controls.
-- [ ] Keep the conversation/composer visible beside a resizable, collapsible
+- [x] Keep the conversation/composer visible beside a collapsible
   right pane with a single tab strip and new-tab launcher.
-- [ ] Load the built UI in the packaged desktop host and complete a real daemon
+- [x] Load the built UI in the packaged desktop host and complete a real daemon
   turn while an external CEF browser tab remains usable beside it.
 - [ ] Verify focus, native editing, IME, menus/dialogs, pane bounds, browser
   identity, theme application and owned-process shutdown in that packaged app.
+
+### UI proof performed on 2026-10-27
+
+The packaged debug app ran the compiled React assets without Vite. An isolated
+daemon with the deterministic fake provider completed real WebSocket turns and
+streamed assistant text beside a retained native CEF page. The external page
+accepted text input; navigation updated its tab title. The conversation remained
+visible while opening and closing the workbench and selecting tabs. The native
+window was also inspected at two sizes.
+
+The corner summary is separate from the left chat sidebar and the tabbed
+workbench. It shows current-chat change totals, subagent status, background
+processes and pinned sources. Its entries select the existing detail surfaces;
+opening the card alone does not change the pane layout. The packaged smoke
+verified opening the card and navigating from Subagents to its detail tab.
+Sources currently reflect pinned files, not a complete attachment/source index.
+
+All 161 React tests, the production TypeScript/Vite build and 334 desktop tests
+passed. Desktop tests used isolated configuration and a single test thread to
+avoid shared native/global-state races. The real hidden AppKit harness verified
+editing routing, Undo/Redo menu targets and visible accessibility-root
+composition. The palette test and generated-theme check passed. Native editing
+was also exercised in the actual packaged browser and composer.
+
+Pointer-driven pane resizing, IME, full native shortcut/menu acceptance, live
+installed-theme acceptance and measured resource use remain pending. The
+packaged accessibility tree still does not expose the CEF document through the
+computer-use interface, despite the passing composition harness. The opt-in
+shell currently supports local loopback connections; saved remote profiles,
+durable UI view-state import and the rest of the baseline remain migration work.
+The existing native desktop stays the default. This is the stopping point for
+the requested UI milestone, not full replacement acceptance.
 
 The complete baseline remains the replacement's release bar. Direct subagent
 messaging is required for v1, but its runtime/controller work and the remaining
@@ -119,7 +151,7 @@ server or separate loose UI asset installation.
 
 | Feature and owner | Existing evidence inspected | Acceptance still required |
 | --- | --- | --- |
-| Built-in themes and semantic tokens. [Manifest](../crates/mew-tui/resources/theme_manifest.json), [Rust theme loader](../crates/mew-tui/src/theme.rs), [theme guide](../docs/using-mew/theming.md). | Manifest is authoritative for 23 built-ins and generated assets; loader tests cover built-ins, aliases, persona accent and fallback. Generated web CSS already exists. | [ ] Inventory stays synchronized; shadcn/Tailwind chrome, menus, transcript, markdown, code, tool output, selection and terminal use shared semantic tokens; no copied mockup palette; run theme codegen/check when sources change. |
+| Built-in themes and semantic tokens. [Manifest](../crates/mew-tui/resources/theme_manifest.json), [Rust theme loader](../crates/mew-tui/src/theme.rs), [theme guide](../docs/using-mew/theming.md). | Manifest is authoritative for 25 built-ins and generated assets; loader tests cover built-ins, aliases, persona accent and fallback. Generated web CSS already exists. | [ ] Inventory stays synchronized; shadcn/Tailwind chrome, menus, transcript, markdown, code, tool output, selection and terminal use shared semantic tokens; no copied mockup palette; run theme codegen/check when sources change. |
 | Installed custom themes, inheritance/aliases and validation. Rust loader/CSS export; native/browser host supplies inventory and resolved data. | Loader tests cover custom overrides, alias cycles and invalid colors. Existing [web theme picker](../mew-web-ui/src/lib/theme.tsx) is built-in-only and infers mode from swatches. | [ ] Resolve installed JSON through the existing loader with explicit project context; reject invalid/unknown/cyclic tokens visibly; validate inherited/aliased fixtures; expose matching inventory and explicit mode in desktop/browser without hardcoded filesystem paths. |
 | System appearance, independent light/dark palettes and live updates. Host appearance plus [native preferences](../apps/mew-desktop/src/shell/preferences.rs). | Native `desktop_theme_mode_selects_the_configured_variant` and cached-code color refresh tests establish references. | [ ] Import saved mode/light/dark choices, follow system changes live, keep explicit mode stable and refresh already-rendered code and idle terminal colors immediately. |
 | Font and layout preferences. [Native settings](../apps/mew-desktop/src/shell/settings.rs), [web settings](../mew-web-ui/src/routes/settings.tsx), config/view state. | Native terminal font picker, workspace toggles and browser font choices exist; state tests cover roundtrips. | [ ] Preserve applicable selected fonts, pane visibility/width and recent models through restart/import; missing/invalid preferences have defined usable fallbacks. |

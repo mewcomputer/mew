@@ -1,4 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useReducer, type CSSProperties, type ReactNode } from "react";
+import { useSessionStore } from "../stores/session";
+import { createWorkbenchTab } from "../lib/workbench-tabs";
+import { isDesktopHost } from "../lib/host";
 import { getClient } from "../lib/client";
 import { useIsMobile } from "../hooks/use-mobile";
 import {
@@ -22,7 +25,7 @@ import { usePanelRef } from "react-resizable-panels";
 interface WorkspaceFrameContextValue {
   surfaces: WorkspaceSurfacesState;
   dispatch: (action: WorkspaceSurfacesAction) => void;
-  toggleSummary: () => void;
+  toggleSidebar: () => void;
   toggleWorkbench: () => void;
 }
 
@@ -30,12 +33,17 @@ const WorkspaceFrameContext = createContext<WorkspaceFrameContextValue | null>(n
 
 export function WorkspaceFrame({ children }: { children: ReactNode }) {
   const isMobile = useIsMobile();
+  const sessionId = useSessionStore((state) => state.sessionId);
   const workbenchPanelRef = usePanelRef();
   const [surfaces, dispatch] = useReducer(
     workspaceSurfacesReducer,
     DEFAULT_WORKSPACE_SURFACES,
     () => loadWorkspaceSurfaces(typeof window === "undefined" ? undefined : window.localStorage),
   );
+
+  useEffect(() => {
+    dispatch({ type: "select-session", sessionId: sessionId ?? "new" });
+  }, [sessionId]);
 
   useEffect(() => {
     try {
@@ -60,15 +68,42 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
       dispatch({ type: "toggle-workbench" });
     };
 
+    const menu = (event: Event) => {
+      const action = (event as CustomEvent<string>).detail;
+      if (action === "toggle-sidebar") dispatch({ type: "toggle-sidebar" });
+      if (action === "toggle-workbench") dispatch({ type: "toggle-workbench" });
+      if (action === "new-tab" || action === "terminal") dispatch({ type: "set-workbench-open", open: true });
+    };
     window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    window.addEventListener("mew:menu-action", menu);
+    return () => { window.removeEventListener("keydown", handleKeyDown); window.removeEventListener("mew:menu-action", menu); };
+  }, []);
+
+  useEffect(() => {
+    if (!isDesktopHost()) return;
+    const openLink = (event: MouseEvent) => {
+      if (event.defaultPrevented || event.button !== 0 || !(event.target instanceof Element)) return;
+      const anchor = event.target.closest("a[href]");
+      if (!(anchor instanceof HTMLAnchorElement) || anchor.hasAttribute("download")) return;
+      const destination = new URL(anchor.href, window.location.href);
+      if (!/^https?:$/.test(destination.protocol) || destination.origin === window.location.origin) return;
+      event.preventDefault();
+      dispatch({ type: "workbench-tabs-action", action: { type: "add", tab: createWorkbenchTab("browser", {
+        title: destination.hostname,
+        sessionId: useSessionStore.getState().sessionId ?? undefined,
+        payload: { url: destination.href },
+      }) } });
+      dispatch({ type: "set-workbench-open", open: true });
+    };
+    window.addEventListener("click", openLink);
+    return () => window.removeEventListener("click", openLink);
   }, []);
 
   const contextValue = useMemo<WorkspaceFrameContextValue>(
     () => ({
       surfaces,
       dispatch,
-      toggleSummary: () => dispatch({ type: "toggle-summary" }),
+      toggleSidebar: () => dispatch({ type: "toggle-sidebar" }),
       toggleWorkbench: () => dispatch({ type: "toggle-workbench" }),
     }),
     [surfaces, dispatch],
@@ -77,11 +112,11 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
   return (
     <WorkspaceFrameContext.Provider value={contextValue}>
       <SidebarProvider
-        open={surfaces.summaryOpen}
-        onOpenChange={(open) => dispatch({ type: "set-summary-open", open })}
+        open={surfaces.sidebarOpen}
+        onOpenChange={(open) => dispatch({ type: "set-sidebar-open", open })}
         style={
           {
-            "--sidebar-width": "calc(var(--spacing) * 72)",
+            "--sidebar-width": "14rem",
             "--header-height": "calc(var(--spacing) * 12)",
           } as CSSProperties
         }
@@ -90,7 +125,7 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
           <SessionRail client={getClient()} />
           {isMobile ? (
             <>
-              <SidebarInset className="flex h-full min-w-0 flex-1 flex-col overflow-hidden md:m-2 md:ml-0 md:rounded-[var(--radius-shell)] md:shadow-sm">
+              <SidebarInset className="flex h-full min-w-0 flex-1 flex-col overflow-hidden">
                 {children}
               </SidebarInset>
               <RightRail
@@ -121,7 +156,7 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
               <ResizablePanel
                 id="conversation"
                 defaultSize={`${100 - surfaces.workbenchSize}%`}
-                minSize="30%"
+                minSize="24rem"
                 className="motion-panel-size min-w-0"
               >
                 <SidebarInset className="max-h-screen h-full">
@@ -133,8 +168,8 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
                 id="workbench"
                 panelRef={workbenchPanelRef}
                 defaultSize={`${surfaces.workbenchSize}%`}
-                minSize="18rem"
-                maxSize="50%"
+                minSize="22rem"
+                maxSize="65%"
                 collapsible
                 collapsedSize="0%"
                 className="motion-panel-size min-w-0"

@@ -62,9 +62,9 @@ export function ModelPill() {
         className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
         title="Switch model"
       >
-        <span className="truncate font-mono">{label}</span>
+        <span className="max-w-40 truncate">{label}</span>
         {currentThinkingVariant && (
-          <span className="rounded bg-primary/10 px-1 text-[9px] text-primary">
+          <span className="text-[10px] text-muted-foreground">
             {currentThinkingVariant}
           </span>
         )}
@@ -75,12 +75,12 @@ export function ModelPill() {
           stroke="currentColor"
           strokeWidth="2"
         >
-          <path d="M3 7.5L6 4.5L9 7.5" />
+          <path d="M3 4.5L6 7.5L9 4.5" />
         </svg>
       </button>
 
       {open && (
-        <div className="absolute bottom-full right-0 z-50 mb-1 w-72 rounded-lg border border-border bg-popover shadow-lg">
+        <div data-mew-overlay="" className="absolute bottom-full right-0 z-50 mb-1 w-72 rounded-lg border border-border bg-popover shadow-lg">
           {variants.length > 0 && (
             <div className="border-b border-border p-1">
               <button

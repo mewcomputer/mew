@@ -3764,3 +3764,26 @@ real AppKit editing/Undo/Redo/accessibility harness, and debug packaging. The
 actual package streamed a daemon reply beside an editable native browser page.
 Full IME, shortcut, resize, remote-profile and native accessibility acceptance
 remains tracked in the baseline checklist.
+
+## 2026-10-27: familiar chat UI and corner summary
+
+Matched the supplied Codex references with a compact notifications sidebar,
+system typography, neutral message bubbles, a centered composer and a flat
+tabbed-workbench launcher. The home composer creates an actual daemon chat.
+Drafts, attachments and workbench tabs retain their chat ownership. The desktop
+browser uses retained native CEF pages and scoped registration receipts rather
+than a preview iframe. Shared semantic theme variables also color cached code.
+
+The corner summary opens independently of the left sidebar and workbench. It
+shows selected-chat changes, subagent status, background processes and pinned
+sources, and selects their existing detail surfaces. Added the popover through
+the shadcn CLI. Corrected the shared sidebar active marker so inactive chats
+are not highlighted. Renamed the prototype header to ConversationHeader.
+
+Verified all 161 UI tests and the production build. Packaged smoke completed a
+real daemon/fake-provider turn while editing an external page, opened the
+summary and entered its subagent detail tab. Recorded screenshots and the
+remaining acceptance work in `notes/chat-ui-baseline-checklist.md`. The current
+milestone stops at the UI; direct subagent messaging and full migration parity
+remain required before replacement release. The build retains its existing
+large-chunk warning.
