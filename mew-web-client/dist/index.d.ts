@@ -188,6 +188,16 @@ export type ClientMessage = {
     type: "list_filesystem_dir";
     path?: string;
 } | {
+    type: "register_browser_page";
+    session_id: string;
+    page_instance: string;
+    cdp_endpoint: string;
+    target_id: string;
+} | {
+    type: "unregister_browser_page";
+    session_id: string;
+    page_instance: string;
+} | {
     type: "browser_open";
     url: string;
     tab_id?: string;
@@ -248,41 +258,35 @@ export type ProviderEventWire = {
     type: "error";
     error: MessageError;
 };
-export type Part = {
+export type Part = PartBase & ({
     type: "text";
-    base: PartBase;
     text: string;
-    synthetic: boolean;
+    synthetic?: boolean;
 } | {
     type: "reasoning";
-    base: PartBase;
     text: string;
     signature?: string;
 } | {
     type: "tool_call";
-    base: PartBase;
     tool_name: string;
     call_id: string;
     state: ToolState;
 } | {
     type: "tool_result";
-    base: PartBase;
     call_id: string;
     output?: string;
 } | {
     type: "file";
-    base: PartBase;
     mime: string;
     filename?: string;
     url: string;
 } | {
     type: "compaction";
-    base: PartBase;
     auto: boolean;
     overflow: boolean;
     summary?: string;
     removed_count?: number;
-};
+});
 export interface PartBase {
     id: string;
     message_id: string;
@@ -822,6 +826,11 @@ export type ServerMessage = ({
     type: "project_list";
     projects: ProjectInfo[];
 } | {
+    type: "browser_page_registration";
+    session_id: string;
+    page_instance: string;
+    error: string | null;
+} | {
     type: "browser_snapshot";
     snapshot: string;
     url: string;
@@ -1083,6 +1092,11 @@ export interface MewClientEvents {
     "project-list": (data: {
         projects: ProjectInfo[];
     }) => void;
+    "browser-page-registration": (data: {
+        session_id: string;
+        page_instance: string;
+        error: string | null;
+    }) => void;
     "browser-snapshot": (data: {
         snapshot: string;
         url: string;
@@ -1257,6 +1271,9 @@ export declare class MewClient {
     ping(): Promise<string>;
     /** List known projects (recent session cwds). */
     listProjects(): void;
+    registerBrowserPage(sessionId: string, pageInstance: string, cdpEndpoint: string, targetId: string): Promise<void>;
+    unregisterBrowserPage(sessionId: string, pageInstance: string): Promise<void>;
+    private browserPageRequest;
     browserOpen(url: string, tabId?: string): void;
     browserSnapshot(tabId?: string): void;
     browserScreenshot(annotate?: boolean, tabId?: string): void;

@@ -121,6 +121,8 @@ export type ClientMessage =
   | { type: "ping" }
   | { type: "list_projects" }
   | { type: "list_filesystem_dir"; path?: string }
+  | { type: "register_browser_page"; session_id: string; page_instance: string; cdp_endpoint: string; target_id: string }
+  | { type: "unregister_browser_page"; session_id: string; page_instance: string }
   | { type: "browser_open"; url: string; tab_id?: string }
   | { type: "browser_snapshot"; tab_id?: string }
   | { type: "browser_screenshot"; annotate: boolean; tab_id?: string }
@@ -156,32 +158,29 @@ export type ProviderEventWire =
     }
   | { type: "error"; error: MessageError };
 
-export type Part =
-  | { type: "text"; base: PartBase; text: string; synthetic: boolean }
-  | { type: "reasoning"; base: PartBase; text: string; signature?: string }
+export type Part = PartBase & (
+  | { type: "text"; text: string; synthetic?: boolean }
+  | { type: "reasoning"; text: string; signature?: string }
   | {
       type: "tool_call";
-      base: PartBase;
       tool_name: string;
       call_id: string;
       state: ToolState;
     }
-  | { type: "tool_result"; base: PartBase; call_id: string; output?: string }
+  | { type: "tool_result"; call_id: string; output?: string }
   | {
       type: "file";
-      base: PartBase;
       mime: string;
       filename?: string;
       url: string;
     }
   | {
       type: "compaction";
-      base: PartBase;
       auto: boolean;
       overflow: boolean;
       summary?: string;
       removed_count?: number;
-    };
+    });
 
 export interface PartBase {
   id: string;
@@ -649,6 +648,7 @@ export type ServerMessage =
     }
   | { type: "pong"; version: string; protocol_version?: number }
   | { type: "project_list"; projects: ProjectInfo[] }
+  | { type: "browser_page_registration"; session_id: string; page_instance: string; error: string | null }
   | { type: "browser_snapshot"; snapshot: string; url: string; title: string; tab_id?: string }
   | { type: "browser_screenshot"; data: string; url: string; tab_id?: string }
   | { type: "browser_state"; open: boolean; url?: string; title?: string; tab_id?: string }
@@ -826,6 +826,7 @@ export interface MewClientEvents {
   errorEvent: (data: { message: string }) => void;
   pong: (data: { version: string; protocol_version: number }) => void;
   "project-list": (data: { projects: ProjectInfo[] }) => void;
+  "browser-page-registration": (data: { session_id: string; page_instance: string; error: string | null }) => void;
   "browser-snapshot": (data: { snapshot: string; url: string; title: string; tabId?: string }) => void;
   "browser-screenshot": (data: { data: string; url: string; tabId?: string }) => void;
   "browser-state": (data: { open: boolean; url?: string; title?: string; tabId?: string }) => void;
@@ -1355,6 +1356,36 @@ export class MewClient {
     this.send({ type: "list_projects" });
   }
 
+  registerBrowserPage(sessionId: string, pageInstance: string, cdpEndpoint: string, targetId: string): Promise<void> {
+    return this.browserPageRequest({ type: "register_browser_page", session_id: sessionId, page_instance: pageInstance, cdp_endpoint: cdpEndpoint, target_id: targetId });
+  }
+
+  unregisterBrowserPage(sessionId: string, pageInstance: string): Promise<void> {
+    return this.browserPageRequest({ type: "unregister_browser_page", session_id: sessionId, page_instance: pageInstance });
+  }
+
+  private browserPageRequest(message: Extract<ClientMessage, { type: "register_browser_page" | "unregister_browser_page" }>): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timeout);
+        this.off("browser-page-registration", onReply);
+        this.off("close", onClose);
+      };
+      const onReply = (reply: { session_id: string; page_instance: string; error: string | null }) => {
+        if (reply.session_id !== message.session_id || reply.page_instance !== message.page_instance) return;
+        cleanup();
+        if (reply.error) reject(new Error(reply.error));
+        else resolve();
+      };
+      const onClose = () => { cleanup(); reject(new Error("The daemon disconnected while updating the browser page.")); };
+      const timeout = setTimeout(() => { cleanup(); reject(new Error("The daemon did not acknowledge the browser page.")); }, 10000);
+      this.on("browser-page-registration", onReply);
+      this.on("close", onClose);
+      try { this.send(message); }
+      catch (error) { cleanup(); reject(error); }
+    });
+  }
+
   browserOpen(url: string, tabId?: string): void { this.send({ type: "browser_open", url, tab_id: tabId }); }
   browserSnapshot(tabId?: string): void { this.send({ type: "browser_snapshot", tab_id: tabId }); }
   browserScreenshot(annotate = false, tabId?: string): void { this.send({ type: "browser_screenshot", annotate, tab_id: tabId }); }
@@ -1699,6 +1730,9 @@ export class MewClient {
         break;
       case "project_list":
         this.emit("project-list", { projects: msg.projects });
+        break;
+      case "browser_page_registration":
+        this.emit("browser-page-registration", { session_id: msg.session_id, page_instance: msg.page_instance, error: msg.error });
         break;
       case "browser_snapshot":
         this.emit("browser-snapshot", { snapshot: msg.snapshot, url: msg.url, title: msg.title, tabId: msg.tab_id });

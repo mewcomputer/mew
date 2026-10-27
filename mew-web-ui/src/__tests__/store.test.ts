@@ -375,11 +375,9 @@ describe("assistant metadata preservation", () => {
         parts: [
           {
             type: "text",
-            base: {
-              id: "part-1",
-              message_id: "msg-1",
-              session_id: "sess-1",
-            },
+            id: "part-1",
+            message_id: "msg-1",
+            session_id: "sess-1",
             text: "Hello",
             synthetic: false,
           },
@@ -567,7 +565,7 @@ describe("assistant metadata preservation", () => {
         parts: [
           {
             type: "text",
-            base: { id: "part-empty", message_id: "msg-empty", session_id: "sess-1" },
+            id: "part-empty", message_id: "msg-empty", session_id: "sess-1",
             text: "",
             synthetic: false,
           },

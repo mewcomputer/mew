@@ -1,3 +1,4 @@
+import type { ProviderEventWire } from "@mew/web-client";
 import type { ReactNode } from "react";
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -24,6 +25,23 @@ describe("MessageItem streaming subscriptions", () => {
       streamingReasoningId: null,
       streamingReasoningText: "",
     });
+  });
+
+  it("renders the canonical flattened daemon text stream through completion", () => {
+    function Conversation() {
+      const messages = useSessionStore((state) => state.messages);
+      return messages.map((message) => <MessageItem key={message.id} message={message} />);
+    }
+    render(<Conversation />);
+    const events: ProviderEventWire[] = JSON.parse(`[
+      {"type":"part_start","part":{"type":"text","id":"part-1","message_id":"message-1","session_id":"session-1","text":""}},
+      {"type":"part_delta","part_id":"part-1","field":"text","delta":"hello from fake provider"},
+      {"type":"part_end","part_id":"part-1"},
+      {"type":"message_end","finish":"stop","usage":{"input":0,"output":0,"reasoning":0,"cache_read":0,"cache_write":0},"cost":0}
+    ]`);
+    act(() => events.forEach((event) => useSessionStore.getState().onProviderEvent(event)));
+    expect(screen.getByText("hello from fake provider")).toBeTruthy();
+    expect(useSessionStore.getState().streamingPartId).toBeNull();
   });
 
   it("does not rerender completed messages for streaming deltas", () => {
@@ -111,7 +129,7 @@ describe("MessageItem streaming subscriptions", () => {
         type: "part_start",
         part: {
           type: "text",
-          base: { id: "text-1", message_id: "message-3", session_id: "session-1" },
+          id: "text-1", message_id: "message-3", session_id: "session-1",
           text: "",
           synthetic: false,
         },

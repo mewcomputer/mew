@@ -3722,3 +3722,16 @@ ignored without its runtime environment. Strict workspace Clippy, formatting
 and architecture checks passed. The package opened the React app through the
 native binding and displayed a real external browser page; final native window
 acceptance is recorded separately from these component checks.
+
+## 2026-10-27: web streaming wire compatibility and browser receipts
+
+Corrected the TypeScript part model and store to use the daemon's flattened
+part identities. The native smoke exposed that synthetic fixtures had used a
+nested `base` shape, causing real streamed assistant text to fail before
+rendering. The regression now feeds canonical JSON events through the store and
+message component. Added scoped browser registration/revocation operations and
+matching acknowledgement promises for selecting retained native pages.
+
+Verified all 32 client tests, the client build and the complete 142-test React
+suite. Tracked client distribution files were regenerated. No Rust protocol
+format changed.

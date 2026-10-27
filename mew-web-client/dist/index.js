@@ -482,6 +482,41 @@ export class MewClient {
     listProjects() {
         this.send({ type: "list_projects" });
     }
+    registerBrowserPage(sessionId, pageInstance, cdpEndpoint, targetId) {
+        return this.browserPageRequest({ type: "register_browser_page", session_id: sessionId, page_instance: pageInstance, cdp_endpoint: cdpEndpoint, target_id: targetId });
+    }
+    unregisterBrowserPage(sessionId, pageInstance) {
+        return this.browserPageRequest({ type: "unregister_browser_page", session_id: sessionId, page_instance: pageInstance });
+    }
+    browserPageRequest(message) {
+        return new Promise((resolve, reject) => {
+            const cleanup = () => {
+                clearTimeout(timeout);
+                this.off("browser-page-registration", onReply);
+                this.off("close", onClose);
+            };
+            const onReply = (reply) => {
+                if (reply.session_id !== message.session_id || reply.page_instance !== message.page_instance)
+                    return;
+                cleanup();
+                if (reply.error)
+                    reject(new Error(reply.error));
+                else
+                    resolve();
+            };
+            const onClose = () => { cleanup(); reject(new Error("The daemon disconnected while updating the browser page.")); };
+            const timeout = setTimeout(() => { cleanup(); reject(new Error("The daemon did not acknowledge the browser page.")); }, 10000);
+            this.on("browser-page-registration", onReply);
+            this.on("close", onClose);
+            try {
+                this.send(message);
+            }
+            catch (error) {
+                cleanup();
+                reject(error);
+            }
+        });
+    }
     browserOpen(url, tabId) { this.send({ type: "browser_open", url, tab_id: tabId }); }
     browserSnapshot(tabId) { this.send({ type: "browser_snapshot", tab_id: tabId }); }
     browserScreenshot(annotate = false, tabId) { this.send({ type: "browser_screenshot", annotate, tab_id: tabId }); }
@@ -807,6 +842,9 @@ export class MewClient {
                 break;
             case "project_list":
                 this.emit("project-list", { projects: msg.projects });
+                break;
+            case "browser_page_registration":
+                this.emit("browser-page-registration", { session_id: msg.session_id, page_instance: msg.page_instance, error: msg.error });
                 break;
             case "browser_snapshot":
                 this.emit("browser-snapshot", { snapshot: msg.snapshot, url: msg.url, title: msg.title, tabId: msg.tab_id });

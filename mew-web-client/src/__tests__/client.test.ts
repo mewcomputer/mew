@@ -719,3 +719,25 @@ test("job output chunks preserve request scope, offsets and incomplete status", 
   latest().peerSend({ type: "job_output_error", ...error });
   assert.deepEqual(errors, [error]);
 });
+
+
+test("browser page registration drains its matching acknowledgement before revocation", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connected = client.connect();
+  latest().open();
+  await connected;
+  const registered = client.registerBrowserPage("chat", "page-1", "http://127.0.0.1:9222", "target-1");
+  assert.deepEqual(latest().sent.at(-1), { type: "register_browser_page", session_id: "chat", page_instance: "page-1", cdp_endpoint: "http://127.0.0.1:9222", target_id: "target-1" });
+  latest().peerSend({ type: "browser_page_registration", session_id: "other", page_instance: "page-1", error: null });
+  latest().peerSend({ type: "browser_page_registration", session_id: "chat", page_instance: "page-1", error: null });
+  await registered;
+  const revoked = client.unregisterBrowserPage("chat", "page-1");
+  assert.deepEqual(latest().sent.at(-1), { type: "unregister_browser_page", session_id: "chat", page_instance: "page-1" });
+  latest().peerSend({ type: "browser_page_registration", session_id: "chat", page_instance: "page-1", error: null });
+  await revoked;
+  const rejected = client.registerBrowserPage("chat", "page-2", "http://127.0.0.1:9222", "target-2");
+  latest().peerSend({ type: "browser_page_registration", session_id: "chat", page_instance: "page-2", error: "page rejected" });
+  await assert.rejects(rejected, /page rejected/);
+  client.disconnect();
+});

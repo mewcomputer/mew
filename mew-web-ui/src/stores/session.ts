@@ -427,7 +427,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       case "part_start": {
         if (ev.part.type === "text") {
           // Start a new streaming text part.
-          const partId = ev.part.base.id;
+          const partId = ev.part.id;
           set({
             streamingPartId: partId,
             streamingText: "",
@@ -475,7 +475,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           });
         } else if (ev.part.type === "reasoning") {
           // Start streaming reasoning text
-          const partId = ev.part.base.id;
+          const partId = ev.part.id;
           set({
             streamingReasoningId: partId,
             streamingReasoningText: ev.part.text || "",
