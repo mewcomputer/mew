@@ -106,6 +106,83 @@ impl AppDragView {
     }
 }
 
+define_class! {
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    pub struct BrowserInputShield;
+
+    unsafe impl NSObjectProtocol for BrowserInputShield {}
+
+    impl BrowserInputShield {
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool { true }
+
+        #[unsafe(method(mouseDownCanMoveWindow))]
+        fn mouse_down_can_move_window(&self) -> bool { false }
+
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, _event: &NSEvent) {}
+        #[unsafe(method(mouseUp:))]
+        fn mouse_up(&self, _event: &NSEvent) {}
+        #[unsafe(method(mouseDragged:))]
+        fn mouse_dragged(&self, _event: &NSEvent) {}
+        #[unsafe(method(rightMouseDown:))]
+        fn right_mouse_down(&self, _event: &NSEvent) {}
+        #[unsafe(method(rightMouseUp:))]
+        fn right_mouse_up(&self, _event: &NSEvent) {}
+        #[unsafe(method(rightMouseDragged:))]
+        fn right_mouse_dragged(&self, _event: &NSEvent) {}
+        #[unsafe(method(otherMouseDown:))]
+        fn other_mouse_down(&self, _event: &NSEvent) {}
+        #[unsafe(method(otherMouseUp:))]
+        fn other_mouse_up(&self, _event: &NSEvent) {}
+        #[unsafe(method(otherMouseDragged:))]
+        fn other_mouse_dragged(&self, _event: &NSEvent) {}
+        #[unsafe(method(scrollWheel:))]
+        fn scroll_wheel(&self, _event: &NSEvent) {}
+    }
+}
+
+#[allow(dead_code)]
+impl BrowserInputShield {
+    pub fn attach(parent: &NSView) -> Retained<Self> {
+        let mtm = MainThreadMarker::new().expect("native browser input requires the main thread");
+        let view = Self::alloc(mtm).set_ivars(());
+        let view: Retained<Self> =
+            unsafe { msg_send![super(view), initWithFrame: parent.bounds()] };
+        view.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        view.setHidden(true);
+        parent.addSubview(&view);
+        view
+    }
+
+    pub fn set_interactive(&self, interactive: bool) {
+        self.setHidden(interactive);
+        let Some(parent) = (unsafe { self.superview() }) else {
+            return;
+        };
+        unsafe {
+            let _: () = msg_send![&*parent, setAccessibilityHidden: !interactive];
+        }
+        if !interactive {
+            self.setFrame(parent.bounds());
+            parent.addSubview(self);
+            if let Some(window) = parent.window()
+                && window
+                    .firstResponder()
+                    .as_ref()
+                    .and_then(|responder| responder.downcast_ref::<NSView>())
+                    .is_some_and(|focused| focused.isDescendantOf(&parent))
+            {
+                window.makeFirstResponder(None::<&objc2_app_kit::NSResponder>);
+            }
+        }
+    }
+}
+
 fn native_key_equivalent_imp() -> Imp {
     unsafe {
         std::mem::transmute(native_key_equivalent as unsafe extern "C-unwind" fn(_, _, _) -> _)
@@ -233,8 +310,11 @@ fn accessible_browser_views(parent: &NSView) -> Vec<Retained<NSView>> {
             .iter()
             .filter_map(Weak::load)
             .filter(|view| {
+                let accessibility_hidden: bool =
+                    unsafe { msg_send![&**view, isAccessibilityHidden] };
                 !std::ptr::eq(&**view, parent)
                     && !view.isHiddenOrHasHiddenAncestor()
+                    && !accessibility_hidden
                     && view.isDescendantOf(parent)
             })
             .collect()

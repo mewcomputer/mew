@@ -319,6 +319,12 @@ impl BrowserPortal {
         Ok(self.require_page(owner)?.focus_on_main_thread())
     }
 
+    pub fn set_interactive(&self, owner: &BrowserOwner, interactive: bool) -> Result<()> {
+        self.require_page(owner)?
+            .set_interactive_on_main_thread(interactive);
+        Ok(())
+    }
+
     pub fn blur(&self, owner: &BrowserOwner) -> Result<bool> {
         Ok(self.require_page(owner)?.blur_on_main_thread())
     }

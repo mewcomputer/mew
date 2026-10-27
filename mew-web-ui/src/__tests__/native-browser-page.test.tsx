@@ -6,6 +6,24 @@ import type { MewClient } from "@mew/web-client";
 afterEach(() => { cleanup(); delete window.mewQuery; vi.restoreAllMocks(); document.querySelectorAll('[data-test-overlay], [role="dialog"]').forEach((node) => node.remove()); });
 
 describe("native browser surface", () => {
+  it("keeps a closing page visible while revoking its tools and input immediately", async () => {
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue(new DOMRect(800, 80, 400, 600));
+    const calls: Record<string, unknown>[] = [];
+    window.mewQuery = ({ request, onSuccess }) => { calls.push(JSON.parse(request)); onSuccess("{}"); };
+    const client = { registerBrowserPage: vi.fn().mockResolvedValue(undefined), unregisterBrowserPage: vi.fn().mockResolvedValue(undefined), isConnected: () => true } as unknown as MewClient;
+    const props = { client, connected: true, sessionId: "closing-page", tabId: "tab", url: "https://example.com", onChange: vi.fn(), onError: vi.fn() };
+    const { rerender } = render(<NativeBrowserPage {...props} active present />);
+    window.dispatchEvent(new CustomEvent("mew:browser-event", { detail: { sessionId: props.sessionId, tabId: props.tabId, pageInstance: "closing-generation", kind: "ready", url: props.url, cdpEndpoint: "http://127.0.0.1:9222", targetId: "target" } }));
+    await waitFor(() => expect(client.registerBrowserPage).toHaveBeenCalledOnce());
+    expect(calls.at(-1)).toMatchObject({ visible: true, interactive: true });
+    rerender(<NativeBrowserPage {...props} active={false} present />);
+    expect(calls.at(-1)).toMatchObject({ visible: true, interactive: false });
+    await waitFor(() => expect(client.unregisterBrowserPage).toHaveBeenCalledWith(props.sessionId, "closing-generation"));
+    rerender(<NativeBrowserPage {...props} active={false} present={false} />);
+    expect(calls.at(-1)).toMatchObject({ visible: false, interactive: false });
+    expect(calls.some((call) => call.type === "browser_close")).toBe(false);
+  });
+
   it.each(["menu", "dialog"])("keeps the browser visible beside a non-overlapping %s", async (role) => {
     const calls: Record<string, unknown>[] = [];
     window.mewQuery = ({ request, onSuccess }) => { calls.push(JSON.parse(request)); onSuccess("{}"); };

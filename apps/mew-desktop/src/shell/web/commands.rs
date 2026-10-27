@@ -18,6 +18,8 @@ pub(super) enum HostCommand {
         url: String,
         rect: ViewportRect,
         visible: bool,
+        #[serde(default = "default_interactive")]
+        interactive: bool,
     },
     BrowserClose {
         session_id: String,
@@ -27,6 +29,10 @@ pub(super) enum HostCommand {
         #[serde(flatten)]
         preferences: ThemePreferences,
     },
+}
+
+fn default_interactive() -> bool {
+    true
 }
 
 impl HostCommand {
@@ -186,6 +192,31 @@ mod tests {
         assert!(HostCommand::parse(&update("about:blank", -1., false)).is_err());
         assert!(HostCommand::parse(
             r#"{"type":"browser_close","sessionId":"  ","tabId":"browser"}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn closing_browser_pages_can_disable_input_without_disappearing() {
+        let explicit = update("https://example.com/", 100., true)
+            .replace("\"visible\":true", "\"visible\":true,\"interactive\":false");
+        assert!(matches!(
+            HostCommand::parse(&explicit).unwrap(),
+            HostCommand::BrowserUpdate {
+                visible: true,
+                interactive: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            HostCommand::parse(&update("https://example.com/", 100., true)).unwrap(),
+            HostCommand::BrowserUpdate {
+                interactive: true,
+                ..
+            }
+        ));
+        assert!(HostCommand::parse(
+            &explicit.replace("\"interactive\":false", "\"interactive\":\"false\"")
         )
         .is_err());
     }

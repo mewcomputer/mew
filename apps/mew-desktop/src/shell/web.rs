@@ -455,6 +455,7 @@ impl WebShell {
                 url,
                 rect,
                 visible,
+                interactive,
             } => {
                 let owner = BrowserOwner {
                     connection_profile: profile,
@@ -474,6 +475,9 @@ impl WebShell {
                     native.requested_urls.insert(owner.clone(), url);
                 }
                 native.page_rects.insert(owner.clone(), (rect, visible));
+                native
+                    .portal
+                    .set_interactive(&owner, interactive && visible)?;
                 native
                     .portal
                     .set_rect(&owner, rect.in_viewport(native.viewport, visible))?;

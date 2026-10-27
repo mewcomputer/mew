@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useReducer, type CSSProperties, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useSessionStore } from "../stores/session";
 import { createWorkbenchTab, type WorkbenchTabKind } from "../lib/workbench-tabs";
 import { isDesktopHost } from "../lib/host";
@@ -36,11 +36,14 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
   const isMobile = useIsMobile();
   const sessionId = useSessionStore((state) => state.sessionId);
   const workbenchPanelRef = usePanelRef();
+  const panelGroup = useRef<HTMLDivElement>(null);
+  const previousWorkbenchOpen = useRef<boolean | null>(null);
   const [surfaces, dispatch] = useReducer(
     workspaceSurfacesReducer,
     DEFAULT_WORKSPACE_SURFACES,
     () => loadWorkspaceSurfaces(typeof window === "undefined" ? undefined : window.localStorage),
   );
+  const [workbenchPresent, setWorkbenchPresent] = useState(surfaces.workbenchOpen);
 
   useEffect(() => {
     dispatch({ type: "select-session", sessionId: sessionId ?? "new" });
@@ -54,10 +57,46 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
     }
   }, [surfaces]);
 
-  useEffect(() => {
-    if (isMobile) return;
+  useLayoutEffect(() => {
+    if (isMobile) {
+      previousWorkbenchOpen.current = null;
+      setWorkbenchPresent(surfaces.workbenchOpen);
+      return;
+    }
+    const group = panelGroup.current;
+    if (!group) return;
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const changed = previousWorkbenchOpen.current !== null && previousWorkbenchOpen.current !== surfaces.workbenchOpen;
+    const animate = changed && !reducedMotion.matches;
+    let cancelled = false;
+    const finish = () => {
+      if (cancelled) return;
+      group.dataset.workbenchMotion = "false";
+      setWorkbenchPresent(surfaces.workbenchOpen);
+    };
+    if (changed && !surfaces.workbenchOpen
+      && (document.activeElement === document.body || group.querySelector("#workbench")?.contains(document.activeElement))) {
+      group.querySelector<HTMLButtonElement>('[aria-label="Open workbench"]')?.focus();
+    }
+    group.dataset.workbenchMotion = String(animate);
+    if (surfaces.workbenchOpen) setWorkbenchPresent(true);
     if (surfaces.workbenchOpen) workbenchPanelRef.current?.expand();
     else workbenchPanelRef.current?.collapse();
+    previousWorkbenchOpen.current = surfaces.workbenchOpen;
+    if (!animate) { finish(); return; }
+
+    const frame = requestAnimationFrame(() => {
+      const animations = Array.from(group.querySelectorAll<HTMLElement>(":scope > [data-panel]"))
+        .flatMap((panel) => panel.getAnimations?.().map((animation) => animation.finished) ?? []);
+      void Promise.allSettled(animations).then(finish);
+    });
+    const motionChanged = () => { if (reducedMotion.matches) finish(); };
+    reducedMotion.addEventListener("change", motionChanged);
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(frame);
+      reducedMotion.removeEventListener("change", motionChanged);
+    };
   }, [isMobile, surfaces.workbenchOpen, workbenchPanelRef]);
 
   useEffect(() => {
@@ -149,8 +188,9 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
             </>
           ) : (
             <ResizablePanelGroup
+              elementRef={panelGroup}
               orientation="horizontal"
-              className="min-w-0 flex-1"
+              className="mew-workspace-panels min-w-0 flex-1"
               id="mew-workspace-panels"
               resizeTargetMinimumSize={{ coarse: 28, fine: 20 }}
               onLayoutChanged={(layout, meta) => {
@@ -177,6 +217,8 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
               <ResizableHandle withHandle aria-label="Resize workbench" />
               <ResizablePanel
                 id="workbench"
+                inert={!surfaces.workbenchOpen}
+                aria-hidden={!surfaces.workbenchOpen}
                 panelRef={workbenchPanelRef}
                 defaultSize={`${surfaces.workbenchSize}%`}
                 minSize="18rem"
@@ -188,6 +230,7 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
                 <RightRail
                   mode="dock"
                   open={surfaces.workbenchOpen}
+                  present={workbenchPresent}
                   onOpenChange={(open) => dispatch({ type: "set-workbench-open", open })}
                   workbenchTabs={surfaces.workbenchTabs}
                   onWorkbenchTabsAction={(action) => dispatch({ type: "workbench-tabs-action", action })}

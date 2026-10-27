@@ -99,6 +99,21 @@ input through pane close/reopen; `mew-motion-01-compact.jpg`,
 `mew-motion-02-expanded.jpg` and `mew-motion-03-summary-browser.jpg` record the
 resulting layouts. Temporary slow inspection timing was restored to 180ms.
 
+Workbench motion verification: browser and tool panes now open and close over
+the existing 260ms panel token. Their actual resizable geometry animates, with
+retained contents through exit and immediate logical/input deactivation. Native
+browser controls, focus and accessibility restore on reopening the same page.
+Reduced motion, live preference changes, reversal and StrictMode initialization
+have regression coverage. Pointer divider resizing passed in the browser
+harness; native keyboard resizing, chat draft retention, browser form retention,
+editing after reopen and Files close/reopen passed in the packaged app. Native
+window dragging was unavailable through the automation API during this pass.
+All 201 React tests, 335 isolated serial desktop tests, 21 CEF library tests,
+11 browser-host tests, the real AppKit harness, production build and debug
+packaging passed. Photos `mew-pane-01-closed.jpg`,
+`mew-pane-04-tool-reopened.jpg` and `mew-pane-06-chat-browser.jpg` record the
+verified layouts.
+
 The complete baseline remains the replacement's release bar. Direct subagent
 messaging is required for v1, but its runtime/controller work and the remaining
 workbench tools are beyond this first UI milestone. Keep the existing desktop

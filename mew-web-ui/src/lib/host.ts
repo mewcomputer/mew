@@ -29,7 +29,7 @@ export interface NativeBrowserEvent {
 export type HostRequest =
   | { type: "bootstrap" }
   | { type: "set_theme"; themeMode: "system" | "light" | "dark"; lightTheme: string; darkTheme: string }
-  | { type: "browser_update"; sessionId: string; tabId: string; url: string; rect: { x: number; y: number; width: number; height: number }; visible: boolean }
+  | { type: "browser_update"; sessionId: string; tabId: string; url: string; rect: { x: number; y: number; width: number; height: number }; visible: boolean; interactive?: boolean }
   | { type: "browser_close"; sessionId: string; tabId: string };
 
 declare global {

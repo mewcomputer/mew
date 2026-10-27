@@ -59,6 +59,8 @@ describe("RightRail", () => {
 
   afterEach(() => {
     cleanup();
+    delete window.mewQuery;
+    vi.restoreAllMocks();
     watchWorkspaceMock.mockClear();
     gitStatusMock.mockClear();
     browserOpenMock.mockClear();
@@ -211,6 +213,33 @@ describe("RightRail", () => {
 
     fireEvent.keyDown(window, { key: "1", metaKey: true });
     expect(screen.getAllByRole("tab", { name: "New tab" })[0]!.getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("leaves chat shortcuts alone while the closed pane finishes its exit", () => {
+    const onTabsChange = vi.fn();
+    const tabs = { tabs: [{ id: "closing-browser", kind: "browser" as const, title: "New tab", closable: true }], activeTabId: "closing-browser" };
+    render(<RightRail mode="dock" open={false} present onOpenChange={vi.fn()} workbenchTabs={tabs} onWorkbenchTabsChange={onTabsChange} />);
+    for (const key of ["t", "w", "1"]) {
+      const event = new KeyboardEvent("keydown", { key, metaKey: true, cancelable: true });
+      fireEvent(window, event);
+      expect(event.defaultPrevented).toBe(false);
+    }
+    fireEvent(window, new CustomEvent("mew:menu-action", { detail: "close-tab" }));
+    expect(onTabsChange).not.toHaveBeenCalled();
+  });
+
+  it("retains the selected native browser through exit without leaving it interactive", () => {
+    const calls: Record<string, unknown>[] = [];
+    window.mewQuery = ({ request, onSuccess }) => { calls.push(JSON.parse(request)); onSuccess("{}"); };
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue(new DOMRect(800, 80, 400, 600));
+    const tabs = { tabs: [{ id: "native-closing-browser", sessionId: "native-closing-chat", kind: "browser" as const, title: "Example", closable: true, payload: { url: "https://example.com" } }], activeTabId: "native-closing-browser" };
+    const props = { mode: "dock" as const, onOpenChange: vi.fn(), workbenchTabs: tabs, onWorkbenchTabsChange: vi.fn() };
+    const { rerender } = render(<RightRail {...props} open present />);
+    expect(calls.at(-1)).toMatchObject({ visible: true, interactive: true });
+    rerender(<RightRail {...props} open={false} present />);
+    expect(calls.at(-1)).toMatchObject({ visible: true, interactive: false });
+    rerender(<RightRail {...props} open={false} present={false} />);
+    expect(calls.at(-1)).toMatchObject({ visible: false, interactive: false });
   });
 
   it("surfaces browser protocol errors and stops the loading state", async () => {

@@ -14,13 +14,14 @@ function queueRegistration(action: () => Promise<void>, onError: (message: strin
   });
 }
 
-export function NativeBrowserPage({ client, connected, sessionId, tabId, url, active, obscured = false, onChange, onError }: {
+export function NativeBrowserPage({ client, connected, sessionId, tabId, url, active, present = active, obscured = false, onChange, onError }: {
   client: MewClient;
   connected: boolean;
   sessionId: string;
   tabId: string;
   url: string;
   active: boolean;
+  present?: boolean;
   obscured?: boolean;
   onChange: (event: NativeBrowserEvent) => void;
   onError: (message: string) => void;
@@ -88,10 +89,12 @@ export function NativeBrowserPage({ client, connected, sessionId, tabId, url, ac
         return node.getAttribute("aria-modal") === "true"
           || (rect.left < bounds.right && rect.right > bounds.left && rect.top < bounds.bottom && rect.bottom > bounds.top);
       });
+      const visible = present && !obscured && !document.hidden && !overlay && bounds.width > 0 && bounds.height > 0;
       const request = {
         type: "browser_update" as const, sessionId, tabId, url,
         rect: { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height },
-        visible: active && !obscured && !document.hidden && !overlay && bounds.width > 0 && bounds.height > 0,
+        visible,
+        interactive: active && visible,
       };
       const serialized = JSON.stringify(request);
       if (serialized === lastUpdate) return;
@@ -111,9 +114,9 @@ export function NativeBrowserPage({ client, connected, sessionId, tabId, url, ac
       window.removeEventListener("resize", update);
       document.removeEventListener("visibilitychange", update);
       document.removeEventListener("scroll", update, true);
-      void hostRequest({ type: "browser_update", sessionId, tabId, url, rect: { x: 0, y: 0, width: 0, height: 0 }, visible: false }).catch(() => {});
+      void hostRequest({ type: "browser_update", sessionId, tabId, url, rect: { x: 0, y: 0, width: 0, height: 0 }, visible: false, interactive: false }).catch(() => {});
     };
-  }, [active, obscured, sessionId, tabId, url]);
+  }, [active, present, obscured, sessionId, tabId, url]);
 
   return <div ref={container} className="h-full min-h-0 w-full flex-1 bg-background" aria-label="Browser page" />;
 }

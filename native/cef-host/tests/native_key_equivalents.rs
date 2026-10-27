@@ -156,7 +156,84 @@ fn main() {
     native_browser_accessibility(mtm);
     native_app_edit_menu(mtm);
     native_app_draggable_regions(mtm);
+    native_browser_input_guard(mtm);
     println!("native editing and browser accessibility: all checks passed");
+}
+
+#[cfg(target_os = "macos")]
+fn native_browser_input_guard(mtm: objc2::MainThreadMarker) {
+    use objc2::{MainThreadOnly, class, msg_send, rc::Retained};
+    use objc2_app_kit::{NSBackingStoreType, NSButton, NSView, NSWindow, NSWindowStyleMask};
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
+
+    let bounds = NSRect::new(NSPoint::ZERO, NSSize::new(300., 200.));
+    let window = unsafe {
+        NSWindow::initWithContentRect_styleMask_backing_defer(
+            NSWindow::alloc(mtm),
+            bounds,
+            NSWindowStyleMask::Borderless,
+            NSBackingStoreType::Buffered,
+            false,
+        )
+    };
+    let parent = NSView::new(mtm);
+    window.setContentView(Some(&parent));
+    let browser = NSView::new(mtm);
+    browser.setFrame(bounds);
+    parent.addSubview(&browser);
+    let button = NSButton::new(mtm);
+    button.setFrame(bounds);
+    browser.addSubview(&button);
+    let shield = mew_cef_host::mac::BrowserInputShield::attach(&browser);
+    let target = browser.hitTest(NSPoint::new(100., 100.)).unwrap();
+    let button_view: &NSView = &button;
+    assert!(
+        std::ptr::eq(&*target, button_view),
+        "new pages must accept input by default"
+    );
+
+    let editor: Retained<NSView> = unsafe { msg_send![class!(NSTextView), new] };
+    browser.addSubview(&editor);
+    assert!(window.makeFirstResponder(Some(&editor)));
+    shield.set_interactive(false);
+    let target = browser.hitTest(NSPoint::new(100., 100.)).unwrap();
+    let shield_view: &NSView = &shield;
+    assert!(
+        std::ptr::eq(&*target, shield_view),
+        "closing pages must consume pointer input without hiding their content"
+    );
+    assert!(!browser.isHidden());
+    assert_eq!(browser.frame(), bounds);
+    assert!(!std::ptr::eq(
+        &*window.firstResponder().unwrap(),
+        &*editor as &objc2_app_kit::NSResponder
+    ));
+    browser.setFrame(NSRect::new(NSPoint::ZERO, NSSize::new(400., 300.)));
+    let target = browser.hitTest(NSPoint::new(350., 250.)).unwrap();
+    assert!(
+        std::ptr::eq(&*target, shield_view),
+        "animated bounds must remain covered by the input guard"
+    );
+
+    let other_editor: Retained<NSView> = unsafe { msg_send![class!(NSTextView), new] };
+    parent.addSubview(&other_editor);
+    assert!(window.makeFirstResponder(Some(&other_editor)));
+    shield.set_interactive(false);
+    assert!(
+        std::ptr::eq(
+            &*window.firstResponder().unwrap(),
+            &*other_editor as &objc2_app_kit::NSResponder
+        ),
+        "background page updates must preserve another page's focus"
+    );
+    other_editor.removeFromSuperview();
+    editor.removeFromSuperview();
+    shield.set_interactive(true);
+    let target = browser.hitTest(NSPoint::new(100., 100.)).unwrap();
+    assert!(
+        std::ptr::eq(&*target, button_view),
+        "reopening must restore the same retained page's controls"
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -391,6 +468,18 @@ fn native_browser_accessibility(mtm: objc2::MainThreadMarker) {
         children().count(),
         3,
         "app and browser siblings must both be accessible, without duplicates"
+    );
+    let shield = mew_cef_host::mac::BrowserInputShield::attach(&external);
+    shield.set_interactive(false);
+    assert!(
+        !children().containsObject(&page_node),
+        "closing pages must leave the AX tree before their exit animation finishes"
+    );
+    assert!(children().containsObject(&composer_node));
+    shield.set_interactive(true);
+    assert!(
+        children().containsObject(&page_node),
+        "reopening must restore the retained page's AX controls"
     );
     external.setHidden(true);
     assert!(children().containsObject(&composer_node));

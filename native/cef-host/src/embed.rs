@@ -99,6 +99,8 @@ mod mac_impl {
         last_rect: Mutex<Option<BrowserRect>>,
         pending_navigation: Mutex<Option<String>>,
         native_view: AtomicUsize,
+        interactive: AtomicBool,
+        input_shield: Mutex<Option<objc2::rc::Retained<mac::BrowserInputShield>>>,
         closed: AtomicBool,
         browser_event: BrowserEventCallback,
         app: Option<AppPage>,
@@ -134,6 +136,8 @@ mod mac_impl {
                 last_rect: Mutex::new(None),
                 pending_navigation: Mutex::new(None),
                 native_view: AtomicUsize::new(0),
+                interactive: AtomicBool::new(true),
+                input_shield: Mutex::new(None),
                 closed: AtomicBool::new(false),
                 browser_event,
                 app: None,
@@ -516,6 +520,13 @@ mod mac_impl {
                 let parent = unsafe { &*(handle as *const NSView) };
                 view.setFrame(parent.bounds());
             }
+            if let Ok(shield) = self.state.input_shield.lock()
+                && let Some(shield) = shield.as_ref()
+            {
+                let parent = unsafe { &*(handle as *const NSView) };
+                shield.setFrame(parent.bounds());
+                shield.set_interactive(self.state.interactive.load(Ordering::Acquire));
+            }
         }
 
         pub fn navigate_on_main_thread(&self, url: &str) {
@@ -553,6 +564,9 @@ mod mac_impl {
         }
 
         pub fn focus_on_main_thread(&self) -> bool {
+            if !self.state.interactive.load(Ordering::Acquire) {
+                return false;
+            }
             let Ok(mut browser) = self.state.browser.lock() else {
                 return false;
             };
@@ -563,6 +577,21 @@ mod mac_impl {
                 return true;
             }
             false
+        }
+
+        pub fn set_interactive_on_main_thread(&self, interactive: bool) {
+            self.state.interactive.store(interactive, Ordering::Release);
+            if let Ok(shield) = self.state.input_shield.lock()
+                && let Some(shield) = shield.as_ref()
+            {
+                shield.set_interactive(interactive);
+            }
+            if !interactive
+                && let Ok(browser) = self.state.browser.lock()
+                && let Some(host) = browser.as_ref().and_then(|browser| browser.host())
+            {
+                host.set_focus(0);
+            }
         }
 
         pub fn blur_on_main_thread(&self) -> bool {
@@ -908,6 +937,10 @@ mod mac_impl {
                 Some(MewDisplayHandler::new(self.state.clone()))
             }
 
+            fn focus_handler(&self) -> Option<FocusHandler> {
+                Some(MewFocusHandler::new(self.state.clone()))
+            }
+
             fn request_handler(&self) -> Option<RequestHandler> {
                 self.state.app.as_ref().map(|_| MewAppRequestHandler::new(self.state.clone()))
             }
@@ -927,6 +960,19 @@ mod mac_impl {
                     return 0;
                 }
                 i32::from(app.router.on_process_message_received(browser.cloned(), frame.cloned(), source_process, message.cloned()))
+            }
+        }
+    }
+
+    wrap_focus_handler! {
+        struct MewFocusHandler {
+            state: Arc<PageState>,
+        }
+
+        impl FocusHandler {
+            fn on_set_focus(&self, _browser: Option<&mut Browser>, _source: FocusSource) -> i32 {
+                i32::from(!self.state.interactive.load(Ordering::Acquire)
+                    || self.state.closed.load(Ordering::Acquire))
             }
         }
     }
@@ -1094,6 +1140,14 @@ mod mac_impl {
                         && let Ok(mut drag_view) = app.drag_view.lock()
                     {
                         *drag_view = Some(mac::AppDragView::attach(view));
+                    } else if self.state.app.is_none()
+                        && let Ok(mut input_shield) = self.state.input_shield.lock()
+                    {
+                        let shield = mac::BrowserInputShield::attach(view);
+                        let interactive = self.state.interactive.load(Ordering::Acquire);
+                        shield.set_interactive(interactive);
+                        if !interactive { host.set_focus(0); }
+                        *input_shield = Some(shield);
                     }
                     mac::register_browser_view(view);
                     view.setHidden(true);
@@ -1142,6 +1196,7 @@ mod mac_impl {
                 self.state.native_view.store(0, Ordering::Release);
                 if let Ok(mut browser) = self.state.browser.lock() { *browser = None; }
                 if let Ok(mut registration) = self.state.devtools_registration.lock() { *registration = None; }
+                if let Ok(mut shield) = self.state.input_shield.lock() { *shield = None; }
             }
         }
     }
@@ -1191,7 +1246,7 @@ mod mac_impl {
     #[cfg(test)]
     mod tests {
         use super::{PageState, RuntimeState, is_helper_process};
-        use cef::ImplLifeSpanHandler;
+        use cef::{ImplClient, ImplFocusHandler, ImplLifeSpanHandler};
         use std::sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -1535,6 +1590,42 @@ mod mac_impl {
         }
 
         #[test]
+        fn input_state_before_native_creation_is_retained_without_replacing_the_page() {
+            let runtime = Arc::new(RuntimeState::new(String::new()));
+            let page = Arc::new(PageState::new(
+                0,
+                "https://example.com/",
+                runtime,
+                Arc::new(|_| {}),
+            ));
+            let controller = super::CefPageController {
+                state: page.clone(),
+            };
+            let client = super::MewBrowserClient::new(page.clone());
+            let focus = client
+                .focus_handler()
+                .expect("browser pages must guard CEF focus requests");
+            assert!(page.interactive.load(Ordering::Acquire));
+            assert_eq!(focus.on_set_focus(None, cef::FocusSource::NAVIGATION), 0);
+            controller.navigate_on_main_thread("https://example.com/retained");
+            controller.set_interactive_on_main_thread(false);
+            assert!(!page.interactive.load(Ordering::Acquire));
+            assert!(!controller.focus_on_main_thread());
+            assert_eq!(focus.on_set_focus(None, cef::FocusSource::NAVIGATION), 1);
+            assert_eq!(focus.on_set_focus(None, cef::FocusSource::SYSTEM), 1);
+            assert!(!page.closed.load(Ordering::Acquire));
+            assert_eq!(
+                page.pending_navigation.lock().unwrap().as_deref(),
+                Some("https://example.com/retained")
+            );
+            controller.set_interactive_on_main_thread(true);
+            assert!(page.interactive.load(Ordering::Acquire));
+            assert_eq!(focus.on_set_focus(None, cef::FocusSource::SYSTEM), 0);
+            super::MewLifeSpanHandler::new(page.clone()).on_before_close(None);
+            assert_eq!(focus.on_set_focus(None, cef::FocusSource::SYSTEM), 1);
+        }
+
+        #[test]
         fn cancelling_creation_suppresses_late_native_callbacks() {
             let runtime = Arc::new(RuntimeState::new("http://127.0.0.1:9223".into()));
             runtime.initialized.store(true, Ordering::Release);
@@ -1629,6 +1720,7 @@ mod non_macos {
         pub fn focus_on_main_thread(&self) -> bool {
             false
         }
+        pub fn set_interactive_on_main_thread(&self, _interactive: bool) {}
         pub fn blur_on_main_thread(&self) -> bool {
             false
         }

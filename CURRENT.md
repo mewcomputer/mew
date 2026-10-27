@@ -3876,3 +3876,39 @@ was restored. Packaged smoke covered summary entry/exit, direct divider resizing
 and retained browser input through pane close/reopen. Photos are
 `mew-motion-01-compact.jpg`, `mew-motion-02-expanded.jpg` and
 `mew-motion-03-summary-browser.jpg` in this task's visualization folder.
+
+
+## 2026-10-27: animate browser and tool pane transitions
+
+The workbench now opens and closes over the existing 260ms panel motion token.
+The outer resizable panels animate their actual flex sizes, so retained native
+browser bounds follow the same geometry. Closing retains visual contents until
+both panel transitions settle, while logical activity, DOM input, shortcuts and
+browser tool registration stop immediately. Native external pages use a
+transparent input shield, reject focus and leave the composed accessibility
+tree during exit; reopening restores the same page. The trusted app header's
+drag regions are unchanged.
+
+Quick reversals ignore stale completion callbacks. Reduced motion settles
+immediately, including a live preference change. Initial layout, StrictMode
+effect replay and direct divider interaction remain immediate. Regressions
+cover these paths, retained visibility, input/registration handoff and native
+focus/accessibility restoration.
+
+Verified all 201 React tests and the production build, 335 isolated serial
+desktop tests, 21 CEF library tests, 11 browser-host tests and the real AppKit
+editing/accessibility/input harness. Debug packaging passed. Browser inspection
+confirmed intermediate panel widths, reversal and direct pointer resizing.
+Packaged smoke used the isolated daemon and deterministic fake provider. It
+covered toolbar/header close and reopen, keyboard divider
+resizing, Files and browser tabs, retained chat drafts and browser form input,
+and native editing after reopening. Photos `mew-pane-01-closed.jpg` through
+`mew-pane-06-chat-browser.jpg` are in this task's visualization folder.
+
+QA follow-ups: native window dragging returned AXError.attributeUnsupported in
+the computer-use harness this pass, so that interaction was not reverified.
+Editing the host contract during Vite hot reload re-executed createRoot and
+invalidated the theme context; a full reload cleared that development-only
+failure. The packaged build does not use Vite hot reload. Files watching in the
+non-Git QA workspace also surfaced git-status errors; the real file listing
+and pane close/reopen still worked.

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { WorkspaceFrame } from "../components/workspace-frame";
 import { useSessionStore } from "../stores/session";
-import type { ReactNode } from "react";
+import { StrictMode, type ReactNode, type Ref } from "react";
 import type { WorkbenchTabsState } from "../lib/workbench-tabs";
 import { ConversationLayout } from "../components/conversation-layout";
 
@@ -11,12 +11,83 @@ vi.mock("../components/session-rail", async (importOriginal) => ({
   ...await importOriginal<typeof import("../components/session-rail")>(),
   SessionRail: () => <nav aria-label="Chats" />,
 }));
-vi.mock("../components/right-rail", () => ({ RightRail: ({ open, workbenchTabs }: { open: boolean; workbenchTabs: WorkbenchTabsState }) => <aside aria-label="Workbench" data-open={open}>{workbenchTabs.tabs.map((tab) => <output key={tab.id}>{`${tab.title}:${tab.payload?.url}:${tab.sessionId}`}</output>)}</aside> }));
-vi.mock("../components/ui/resizable", () => ({ ResizablePanelGroup: ({ children }: { children: ReactNode }) => <div>{children}</div>, ResizablePanel: ({ children }: { children: ReactNode }) => <section>{children}</section>, ResizableHandle: () => null }));
+vi.mock("../components/right-rail", () => ({ RightRail: ({ open, present = open, workbenchTabs }: { open: boolean; present?: boolean; workbenchTabs: WorkbenchTabsState }) => <aside aria-label="Workbench" data-open={open} data-present={present}>{workbenchTabs.tabs.map((tab) => <output key={tab.id}>{`${tab.title}:${tab.payload?.url}:${tab.sessionId}`}</output>)}</aside> }));
+vi.mock("../components/ui/resizable", () => ({
+  ResizablePanelGroup: ({ children, elementRef, id }: { children: ReactNode; elementRef?: Ref<HTMLDivElement>; id?: string }) => <div id={id} ref={elementRef}>{children}</div>,
+  ResizablePanel: ({ children, id, inert }: { children: ReactNode; id: string; inert?: boolean }) => <section id={id} data-panel inert={inert}>{children}</section>,
+  ResizableHandle: () => null,
+}));
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); delete window.mewQuery; localStorage.clear(); });
 
 describe("native workspace navigation", () => {
+  it("restores the initial pane without motion during strict effect replay", () => {
+    localStorage.setItem("mew.workspaceSurfaces", JSON.stringify({ workbenchOpen: true }));
+    const frame = vi.spyOn(window, "requestAnimationFrame").mockReturnValue(1);
+    render(<StrictMode><WorkspaceFrame><article>Conversation</article></WorkspaceFrame></StrictMode>);
+    expect(document.getElementById("mew-workspace-panels")!.getAttribute("data-workbench-motion")).toBe("false");
+    expect(frame).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Workbench").getAttribute("data-open")).toBe("true");
+  });
+
+  it("keeps workbench contents present until both panels finish closing", async () => {
+    localStorage.setItem("mew.workspaceSurfaces", JSON.stringify({ workbenchOpen: true }));
+    let nextFrame!: FrameRequestCallback;
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => { nextFrame = callback; return 1; });
+    useSessionStore.setState({ sessionId: "closing-chat" });
+    render(<WorkspaceFrame><ConversationLayout><article>Conversation</article></ConversationLayout></WorkspaceFrame>);
+    let finishChat!: () => void;
+    let finishWorkbench!: () => void;
+    document.getElementById("conversation")!.getAnimations = () => [{ finished: new Promise<void>((resolve) => { finishChat = resolve; }) } as unknown as Animation];
+    document.getElementById("workbench")!.getAnimations = () => [{ finished: new Promise<void>((resolve) => { finishWorkbench = resolve; }) } as unknown as Animation];
+    fireEvent.click(screen.getByRole("button", { name: "Close workbench" }));
+    expect(screen.getByLabelText("Workbench").getAttribute("data-open")).toBe("false");
+    expect(screen.getByLabelText("Workbench").getAttribute("data-present")).toBe("true");
+    expect(document.getElementById("workbench")!.hasAttribute("inert")).toBe(true);
+    act(() => nextFrame(0));
+    await act(async () => finishChat());
+    expect(screen.getByLabelText("Workbench").getAttribute("data-present")).toBe("true");
+    await act(async () => finishWorkbench());
+    expect(screen.getByLabelText("Workbench").getAttribute("data-present")).toBe("false");
+  });
+
+  it("ignores completion of a close transition after reopening the pane", async () => {
+    localStorage.setItem("mew.workspaceSurfaces", JSON.stringify({ workbenchOpen: true }));
+    let nextFrame!: FrameRequestCallback;
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => { nextFrame = callback; return 1; });
+    useSessionStore.setState({ sessionId: "reopened-chat" });
+    render(<WorkspaceFrame><ConversationLayout><article>Conversation</article></ConversationLayout></WorkspaceFrame>);
+    let finishClose!: () => void;
+    document.getElementById("workbench")!.getAnimations = () => [{ finished: new Promise<void>((resolve) => { finishClose = resolve; }) } as unknown as Animation];
+    fireEvent.click(screen.getByRole("button", { name: "Close workbench" }));
+    act(() => nextFrame(0));
+    fireEvent.click(screen.getByRole("button", { name: "Open workbench" }));
+    await act(async () => finishClose());
+    expect(screen.getByLabelText("Workbench").getAttribute("data-open")).toBe("true");
+    expect(screen.getByLabelText("Workbench").getAttribute("data-present")).toBe("true");
+    expect(document.getElementById("workbench")!.hasAttribute("inert")).toBe(false);
+  });
+
+  it("finishes a closing pane immediately when reduced motion becomes enabled", () => {
+    localStorage.setItem("mew.workspaceSurfaces", JSON.stringify({ workbenchOpen: true }));
+    let reduced = false;
+    const media = new EventTarget();
+    Object.defineProperty(media, "matches", { get: () => reduced });
+    const matchMedia = window.matchMedia;
+    vi.spyOn(window, "matchMedia").mockImplementation((query) => query === "(prefers-reduced-motion: reduce)" ? media as MediaQueryList : matchMedia(query));
+    vi.spyOn(window, "requestAnimationFrame").mockReturnValue(1);
+    useSessionStore.setState({ sessionId: "reduced-pane-chat" });
+    render(<WorkspaceFrame><ConversationLayout><article>Conversation</article></ConversationLayout></WorkspaceFrame>);
+    fireEvent.click(screen.getByRole("button", { name: "Close workbench" }));
+    expect(screen.getByLabelText("Workbench").getAttribute("data-present")).toBe("true");
+    act(() => { reduced = true; media.dispatchEvent(new Event("change")); });
+    expect(screen.getByLabelText("Workbench").getAttribute("data-present")).toBe("false");
+    expect(document.getElementById("mew-workspace-panels")!.getAttribute("data-workbench-motion")).toBe("false");
+    fireEvent.click(screen.getByRole("button", { name: "Open workbench" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close workbench" }));
+    expect(screen.getByLabelText("Workbench").getAttribute("data-present")).toBe("false");
+  });
+
   it("stops in-flight movement when reduced motion becomes enabled", () => {
     let resize: ResizeObserverCallback;
     vi.stubGlobal("ResizeObserver", class {

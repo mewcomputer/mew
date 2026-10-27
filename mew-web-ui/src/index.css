@@ -481,6 +481,10 @@ button:focus-visible,
   transition-timing-function: var(--ease-out);
 }
 
+.mew-workspace-panels[data-workbench-motion="true"]:not(:has([data-separator="active"], [data-separator="focus"])) > [data-panel] {
+  transition: flex-grow var(--motion-panel) var(--ease-drawer);
+}
+
 .mew-summary-content {
   opacity: 1;
   visibility: visible;
@@ -515,6 +519,10 @@ button:focus-visible,
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .mew-workspace-panels > [data-panel] {
+    transition: none !important;
+  }
+
   *,
   *::before,
   *::after {

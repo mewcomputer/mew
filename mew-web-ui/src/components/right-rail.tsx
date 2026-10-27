@@ -51,6 +51,7 @@ const NEW_TAB_TOOLS: ReadonlyArray<{
 
 interface RightRailProps {
   open: boolean;
+  present?: boolean;
   onOpenChange: (open: boolean) => void;
   mode?: "sheet" | "dock";
   workbenchTabs?: WorkbenchTabsState;
@@ -60,6 +61,7 @@ interface RightRailProps {
 
 export function RightRail({
   open,
+  present = open,
   onOpenChange,
   mode = "sheet",
   workbenchTabs = DEFAULT_WORKBENCH_TABS,
@@ -161,7 +163,7 @@ export function RightRail({
     const action = (name: string) => {
       if (name === "new-tab") addWorkbenchTab("browser");
       if (name === "terminal") addWorkbenchTab("terminal");
-      if (name === "close-tab" && selectedWorkbenchTab?.closable) applyWorkbenchAction({ type: "close", id: selectedWorkbenchTab.id });
+      if (name === "close-tab" && open && selectedWorkbenchTab?.closable) applyWorkbenchAction({ type: "close", id: selectedWorkbenchTab.id });
     };
     const handleKeyDown = (event: KeyboardEvent) => {
       if (!open || !(event.metaKey || event.ctrlKey)) return;
@@ -292,6 +294,7 @@ export function RightRail({
           client={getClient()}
           connected={connected}
           active={open && active}
+          present={present && active}
           tab={tab}
           onTabChange={(patch) => {
             if (tab.id === "launcher") applyWorkbenchAction({ type: "add", tab: createWorkbenchTab("browser", { ...patch, sessionId: sessionId ?? undefined }) });
