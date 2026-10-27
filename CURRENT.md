@@ -3691,3 +3691,15 @@ semantics and the difference between metadata archiving and stop-and-archive.
 Verified all 17 local source links, checked coverage of the requested features
 and delivery stages, and ran `just theme-codegen-check` successfully. No product
 code or generated assets changed; implementation remains a separate step.
+
+## 2026-10-27: shared chat UI baseline inventory
+
+Added `notes/chat-ui-baseline-checklist.md` with source and test ownership for
+the existing desktop baseline, pending replacement acceptance cases, and the
+bounded chat-plus-browser UI milestone. Direct subagent messaging remains a v1
+requirement in the later runtime stage. The native interface remains available
+until the complete baseline is accepted.
+
+Verified the checklist's repository links and desktop recipe dry runs. The
+inventory distinguishes inspected coverage from acceptance performed; unchecked
+items do not imply replacement parity.
