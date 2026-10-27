@@ -250,6 +250,7 @@ async fn async_main(cli: Cli, daemonized: bool) -> Result<()> {
     }
 
     match cli.command {
+        Some(Commands::DesktopHost) => commands::desktop_host::run().await,
         Some(Commands::Run {
             provider,
             model,

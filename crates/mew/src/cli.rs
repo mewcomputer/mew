@@ -30,6 +30,8 @@ mod tests {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Serve the desktop UI and its JSONL host protocol without opening a window.
+    DesktopHost,
     /// Run a single prompt non-interactively
     Run {
         /// Provider ID (defaults to last-used or opencode-zen)

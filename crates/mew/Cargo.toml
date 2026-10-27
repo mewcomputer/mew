@@ -32,6 +32,8 @@ mew-daemon = { workspace = true }
 mew-protocol = { workspace = true }
 mew-client-core = { workspace = true }
 mew-client-local = { workspace = true }
+mew-desktop-supervisor = { workspace = true }
+mew-web-bridge = { workspace = true }
 mew-hooks-runtime = { workspace = true }
 mew-ext-broker = { workspace = true }
 mew-subagents = { workspace = true }
@@ -41,6 +43,7 @@ crossterm = { workspace = true }
 tokio = { workspace = true }
 ulid = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
 toml = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
