@@ -481,6 +481,24 @@ button:focus-visible,
   transition-timing-function: var(--ease-out);
 }
 
+.mew-summary-content {
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(0);
+  transition: opacity var(--motion-menu) var(--ease-out), transform var(--motion-menu) var(--ease-out), visibility var(--motion-menu);
+}
+
+[data-state="closed"] > .mew-summary-content {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateX(12px);
+}
+
+[data-summary-animate="false"] .mew-summary-content {
+  transition: none;
+}
+
 .motion-disclosure {
   display: grid;
   grid-template-rows: 0fr;
@@ -510,7 +528,8 @@ button:focus-visible,
   .motion-popover,
   .motion-overlay,
   .motion-drawer,
-  .motion-panel-size {
+  .motion-panel-size,
+  .mew-summary-content {
     transition: none !important;
     transform: none !important;
   }

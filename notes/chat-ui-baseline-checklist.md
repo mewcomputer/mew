@@ -89,6 +89,16 @@ The native browser remains visible beside a compact summary that does not
 overlap it. Overlapping tool menus and modal dialogs still hide native content
 until dismissal; bounds and modal regressions cover this distinction.
 
+Summary motion verification: the summary now uses a 180ms slide/fade with
+transform-based chat-column repositioning. Divider resizing and initial layout
+remain immediate. Reduced motion disables the movement and cancels active
+column animations on a live preference change. Regressions cover focus in both
+layout directions, repinning an open popover and motion cancellation. All 194
+React tests and the production build pass. Packaged smoke retained browser
+input through pane close/reopen; `mew-motion-01-compact.jpg`,
+`mew-motion-02-expanded.jpg` and `mew-motion-03-summary-browser.jpg` record the
+resulting layouts. Temporary slow inspection timing was restored to 180ms.
+
 The complete baseline remains the replacement's release bar. Direct subagent
 messaging is required for v1, but its runtime/controller work and the remaining
 workbench tools are beyond this first UI milestone. Keep the existing desktop

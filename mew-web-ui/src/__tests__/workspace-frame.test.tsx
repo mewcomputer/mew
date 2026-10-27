@@ -14,14 +14,43 @@ vi.mock("../components/session-rail", async (importOriginal) => ({
 vi.mock("../components/right-rail", () => ({ RightRail: ({ open, workbenchTabs }: { open: boolean; workbenchTabs: WorkbenchTabsState }) => <aside aria-label="Workbench" data-open={open}>{workbenchTabs.tabs.map((tab) => <output key={tab.id}>{`${tab.title}:${tab.payload?.url}:${tab.sessionId}`}</output>)}</aside> }));
 vi.mock("../components/ui/resizable", () => ({ ResizablePanelGroup: ({ children }: { children: ReactNode }) => <div>{children}</div>, ResizablePanel: ({ children }: { children: ReactNode }) => <section>{children}</section>, ResizableHandle: () => null }));
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); delete window.mewQuery; localStorage.clear(); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); delete window.mewQuery; localStorage.clear(); });
 
 describe("native workspace navigation", () => {
+  it("stops in-flight movement when reduced motion becomes enabled", () => {
+    let resize: ResizeObserverCallback;
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(element: Element) { if (element.getAttribute("aria-label") === "Chat") resize = this.callback; }
+      disconnect() {}
+    });
+    let reduced = false;
+    const media = new EventTarget();
+    Object.defineProperty(media, "matches", { get: () => reduced });
+    const matchMedia = window.matchMedia;
+    vi.spyOn(window, "matchMedia").mockImplementation((query) => query === "(prefers-reduced-motion: reduce)" ? media as MediaQueryList : matchMedia(query));
+    useSessionStore.setState({ sessionId: "motion-chat" });
+    render(<WorkspaceFrame><ConversationLayout><article className="mew-conversation-width">Conversation</article></ConversationLayout></WorkspaceFrame>);
+    const column = screen.getByText("Conversation");
+    vi.spyOn(column, "getBoundingClientRect").mockReturnValueOnce(new DOMRect(100, 0, 600, 800)).mockReturnValue(new DOMRect(50, 0, 600, 800));
+    const animation = { playState: "running", cancel() { this.playState = "idle"; } };
+    column.animate = () => animation as Animation;
+    act(() => resize!([{ contentRect: { width: 700 } }] as ResizeObserverEntry[], {} as ResizeObserver));
+    act(() => resize!([{ contentRect: { width: 1200 } }] as ResizeObserverEntry[], {} as ResizeObserver));
+    const summary = screen.getByRole("complementary", { name: "Conversation summary" });
+    expect(animation.playState).toBe("running");
+    reduced = true;
+    media.dispatchEvent(new Event("change"));
+    expect(animation.playState).toBe("idle");
+    expect(screen.getByRole("complementary", { name: "Conversation summary" })).toBe(summary);
+    expect(column.isConnected).toBe(true);
+  });
+
   it("automatically mounts the summary inside a wide chat pane and follows pane resizing", () => {
     let resize: ResizeObserverCallback;
     vi.stubGlobal("ResizeObserver", class {
-      constructor(callback: ResizeObserverCallback) { resize = callback; }
-      observe() {}
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(element: Element) { if (element.getAttribute("aria-label") === "Chat") resize = this.callback; }
       disconnect() {}
     });
     useSessionStore.setState({ sessionId: "wide-chat", sessionCwd: "/code/mew", subagents: new Map(), jobs: new Map(), flaggedFiles: [], gitStatus: [] });
@@ -36,10 +65,25 @@ describe("native workspace navigation", () => {
     expect(screen.queryByRole("button", { name: "Open summary" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Open workbench" }));
     expect(screen.getByRole("complementary", { name: "Conversation summary" })).toBe(summary);
+    within(summary).getByRole("button", { name: /Changes/ }).focus();
     act(() => resize!([{ contentRect: { width: 700 } }] as ResizeObserverEntry[], {} as ResizeObserver));
     expect(screen.queryByRole("complementary", { name: "Conversation summary" })).toBeNull();
-    expect(within(screen.getByRole("region", { name: "Chat" })).getByRole("button", { name: "Open summary" })).toBeTruthy();
+    const trigger = within(screen.getByRole("region", { name: "Chat" })).getByRole("button", { name: "Open summary" });
+    expect(document.activeElement).toBe(trigger);
+    expect(summary.isConnected).toBe(true);
+    expect(summary.getAttribute("aria-hidden")).toBe("true");
+    expect(summary.hasAttribute("inert")).toBe(true);
     expect(within(screen.getByLabelText("Workbench")).queryByRole("button", { name: "Open summary" })).toBeNull();
+    act(() => resize!([{ contentRect: { width: 1200 } }] as ResizeObserverEntry[], {} as ResizeObserver));
+    expect(screen.getByRole("complementary", { name: "Conversation summary" })).toBe(summary);
+    expect(summary.hasAttribute("inert")).toBe(false);
+    expect(document.activeElement).toBe(within(summary).getByRole("button", { name: /Changes/ }));
+    act(() => resize!([{ contentRect: { width: 700 } }] as ResizeObserverEntry[], {} as ResizeObserver));
+    fireEvent.click(screen.getByRole("button", { name: "Open summary" }));
+    within(screen.getByRole("dialog", { name: "Conversation summary" })).getByRole("button", { name: "View all sources" }).focus();
+    act(() => resize!([{ contentRect: { width: 1200 } }] as ResizeObserverEntry[], {} as ResizeObserver));
+    expect(screen.queryByRole("dialog", { name: "Conversation summary" })).toBeNull();
+    expect(document.activeElement).toBe(within(summary).getByRole("button", { name: /Changes/ }));
   });
 
   it("opens the corner summary independently and enters subagents through it", () => {

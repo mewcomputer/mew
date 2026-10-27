@@ -3855,3 +3855,24 @@ The regressions failed before the fix. All 193 React tests and the production
 build pass afterward. Rebuilt and packaged the desktop app, then photographed
 the compact summary beside a real retained browser and checked that browser
 tools still hide/restore native content. No runtime or baseline expansion.
+
+
+## 2026-10-27: animate chat summary transitions
+
+The pinned summary slides and fades over the existing 180ms motion token on
+entry and exit. Its retained shell becomes inert and hidden to accessibility
+immediately on close, while visibility settles after the exit transition.
+Chat columns move from their measured visual positions using transforms,
+including during a reversal, so the transcript is laid out once per change.
+Initial layout and divider interaction stay immediate. Reduced-motion mode
+skips movement and cancels running column animations when the preference changes.
+Focus follows the summary between its pinned card, compact trigger and open
+popover without dropping to the document body.
+
+Verified the 194-test React suite and production build, then rebuilt and
+packaged the desktop app. A slowed browser inspection confirmed intermediate
+column transforms and completed hidden/inert exit state; normal 180ms timing
+was restored. Packaged smoke covered summary entry/exit, direct divider resizing
+and retained browser input through pane close/reopen. Photos are
+`mew-motion-01-compact.jpg`, `mew-motion-02-expanded.jpg` and
+`mew-motion-03-summary-browser.jpg` in this task's visualization folder.
