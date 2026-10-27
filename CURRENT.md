@@ -3673,3 +3673,21 @@ stack the pane below the conversation. Light and existing named themes were
 visually inspected, with no JavaScript errors. This remains a design prototype;
 no provider calls, application implementation or generated-theme changes were
 made.
+
+## 2026-10-27: chat UI migration plan
+
+Added `notes/cef-ui-migration-plan.md` with the proposed shared React/TypeScript
+presentation in the packaged CEF runtime, a thin Rust host and preserved daemon,
+provider/tool/session boundaries. The plan maps existing features to their owning
+layers, preserves native/browser preferences and custom theme resolution, and
+defines six delivery stages with acceptance conditions before switching defaults.
+
+Direct subagent messaging is a first-version requirement. Its runtime stage
+covers child-owned delivery, follow-up runs in the same conversation, receipts,
+policy persistence, parent collection races and descendant cancellation. The
+plan also identifies missing TS protocol operations, connection-owned PTY
+semantics and the difference between metadata archiving and stop-and-archive.
+
+Verified all 17 local source links, checked coverage of the requested features
+and delivery stages, and ran `just theme-codegen-check` successfully. No product
+code or generated assets changed; implementation remains a separate step.
