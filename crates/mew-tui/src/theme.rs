@@ -667,6 +667,26 @@ mod tests {
     // --- Theme tests ---
 
     #[test]
+    fn codex_palettes_keep_neutral_chrome_and_inherited_semantic_colors() {
+        for (name, mode, background) in [
+            ("codex-dark", ThemeMode::Dark, Color::Rgb(24, 24, 24)),
+            ("codex-light", ThemeMode::Light, Color::Rgb(255, 255, 255)),
+        ] {
+            let theme = Theme::load(name);
+            assert_eq!(theme.name, name);
+            assert_eq!(theme.mode, mode);
+            assert_eq!(theme.resolve("background"), background);
+            assert_eq!(theme.resolve("text.body"), theme.resolve("foreground"));
+            assert_eq!(
+                theme.resolve("markdown.paragraph"),
+                theme.resolve("foreground")
+            );
+            assert!(theme.css_variables().contains("--sidebar:"));
+        }
+        assert_eq!(Theme::dark().resolve("primary"), Color::Rgb(0, 255, 255));
+    }
+
+    #[test]
     fn test_dark_theme_loads() {
         let t = Theme::dark();
         assert_eq!(t.name, "dark");

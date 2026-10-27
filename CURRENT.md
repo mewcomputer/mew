@@ -3735,3 +3735,14 @@ matching acknowledgement promises for selecting retained native pages.
 Verified all 32 client tests, the client build and the complete 142-test React
 suite. Tracked client distribution files were regenerated. No Rust protocol
 format changed.
+
+## 2026-10-27: neutral Codex-style palettes
+
+Added `codex-dark` and `codex-light` to the shared theme manifest and browser
+inventory. These provide neutral surfaces for the closer Codex presentation;
+existing palettes and semantic aliases remain available. Generated the Rust and
+CSS outputs through theme codegen.
+
+Verified the palette regression, including unchanged original dark-theme
+colors, and `just theme-codegen-check`. The new desktop shell selects these
+palettes only when there is no saved light/dark preference.
