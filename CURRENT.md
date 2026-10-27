@@ -3912,3 +3912,34 @@ invalidated the theme context; a full reload cleared that development-only
 failure. The packaged build does not use Vite hot reload. Files watching in the
 non-Git QA workspace also surfaced git-status errors; the real file listing
 and pane close/reopen still worked.
+
+### 2026-10-27: isolated browser composition comparison
+
+Added a shared React/shadcn composition harness under
+`mew-web-ui/prototypes/composition`, an independently packaged Electron 45 host
+under `prototypes/browser-composition`, and a standalone CEF OSR example under
+`native/cef-host/examples/composition.rs`. Production UI, daemon and generated
+themes are unchanged. The fixture is an actual browser document that refuses
+iframe embedding. CEF publishes BGRA frames to a DOM canvas and forwards input;
+Electron uses a DOM webview with native guest input.
+
+Packaged Electron smoke verified translucent app overlays, dropdown click
+isolation, resize/fade under an overlay, retained state through close/reopen,
+page/nested/workbench scrolling, editing and Unicode paste, native select,
+Escape focus return, guest keyboard traversal, browser-to-chat copy/paste and
+light/dark theme rendering. Photos `composition-01-windowed-live.jpg` through
+`composition-07-electron-light.jpg` are in this task's visualization folder.
+
+CEF startup now loads the app and fixture with HTTP 200 and produces native OSR
+frames. Fixed prototype lifecycle/pump handling and matched the existing host's
+mock-keychain policy after a native trace found profile initialization blocked
+in SecItemCopyMatching. The real CEF command-line regression passes for default
+and explicit system-keychain settings. Packaged CEF visual/input checks remain
+pending because the Mac locked. Native IME candidate geometry and canvas
+accessibility are explicitly unimplemented; there is no CEF performance verdict.
+
+Verification: 9 UI tests, 5 Electron tests including real package/signature
+verification, 7 ordinary CEF tests, the separate native keychain regression,
+TypeScript check and prototype production build pass. Both disposable app
+signatures verify. Reproduction steps, evidence boundaries and the provisional
+host assessment are in `prototypes/browser-composition/README.md`.
