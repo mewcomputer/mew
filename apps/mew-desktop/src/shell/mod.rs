@@ -69,6 +69,7 @@ mod sidebar;
 mod tests;
 mod topbar;
 mod types;
+mod web;
 mod work_tabs;
 mod workbench;
 
@@ -79,6 +80,7 @@ use helpers::*;
 pub(crate) use platform::run;
 use session_requests::SessionRequests;
 use types::*;
+pub(crate) use web::run as run_web;
 use work_tabs::{WorkTabKind, WorkTabs};
 
 actions!(

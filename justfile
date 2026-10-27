@@ -161,16 +161,18 @@ _open-url url:
 dev-ui:
     pnpm --filter mew-web-ui dev
 
-# Run the native GPUI desktop client with a debug daemon beside it.
-desktop-dev:
+# Run the packaged desktop client; --web-ui selects the React UI.
+desktop-dev *args: build-js
+    pnpm --filter mew-web-ui build
     cargo build -p mew
     cargo build -p mew-desktop
     cargo build -p mew-cef-host --bin mew-cef-host-helper --no-default-features
     MEW_DESKTOP_PROFILE=debug {{justfile_directory()}}/scripts/package-desktop-native.sh
-    MEW_DESKTOP_DAEMON_BINARY="{{justfile_directory()}}/target/debug/mew" "{{justfile_directory()}}/target/debug/bundle/macos/mew.app/Contents/MacOS/mew-desktop"
+    MEW_DESKTOP_DAEMON_BINARY="{{justfile_directory()}}/target/debug/mew" "{{justfile_directory()}}/target/debug/bundle/macos/mew.app/Contents/MacOS/mew-desktop" "$@"
 
-# Build the native GPUI desktop binary and its daemon.
-desktop-build:
+# Build the packaged desktop binary, embedded UI and daemon.
+desktop-build: build-js
+    pnpm --filter mew-web-ui build
     cargo build --release -p mew -p mew-desktop
     cargo build --release -p mew-cef-host --bin mew-cef-host-helper --no-default-features
     {{justfile_directory()}}/scripts/package-desktop-native.sh

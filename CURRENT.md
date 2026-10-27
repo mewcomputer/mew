@@ -3746,3 +3746,21 @@ CSS outputs through theme codegen.
 Verified the palette regression, including unchanged original dark-theme
 colors, and `just theme-codegen-check`. The new desktop shell selects these
 palettes only when there is no saved light/dark preference.
+
+## 2026-10-27: packaged React desktop host
+
+Added the opt-in `--web-ui` shell using the shared CEF runtime and embedded web
+assets. The host bootstraps the local daemon URL and resolved installed themes,
+persists appearance choices, and positions retained external browser pages from
+validated chat/tab-scoped DOM bounds. Native menus forward navigation commands
+to React. Desktop recipes build the client and UI before embedding their assets.
+
+Moved the CEF pump outside the GPUI app borrow because native menu validation
+can re-enter GPUI. The application-page Edit menu routes Undo/Redo through the
+native responder chain. Existing native rendering remains the default.
+
+Verified all 334 desktop tests with isolated state and serial execution, the
+real AppKit editing/Undo/Redo/accessibility harness, and debug packaging. The
+actual package streamed a daemon reply beside an editable native browser page.
+Full IME, shortcut, resize, remote-profile and native accessibility acceptance
+remains tracked in the baseline checklist.

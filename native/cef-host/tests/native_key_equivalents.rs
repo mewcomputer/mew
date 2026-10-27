@@ -154,7 +154,87 @@ fn main() {
         assert_eq!((native.state(), host.state()), (0, 1));
     }
     native_browser_accessibility(mtm);
-    println!("native key equivalents and browser accessibility: all checks passed");
+    native_app_edit_menu(mtm);
+    println!("native editing and browser accessibility: all checks passed");
+}
+
+#[cfg(target_os = "macos")]
+fn native_app_edit_menu(mtm: objc2::MainThreadMarker) {
+    use objc2::MainThreadOnly;
+    use objc2::{
+        class, msg_send,
+        rc::{Allocated, Retained},
+        runtime::{AnyObject, NSObject, Sel},
+        sel,
+    };
+    use objc2_app_kit::{NSApp, NSBackingStoreType, NSView, NSWindow, NSWindowStyleMask};
+    use objc2_foundation::{NSPoint, NSRange, NSRect, NSSize, NSString};
+
+    let app = NSApp(mtm);
+    let original: Option<Retained<NSObject>> = unsafe { msg_send![&*app, mainMenu] };
+    let main: Retained<NSObject> = unsafe { msg_send![class!(NSMenu), new] };
+    let edit: Retained<NSObject> = unsafe { msg_send![class!(NSMenu), new] };
+    let create = |title: &str, key: &str, action: Sel| -> Retained<NSObject> {
+        unsafe {
+            let item: Allocated<NSObject> = msg_send![class!(NSMenuItem), alloc];
+            msg_send![item, initWithTitle: &*NSString::from_str(title), action: action, keyEquivalent: &*NSString::from_str(key)]
+        }
+    };
+    let parent = create("Edit", "", sel!(handleGPUIMenuItem:));
+    let undo = create("Undo", "z", sel!(handleGPUIMenuItem:));
+    let redo = create("Redo", "Z", sel!(handleGPUIMenuItem:));
+    let copy = create("Copy", "c", sel!(copy:));
+    unsafe {
+        let _: () = msg_send![&*main, addItem: &*parent];
+        let _: () = msg_send![&*parent, setSubmenu: &*edit];
+        for item in [&undo, &redo, &copy] {
+            let _: () = msg_send![&*edit, addItem: &**item];
+        }
+        let _: () = msg_send![&*app, setMainMenu: &*main];
+    }
+    let action = |item: &NSObject| -> Option<Sel> { unsafe { msg_send![item, action] } };
+    assert_eq!(action(&undo), Some(sel!(handleGPUIMenuItem:)));
+    assert_eq!(action(&redo), Some(sel!(handleGPUIMenuItem:)));
+    mew_cef_host::mac::configure_app_edit_menu();
+    assert_eq!(action(&undo), Some(sel!(undo:)));
+    assert_eq!(action(&redo), Some(sel!(redo:)));
+    assert_eq!(action(&copy), Some(sel!(copy:)));
+    for item in [&undo, &redo] {
+        let target: Option<Retained<AnyObject>> = unsafe { msg_send![&**item, target] };
+        assert!(
+            target.is_none(),
+            "native editing must use the first-responder chain"
+        );
+    }
+    let window = unsafe {
+        NSWindow::initWithContentRect_styleMask_backing_defer(
+            NSWindow::alloc(mtm),
+            NSRect::new(NSPoint::ZERO, NSSize::new(200., 200.)),
+            NSWindowStyleMask::Borderless,
+            NSBackingStoreType::Buffered,
+            false,
+        )
+    };
+    let editor: Retained<NSView> = unsafe { msg_send![class!(NSTextView), new] };
+    window.setContentView(Some(&editor));
+    assert!(window.makeFirstResponder(Some(&editor)));
+    unsafe {
+        let _: () = msg_send![&*editor, setAllowsUndo: true];
+        let _: () = msg_send![&*editor, insertText: &*NSString::from_str("native edit"), replacementRange: NSRange::new(0, 0)];
+        let _: () = msg_send![&*editor, breakUndoCoalescing];
+    }
+    let text = || -> String {
+        let text: Retained<NSString> = unsafe { msg_send![&*editor, string] };
+        text.to_string()
+    };
+    assert_eq!(text(), "native edit");
+    assert!(unsafe { editor.tryToPerform_with(action(&undo).unwrap(), Some(&undo)) });
+    assert_eq!(text(), "");
+    assert!(unsafe { editor.tryToPerform_with(action(&redo).unwrap(), Some(&redo)) });
+    assert_eq!(text(), "native edit");
+    unsafe {
+        let _: () = msg_send![&*app, setMainMenu: original.as_deref()];
+    }
 }
 
 #[cfg(target_os = "macos")]

@@ -1044,6 +1044,7 @@ mod mac_impl {
                 }
                 if let Some(host) = browser.host() {
                     if self.state.app.is_some() {
+                        mac::configure_app_edit_menu();
                         host.set_accessibility_state(State::ENABLED);
                     }
                     let handle = host.window_handle() as usize;

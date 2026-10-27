@@ -60,7 +60,7 @@ fn quit(_: &Quit, cx: &mut App) {
     cx.quit();
 }
 
-fn supervisor_config() -> Result<SupervisorConfig> {
+pub(super) fn supervisor_config() -> Result<SupervisorConfig> {
     let mut config = SupervisorConfig::from_env()?;
     if config.daemon_binary.is_none() {
         config.daemon_binary = packaged_daemon_binary().or_else(|| Some(PathBuf::from("mew")));
@@ -75,7 +75,7 @@ fn packaged_daemon_binary() -> Option<PathBuf> {
         .filter(|binary| binary.is_file())
 }
 
-fn persisted_window_bounds() -> Option<Bounds<Pixels>> {
+pub(super) fn persisted_window_bounds() -> Option<Bounds<Pixels>> {
     let state = mew_config::load_state().ok()?;
     let frame = state.desktop_window?;
     if !frame.x.is_finite()
@@ -94,7 +94,7 @@ fn persisted_window_bounds() -> Option<Bounds<Pixels>> {
 }
 
 #[cfg(target_os = "macos")]
-fn configure_native_cef_environment() {
+pub(super) fn configure_native_cef_environment() {
     if std::env::var_os("MEW_CEF_FRAMEWORK_PATH").is_none() {
         if let Some(framework) = find_native_cef_framework() {
             std::env::set_var("MEW_CEF_FRAMEWORK_PATH", framework);
@@ -190,9 +190,9 @@ fn find_native_cef_framework() -> Option<PathBuf> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn configure_native_cef_environment() {}
+pub(super) fn configure_native_cef_environment() {}
 
-fn remote_connection_profile_from_env() -> Option<DesktopConnectionProfile> {
+pub(super) fn remote_connection_profile_from_env() -> Option<DesktopConnectionProfile> {
     let (node_id, persisted_device_name) =
         if let Ok(node_id) = std::env::var("MEW_DESKTOP_IROH_NODE_ID") {
             (node_id, None)

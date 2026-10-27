@@ -11,7 +11,7 @@ use objc2_app_kit::{
     NSDeleteCharacter, NSDeleteFunctionKey, NSDownArrowFunctionKey, NSEvent, NSEventModifierFlags,
     NSLeftArrowFunctionKey, NSRightArrowFunctionKey, NSUpArrowFunctionKey, NSView, NSWindow,
 };
-use objc2_foundation::{NSArray, NSMutableArray};
+use objc2_foundation::{NSArray, NSMutableArray, NSString};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -30,6 +30,40 @@ thread_local! {
 fn native_key_equivalent_imp() -> Imp {
     unsafe {
         std::mem::transmute(native_key_equivalent as unsafe extern "C-unwind" fn(_, _, _) -> _)
+    }
+}
+
+/// The web app owns editing; let AppKit validate against its native responder.
+/// Legacy GPUI menus keep their action handlers unless this is called.
+#[allow(dead_code)]
+pub fn configure_app_edit_menu() {
+    let mtm = MainThreadMarker::new().expect("native menus require the main thread");
+    let app = NSApp(mtm);
+    let Some(main): Option<Retained<NSObject>> = (unsafe { msg_send![&*app, mainMenu] }) else {
+        return;
+    };
+    let items: Retained<NSArray<NSObject>> = unsafe { msg_send![&*main, itemArray] };
+    for item in &items {
+        let title: Retained<NSString> = unsafe { msg_send![&*item, title] };
+        if title.to_string() != "Edit" {
+            continue;
+        }
+        let Some(edit): Option<Retained<NSObject>> = (unsafe { msg_send![&*item, submenu] }) else {
+            continue;
+        };
+        let entries: Retained<NSArray<NSObject>> = unsafe { msg_send![&*edit, itemArray] };
+        for entry in &entries {
+            let title: Retained<NSString> = unsafe { msg_send![&*entry, title] };
+            let action = match title.to_string().as_str() {
+                "Undo" => sel!(undo:),
+                "Redo" => sel!(redo:),
+                _ => continue,
+            };
+            unsafe {
+                let _: () = msg_send![&*entry, setTarget: None::<&AnyObject>];
+                let _: () = msg_send![&*entry, setAction: action];
+            }
+        }
     }
 }
 

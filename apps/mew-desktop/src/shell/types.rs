@@ -388,6 +388,15 @@ impl BrowserPumpView {
             let Some(this) = this.upgrade() else {
                 break;
             };
+            let ready = shell_for_task.upgrade().is_some_and(|shell| {
+                shell.read_with(cx, |shell, _| {
+                    browser_pump_is_needed(shell.browser_portal.is_some(), shell.quitting)
+                })
+            });
+            if ready {
+                // Native menu callbacks must be able to borrow the GPUI app.
+                mew_cef_host::embed::CefEmbedController::do_message_loop_work();
+            }
             let keep_pumping = this.update(cx, |pump, cx| {
                 let Some(shell) = pump.shell.upgrade() else {
                     return false;
@@ -395,9 +404,6 @@ impl BrowserPumpView {
                 shell.update(cx, |shell, cx| {
                     if !browser_pump_is_needed(shell.browser_portal.is_some(), shell.quitting) {
                         return false;
-                    }
-                    if let Some(portal) = shell.browser_portal.as_ref() {
-                        portal.pump();
                     }
                     if shell.apply_browser_events(cx) {
                         cx.notify();
@@ -410,9 +416,7 @@ impl BrowserPumpView {
             }
         })
         .detach();
-        Self {
-            shell: shell_for_task,
-        }
+        Self { shell }
     }
 }
 

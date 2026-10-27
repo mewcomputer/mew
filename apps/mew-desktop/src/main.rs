@@ -5,5 +5,9 @@ mod shell;
 mod terminal;
 
 fn main() {
-    shell::run();
+    if std::env::args().any(|arg| arg == "--web-ui") {
+        shell::run_web();
+    } else {
+        shell::run();
+    }
 }
