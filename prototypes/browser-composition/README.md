@@ -15,29 +15,36 @@ translucency, rounded clipping and opacity changes.
 
 | check in the packaged window | Electron | CEF canvas |
 | --- | --- | --- |
-| app and browser document load | passed | HTTP 200 for both; native OSR paint confirmed |
-| translucent app popover over live browser | passed | pending unlocked-window check |
-| app dropdown intercepts clicks over guest controls | passed | pending |
-| resize and fade beneath an open overlay | passed | pending |
-| close/reopen retains browser notes, counter and chat draft | passed | pending |
-| browser page scroll, nested scroll and outer workbench scroll | passed | pending |
-| text, Unicode paste, Enter, Backspace and arrow keys | passed | pending |
-| browser select popup | passed | pending |
-| Escape returns focus to the app overlay trigger | passed | pending |
-| keyboard traversal into and out of guest | passed | pending |
-| browser-to-chat copy/paste | passed | pending |
+| app and browser document load | passed | passed |
+| translucent app popover over live browser | passed | passed |
+| app dropdown intercepts clicks over guest controls | passed | passed |
+| resize and fade beneath an open overlay | passed | passed |
+| close/reopen retains browser notes, counter and chat draft | passed | passed |
+| browser page scroll, nested scroll and outer workbench scroll | passed | passed |
+| guest text, Unicode paste, Enter, Backspace and arrow keys | passed | passed after Enter correction |
+| browser select popup | passed | passed, painted inside the canvas |
+| Escape returns focus to the app overlay trigger | passed | initially observed; inconsistent in later native checks |
+| keyboard traversal into and out of guest | passed | exit unimplemented; focus stays on the canvas |
+| browser-to-chat copy/paste | passed | incomplete app editing-shortcut route |
 | guest HTML controls exposed through macOS accessibility | observed | unimplemented for the canvas |
 | native IME candidate positioning | untested | unimplemented |
+| light and dark app themes with browser overlay | passed | passed |
+| native window close | passed | passed, exit 0 |
 
-The Mac locked during the CEF checks. CEF's packaged visual/input acceptance is
-unfinished. Its first native paint is not proof that the app canvas, overlays or
-input forwarding work correctly.
+The CEF window checks resumed after unlocking the Mac. Both approaches provide
+actual DOM composition. The CEF canvas remains an incomplete host-input
+implementation: guest keyboard exit, reliable focus handoff, app editing
+shortcuts, native IME geometry and guest accessibility need more work.
 
 CEF startup exposed prototype bugs in query-handler registration, helper
 framework lookup, AppKit run-loop handling and browser-process keychain policy.
-The corrected app loads both documents and produces OSR pixels. The keychain
-policy now matches the existing production host; a real CEF command-line
-regression covers the default and explicit system-keychain settings.
+The corrected app loads both documents and produces OSR pixels. Additional
+regressions caught accepted sockets retaining macOS nonblocking mode, premature
+connection closure, an incorrect OSR close result and Enter missing its separate
+CEF character event. The keychain policy matches the existing production host;
+a real CEF command-line regression covers default and explicit system-keychain
+settings. Reusing the GPUI-specific shortcut registration did not fix this
+standalone app and removed its AX tree, so that experiment was removed.
 
 Electron 45.0.0 reported Chromium 156.0.8078.48 and Node 24.22.0. The CEF SDK is
 150.0.14 / Chromium 150.0.7871.129. Versions differ, and the CEF executable is a
@@ -50,7 +57,19 @@ One macOS `ps` spot sample of the five Electron processes with the animated
 fixture visible summed to 32.1% CPU and 488,816 KiB RSS. With the fixture paused,
 a later sample summed to 0% CPU and 508,272 KiB RSS. RSS sums include shared pages;
 they are not private application memory or a steady-state budget. These samples
-do not establish a CEF versus Electron performance result.
+do not establish a general CEF versus Electron performance result.
+
+The CEF debug CPU/HTTP spike's seven processes sampled at 70.4% CPU / 901,728 KiB
+RSS with the animated fixture visible, and 36.9% CPU / 787,984 KiB RSS after
+pausing it. The idle polling and a worker thread per HTTP connection are costs of
+this deliberately basic transport. These numbers are not accelerated CEF results.
+
+At a fixed 691 × 758 physical pixels, an 88.021-second interval transferred
+11,026,574,456 BGRA body bytes in 5,263 responses: about 125.27 MB/s and 59.8
+consumed frames/s. That is transport throughput, not a frame-pacing or latency
+measurement. During a later paused interval of 37.967 seconds, native frame and
+successful HTTP body counters remained unchanged. Conditional responses avoid
+pixel copying while idle, although request polling still consumes CPU.
 
 CEF reports published BGRA bytes, successful HTTP frame-body bytes, physical
 frame dimensions and frame counts. The canvas requests one frame at a time,
@@ -62,10 +81,11 @@ rendering strategy.
 
 ## what this supports
 
-Electron is the stronger candidate so far for the requested UI: the tested
-composition behavior and native browser input are available without a custom
-pixel/input bridge. Finish the CEF interaction pass before making the host
-decision.
+Recommend Electron for the desktop shell, retaining the Rust daemon, shared
+protocol and theme system. The tested composition behavior and native browser
+input are available without a custom pixel/input bridge. The CPU-canvas spike
+does not offer a resource advantage that would justify its remaining host-input
+work for the requested UI. This is a host recommendation, not a repository rewrite.
 
 Stock Electron warns that `webview` has architectural stability risks. This
 experiment does not reproduce Codex's customized Chromium runtime. A production
@@ -158,15 +178,16 @@ npm --prefix prototypes/browser-composition test
 CEF_PATH=/Users/natalie/.local/share/cef/150.0.14 cargo test --manifest-path native/cef-host/Cargo.toml --example composition
 ```
 
-The ordinary suites pass 9 UI, 5 Electron and 7 CEF tests. UI tests cover retained
+The ordinary suites pass 9 UI, 5 Electron and 10 CEF tests. UI tests cover retained
 DOM content and overlay focus return; they do not simulate browser acceptance.
 Electron tests include actual packaging/signature verification and a real HTTP
 server. CEF tests exercise ownership, bounds, conversion inputs, popup paint
-callbacks and real HTTP frame responses. The separately run native keychain
+callbacks, key-event translation, real HTTP frame responses and idle/partial
+preconnections. The separately run native keychain
 regression requires `MEW_CEF_FRAMEWORK_PATH` and `--ignored`.
 
 Photos from the packaged windows are in this task's visualization directory:
-`composition-01-windowed-live.jpg` through `composition-07-electron-light.jpg`.
+`composition-01-windowed-live.jpg` through `composition-17-cef-composed.jpg`.
 
 ## primary references
 

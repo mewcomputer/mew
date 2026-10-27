@@ -216,11 +216,16 @@ mod native {
         listener
             .set_nonblocking(true)
             .map_err(|error| error.to_string())?;
+        let assets = Arc::new(assets);
         std::thread::spawn(move || {
             while !stop.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((stream, _)) => {
-                        let _ = serve(stream, &assets, &frames);
+                        let assets = assets.clone();
+                        let frames = frames.clone();
+                        std::thread::spawn(move || {
+                            let _ = serve(stream, &assets, &frames);
+                        });
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(2))
@@ -237,6 +242,7 @@ mod native {
         assets: &std::path::Path,
         frames: &Mutex<Frames>,
     ) -> std::io::Result<()> {
+        stream.set_nonblocking(false)?;
         stream.set_read_timeout(Some(Duration::from_secs(2)))?;
         stream.set_write_timeout(Some(Duration::from_secs(2)))?;
         let mut reader = BufReader::new(&mut stream);
@@ -412,7 +418,8 @@ mod native {
                 if let Some(browser) = browser { if self.is_app { self.app_id.store(browser.identifier(), Ordering::Release); if let Some(host) = browser.host() { host.set_accessibility_state(State::ENABLED); } } self.browsers.borrow_mut().push(browser.clone()); }
             }
             fn do_close(&self, browser: Option<&mut Browser>) -> i32 {
-                if self.is_app && let Some(host) = browser.and_then(|browser| browser.host()) {
+                if !self.is_app { return 0; }
+                if let Some(host) = browser.and_then(|browser| browser.host()) {
                     let handle = host.window_handle();
                     if !handle.is_null() {
                         let view = unsafe { &*handle.cast::<NSView>() };
@@ -438,14 +445,13 @@ mod native {
     wrap_load_handler! {
         struct ExperimentLoad { is_app: bool }
         impl LoadHandler {
-            fn on_load_end(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, status: i32) { eprintln!("composition: load_end app={} status={} url={:?}", self.is_app, status, frame.map(|frame| CefString::from(&frame.url()).to_string())); }
             fn on_load_error(&self, _browser: Option<&mut Browser>, _frame: Option<&mut Frame>, error: Errorcode, text: Option<&CefString>, url: Option<&CefString>) { eprintln!("composition: load_error app={} code={:?} text={:?} url={:?}", self.is_app, error, text.map(ToString::to_string), url.map(ToString::to_string)); }
         }
     }
     wrap_display_handler! {
         struct ExperimentDisplay { is_app: bool }
         impl DisplayHandler {
-            fn on_console_message(&self, _browser: Option<&mut Browser>, level: LogSeverity, message: Option<&CefString>, _source: Option<&CefString>, _line: i32) -> i32 { eprintln!("composition: console app={} level={:?} {}", self.is_app, level, message.map(ToString::to_string).unwrap_or_default()); 0 }
+            fn on_console_message(&self, _browser: Option<&mut Browser>, level: LogSeverity, message: Option<&CefString>, _source: Option<&CefString>, _line: i32) -> i32 { if matches!(level, LogSeverity::WARNING | LogSeverity::ERROR | LogSeverity::FATAL) { eprintln!("composition: console app={} level={:?} {}", self.is_app, level, message.map(ToString::to_string).unwrap_or_default()); } 0 }
         }
     }
     wrap_render_handler! {
@@ -473,7 +479,6 @@ mod native {
                 if buffer.is_null() { return; }
                 let bytes = unsafe { std::slice::from_raw_parts(buffer, length) };
                 let mut frames = self.frames.lock().unwrap();
-                if frames.latest.is_none() { eprintln!("composition: first OSR paint {}x{}", width, height); }
                 let mut popup = self.popup.borrow_mut();
                 if kind == PaintElementType::VIEW { frames.publish(width, height, bytes); }
                 else { popup.pixels = Some(PixelFrame { width, height, bytes:bytes.to_vec(), sequence:0 }); }
@@ -597,36 +602,9 @@ mod native {
                         _ => {}
                     }
                 }
-                let (native, character) = match event["code"].as_str().unwrap_or("") {
-                    "Backspace" => (51, 0x7f),
-                    "Delete" => (117, 0xf728),
-                    "Enter" => (36, 13),
-                    "Tab" => (48, 9),
-                    "Escape" => (53, 27),
-                    "ArrowLeft" => (123, 0xf702),
-                    "ArrowRight" => (124, 0xf703),
-                    "ArrowDown" => (125, 0xf701),
-                    "ArrowUp" => (126, 0xf700),
-                    "Home" => (115, 0xf729),
-                    "End" => (119, 0xf72b),
-                    "PageUp" => (116, 0xf72c),
-                    "PageDown" => (121, 0xf72d),
-                    _ if key.chars().count() == 1 => return Ok(()),
-                    _ => return Ok(()),
-                };
-                host.send_key_event(Some(&KeyEvent {
-                    type_: if down {
-                        KeyEventType::RAWKEYDOWN
-                    } else {
-                        KeyEventType::KEYUP
-                    },
-                    modifiers: modifiers(event),
-                    windows_key_code: event["keyCode"].as_i64().unwrap_or(0) as i32,
-                    native_key_code: native,
-                    character,
-                    unmodified_character: character,
-                    ..Default::default()
-                }));
+                for event in key_events(event, down).into_iter().flatten() {
+                    host.send_key_event(Some(&event));
+                }
             }
             _ => {
                 return Err(
@@ -637,10 +615,77 @@ mod native {
         Ok(())
     }
 
+    fn key_events(event: &serde_json::Value, down: bool) -> [Option<KeyEvent>; 2] {
+        let (native, character) = match event["code"].as_str().unwrap_or("") {
+            "Backspace" => (51, 0x7f),
+            "Delete" => (117, 0xf728),
+            "Enter" => (36, 13),
+            "Tab" => (48, 9),
+            "Escape" => (53, 27),
+            "ArrowLeft" => (123, 0xf702),
+            "ArrowRight" => (124, 0xf703),
+            "ArrowDown" => (125, 0xf701),
+            "ArrowUp" => (126, 0xf700),
+            "Home" => (115, 0xf729),
+            "End" => (119, 0xf72b),
+            "PageUp" => (116, 0xf72c),
+            "PageDown" => (121, 0xf72d),
+            _ => return [None, None],
+        };
+        let key = KeyEvent {
+            type_: if down {
+                KeyEventType::RAWKEYDOWN
+            } else {
+                KeyEventType::KEYUP
+            },
+            modifiers: modifiers(event),
+            windows_key_code: event["keyCode"].as_i64().unwrap_or(0) as i32,
+            native_key_code: native,
+            character,
+            unmodified_character: character,
+            ..Default::default()
+        };
+        let shortcut_modifiers = cef::sys::cef_event_flags_t::EVENTFLAG_COMMAND_DOWN.0
+            | cef::sys::cef_event_flags_t::EVENTFLAG_CONTROL_DOWN.0
+            | cef::sys::cef_event_flags_t::EVENTFLAG_ALT_DOWN.0;
+        let character_event = (down && character == 13 && key.modifiers & shortcut_modifiers == 0)
+            .then(|| KeyEvent {
+                type_: KeyEventType::CHAR,
+                ..key.clone()
+            });
+        [Some(key), character_event]
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
         use std::io::Read;
+
+        #[test]
+        fn enter_has_a_character_event_while_navigation_and_shortcuts_do_not() {
+            for shift in [false, true] {
+                let enter = serde_json::json!({"code":"Enter","keyCode":13,"shiftKey":shift});
+                let events = key_events(&enter, true);
+                assert_eq!(events[0].as_ref().unwrap().type_, KeyEventType::RAWKEYDOWN);
+                let character = events[1].as_ref().expect("Enter must insert a character");
+                assert_eq!(character.type_, KeyEventType::CHAR);
+                assert_eq!(character.character, 13);
+                assert_eq!(character.native_key_code, 36);
+                assert_eq!(character.modifiers, modifiers(&enter));
+                let events = key_events(&enter, false);
+                assert_eq!(events[0].as_ref().unwrap().type_, KeyEventType::KEYUP);
+                assert!(events[1].is_none());
+            }
+            for code in ["ArrowLeft", "Backspace", "Tab", "KeyA"] {
+                let events = key_events(&serde_json::json!({"code":code}), true);
+                assert!(events[1].is_none());
+            }
+            for modifier in ["metaKey", "ctrlKey", "altKey"] {
+                let mut event = serde_json::json!({"code":"Enter"});
+                event[modifier] = true.into();
+                assert!(key_events(&event, true)[1].is_none());
+            }
+        }
 
         #[test]
         #[ignore = "requires MEW_CEF_FRAMEWORK_PATH pointing to the native CEF runtime"]
@@ -673,6 +718,64 @@ mod native {
                 std::env::var("MEW_CEF_USE_SYSTEM_KEYCHAIN").as_deref() != Ok("1")
             );
             app.on_before_command_line_processing(None, None);
+        }
+
+        #[test]
+        fn windowless_close_allows_cef_to_complete_without_a_native_view() {
+            let handler = ExperimentLife::new(
+                Rc::new(RefCell::new(Vec::new())),
+                Arc::new(AtomicI32::new(0)),
+                BrowserSideRouter::new(MessageRouterConfig::default()),
+                false,
+            );
+            assert_eq!(handler.do_close(None), 0);
+        }
+
+        #[test]
+        fn idle_and_partial_preconnects_do_not_block_app_or_fixture_requests() {
+            let assets = std::env::temp_dir()
+                .join(format!("mew-composition-preconnect-{}", std::process::id()));
+            std::fs::create_dir_all(&assets).unwrap();
+            let assets = assets.canonicalize().unwrap();
+            std::fs::write(assets.join("index.html"), "app").unwrap();
+            std::fs::write(assets.join("fixture.html"), "fixture").unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let origin = server(
+                assets.clone(),
+                Arc::new(Mutex::new(Frames::default())),
+                stop.clone(),
+            )
+            .unwrap();
+            let address = origin.trim_start_matches("http://");
+            for partial in ["", "GET / HTTP/1.1\r\nHost: localhost\r\n"] {
+                let mut idle = TcpStream::connect(address).unwrap();
+                idle.set_read_timeout(Some(Duration::from_millis(500)))
+                    .unwrap();
+                idle.write_all(partial.as_bytes()).unwrap();
+                for (path, body) in [("/", "app"), ("/fixture.html", "fixture")] {
+                    let mut stream = TcpStream::connect(address).unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_millis(500)))
+                        .unwrap();
+                    write!(stream, "GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+                    let mut response = String::new();
+                    stream.read_to_string(&mut response).unwrap();
+                    assert!(response.starts_with("HTTP/1.1 200 "));
+                    assert!(response.ends_with(body));
+                }
+                idle.write_all(if partial.is_empty() {
+                    b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
+                } else {
+                    b"\r\n"
+                })
+                .unwrap();
+                let mut response = String::new();
+                idle.read_to_string(&mut response).unwrap();
+                assert!(response.starts_with("HTTP/1.1 200 "));
+                assert!(response.ends_with("app"));
+            }
+            stop.store(true, Ordering::Release);
+            std::fs::remove_dir_all(assets).unwrap();
         }
 
         #[test]

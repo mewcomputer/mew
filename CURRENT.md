@@ -3943,3 +3943,34 @@ verification, 7 ordinary CEF tests, the separate native keychain regression,
 TypeScript check and prototype production build pass. Both disposable app
 signatures verify. Reproduction steps, evidence boundaries and the provisional
 host assessment are in `prototypes/browser-composition/README.md`.
+
+### 2026-10-27: completed native browser composition pass
+
+Resumed packaged CEF checks after the Mac was unlocked. Verified a live browser
+under translucent app overlays and dropdowns, click isolation, resize/fade,
+retained browser/chat state through pane transitions, independent page/nested/
+workbench scrolling, the painted select popup and light/dark themes. Native
+window close now exits 0. Photos `composition-08-cef-overlay.jpg` through
+`composition-17-cef-composed.jpg` record the CEF checks.
+
+Added real HTTP regressions after macOS accepted sockets retained nonblocking
+mode and could close before Chrome sent its request. Accepted connections now
+use blocking reads on separate workers. Corrected OSR's close callback and
+forwarded Enter's required character event; final native textarea smoke confirms
+newlines and Unicode paste. Removed the failed attempt to reuse GPUI shortcut
+registration in the standalone window, including its AX regression. Temporary
+startup/resize tracing is gone.
+
+The comparison is complete with explicit input gaps: CEF canvas keyboard exit,
+reliable focus handoff, app editing shortcuts, guest accessibility and native IME
+geometry remain unimplemented. These are not claimed as passing. At a fixed
+691x758 frame, the CPU/HTTP path moved about 125.27 MB/s; paused native frame/body
+counters stayed unchanged. Spot CPU/RSS numbers are recorded with debug-build,
+copy/polling and shared-memory accounting caveats in the report. They do not
+establish a general CEF performance limit.
+
+Recommendation: use Electron for the desktop shell while retaining the Rust
+daemon, protocol and theme system. No production migration was performed.
+Verification: 10 CEF tests pass, alongside the unchanged 9 UI and 5 Electron
+tests. The final bundle signature verifies and both corrected native runs closed
+successfully. The native keychain regression remains an explicit runtime check.
