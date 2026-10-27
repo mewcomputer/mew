@@ -3631,3 +3631,25 @@ native drag-and-drop, topic selectors, previews, archive/restoration and local
 follow-ups. Both views fit 320, 360, 420, 768 and 1056 px browser widths without
 horizontal overflow. Light/dark and both compositions were visually inspected;
 narrow header overlap was corrected and rechecked. No provider calls were made.
+
+## 2026-10-26: familiar chat baseline and existing theme preview
+
+Revised the design direction to a straightforward Codex-style chat workspace,
+removing canvas and topic-lane controls from the proposed baseline. The new
+standalone prototype keeps recent/pinned chats, inbox, archive/restoration,
+grouped subagents, composer policy controls, attachments and the five workbench
+surfaces. Preserving built-in/custom themes and existing runtime capabilities
+remains a migration requirement; application implementation has not started.
+
+The appearance preview resolves all 23 built-in palettes from the existing
+manifest, including inheritance and token aliases. System appearance, explicit
+theme overrides, syntax colors and terminal colors use those same tokens.
+The manifest and generated theme outputs are unchanged.
+
+Browser verification passed for every built-in palette, per-chat drafts/policy,
+mentions, attachments, approvals/questions, search, rename/pin, new chats,
+stop/archive and idle restoration. Conversation/workbench layouts fit 320,
+360, 420, 768 and 1056 px browser widths. Long workbench content was corrected
+to grow the preview instead of clipping. Light/dark, a named theme and narrow
+views were inspected; final checks reported no JavaScript errors. No provider
+calls or application/daemon changes were made.
