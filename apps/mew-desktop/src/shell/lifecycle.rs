@@ -950,6 +950,7 @@ mod lifecycle_tests {
                     mew_protocol::encode_json(&mew_protocol::ServerMessage::Pong {
                         version: "test".into(),
                         protocol_version: mew_protocol::PROTOCOL_VERSION,
+                        browser_focus_preflight: false,
                     })
                     .unwrap(),
                 ))
@@ -1032,6 +1033,7 @@ mod lifecycle_tests {
             .send(mew_protocol::ServerMessage::Pong {
                 version: "test".into(),
                 protocol_version: mew_protocol::PROTOCOL_VERSION,
+                browser_focus_preflight: false,
             })
             .unwrap();
         server.join().unwrap();
@@ -1180,6 +1182,7 @@ mod lifecycle_tests {
                     mew_protocol::encode_json(&ServerMessage::Pong {
                         version: "test".into(),
                         protocol_version: PROTOCOL_VERSION,
+                        browser_focus_preflight: false,
                     })
                     .unwrap(),
                 ))
@@ -1244,6 +1247,7 @@ mod lifecycle_tests {
                     mew_protocol::encode_json(&ServerMessage::Pong {
                         version: "test".into(),
                         protocol_version: PROTOCOL_VERSION,
+                        browser_focus_preflight: false,
                     })
                     .unwrap(),
                 ))

@@ -42,6 +42,8 @@ export class MewClient {
     openPromise = null;
     /** Session id returned by `newSession`. */
     sessionId = null;
+    confirmedSessions = new Set();
+    browserFocusPreflight = null;
     /** Messages currently projected from the most recent history pages. */
     sessionHistoryMessages = [];
     /** Session lifecycle requests share uncorrelated daemon errors. */
@@ -57,6 +59,8 @@ export class MewClient {
     connect() {
         if (this.openPromise)
             return this.openPromise;
+        this.confirmedSessions.clear();
+        this.browserFocusPreflight = null;
         this.openPromise = new Promise((resolve, reject) => {
             let settled = false;
             const ws = this.socketFactory(this.url);
@@ -91,6 +95,8 @@ export class MewClient {
                 });
             }
             ws.addEventListener("message", (ev) => {
+                if (this.ws !== ws)
+                    return;
                 try {
                     const msg = JSON.parse(ev.data);
                     if (this.debug)
@@ -105,6 +111,8 @@ export class MewClient {
                 if (this.debug)
                     console.debug("[mew] close", ev);
                 if (this.ws === ws) {
+                    this.confirmedSessions.clear();
+                    this.browserFocusPreflight = null;
                     this.ws = null;
                     this.openPromise = null;
                 }
@@ -118,6 +126,8 @@ export class MewClient {
                 if (this.debug)
                     console.debug("[mew] error", ev);
                 if (this.ws === ws) {
+                    this.confirmedSessions.clear();
+                    this.browserFocusPreflight = null;
                     this.ws = null;
                     this.openPromise = null;
                 }
@@ -132,12 +142,17 @@ export class MewClient {
     }
     /** Close the WebSocket. After calling this, the client cannot be reused. */
     disconnect(code = 1000, reason = "client disconnect") {
+        this.confirmedSessions.clear();
+        this.browserFocusPreflight = null;
         this.ws?.close(code, reason);
         this.ws = null;
         this.openPromise = null;
     }
     isConnected() {
         return this.ws !== null;
+    }
+    hasConfirmedSession(sessionId) {
+        return this.confirmedSessions.has(sessionId);
     }
     /** Serialize lifecycle requests because daemon errors have no request id. */
     enqueueSessionCommand(command) {
@@ -482,8 +497,49 @@ export class MewClient {
     listProjects() {
         this.send({ type: "list_projects" });
     }
-    registerBrowserPage(sessionId, pageInstance, cdpEndpoint, targetId) {
-        return this.browserPageRequest({ type: "register_browser_page", session_id: sessionId, page_instance: pageInstance, cdp_endpoint: cdpEndpoint, target_id: targetId });
+    async registerBrowserPage(sessionId, pageInstance, cdpEndpoint, targetId, focusUrl) {
+        if (focusUrl !== undefined) {
+            const socket = this.ws;
+            if (!socket || !this.hasConfirmedSession(sessionId))
+                throw new Error("Browser input requires a confirmed session on this connection.");
+            if (!this.browserFocusPreflight) {
+                const check = new Promise((resolve, reject) => {
+                    const cleanup = () => {
+                        clearTimeout(timeout);
+                        this.off("pong", onPong);
+                        this.off("close", onConnectionChanged);
+                        this.off("error", onConnectionChanged);
+                    };
+                    const onPong = (data) => { cleanup(); resolve(data.browser_focus_preflight); };
+                    const onConnectionChanged = () => {
+                        if (this.ws === socket)
+                            return;
+                        cleanup();
+                        reject(new Error("The daemon disconnected before confirming browser focus support."));
+                    };
+                    const timeout = setTimeout(() => { cleanup(); reject(new Error("The daemon did not confirm browser focus support.")); }, 3000);
+                    this.on("pong", onPong);
+                    this.on("close", onConnectionChanged);
+                    this.on("error", onConnectionChanged);
+                    try {
+                        this.send({ type: "ping" });
+                    }
+                    catch (error) {
+                        cleanup();
+                        reject(error);
+                    }
+                });
+                this.browserFocusPreflight = check;
+                void check.catch(() => { if (this.browserFocusPreflight === check)
+                    this.browserFocusPreflight = null; });
+            }
+            const supported = await this.browserFocusPreflight;
+            if (this.ws !== socket || !this.hasConfirmedSession(sessionId))
+                throw new Error("The daemon connection changed before browser page registration.");
+            if (!supported)
+                throw new Error("Update the daemon to enable safe browser input.");
+        }
+        return this.browserPageRequest({ type: "register_browser_page", session_id: sessionId, page_instance: pageInstance, cdp_endpoint: cdpEndpoint, target_id: targetId, focus_url: focusUrl });
     }
     unregisterBrowserPage(sessionId, pageInstance) {
         return this.browserPageRequest({ type: "unregister_browser_page", session_id: sessionId, page_instance: pageInstance });
@@ -565,6 +621,7 @@ export class MewClient {
                 break;
             case "session_ready":
                 this.sessionId = msg.session_id;
+                this.confirmedSessions.add(msg.session_id);
                 this.emit("session-ready", {
                     session_id: msg.session_id,
                     cwd: msg.cwd,
@@ -838,7 +895,7 @@ export class MewClient {
                 this.emit("errorEvent", { message: msg.message });
                 break;
             case "pong":
-                this.emit("pong", { version: msg.version, protocol_version: msg.protocol_version ?? 0 });
+                this.emit("pong", { version: msg.version, protocol_version: msg.protocol_version ?? 0, browser_focus_preflight: msg.browser_focus_preflight ?? false });
                 break;
             case "project_list":
                 this.emit("project-list", { projects: msg.projects });

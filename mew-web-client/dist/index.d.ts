@@ -193,6 +193,7 @@ export type ClientMessage = {
     page_instance: string;
     cdp_endpoint: string;
     target_id: string;
+    focus_url?: string;
 } | {
     type: "unregister_browser_page";
     session_id: string;
@@ -822,6 +823,7 @@ export type ServerMessage = ({
     type: "pong";
     version: string;
     protocol_version?: number;
+    browser_focus_preflight?: boolean;
 } | {
     type: "project_list";
     projects: ProjectInfo[];
@@ -1088,6 +1090,7 @@ export interface MewClientEvents {
     pong: (data: {
         version: string;
         protocol_version: number;
+        browser_focus_preflight: boolean;
     }) => void;
     "project-list": (data: {
         projects: ProjectInfo[];
@@ -1153,6 +1156,8 @@ export declare class MewClient {
     private openPromise;
     /** Session id returned by `newSession`. */
     private sessionId;
+    private confirmedSessions;
+    private browserFocusPreflight;
     /** Messages currently projected from the most recent history pages. */
     private sessionHistoryMessages;
     /** Session lifecycle requests share uncorrelated daemon errors. */
@@ -1163,6 +1168,7 @@ export declare class MewClient {
     /** Close the WebSocket. After calling this, the client cannot be reused. */
     disconnect(code?: number, reason?: string): void;
     isConnected(): boolean;
+    hasConfirmedSession(sessionId: string): boolean;
     /** Serialize lifecycle requests because daemon errors have no request id. */
     private enqueueSessionCommand;
     /** Send `new_session`. Resolves with the daemon-assigned session id. */
@@ -1271,7 +1277,7 @@ export declare class MewClient {
     ping(): Promise<string>;
     /** List known projects (recent session cwds). */
     listProjects(): void;
-    registerBrowserPage(sessionId: string, pageInstance: string, cdpEndpoint: string, targetId: string): Promise<void>;
+    registerBrowserPage(sessionId: string, pageInstance: string, cdpEndpoint: string, targetId: string, focusUrl?: string): Promise<void>;
     unregisterBrowserPage(sessionId: string, pageInstance: string): Promise<void>;
     private browserPageRequest;
     browserOpen(url: string, tabId?: string): void;

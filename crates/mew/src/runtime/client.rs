@@ -666,6 +666,7 @@ mod tests {
             .send(ServerMessage::Pong {
                 version: "test".into(),
                 protocol_version: mew_protocol::PROTOCOL_VERSION,
+                browser_focus_preflight: false,
             })
             .unwrap();
         (

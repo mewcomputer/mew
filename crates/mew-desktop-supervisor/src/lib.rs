@@ -379,6 +379,7 @@ fn probe_daemon_connection(url: &str, stream: TcpStream) -> Result<()> {
         mew_protocol::ServerMessage::Pong {
             protocol_version,
             version,
+            ..
         } => {
             if protocol_version != mew_protocol::PROTOCOL_VERSION {
                 bail!(

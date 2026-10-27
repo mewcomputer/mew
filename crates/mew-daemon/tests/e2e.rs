@@ -1182,6 +1182,10 @@ async fn ping_returns_pong_with_version() {
     send(&mut ws, ClientMessage::Ping).await;
 
     let msg = recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::Pong { .. })).await;
+    assert_eq!(
+        serde_json::to_value(&msg).unwrap()["browser_focus_preflight"],
+        true
+    );
     match msg {
         ServerMessage::Pong { version, .. } => {
             assert!(

@@ -315,7 +315,7 @@ for (const [response, expectedProtocol] of [
     latest().peerSend(response);
 
     assert.equal(await ping, "0.1.0");
-    assert.deepEqual(replies, [{ version: "0.1.0", protocol_version: expectedProtocol }]);
+    assert.deepEqual(replies, [{ version: "0.1.0", protocol_version: expectedProtocol, browser_focus_preflight: false }]);
   });
 }
 
@@ -739,5 +739,169 @@ test("browser page registration drains its matching acknowledgement before revoc
   const rejected = client.registerBrowserPage("chat", "page-2", "http://127.0.0.1:9222", "target-2");
   latest().peerSend({ type: "browser_page_registration", session_id: "chat", page_instance: "page-2", error: "page rejected" });
   await assert.rejects(rejected, /page rejected/);
+  client.disconnect();
+});
+
+test("browser page registration includes an optional native focus endpoint", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connected = client.connect();
+  latest().open();
+  await connected;
+  latest().peerSend({ type: "session_ready", session_id: "chat" });
+  const registered = client.registerBrowserPage("chat", "page-1", "http://127.0.0.1:9222", "target-1", "http://127.0.0.1:9223/focus/page-1");
+  const preflight = latest().sent.slice();
+  latest().peerSend({ type: "pong", version: "0.1.0", protocol_version: 3, browser_focus_preflight: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  const request = latest().sent.at(-1);
+  latest().peerSend({ type: "browser_page_registration", session_id: "chat", page_instance: "page-1", error: null });
+  await registered;
+  client.disconnect();
+  assert.deepEqual(preflight, [{ type: "ping" }]);
+  assert.deepEqual(request, { type: "register_browser_page", session_id: "chat", page_instance: "page-1", cdp_endpoint: "http://127.0.0.1:9222", target_id: "target-1", focus_url: "http://127.0.0.1:9223/focus/page-1" });
+});
+
+for (const capability of [undefined, false]) {
+  test(`browser registration rejects a daemon with focus preflight capability ${capability}`, async () => {
+    const { factory, latest } = makeFactory();
+    const client = new MewClient("ws://test/", { socketFactory: factory, clientKind: "desktop" });
+    const connected = client.connect();
+    latest().open();
+    await connected;
+    latest().peerSend({ type: "session_ready", session_id: "chat" });
+    const registered = client.registerBrowserPage("chat", "page", "http://127.0.0.1:9222", "target", "http://127.0.0.1:9223/focus");
+    latest().peerSend({ type: "pong", version: "old", protocol_version: 3, browser_focus_preflight: capability });
+    latest().peerSend({ type: "browser_page_registration", session_id: "chat", page_instance: "page", error: null });
+    await assert.rejects(registered, /update.*daemon/i);
+    assert.deepEqual(latest().sent, [{ type: "ping" }]);
+    client.disconnect();
+  });
+}
+
+test("browser focus capability is shared by concurrent registrations and refreshed after reconnect", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory, clientKind: "desktop" });
+  const connected = client.connect();
+  const first = latest();
+  first.open();
+  await connected;
+  first.peerSend({ type: "session_ready", session_id: "chat" });
+  const register = (page: string) => client.registerBrowserPage("chat", page, "http://127.0.0.1:9222", `target-${page}`, `http://127.0.0.1:9223/${page}`);
+  const one = register("one");
+  const two = register("two");
+  assert.deepEqual(first.sent, [{ type: "ping" }]);
+  first.peerSend({ type: "pong", version: "new", protocol_version: 3, browser_focus_preflight: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(first.sent.slice(1).map((message) => message.type), ["register_browser_page", "register_browser_page"]);
+  for (const page_instance of ["one", "two"]) first.peerSend({ type: "browser_page_registration", session_id: "chat", page_instance, error: null });
+  await Promise.all([one, two]);
+  client.disconnect();
+  const connectedAgain = client.connect();
+  const second = latest();
+  second.open();
+  await connectedAgain;
+  await assert.rejects(register("unconfirmed"), /confirmed.*session/i);
+  assert.deepEqual(second.sent, []);
+  second.peerSend({ type: "session_ready", session_id: "chat" });
+  const three = register("three");
+  assert.deepEqual(second.sent, [{ type: "ping" }]);
+  first.peerSend({ type: "pong", version: "new", browser_focus_preflight: true });
+  second.peerSend({ type: "pong", version: "old", protocol_version: 3 });
+  await assert.rejects(three, /update.*daemon/i);
+  assert.deepEqual(second.sent, [{ type: "ping" }]);
+  client.disconnect();
+});
+
+test("closing a connection during focus capability discovery cannot register on a replacement", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory, clientKind: "desktop" });
+  const connected = client.connect();
+  latest().open();
+  await connected;
+  latest().peerSend({ type: "session_ready", session_id: "chat" });
+  const closed = client.registerBrowserPage("chat", "closed", "http://127.0.0.1:9222", "target", "http://127.0.0.1:9223/focus");
+  const rejected = assert.rejects(closed, /disconnect/i);
+  client.disconnect();
+  await rejected;
+  const connectedAgain = client.connect();
+  latest().open();
+  await connectedAgain;
+  latest().peerSend({ type: "session_ready", session_id: "chat" });
+  const registered = client.registerBrowserPage("chat", "changed", "http://127.0.0.1:9222", "target", "http://127.0.0.1:9223/focus");
+  latest().peerSend({ type: "pong", version: "new", browser_focus_preflight: true });
+  client.disconnect();
+  await assert.rejects(registered, /connection changed/i);
+});
+
+test("focus capability discovery times out cleanly and can be retried", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory, clientKind: "desktop" });
+  const connected = client.connect();
+  latest().open();
+  await connected;
+  latest().peerSend({ type: "session_ready", session_id: "chat" });
+  const register = () => client.registerBrowserPage("chat", "page", "http://127.0.0.1:9222", "target", "http://127.0.0.1:9223/focus");
+  const timedOut = assert.rejects(register(), /did not confirm.*focus/i);
+  context.mock.timers.tick(3000);
+  await timedOut;
+  latest().peerSend({ type: "pong", version: "late", browser_focus_preflight: true });
+  assert.deepEqual(latest().sent, [{ type: "ping" }]);
+  const retried = register();
+  assert.deepEqual(latest().sent, [{ type: "ping" }, { type: "ping" }]);
+  latest().peerSend({ type: "pong", version: "new", browser_focus_preflight: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  latest().peerSend({ type: "browser_page_registration", session_id: "chat", page_instance: "page", error: null });
+  await retried;
+  client.disconnect();
+});
+
+test("session confirmations belong to the current connection and retain background sessions", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory, clientKind: "desktop" });
+  const connected = client.connect();
+  const first = latest();
+  first.open();
+  await connected;
+  assert.equal(client.hasConfirmedSession("chat-a"), false);
+  let confirmedBeforeReady = false;
+  client.on("session-ready", ({ session_id }) => { confirmedBeforeReady = client.hasConfirmedSession(session_id); });
+  first.peerSend({ type: "session_ready", session_id: "chat-a" });
+  first.peerSend({ type: "session_ready", session_id: "chat-b" });
+  assert.equal(confirmedBeforeReady, true);
+  assert.equal(client.hasConfirmedSession("chat-a"), true);
+  assert.equal(client.hasConfirmedSession("chat-b"), true);
+  first.peerClose();
+  assert.equal(client.hasConfirmedSession("chat-a"), false);
+  assert.equal(client.hasConfirmedSession("chat-b"), false);
+  assert.equal(client.getSessionId(), "chat-b");
+  const reconnected = client.connect();
+  latest().open();
+  await reconnected;
+  assert.equal(client.hasConfirmedSession("chat-b"), false);
+  latest().peerSend({ type: "session_ready", session_id: "chat-a" });
+  first.peerSend({ type: "session_ready", session_id: "chat-b" });
+  first.peerClose();
+  assert.equal(client.hasConfirmedSession("chat-a"), true);
+  assert.equal(client.hasConfirmedSession("chat-b"), false);
+  client.disconnect();
+  assert.equal(client.hasConfirmedSession("chat-a"), false);
+  assert.equal(client.getSessionId(), "chat-a");
+});
+
+test("a failed socket loses its session confirmations before a replacement opens", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory, clientKind: "desktop" });
+  const connected = client.connect();
+  latest().open();
+  await connected;
+  latest().peerSend({ type: "session_ready", session_id: "chat" });
+  assert.equal(client.hasConfirmedSession("chat"), true);
+  latest().peerError();
+  assert.equal(client.hasConfirmedSession("chat"), false);
+  const reconnected = client.connect();
+  latest().open();
+  await reconnected;
+  assert.equal(client.hasConfirmedSession("chat"), false);
   client.disconnect();
 });

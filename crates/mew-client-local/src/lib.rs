@@ -132,6 +132,7 @@ mod tests {
             let response = mew_protocol::encode_json(&ServerMessage::Pong {
                 version: "test".into(),
                 protocol_version: mew_protocol::PROTOCOL_VERSION,
+                browser_focus_preflight: false,
             })
             .unwrap();
             socket.send(Message::Text(response)).await.unwrap();
@@ -166,6 +167,7 @@ mod tests {
                 ServerMessage::Pong {
                     version: "test".into(),
                     protocol_version: mew_protocol::PROTOCOL_VERSION,
+                    browser_focus_preflight: false,
                 },
             ] {
                 socket
@@ -176,7 +178,7 @@ mod tests {
             let command = socket.next().await.unwrap().unwrap().into_text().unwrap();
             assert!(matches!(
                 mew_protocol::decode_json::<ClientMessage>(&command).unwrap(),
-                ClientMessage::ListSessions {}
+                ClientMessage::ListSessions
             ));
         });
         let transport = LocalWebSocketTransport::new(format!("ws://{address}"));

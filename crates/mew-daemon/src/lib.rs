@@ -2115,6 +2115,7 @@ where
                 reply(ServerMessage::Pong {
                     version: env!("CARGO_PKG_VERSION").to_string(),
                     protocol_version: mew_protocol::PROTOCOL_VERSION,
+                    browser_focus_preflight: true,
                 });
             }
             ClientMessage::ListProjects => {
@@ -2810,6 +2811,7 @@ where
                 page_instance,
                 cdp_endpoint,
                 target_id,
+                focus_url,
             } => {
                 if !confirmed_desktop_sessions.contains(&session_id)
                     || legacy_iroh
@@ -2848,6 +2850,7 @@ where
                         page_instance: page_instance.clone(),
                         cdp_endpoint,
                         target_id,
+                        focus_url,
                     },
                 );
                 if session

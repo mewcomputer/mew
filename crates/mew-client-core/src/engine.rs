@@ -21,14 +21,14 @@ impl ClientEngine {
             connection.send(ClientMessage::Ping).await?;
             loop {
                 match connection.receive().await? {
-                    Some(ServerMessage::Pong { protocol_version, version }) => {
+                    Some(ServerMessage::Pong { protocol_version, version, browser_focus_preflight }) => {
                         if protocol_version != PROTOCOL_VERSION {
                             return Err(TransportError::Other(format!(
                                 "incompatible daemon protocol {protocol_version} (daemon {version}); \
                                  this app requires {PROTOCOL_VERSION}"
                             )));
                         }
-                        state.apply_server_message(ServerMessage::Pong { protocol_version, version });
+                        state.apply_server_message(ServerMessage::Pong { protocol_version, version, browser_focus_preflight });
                         return Ok(());
                     }
                     Some(message @ ServerMessage::RemoteReady { .. }) => {
@@ -239,6 +239,7 @@ mod tests {
         transport.push_server_message(ServerMessage::Pong {
             version: "previous-native".into(),
             protocol_version: 1,
+            browser_focus_preflight: false,
         });
         let error = ClientEngine::connect(&transport)
             .await
@@ -257,6 +258,7 @@ mod tests {
         transport.push_server_message(ServerMessage::Pong {
             version: "test".into(),
             protocol_version: PROTOCOL_VERSION,
+            browser_focus_preflight: false,
         });
         let mut engine = ClientEngine::connect(&transport).await.unwrap();
         assert!(matches!(
@@ -371,6 +373,7 @@ mod tests {
         transport.push_server_message(ServerMessage::Pong {
             version: "test".into(),
             protocol_version: PROTOCOL_VERSION,
+            browser_focus_preflight: false,
         });
         let mut reconnected = ClientEngine::connect(&transport).await.unwrap();
         transport.push_server_message(ServerMessage::SessionReady {
@@ -404,6 +407,7 @@ mod tests {
         transport.push_server_message(ServerMessage::Pong {
             version: "test".into(),
             protocol_version: PROTOCOL_VERSION,
+            browser_focus_preflight: false,
         });
         let mut engine = ClientEngine::connect(&transport).await.unwrap();
         transport.push_server_message(ServerMessage::SessionReady {
@@ -474,6 +478,7 @@ mod tests {
         transport.push_server_message(ServerMessage::Pong {
             version: "test".into(),
             protocol_version: PROTOCOL_VERSION,
+            browser_focus_preflight: false,
         });
         let mut engine = ClientEngine::connect(&transport).await.unwrap();
 

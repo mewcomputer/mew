@@ -402,6 +402,7 @@ impl DesktopShell {
             page_instance: page.page_instance.clone(),
             cdp_endpoint: ready.cdp_endpoint,
             target_id: ready.target_id,
+            focus_url: None,
         });
     }
 

@@ -4697,6 +4697,7 @@ mod tests {
         let current = mew_protocol::encode_json(&ServerMessage::Pong {
             version: "test".into(),
             protocol_version: mew_protocol::PROTOCOL_VERSION,
+            browser_focus_preflight: false,
         })
         .unwrap();
         let pong = protocol_handshake_result(&current).await.unwrap();
@@ -4711,6 +4712,7 @@ mod tests {
             mew_protocol::encode_json(&ServerMessage::Pong {
                 version: "future".into(),
                 protocol_version: mew_protocol::PROTOCOL_VERSION + 1,
+                browser_focus_preflight: false,
             })
             .unwrap(),
         ] {

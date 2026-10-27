@@ -355,6 +355,8 @@ pub enum ClientMessage {
         page_instance: String,
         cdp_endpoint: String,
         target_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        focus_url: Option<String>,
     },
     /// Revoke this connection's matching page generation.
     UnregisterBrowserPage {
@@ -1141,6 +1143,9 @@ pub enum ServerMessage {
         /// Missing in legacy daemons, which are incompatible with this revision.
         #[serde(default)]
         protocol_version: u32,
+        /// Supports the registered page's local focus callback before keyboard input.
+        #[serde(default)]
+        browser_focus_preflight: bool,
     },
 
     /// Response to `ListProjects`. Contains deduped project directories
@@ -1912,6 +1917,7 @@ mod tests {
         let pong = ServerMessage::Pong {
             version: "0.2.0".into(),
             protocol_version: PROTOCOL_VERSION,
+            browser_focus_preflight: false,
         };
         let j = encode_json(&pong).unwrap();
         assert!(j.contains(r#""type":"pong""#));
@@ -1921,9 +1927,11 @@ mod tests {
             ServerMessage::Pong {
                 version,
                 protocol_version,
+                browser_focus_preflight,
             } => {
                 assert_eq!(version, "0.2.0");
                 assert_eq!(protocol_version, PROTOCOL_VERSION);
+                assert!(!browser_focus_preflight);
             }
             _ => panic!("expected Pong"),
         }
@@ -1939,6 +1947,36 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn pong_roundtrips_browser_focus_preflight_capability() {
+        let value = serde_json::json!({
+            "type": "pong",
+            "version": "0.2.0",
+            "protocol_version": PROTOCOL_VERSION,
+            "browser_focus_preflight": true
+        });
+        let pong: ServerMessage = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(pong).unwrap(), value);
+    }
+
+    #[test]
+    fn legacy_pong_has_no_browser_focus_preflight_capability() {
+        for json in [
+            r#"{"type":"pong","version":"0.2.0"}"#,
+            r#"{"type":"pong","version":"0.2.0","protocol_version":3}"#,
+            r#"{"type":"pong","version":"0.2.0","protocol_version":3,"browser_focus_preflight":false}"#,
+        ] {
+            let pong: ServerMessage = decode_json(json).unwrap();
+            assert!(matches!(
+                pong,
+                ServerMessage::Pong {
+                    browser_focus_preflight: false,
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]
@@ -3370,6 +3408,7 @@ mod tests {
             page_instance: "page-a".into(),
             cdp_endpoint: "http://127.0.0.1:9223".into(),
             target_id: "target-a".into(),
+            focus_url: None,
         };
         assert_eq!(
             encode_json(&round_trip(&request)).unwrap(),
@@ -3392,6 +3431,24 @@ mod tests {
             encode_json(&round_trip(&response)).unwrap(),
             encode_json(&response).unwrap()
         );
+    }
+
+    #[test]
+    fn browser_page_registration_roundtrips_optional_focus_capability() {
+        for focus_url in [None, Some("http://127.0.0.1:9224/focus/page-token")] {
+            let mut value = serde_json::json!({
+                "type": "register_browser_page",
+                "session_id": "session-a",
+                "page_instance": "page-a",
+                "cdp_endpoint": "http://127.0.0.1:9223",
+                "target_id": "target-a"
+            });
+            if let Some(url) = focus_url {
+                value["focus_url"] = url.into();
+            }
+            let request: ClientMessage = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(request).unwrap(), value);
+        }
     }
 
     #[test]

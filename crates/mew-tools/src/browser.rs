@@ -10,6 +10,7 @@ pub struct BrowserTarget {
     pub page_instance: String,
     pub cdp_endpoint: String,
     pub target_id: String,
+    pub focus_url: Option<String>,
 }
 
 pub enum BrowserAction {
@@ -97,6 +98,23 @@ impl BrowserAccess {
                     .into(),
             );
         }
+        if let Some(focus_url) = &target.focus_url {
+            let url = reqwest::Url::parse(focus_url).map_err(|_| {
+                "browser focus endpoint must be an explicit local HTTP URL".to_owned()
+            })?;
+            if url.scheme() != "http"
+                || !matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))
+                || url.port().is_none()
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.fragment().is_some()
+                || url.path().trim_matches('/').is_empty()
+            {
+                return Err(
+                    "browser focus endpoint must be an explicit local HTTP URL with a path".into(),
+                );
+            }
+        }
         let mut page = self.0.page.lock().expect("browser page lock");
         if let Some(previous) = page.as_ref() {
             if previous.owner != owner {
@@ -108,7 +126,7 @@ impl BrowserAccess {
                 return Ok(previous.clone());
             }
             if previous.target.page_instance == target.page_instance {
-                return Err("a page generation cannot change its CDP identity".into());
+                return Err("a page generation cannot change its browser identity".into());
             }
             self.disconnect_cli(previous);
         }
@@ -162,9 +180,10 @@ impl BrowserAccess {
             .json()
             .await
             .map_err(|error| format!("read browser targets: {error}"))?;
-        if !targets.iter().any(|target| {
-            target["id"].as_str() == Some(&lease.target.target_id) && target["type"] == "page"
-        }) {
+        if !targets
+            .iter()
+            .any(|target| matches_browser_target(target, &lease.target.target_id))
+        {
             return Err("registered browser page no longer exists".into());
         }
         // A fresh pinned CLI session creates a page. Select and persist the
@@ -328,10 +347,12 @@ impl BrowserAccess {
                     .await?
             }
             BrowserAction::Fill { selector, text } => {
+                self.focus(&lease, cancel).await?;
                 self.data_command(&lease, cancel, &["fill", &selector, &text])
                     .await?
             }
             BrowserAction::Press(key) => {
+                self.focus(&lease, cancel).await?;
                 self.data_command(&lease, cancel, &["press", &key]).await?
             }
             BrowserAction::Close => {
@@ -376,6 +397,30 @@ impl BrowserAccess {
         })
     }
 
+    async fn focus(&self, lease: &PageLease, cancel: &CancellationToken) -> Result<(), String> {
+        let Some(url) = &lease.target.focus_url else {
+            return Ok(());
+        };
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .map_err(|error| format!("browser focus: {error}"))?;
+        tokio::select! {
+            biased;
+            _ = lease.revoked.cancelled() => Err("browser page registration was revoked".into()),
+            _ = cancel.cancelled() => Err("browser operation cancelled".into()),
+            response = client.post(url).send() => {
+                let response = response.map_err(|error| format!("browser focus: {error}"))?;
+                if response.status() != reqwest::StatusCode::NO_CONTENT {
+                    return Err(format!("browser focus requires HTTP 204; received {}", response.status()));
+                }
+                Ok(())
+            },
+        }
+    }
+
     async fn cdp_get(
         &self,
         lease: &PageLease,
@@ -407,10 +452,12 @@ impl BrowserAccess {
     ) -> Result<String, String> {
         let output = self.run_command(lease, cancel, args, scope, None).await?;
         if !output.status.success() {
-            return Err(format!(
-                "agent-browser: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(if stderr.trim().is_empty() {
+                format!("agent-browser: {}", output.status)
+            } else {
+                format!("agent-browser: {}", stderr.trim())
+            });
         }
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     }
@@ -432,13 +479,8 @@ impl BrowserAccess {
                 Some(input),
             )
             .await?;
-        let responses: Vec<serde_json::Value> =
-            serde_json::from_slice(&output.stdout).map_err(|error| {
-                format!(
-                    "read browser command response: {error}; {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                )
-            })?;
+        let responses: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)
+            .map_err(|error| invalid_command_response(&output, &error))?;
         let response = responses
             .first()
             .filter(|_| responses.len() == 1)
@@ -509,6 +551,20 @@ impl BrowserAccess {
                 .map_err(|e| format!("run agent-browser: {e}; install agent-browser 0.34 or newer")),
         }
     }
+}
+
+fn invalid_command_response(output: &std::process::Output, error: &serde_json::Error) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.trim().is_empty() {
+        format!("read browser command response: {error}; {}", output.status)
+    } else {
+        format!("read browser command response: {error}; {}", stderr.trim())
+    }
+}
+
+fn matches_browser_target(target: &serde_json::Value, expected_id: &str) -> bool {
+    target["id"].as_str() == Some(expected_id)
+        && matches!(target["type"].as_str(), Some("page" | "webview"))
 }
 
 fn check_version(output: &str) -> Result<(), String> {

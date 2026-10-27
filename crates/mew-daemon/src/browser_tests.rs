@@ -3,7 +3,14 @@ use crate::request_tests::{connect, flush, send};
 
 #[tokio::test]
 async fn failed_browser_registration_releases_detached_session_runtime() {
-    for endpoint in ["not-an-endpoint", "http://127.0.0.1:9223"] {
+    for (endpoint, focus_url) in [
+        ("not-an-endpoint", None),
+        ("http://127.0.0.1:9223", None),
+        (
+            "http://127.0.0.1:9223",
+            Some("http://remote.invalid:9224/focus/token"),
+        ),
+    ] {
         let directory = tempfile::tempdir().unwrap();
         let executable = directory.path().join("missing-agent-browser");
         let server = DaemonServer::with_session_dir(
@@ -43,13 +50,21 @@ async fn failed_browser_registration_releases_detached_session_runtime() {
                 page_instance: "failed-page".into(),
                 cdp_endpoint: endpoint.into(),
                 target_id: "target".into(),
+                focus_url: focus_url.map(String::from),
             },
         )
         .await;
+        let response = next_browser_reply(&mut socket).await;
         assert!(matches!(
-            next_browser_reply(&mut socket).await,
+            &response,
             ServerMessage::BrowserPageRegistration { error: Some(_), .. }
         ));
+        if focus_url.is_some() {
+            assert!(
+                matches!(&response, ServerMessage::BrowserPageRegistration { error: Some(error), .. } if error.contains("focus")),
+                "{response:?}"
+            );
+        }
         assert!(!a.browser_access.is_available());
         assert!(
             server.session_manager.unload_detached(&a).await,
@@ -76,6 +91,7 @@ async fn browser_response_captures_unavailable_page_before_task_scheduling() {
             page_instance: "late-page".into(),
             cdp_endpoint: "http://127.0.0.1:9223".into(),
             target_id: "0123456789ABCDEF0123456789ABCDEF".into(),
+            focus_url: None,
         },
     );
     assert!(matches!(
@@ -130,6 +146,7 @@ async fn browser_registration_requires_confirmed_local_desktop_session() {
                 page_instance: "page-a".into(),
                 cdp_endpoint: "http://127.0.0.1:9223".into(),
                 target_id: "0123456789ABCDEF0123456789ABCDEF".into(),
+                focus_url: None,
             },
         )
         .await;
@@ -195,6 +212,7 @@ async fn remote_and_legacy_connections_cannot_register_local_pages() {
                 page_instance: "page-a".into(),
                 cdp_endpoint: "http://127.0.0.1:9223".into(),
                 target_id: "0123456789ABCDEF0123456789ABCDEF".into(),
+                focus_url: None,
             },
         )
         .await;
@@ -273,6 +291,7 @@ async fn real_daemon_pages_survive_switching_and_revoke_on_disconnect_and_delete
         page_instance: instance.into(),
         cdp_endpoint: endpoint.clone(),
         target_id: target_id.clone(),
+        focus_url: None,
     };
     let mut socket = connect(&server).await;
     send(
@@ -307,6 +326,7 @@ async fn real_daemon_pages_survive_switching_and_revoke_on_disconnect_and_delete
             page_instance: "page-a".into(),
             cdp_endpoint: "http://127.0.0.1:1".into(),
             target_id: "different-target".into(),
+            focus_url: None,
         },
     )
     .await;
@@ -458,6 +478,7 @@ async fn real_daemon_pages_survive_switching_and_revoke_on_disconnect_and_delete
             page_instance: "deleted-page".into(),
             cdp_endpoint: endpoint.clone(),
             target_id: target_id.clone(),
+            focus_url: None,
         },
     )
     .await;
@@ -491,6 +512,7 @@ async fn real_daemon_pages_survive_switching_and_revoke_on_disconnect_and_delete
             page_instance: "late-deleted-page".into(),
             cdp_endpoint: endpoint.clone(),
             target_id: target_id.clone(),
+            focus_url: None,
         },
     )
     .await;
