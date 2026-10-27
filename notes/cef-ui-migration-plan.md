@@ -1,7 +1,7 @@
 # Chat UI migration plan
 
 Date: 2026-10-27
-Status: proposed implementation plan
+Status: Electron UI milestone implemented; full migration acceptance pending
 
 Move the desktop presentation to the packaged Chromium runtime and rebuild the
 web interface around the approved chat mockup. Preserve the Rust daemon, agent
@@ -38,7 +38,24 @@ The mockup establishes layout and interaction direction. Its sample terminal,
 browser pages and local message echoes must be replaced by real capabilities.
 Canvas layouts and topic lanes are outside this migration.
 
-## Proposed architecture
+## Current host decision
+
+The browser composition comparison and packaged UI checks selected Electron for
+the opt-in desktop shell. `apps/mew-electron` owns the window, menus and retained
+DOM guests; `mew desktop-host` reuses the Rust supervisor, embedded assets and
+theme loader. The shared React presentation connects to the local daemon through
+`MewClient`. Native GPUI/CEF remains available as the default during migration.
+See the [Electron implementation and verification record](../apps/mew-electron/README.md)
+for build commands, trust boundaries and keyboard-focus preflight. Browser
+automation now requires fresh session confirmation and the daemon's advertised
+focus capability. The first UI milestone is complete; the baseline release
+requirements below remain in force, including direct subagent messaging.
+
+## Initial CEF architecture (superseded host choice)
+
+The following describes the initial hosting plan. The Electron decision above
+supersedes its GPUI/CEF ownership and transport-binding choices; the shared
+presentation, runtime boundaries and baseline requirements still apply.
 
 Keep React, TypeScript and Vite as the presentation toolkit. Replace the current
 screen composition and revise state ownership within `mew-web-ui`; retain

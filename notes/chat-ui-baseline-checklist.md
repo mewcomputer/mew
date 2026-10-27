@@ -1,13 +1,14 @@
 # Chat UI baseline checklist
 
 Date: 2026-10-27
-Status: packaged chat/browser UI proof verified; full migration acceptance pending
+Status: packaged Electron chat/browser UI proof verified; full migration acceptance pending
 
 This checklist implements the baseline step of the
 [migration plan](cef-ui-migration-plan.md). The current milestone is the familiar
 React, Tailwind and shadcn chat shell with a tabbed right pane, its new-tab
 launcher, and a real external browser page beside a working daemon conversation
-in the packaged app. Stop at that UI milestone before expanding the migration.
+in the packaged app. The authorized extension includes reliable browser input
+routing. Stop at that milestone before expanding the remaining migration.
 
 The tables distinguish code and test sources inspected from acceptance actually
 performed. A cited test is existing coverage to reuse or extend, not a claim
@@ -122,6 +123,11 @@ report success for a capability that has not been connected yet.
 
 ## Running the UI milestone
 
+The current opt-in host is Electron. Use `just desktop-electron-dev` to build,
+package and run it, or `just desktop-electron-build` for a release-profile
+bundle. See the [host README](../apps/mew-electron/README.md) for dependencies,
+commands and acceptance limits. The earlier CEF recipes remain available:
+
 Install workspace dependencies with `just install-js` on a first checkout or
 after lockfile changes. Use `just desktop-dev --web-ui` to build and run the
 packaged debug app with the React interface. `just desktop-dev` retains the
@@ -235,3 +241,31 @@ Recipe verification: `just --dry-run desktop-dev --web-ui`,
 resolves the client build before the UI build and Cargo commands; debug arguments
 use the repository's existing positional-argument forwarding convention. This
 checks recipe parsing and command order, not a desktop build or packaged smoke.
+
+### Electron UI proof and automation extension on 2026-10-27
+
+The actual ad hoc signed debug bundle completed another real daemon turn with
+the deterministic fake provider beside two retained browser tabs. Browser tools
+filled distinct Unicode values through the daemon and bundled `agent-browser`;
+each selected guest changed while the other guest and chat draft stayed intact.
+The production focus callback also passed real same-URL guest regressions for
+Fill and selection-preserving Backspace after chat takes focus. Stale/hidden
+page callbacks fail, old daemons cannot silently skip the safeguard, and browser
+registration waits for fresh matching session confirmation after reconnect.
+
+The packaged window retained page input through tab switches and animated pane
+close/reopen. Menus render above a visible guest. Keyboard divider resizing,
+browser scrolling, the new-tab launcher, chat-owned summary, light/dark themes
+and Rust-persisted palette choices passed. Native AX exposes the guest document.
+App close reaped owned processes while the independently attached daemon stayed
+alive. Pointer dragging was unavailable through the native automation API;
+native IME acceptance remains pending.
+
+Verification: 212 UI, 40 TypeScript client, 29 Node host tests, nine packaging
+tests including the separate real signed-package test, five Rust support-process
+tests, 126 protocol, 45 client-core, four client-local, 19 browser, four daemon
+browser tests and the daemon capability Ping test passed. Existing opt-in Chrome
+tests remain unrun. Client/UI builds, affected all-targets and workspace clippy,
+formatting, architecture and generated-theme checks passed. Full replacement acceptance
+boxes remain open. The [host README](../apps/mew-electron/README.md) records
+resource-sample caveats and photos 22-26 from this task's visualization artifacts.

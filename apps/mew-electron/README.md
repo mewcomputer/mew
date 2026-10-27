@@ -81,8 +81,8 @@ Five actual Rust support-process tests cover themes, malformed requests,
 startup failures and owned/attached shutdown. Protocol tests (126), client-core
 (45), client-local (4), browser tests (19), daemon browser tests (4), and the
 daemon Ping advertisement test passed. Existing opt-in Chrome tests were not
-run. Affected all-targets clippy, formatting, architecture and generated-theme
-checks passed.
+run. Affected all-targets clippy, workspace clippy through the enabled commit
+hook, formatting, architecture and generated-theme checks passed.
 
 The packaged debug app completed real WebSocket turns with the deterministic
 fake provider beside two guests. Browser tools filled distinct Unicode values

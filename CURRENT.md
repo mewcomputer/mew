@@ -3974,3 +3974,37 @@ daemon, protocol and theme system. No production migration was performed.
 Verification: 10 CEF tests pass, alongside the unchanged 9 UI and 5 Electron
 tests. The final bundle signature verifies and both corrected native runs closed
 successfully. The native keychain regression remains an explicit runtime check.
+
+### 2026-10-27: opt-in Electron chat/browser UI milestone
+
+Added `apps/mew-electron` around the shared React UI and a headless
+`mew desktop-host` support process. Rust retains daemon supervision, sessions and
+theme resolution/storage. The app uses a stable private origin and isolated
+external browser Session, lazily creates visited guests, and retains them through
+pane/tab/chat navigation. New debug/release recipes package the pinned runtime,
+Rust binary and standalone agent-browser without CEF. The native app stays the
+default; full baseline acceptance remains pending.
+
+Extended the milestone at the user's request to fix browser automation. Exact
+CDP target pinning alone did not route Chromium keyboard input reliably between
+embedded guests. Fill/Press now require an acknowledged per-operation focus
+preflight for the live selected guest. The daemon advertises that capability;
+the client rejects older daemons before registration and waits for fresh session
+confirmation after reconnect. Hidden/stale/revoked pages cannot pass preflight.
+
+Verified real packaged chat turns with the fake provider beside two tabs,
+daemon-to-guest Unicode fills without changing the other guest or chat draft,
+overlays, retained input across pane transitions, keyboard resizing, scrolling,
+light/dark themes and persisted palette choices. App shutdown reaped its children
+and preserved the attached daemon. Photos 22-25 and resource spot sample 26 are
+in this task's visualization artifacts. Pointer dragging was unavailable through
+native automation; native IME and sustained resource acceptance are still open.
+
+Verification: 212 UI, 40 TS client, 29 Node host, nine packaging (including real
+signed builds), five Rust support-process, 126 protocol, 45 client-core, four
+client-local, 19 browser, four daemon browser and one daemon capability Ping
+tests passed. Existing opt-in Chrome tests were not run. Client/UI builds,
+affected all-targets and workspace clippy, formatting, architecture and
+generated-theme checks passed with commit hooks enabled. See
+`apps/mew-electron/README.md` and the updated migration/checklist
+notes for commands, evidence boundaries and the remaining first-release work.
