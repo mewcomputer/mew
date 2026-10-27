@@ -3822,3 +3822,22 @@ Generated themes and debug packaging pass. Packaged screenshots cover light and
 dark themes, browser editing and menus, split resizing, collapsed navigation,
 and automatic summary placement inside the chat pane. Full baseline acceptance
 remains open in `notes/chat-ui-baseline-checklist.md`.
+
+
+## 2026-10-27: polish the composer and message controls
+
+Model and persona pickers use the existing shadcn radio menus for keyboard
+navigation, viewport bounds and focus return. Model/thinking updates expose
+pending and retryable failure states and discard late results after navigating
+to another chat. Restored multiline drafts resize immediately. A successful
+pending send preserves newer text and attachments, while send errors remain
+scoped to their original chat. The compact composer retains accessible
+permission context while allowing long model/persona labels to truncate.
+
+Message actions share a quiet copy/details row. Tool cards use their available
+width, wrap metadata and filenames, preserve full input summaries and use the
+shared semantic status colors. Copy controls announce success and retryable
+failure. Verification includes regressions for delayed send results, restored
+drafts, picker keyboard/failure behavior, tool disclosure and clipboard errors.
+The full 193-test React suite and production build pass. Packaged photos cover
+the composer and model menu in narrow and wide light/dark windows.

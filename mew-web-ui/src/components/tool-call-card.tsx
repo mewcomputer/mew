@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ChevronRight, ChevronDown, Terminal, CheckCircle2, XCircle, Loader2, Copy, FileEdit, FilePlus } from "lucide-react";
+import { ChevronRight, ChevronDown, Clock3, CheckCircle2, XCircle, Loader2, Copy, FileEdit, FilePlus } from "lucide-react";
 import { useSessionStore, type MessagePart } from "../stores/session";
 import { cn } from "../lib/utils";
 
@@ -19,11 +19,11 @@ function inferSensitivity(toolName: string): Sensitivity {
 function sensitivityMeta(s: Sensitivity) {
   switch (s) {
     case "readonly":
-      return { label: "ReadOnly", className: "bg-muted text-muted-foreground" };
+      return { label: "Read only", className: "text-muted-foreground" };
     case "mutating":
-      return { label: "Mutating", className: "bg-amber-500/10 text-amber-600 dark:text-amber-400" };
+      return { label: "Mutating", className: "text-text-warning" };
     case "dangerous":
-      return { label: "Dangerous", className: "bg-red-500/10 text-red-600 dark:text-red-400" };
+      return { label: "Dangerous", className: "text-destructive" };
   }
 }
 
@@ -37,11 +37,11 @@ function inputSummary(input: unknown): string {
     const pattern = obj.pattern as string | undefined;
     const text = obj.text as string | undefined;
     const oldStr = obj.old_string as string | undefined;
-    if (command) return command.length > 60 ? command.slice(0, 60) + "…" : command;
+    if (command) return command;
     if (path) return path;
     if (pattern) return pattern;
-    if (text) return text.length > 60 ? text.slice(0, 60) + "…" : text;
-    if (oldStr) return "old: " + (oldStr.length > 40 ? oldStr.slice(0, 40) + "…" : oldStr);
+    if (text) return text;
+    if (oldStr) return "old: " + oldStr;
   }
   return "";
 }
@@ -64,6 +64,7 @@ function useElapsed(startMs: number | undefined, endMs: number | null | undefine
 export function ToolCallCard({ part }: { part: Extract<MessagePart, { type: "tool-call" }> }) {
   const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState(false);
   const toolState = useSessionStore((s) => s.toolStates.get(part.callId));
   const toolOutput = useSessionStore((s) => s.toolOutputs.get(part.callId)) ?? part.output;
 
@@ -76,66 +77,64 @@ export function ToolCallCard({ part }: { part: Extract<MessagePart, { type: "too
 
   const handleCopy = async () => {
     if (!toolOutput) return;
+    setCopyError(false);
     try {
       await navigator.clipboard.writeText(toolOutput);
       setCopied(true);
       setTimeout(() => setCopied(false), 1200);
     } catch {
-      // ignore
+      setCopied(false);
+      setCopyError(true);
     }
   };
 
   return (
     <div
       className={cn(
-        "min-w-0 max-w-[85%] rounded-lg border bg-card",
+        "min-w-0 w-full max-w-full rounded-lg border bg-card",
         state === "error" && "border-destructive",
         state !== "error" && "border-border",
       )}
     >
       <button
+        type="button"
         onClick={() => setExpanded(!expanded)}
-        className="motion-pressable flex min-w-0 w-full items-center gap-2 px-4 py-2 text-left"
+        aria-label={`${expanded ? "Hide" : "Show"} ${part.toolName} details`}
+        aria-expanded={expanded}
+        className="motion-pressable flex min-w-0 w-full items-start gap-2 rounded-lg px-3 py-2 text-left hover:bg-muted/40"
       >
+        <span className="mt-0.5 shrink-0" aria-hidden="true"><StateIcon state={state} /></span>
+        <span className="min-w-0 flex-1">
+          <span className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+            <span className="min-w-0 break-words font-mono text-xs leading-5 [overflow-wrap:anywhere]">{part.toolName}</span>
+            <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] leading-4 text-muted-foreground">
+              <span className={cn("capitalize", state === "error" && "text-destructive", state === "completed" && "text-text-success", state === "running" && "text-text-accent")}>{state}</span>
+              {elapsed && <span className="tabular-nums">{elapsed}</span>}
+              <span className={sens.className}>{sens.label}</span>
+            </span>
+          </span>
+          {summary && <span className="block truncate text-[11px] leading-4 text-muted-foreground" title={summary}>{summary}</span>}
+        </span>
         {expanded ? (
-          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          <ChevronDown className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
         ) : (
-          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          <ChevronRight className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
         )}
-        <StateIcon state={state} />
-        <Terminal className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-        <span className="min-w-0 shrink truncate font-mono text-sm">{part.toolName}</span>
-        {summary && (
-          <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">{summary}</span>
-        )}
-        <span className={cn("ml-auto shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium uppercase", sens.className)}>
-          {sens.label}
-        </span>
-        <span
-          className={cn(
-            "shrink-0 text-xs capitalize tabular-nums",
-            state === "error" && "text-destructive",
-            state === "completed" && "text-green-500",
-            state === "running" && "text-blue-500",
-            state === "pending" && "text-muted-foreground",
-          )}
-        >
-          {state}
-        </span>
-        {elapsed && <span className="shrink-0 text-[10px] text-muted-foreground">{elapsed}</span>}
       </button>
 
       {hasOutput && !expanded && (
-        <div className="border-t border-border">
-          <div className="group relative">
+        <div className="min-w-0 border-t border-border">
+          <div className="group relative min-w-0">
             <button
+              type="button"
               onClick={handleCopy}
-              className="motion-pressable absolute right-2 top-2 rounded border border-border bg-background p-1 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
+              aria-label="Copy output"
+              className="motion-pressable absolute right-2 top-2 rounded border border-border bg-background p-1 text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
               title="Copy output"
             >
-              {copied ? <CheckCircle2 className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3" />}
+              {copied ? <CheckCircle2 className="h-3 w-3 text-text-success" /> : <Copy className="h-3 w-3" />}
             </button>
-            <pre className="max-h-32 max-w-full overflow-auto px-4 py-2 text-xs text-muted-foreground">
+            <pre className="max-h-32 min-w-0 max-w-full overflow-auto py-2 pl-3 pr-10 text-[11px] leading-relaxed text-muted-foreground">
               {toolOutput}
             </pre>
           </div>
@@ -143,11 +142,11 @@ export function ToolCallCard({ part }: { part: Extract<MessagePart, { type: "too
       )}
 
       {expanded && (
-        <div className="min-w-0 border-t border-border px-4 py-2">
+        <div className="min-w-0 border-t border-border px-3 py-2">
           {part.input != null && (
             <div className="mb-2">
               <div className="flex items-center justify-between">
-                <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                <span className="text-[11px] font-medium text-muted-foreground">
                   Input
                 </span>
                 {(part.toolName === "edit" || part.toolName === "write") && (
@@ -160,7 +159,7 @@ export function ToolCallCard({ part }: { part: Extract<MessagePart, { type: "too
               {(part.toolName === "edit" || part.toolName === "write") && part.input && typeof part.input === "object" ? (
                 <ToolInputDiff toolName={part.toolName} input={part.input as Record<string, unknown>} />
               ) : (
-                <pre className="mt-1 max-w-full overflow-x-auto rounded bg-muted p-2 text-xs">
+                <pre className="mt-1 max-h-64 min-w-0 max-w-full overflow-auto rounded bg-muted p-2 text-[11px] leading-relaxed">
                   {JSON.stringify(part.input, null, 2)}
                 </pre>
               )}
@@ -169,24 +168,28 @@ export function ToolCallCard({ part }: { part: Extract<MessagePart, { type: "too
           {hasOutput && (
             <div>
               <div className="flex items-center justify-between">
-                <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                <span className="text-[11px] font-medium text-muted-foreground">
                   Output
                 </span>
                 <button
+                  type="button"
                   onClick={handleCopy}
-                  className="motion-pressable flex items-center gap-1 rounded border border-border px-1.5 py-0.5 text-[10px] hover:bg-accent"
+                  aria-label="Copy output"
+                  className="motion-pressable flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
                 >
-                  {copied ? <CheckCircle2 className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3" />}
-                  {copied ? "copied" : "copy"}
+                  {copied ? <CheckCircle2 className="h-3 w-3 text-text-success" /> : <Copy className="h-3 w-3" />}
+                  {copied ? "Copied" : "Copy"}
                 </button>
               </div>
-              <pre className="mt-1 max-h-64 max-w-full overflow-auto rounded bg-muted p-2 text-xs">
+              <pre className="mt-1 max-h-64 min-w-0 max-w-full overflow-auto rounded bg-muted p-2 text-[11px] leading-relaxed">
                 {toolOutput}
               </pre>
             </div>
           )}
         </div>
       )}
+      {copied && <span role="status" className="sr-only">Output copied</span>}
+      {copyError && <p role="alert" className="px-3 pb-2 text-[11px] text-destructive">Could not copy output. Try again.</p>}
     </div>
   );
 }
@@ -194,11 +197,11 @@ export function ToolCallCard({ part }: { part: Extract<MessagePart, { type: "too
 function StateIcon({ state }: { state: Extract<MessagePart, { type: "tool-call" }>["state"] }) {
   switch (state) {
     case "pending":
-      return <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />;
+      return <Clock3 className="h-3.5 w-3.5 text-muted-foreground" />;
     case "running":
-      return <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-500" />;
+      return <Loader2 className="h-3.5 w-3.5 animate-spin text-text-accent" />;
     case "completed":
-      return <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />;
+      return <CheckCircle2 className="h-3.5 w-3.5 text-text-success" />;
     case "error":
       return <XCircle className="h-3.5 w-3.5 text-destructive" />;
     default:
@@ -213,7 +216,7 @@ function ToolInputDiff({ toolName, input }: { toolName: string; input: Record<st
     const path = String(input.path ?? "");
     return (
       <div className="mt-1 space-y-1 rounded border border-border bg-muted/50 p-2 text-xs">
-        {path && <div className="font-mono text-muted-foreground">{path}</div>}
+        {path && <div className="break-all font-mono text-muted-foreground">{path}</div>}
         <Diff oldStr={oldStr} newStr={newStr} />
       </div>
     );
@@ -224,7 +227,7 @@ function ToolInputDiff({ toolName, input }: { toolName: string; input: Record<st
     const path = String(input.path ?? "");
     return (
       <div className="mt-1 space-y-1 rounded border border-border bg-muted/50 p-2 text-xs">
-        {path && <div className="font-mono text-muted-foreground">{path}</div>}
+        {path && <div className="break-all font-mono text-muted-foreground">{path}</div>}
         <div className="flex items-center gap-2 text-muted-foreground">
           <FilePlus className="h-3.5 w-3.5" />
           <span>Write {text.length} characters</span>
@@ -255,8 +258,8 @@ function Diff({ oldStr, newStr }: { oldStr: string; newStr: string }) {
           key={i}
           className={cn(
             "flex",
-            line.kind === "old" && "bg-red-500/10 text-red-600 dark:text-red-400",
-            line.kind === "new" && "bg-green-500/10 text-green-600 dark:text-green-400",
+            line.kind === "old" && "bg-destructive/10 text-destructive",
+            line.kind === "new" && "bg-text-success/10 text-text-success",
           )}
         >
           <span className="w-5 shrink-0 select-none pl-1 text-muted-foreground">

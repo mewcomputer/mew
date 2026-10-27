@@ -97,6 +97,42 @@ describe("InputArea", () => {
     expect(screen.getByRole("alert").textContent).toContain("Could not create the chat");
   });
 
+  it("shows send progress and keeps text edited while the previous prompt is pending", async () => {
+    let finish!: () => void;
+    const onSend = vi.fn(() => new Promise<void>((resolve) => { finish = resolve; }));
+    renderInputArea({ onSend });
+    const input = screen.getByRole("textbox", { name: "Message prompt" }) as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "first prompt" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send prompt" }));
+    expect(screen.getByRole("button", { name: "Send prompt" }).getAttribute("aria-busy")).toBe("true");
+    fireEvent.change(input, { target: { value: "my next prompt" } });
+    await act(async () => finish());
+    expect(input.value).toBe("my next prompt");
+    expect(screen.getByRole("button", { name: "Send prompt" }).getAttribute("aria-busy")).toBe("false");
+  });
+
+  it("resizes a restored multiline draft to its content", () => {
+    const { container } = renderInputArea();
+    const input = screen.getByRole("textbox", { name: "Message prompt" }) as HTMLTextAreaElement;
+    Object.defineProperty(input, "scrollHeight", { get: () => input.value.split("\n").length * 20 });
+    const source = useSessionStore.getState().sessionId;
+    fireEvent.change(input, { target: { value: "one\ntwo\nthree" } });
+    act(() => useSessionStore.setState({ sessionId: "resize-other" }));
+    fireEvent.change(input, { target: { value: "short" } });
+    act(() => useSessionStore.setState({ sessionId: source }));
+    expect((container.querySelector("textarea") as HTMLTextAreaElement).style.height).toBe("60px");
+  });
+
+  it("does not show a previous chat's send error after navigation", async () => {
+    let fail!: (reason: Error) => void;
+    renderInputArea({ onSend: vi.fn(() => new Promise<void>((_, reject) => { fail = reject; })) });
+    fireEvent.change(screen.getByRole("textbox", { name: "Message prompt" }), { target: { value: "send here" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send prompt" }));
+    act(() => useSessionStore.setState({ sessionId: "other-send-chat" }));
+    await act(async () => fail(new Error("old chat failed")));
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("shows store personas in @ menu", () => {
     useSessionStore.setState({ availablePersonas: mockPersonas, currentPersona: null });
     const { container } = renderInputArea();

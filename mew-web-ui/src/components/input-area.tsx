@@ -3,12 +3,13 @@ import {
   useRef,
   useState,
   useEffect,
+  useLayoutEffect,
   useImperativeHandle,
   type ClipboardEvent,
   type DragEvent,
   type KeyboardEvent,
 } from "react";
-import { Square, Plus, X, ArrowUp, Shield } from "lucide-react";
+import { Square, Plus, X, ArrowUp, Shield, Loader2, File } from "lucide-react";
 import { cn } from "../lib/utils";
 import { useSessionStore } from "../stores/session";
 import { useSidebar } from "@/components/ui/sidebar";
@@ -67,6 +68,19 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
     const [historyIndex, setHistoryIndex] = useState<number | null>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
+
+    useLayoutEffect(() => {
+      const input = textareaRef.current;
+      if (!input) return;
+      input.style.height = "auto";
+      input.style.height = `${Math.min(input.scrollHeight, isMobile ? 120 : 160)}px`;
+    }, [text, sessionId, isMobile]);
+
+    useEffect(() => {
+      setSendError(null);
+      setHistoryIndex(null);
+      setMenuOpen(null);
+    }, [sessionId]);
 
     useImperativeHandle(ref, () => textareaRef.current!, []);
 
@@ -185,7 +199,6 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
       } else {
         closeMenu();
       }
-      autoResize();
     };
 
     const closeMenu = () => {
@@ -222,13 +235,16 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
         const pending = onSend(trimmed, attachments);
         if (pending !== undefined) await pending;
         pushPromptHistory(trimmed);
-        setText("");
-        setHistoryIndex(null);
-        setFiles([]);
-        closeMenu();
-        if (textareaRef.current) textareaRef.current.style.height = "auto";
+        setText((current) => current === text ? "" : current);
+        if (files.length > 0) setFiles((current) => current.filter((file) => !files.includes(file)));
+        if ((useSessionStore.getState().sessionId ?? "new") === sessionId) {
+          setHistoryIndex(null);
+          closeMenu();
+        }
       } catch (e) {
-        setSendError(e instanceof Error ? e.message : "Could not send the message.");
+        if ((useSessionStore.getState().sessionId ?? "new") === sessionId) {
+          setSendError(e instanceof Error ? e.message : "Could not send the message.");
+        }
       } finally {
         setIsSending(false);
       }
@@ -248,15 +264,6 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
       setText("");
       closeMenu();
       if (textareaRef.current) textareaRef.current.style.height = "auto";
-    };
-
-    const autoResize = () => {
-      const el = textareaRef.current;
-      if (el) {
-        el.style.height = "auto";
-        el.style.height =
-          Math.min(el.scrollHeight, isMobile ? 120 : 160) + "px";
-      }
     };
 
     const addFiles = (incoming: File[]) => {
@@ -331,7 +338,7 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
 
     return (
       <div
-        className="shrink-0 px-4 pb-3 pt-2 sm:px-6"
+        className="shrink-0 px-4 pb-3 pt-3 sm:px-6"
       >
         <div className="mew-conversation-width mx-auto">
           <div className="relative">
@@ -341,9 +348,9 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
               onDragOver={handleDragOver}
               onDragLeave={handleDragLeave}
               className={cn(
-                "pointer-events-auto rounded-2xl border bg-card px-3 pb-2 pt-2 transition-colors duration-150",
-                focused ? "border-foreground/20" : "border-border/50",
-                isDragging && "border-primary border-2",
+                "mew-composer pointer-events-auto rounded-2xl border bg-card px-3 pb-2 pt-2 shadow-xs transition-colors duration-150",
+                focused ? "border-foreground/25" : "border-border/60 hover:border-foreground/15",
+                isDragging && "border-primary ring-2 ring-primary/20",
               )}
             >
               <div className="flex items-end gap-2">
@@ -360,7 +367,7 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
                   aria-label="Message prompt"
                   disabled={!connected}
                   rows={1}
-                  className="min-h-9 min-w-0 flex-1 resize-none bg-transparent px-0.5 pb-2 pt-1 text-[13px] leading-5 text-foreground placeholder:text-muted-foreground focus:outline-hidden"
+                  className="min-h-10 min-w-0 flex-1 resize-none bg-transparent px-0.5 pb-2 pt-1 text-[13px] leading-[1.6] text-foreground placeholder:text-muted-foreground focus:outline-hidden disabled:cursor-not-allowed"
                 />
 
                 <input
@@ -375,19 +382,20 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
               {(attachmentError || files.length > 0) && (
                 <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-1.5 border-t border-border/50 pt-1.5">
                   {attachmentError && (
-                    <span className="text-[10px] text-destructive">
+                    <span role="alert" className="text-xs text-text-error">
                       {attachmentError}
                     </span>
                   )}
                   {files.map((f, i) => (
                     <span
                       key={`${f.name}-${i}`}
-                      className="flex max-w-full items-center gap-1 rounded-md bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground"
+                      className="flex max-w-full items-center gap-1.5 rounded-lg border border-border/70 bg-background/50 py-1 pl-2 pr-1 text-[11px] text-foreground"
                     >
+                      <File className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                       <span className="truncate">{f.name}</span>
                       <button
                         onClick={() => removeFile(f)}
-                        className="shrink-0 rounded-full hover:text-foreground"
+                        className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
                         title="Remove"
                         aria-label={"Remove " + f.name}
                       >
@@ -399,24 +407,24 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
               )}
 
               {sendError && <p role="alert" className="pb-2 text-xs text-destructive">{sendError}</p>}
-              <div className="flex items-center justify-between gap-1">
+              <div className="flex min-w-0 items-center justify-between gap-2">
                 <div className="flex min-w-0 items-center gap-1">
                 <button
                   onClick={() => fileInputRef.current?.click()}
                   disabled={!connected}
-                  className="motion-pressable flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-50"
+                  className="motion-pressable flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-50"
                   title="Attach file"
                   aria-label="Attach file"
                 >
                   <Plus className="h-4 w-4" />
                 </button>
-                  <span className="flex items-center gap-1 whitespace-nowrap px-1 text-[10px] text-muted-foreground" title={`Permission mode: ${permissionMode}`}>
-                    <Shield className="h-3 w-3" />
-                    {permissionMode === "dangerous" ? "Full access" : permissionMode === "standard" ? "Default permissions" : permissionMode.replace("_", " ")}
+                  <span className="flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap px-1 text-[11px] text-muted-foreground" title={`Permission mode: ${permissionMode}`} aria-label={`Permission mode: ${permissionMode}`}>
+                    <Shield className="h-3.5 w-3.5 shrink-0" />
+                    <span className="mew-composer-permission-label">{permissionMode === "dangerous" ? "Full access" : permissionMode === "standard" ? "Default permissions" : permissionMode.replace("_", " ")}</span>
                   </span>
                   <PersonaPill />
                 </div>
-                <div className="flex min-w-0 items-center gap-1">
+                <div className="flex min-w-0 flex-1 items-center justify-end gap-1">
                 <ModelPill />
                 {hasStreaming ? (
                   <button
@@ -431,13 +439,14 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
                   <button
                     onClick={handleSubmit}
                     disabled={!text.trim() || !connected || isSending}
+                    aria-busy={isSending}
                     className={cn(
                       "motion-pressable flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-foreground text-background hover:opacity-90 disabled:opacity-40",
                     )}
-                    title="Send"
+                    title={isSending ? "Sending…" : "Send"}
                     aria-label="Send prompt"
                   >
-                    <ArrowUp className="h-4 w-4" />
+                    {isSending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowUp className="h-4 w-4" />}
                   </button>
                   )}
                   </div>
