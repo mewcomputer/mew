@@ -3,9 +3,23 @@ import { cleanup, render, waitFor } from "@testing-library/react";
 import { NativeBrowserPage } from "../components/native-browser-page";
 import type { MewClient } from "@mew/web-client";
 
-afterEach(() => { cleanup(); delete window.mewQuery; vi.restoreAllMocks(); document.querySelectorAll('[role="dialog"]').forEach((node) => node.remove()); });
+afterEach(() => { cleanup(); delete window.mewQuery; vi.restoreAllMocks(); document.querySelectorAll('[data-test-overlay], [role="dialog"]').forEach((node) => node.remove()); });
 
 describe("native browser surface", () => {
+  it.each(["menu", "listbox"])("hides beneath an open %s and restores the page after dismissal", async (role) => {
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue({ x: 400, y: 80, width: 500, height: 600, top: 80, right: 900, bottom: 680, left: 400, toJSON: () => ({}) });
+    const calls: Record<string, unknown>[] = [];
+    window.mewQuery = ({ request, onSuccess }) => { calls.push(JSON.parse(request)); onSuccess("{}"); };
+    render(<NativeBrowserPage client={{} as MewClient} connected={false} sessionId={`overlay-${role}`} tabId="tab" url="https://example.com" active onChange={() => {}} onError={() => {}} />);
+    expect(calls.at(-1)).toMatchObject({ visible: true });
+    const overlay = document.createElement("div");
+    overlay.role = role;
+    overlay.dataset.testOverlay = "";
+    document.body.append(overlay);
+    await waitFor(() => expect(calls.at(-1)).toMatchObject({ visible: false }));
+    overlay.remove();
+    await waitFor(() => expect(calls.at(-1)).toMatchObject({ visible: true }));
+  });
   it("registers only its own ready page and hides the native view beneath dialogs", async () => {
     vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue({ x: 400, y: 80, width: 500, height: 600, top: 80, right: 900, bottom: 680, left: 400, toJSON: () => ({}) });
     const calls: Record<string, unknown>[] = [];

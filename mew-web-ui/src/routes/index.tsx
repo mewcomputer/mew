@@ -2,7 +2,7 @@ import { createFileRoute, useRouter } from "@tanstack/react-router";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { Attachment } from "@mew/web-client";
 import { getClient, SESSION_ID_KEY } from "@/lib/client";
-import { ConversationHeader } from "@/components/conversation-header";
+import { ConversationLayout } from "@/components/conversation-layout";
 import { Button } from "@/components/ui/button";
 import { InputArea } from "@/components/input-area";
 import { useSessionStore } from "@/stores/session";
@@ -49,8 +49,7 @@ function HomeComponent() {
   const showResumeFailure = resumeState === "failed";
 
   return (
-    <>
-      <ConversationHeader />
+    <ConversationLayout>
       <main className="flex flex-1 items-center justify-center px-6 pb-16">
         <section className="w-full max-w-md space-y-5 text-center">
           {connectionState === "connecting" && (
@@ -85,7 +84,7 @@ function HomeComponent() {
         </section>
       </main>
       <InputArea connected={connectionState === "connected" && resumeState !== "loading"} onSend={sendNewMessage} onCancel={() => getClient().cancel()} />
-    </>
+    </ConversationLayout>
   );
 }
 

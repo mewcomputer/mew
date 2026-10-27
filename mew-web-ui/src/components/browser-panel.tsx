@@ -7,6 +7,7 @@ import { Button } from "./ui/button";
 import { NativeBrowserPage } from "./native-browser-page";
 import { isDesktopHost } from "../lib/host";
 import { cn } from "../lib/utils";
+import { useOutsideClick } from "../lib/useOutsideClick";
 
 export function BrowserPanel({
   client,
@@ -27,6 +28,8 @@ export function BrowserPanel({
 }) {
   const native = isDesktopHost();
   const urlInput = useRef<HTMLInputElement>(null);
+  const toolbar = useRef<HTMLDivElement>(null);
+  const toolsTrigger = useRef<HTMLButtonElement>(null);
   const addressDirty = useRef(false);
   const tabUrl = tab.payload?.url ?? "";
   const [url, setUrl] = useState(tabUrl);
@@ -164,15 +167,29 @@ export function BrowserPanel({
     setInspectorOpen(false);
   };
 
+  useOutsideClick(toolbar, toolsOpen, closeTools);
+  useEffect(() => {
+    if (!toolsOpen) return;
+    const dismiss = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setToolsOpen(false);
+      setInspectorOpen(false);
+      toolsTrigger.current?.focus();
+    };
+    window.addEventListener("keydown", dismiss);
+    return () => window.removeEventListener("keydown", dismiss);
+  }, [toolsOpen]);
+
   const openTools = () => {
     setToolsOpen((value) => !value);
   };
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
-      <div className="relative shrink-0 border-b border-border/70 px-3 py-2">
+      <div ref={toolbar} className="relative shrink-0 border-b border-border/70 px-3 py-2">
         <form onSubmit={open} className="flex min-w-0 items-center gap-2">
-          <div className="mx-auto flex h-8 min-w-0 max-w-3xl flex-1 items-center gap-2 rounded-full border border-border bg-muted/70 px-3 focus-within:border-ring">
+          <div className="mx-auto flex h-8 min-w-0 max-w-3xl flex-1 items-center gap-2 rounded-lg border border-border/80 bg-muted/60 pl-3 pr-1 transition-colors hover:bg-muted focus-within:border-ring/70 focus-within:ring-2 focus-within:ring-ring/15">
             {tabUrl && <Globe className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
             <input
               ref={urlInput}
@@ -190,8 +207,9 @@ export function BrowserPanel({
 
           </div>
             <button
+              ref={toolsTrigger}
               type="button"
-              className={cn("motion-pressable shrink-0 rounded-full p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground", toolsOpen && "bg-accent text-foreground")}
+              className={cn("motion-pressable flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground", toolsOpen && "bg-accent text-foreground")}
               onClick={openTools}
               aria-label="Open browser tools"
               aria-expanded={toolsOpen}
@@ -208,7 +226,7 @@ export function BrowserPanel({
         )}
 
         {toolsOpen && (
-          <div className="motion-enter absolute right-3 top-full z-50 mt-2 w-[min(24rem,calc(100vw-1.5rem))] rounded-xl border border-border bg-popover p-2 text-popover-foreground shadow-2xl">
+          <div data-mew-overlay className="motion-enter absolute right-3 top-full z-50 mt-2 max-h-[min(32rem,calc(100dvh-10rem))] w-[min(24rem,calc(100%_-_1.5rem))] overflow-y-auto overscroll-contain rounded-xl border border-border bg-popover p-2 text-popover-foreground shadow-lg">
             <div className="flex items-center justify-between px-2 py-1.5">
               <div>
                 <p className="text-xs font-medium">Browser tools</p>

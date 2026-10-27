@@ -84,6 +84,7 @@ export function SessionRail({ client }: SessionRailProps) {
   const { setOpenMobile, state: sidebarState, isMobile, setOpen } = useSidebar();
   const compact = sidebarState === "collapsed" && !isMobile;
   const searchInput = useRef<HTMLInputElement>(null);
+  const searchTrigger = useRef<HTMLButtonElement>(null);
   const searchRequested = useRef(false);
   const router = useRouter();
   const [view, setView] = useState<ViewMode>("timeline");
@@ -98,6 +99,12 @@ export function SessionRail({ client }: SessionRailProps) {
     searchRequested.current = false;
     searchInput.current?.focus();
   }, [compact, searchOpen]);
+
+  const closeSearch = () => {
+    searchRequested.current = false;
+    setSearchOpen(false);
+    setQuery("");
+  };
 
   const alertKindsBySession = useMemo(() => {
     const map = new Map<string, AlertKind[]>();
@@ -234,7 +241,7 @@ export function SessionRail({ client }: SessionRailProps) {
         const label = age <= 0 ? "Today" : age === 1 ? "Yesterday" : date.toLocaleDateString(undefined, age < 7 ? { weekday: "long" } : { month: "short", day: "numeric" });
         dates.set(label, [...(dates.get(label) ?? []), session]);
       }
-      return [...(priority.length ? [{ label: "Priority", items: priority }] : []), ...Array.from(dates, ([label, items]) => ({ label, items })), ...(priority.length || dates.size ? [] : [{ label: "Recent", items: [] }])];
+      return [...(priority.length ? [{ label: "Priority", items: priority }] : []), ...Array.from(dates, ([label, items]) => ({ label, items }))];
     },
     [timelineSessions, view, groups, alertKindsBySession],
   );
@@ -290,8 +297,8 @@ export function SessionRail({ client }: SessionRailProps) {
             </SidebarMenu>
           </SidebarFooter>
         </> : <>
-      <SidebarHeader className="px-2 py-2">
-        <div className="flex h-7 items-center justify-between gap-1">
+      <SidebarHeader className="px-2 pb-2 pt-0">
+        <div className="mew-navigation-header mew-drag-region flex h-9 items-center justify-between gap-1">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="ghost" size="sm" aria-label="mew menu" className="h-7 gap-1 px-2 text-xs font-semibold">mew <ChevronDown className="h-3 w-3 text-muted-foreground" /></Button>
@@ -306,14 +313,25 @@ export function SessionRail({ client }: SessionRailProps) {
             </DropdownMenuContent>
           </DropdownMenu>
           <div className="flex items-center gap-0.5">
-            <Button variant="ghost" size="icon" className="h-6 w-6" aria-label="Compose new chat" disabled={!client || connectionState !== "connected"} onClick={handleNewSession}><SquarePen className="h-3.5 w-3.5" /></Button>
-            <Button variant="ghost" size="icon" className="h-6 w-6" aria-label="Search chats" onClick={() => { searchRequested.current = true; setSearchOpen((value) => !value); }}><Search className="h-3.5 w-3.5" /></Button>
+            <Button variant="ghost" size="icon" className="h-6 w-6" aria-label="Compose new chat" title="New chat" disabled={!client || connectionState !== "connected"} onClick={handleNewSession}><SquarePen className="h-3.5 w-3.5" /></Button>
+            <Button ref={searchTrigger} variant="ghost" size="icon" className={cn("h-6 w-6", searchOpen && "bg-sidebar-accent text-sidebar-accent-foreground")} aria-label="Search chats" title="Search chats" aria-expanded={searchOpen} onClick={() => {
+              if (searchOpen) closeSearch();
+              else { searchRequested.current = true; setSearchOpen(true); }
+            }}><Search className="h-3.5 w-3.5" /></Button>
           </div>
         </div>
         <Button onClick={handleNewSession} disabled={!client || connectionState !== "connected"} variant="ghost" size="sm" className="h-7 justify-start gap-2 px-2 text-xs font-normal"><SquarePen className="h-3.5 w-3.5" />New chat</Button>
-        {searchOpen && <Input ref={searchInput} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search chats" aria-label="Search sessions" className="h-7 text-xs" />}
+        {searchOpen && <Input ref={searchInput} value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => {
+          if (event.key !== "Escape") return;
+          event.preventDefault();
+          closeSearch();
+          searchTrigger.current?.focus();
+        }} placeholder="Search chats" aria-label="Search sessions" className="h-7 text-xs" />}
       </SidebarHeader>
       <SidebarContent>
+        {sorted.length === 0 && <div role="status" className="px-4 py-5 text-xs leading-relaxed text-muted-foreground">
+          {loading ? "Loading sessions…" : query.trim() ? "No sessions match “" + query.trim() + "”" : "No sessions yet"}
+        </div>}
         {view === "grouped" && (
           <SidebarGroup>
             <div className="px-2 pb-1">
@@ -338,9 +356,12 @@ export function SessionRail({ client }: SessionRailProps) {
                 {view === "timeline" && section.label}
                 {view === "workspace" && (
                   <button
+                    type="button"
                     onClick={toggleCollapse}
-                    className="flex items-center gap-1"
+                    className="flex min-w-0 flex-1 items-center gap-1 rounded py-1 text-left hover:text-sidebar-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
                     title={section.cwd ?? undefined}
+                    aria-label={`${isCollapsed ? "Expand" : "Collapse"} workspace ${section.label}`}
+                    aria-expanded={!isCollapsed}
                   >
                     <ChevronRight
                       className={cn(
@@ -348,26 +369,10 @@ export function SessionRail({ client }: SessionRailProps) {
                         !isCollapsed && "rotate-90",
                       )}
                     />
-                    <Folder className="h-3 w-3" />
+                    <Folder className="h-3 w-3 shrink-0" />
+                    <span className="truncate">{section.label}</span>
+                    <span className="shrink-0 text-muted-foreground">({section.items.length})</span>
                   </button>
-                )}
-                {view === "workspace" && !isCollapsed && (
-                  <span
-                    className="cursor-pointer select-none"
-                    onClick={toggleCollapse}
-                  >
-                    {section.label}
-                    <span className="text-muted-foreground">({section.items.length})</span>
-                  </span>
-                )}
-                {view === "workspace" && isCollapsed && (
-                  <span
-                    className="cursor-pointer select-none text-muted-foreground"
-                    onClick={toggleCollapse}
-                  >
-                    {section.label}
-                    <span className="text-muted-foreground">({section.items.length})</span>
-                  </span>
                 )}
                 {view === "grouped" && section.groupId && (
                   <GroupColorSwatch groupId={section.groupId} groups={groups} />
@@ -385,14 +390,6 @@ export function SessionRail({ client }: SessionRailProps) {
             )}
             {(!isCollapsed || view !== "workspace") && (
             <SidebarGroupContent>
-              {loading && sorted.length === 0 && (
-                <div className="px-3 py-4 text-center text-xs text-muted-foreground">Loading sessions…</div>
-              )}
-              {!loading && sorted.length === 0 && (
-                <div className="px-3 py-4 text-center text-xs text-muted-foreground">
-                  {query.trim() ? "No sessions match “" + query.trim() + "”" : "No sessions yet"}
-                </div>
-              )}
               <SidebarMenu className="gap-0.5">
                 {section.items.map((s) => (
                   <SidebarMenuItem key={s.session_id}>
@@ -445,8 +442,8 @@ function SessionRow({ session: s, isActive, title, summary, onClick, onArchive, 
   onClick: () => void; onArchive: (a: boolean) => void; onPin: (p: boolean) => void;
   onRegenerateTitle: () => void; groups: GroupInfo[]; client: MewClient | null; attention: SessionAttention[];
 }) {
-  return <div className="group relative">
-    <SidebarMenuButton isActive={isActive} onClick={onClick} title={`Last active ${new Date(s.last_message_at ?? s.created_at).toLocaleString()}`} className="h-auto min-h-10 flex-col items-start gap-0.5 rounded-md px-2 py-1.5">
+  return <div className="group/chat-row relative">
+    <SidebarMenuButton isActive={isActive} aria-current={isActive ? "page" : undefined} onClick={onClick} title={`${title}\nLast active ${new Date(s.last_message_at ?? s.created_at).toLocaleString()}`} className="h-auto min-h-10 flex-col items-start gap-0.5 rounded-md px-2 py-1.5">
       <div className="flex w-full items-center gap-2 pr-5">
         <span className={cn("min-w-0 flex-1 truncate text-xs leading-4", isActive ? "font-medium" : "font-normal")}>{title}</span>
         {(s.state === "running" || attention.length > 0 || s.last_turn_failed) && <StatusDot state={s.state} failed={s.last_turn_failed} attention={attention[0]} />}
@@ -456,7 +453,7 @@ function SessionRow({ session: s, isActive, title, summary, onClick, onArchive, 
       {s.cwd && <span className="flex max-w-full items-center gap-1 truncate text-[10px] leading-[14px] text-muted-foreground"><Folder className="h-2.5 w-2.5 shrink-0" />{deriveWorkspaceName(s.cwd)}</span>}
     </SidebarMenuButton>
     <DropdownMenu>
-      <DropdownMenuTrigger asChild><button type="button" aria-label={`Chat actions: ${title}`} className="absolute right-1 top-1 rounded p-1 text-muted-foreground opacity-0 hover:bg-sidebar-accent focus-visible:opacity-100 group-hover:opacity-100"><MoreHorizontal className="h-3 w-3" /></button></DropdownMenuTrigger>
+      <DropdownMenuTrigger asChild><button type="button" aria-label={`Chat actions: ${title}`} className="absolute right-1 top-1 rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:opacity-100 group-hover/chat-row:opacity-100 group-focus-within/chat-row:opacity-100 data-[state=open]:opacity-100"><MoreHorizontal className="h-3 w-3" /></button></DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-48">
         <DropdownMenuItem onSelect={() => onPin(!s.pinned)}><Pin className="h-3.5 w-3.5" />{s.pinned ? "Unpin chat" : "Pin chat"}</DropdownMenuItem>
         <DropdownMenuItem onSelect={() => onArchive(!s.archived)}><Archive className="h-3.5 w-3.5" />{s.archived ? "Restore chat" : "Archive chat"}</DropdownMenuItem>

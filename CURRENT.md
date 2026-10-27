@@ -3798,3 +3798,27 @@ order so rendering no longer filters or sorts it.
 The regression failed before the change for both the empty workbench launcher
 and an explicit new tab. All 22 related launcher, summary and navigation tests
 passed afterward, along with the production UI build and debug packaging.
+
+
+## 2026-10-27: integrate the header and keep the summary inside chat
+
+Reclaimed the separate native titlebar row for the React pane headers. Trusted
+app CEF drag regions now drive native macOS window dragging, with no-drag
+controls, ordered region subtraction, resize/visibility handling and lifecycle
+invalidation. External browser pages receive no native drag overlay.
+
+The summary appears automatically inside the chat pane when that pane has room,
+before the tool/browser divider. A resize observer follows the actual chat
+width, so window width alone cannot pin it beside a narrow conversation. The
+compact summary stays in the chat header. Shared summary content retains real
+activity and opens the existing detail tabs. Improved sidebar search/disclosure
+and empty states, tab visibility, narrow split bounds, browser menu dismissal
+and native-page occlusion for portaled menus. Header controls reserve space for
+the macOS traffic lights in expanded and collapsed navigation.
+
+Verified the 190-test React suite and production build, 334 isolated serial
+desktop tests, 20 CEF library tests and the real AppKit editing/AX/drag harness.
+Generated themes and debug packaging pass. Packaged screenshots cover light and
+dark themes, browser editing and menus, split resizing, collapsed navigation,
+and automatic summary placement inside the chat pane. Full baseline acceptance
+remains open in `notes/chat-ui-baseline-checklist.md`.

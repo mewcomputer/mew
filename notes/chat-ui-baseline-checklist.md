@@ -37,12 +37,12 @@ accepted text input; navigation updated its tab title. The conversation remained
 visible while opening and closing the workbench and selecting tabs. The native
 window was also inspected at two sizes.
 
-The corner summary is separate from the left chat sidebar and the tabbed
-workbench. It shows current-chat change totals, subagent status, background
-processes and pinned sources. Its entries select the existing detail surfaces;
-opening the card alone does not change the pane layout. The packaged smoke
-verified opening the card and navigating from Subagents to its detail tab.
-Sources currently reflect pinned files, not a complete attachment/source index.
+The summary belongs to the chat pane. It appears automatically at that pane's
+right edge when the pane is at least 1040 CSS pixels wide, including beside an
+open workbench. In narrower chat panes its control remains in the chat header.
+It shows current-chat change totals, subagent status, background processes and
+pinned sources; its entries select the existing detail surfaces. Sources
+currently reflect pinned files, not a complete attachment/source index.
 
 All 161 React tests, the production TypeScript/Vite build and 334 desktop tests
 passed. Desktop tests used isolated configuration and a single test thread to
@@ -51,14 +51,39 @@ editing routing, Undo/Redo menu targets and visible accessibility-root
 composition. The palette test and generated-theme check passed. Native editing
 was also exercised in the actual packaged browser and composer.
 
-Pointer-driven pane resizing, IME, full native shortcut/menu acceptance, live
-installed-theme acceptance and measured resource use remain pending. The
+IME, full native shortcut/menu acceptance, live installed-theme acceptance and
+measured resource use remain pending. The
 packaged accessibility tree still does not expose the CEF document through the
 computer-use interface, despite the passing composition harness. The opt-in
 shell currently supports local loopback connections; saved remote profiles,
 durable UI view-state import and the rest of the baseline remain migration work.
 The existing native desktop stays the default. This is the stopping point for
 the requested UI milestone, not full replacement acceptance.
+
+### Packaged polish verification on 2026-10-27
+
+The UI now fills the former native titlebar row. Trusted app header drag regions
+use macOS window dragging and exclude interactive controls; external pages do
+not receive the drag overlay. Inspected expanded and collapsed navigation, 900px
+and wider split windows, light/dark themes, browser input and restored browser
+content after Escape dismisses a menu. The browser retained its input through
+pane resizing and tab switches. Pointer resizing was exercised in the split
+view; keyboard divider resizing also verified the summary appearing inside the
+chat pane and tucking away as that pane narrows. The compact summary remains in
+the chat header when the workbench is open.
+
+All 190 React tests, the production build, 334 isolated serial desktop tests,
+20 native CEF library tests and the real AppKit editing/accessibility/drag
+harness passed. The generated-theme check and debug packaging passed. The
+existing Vite large-chunk and Rust dependency future-compatibility warnings
+remain. The same isolated daemon and deterministic fake provider were used;
+this pass does not establish production provider or full migration parity.
+
+Photos are in the task's visualization folder:
+`mew-polish-07-narrow-header.png`, `mew-polish-09-browser-summary-light.png`,
+`mew-polish-10-collapsed.png`, `mew-polish-12-summary-compact.png` and
+`mew-polish-14-summary-in-chat.png`. Earlier wide-summary photos show the
+superseded page-edge placement; photo 14 shows the corrected chat-pane layout.
 
 The complete baseline remains the replacement's release bar. Direct subagent
 messaging is required for v1, but its runtime/controller work and the remaining

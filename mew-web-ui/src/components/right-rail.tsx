@@ -1,4 +1,4 @@
-import { useState, useEffect, type ReactNode } from "react";
+import { useState, useEffect, useRef, type ReactNode } from "react";
 import {
   Folder,
   GitBranch,
@@ -32,6 +32,7 @@ import { BrowserPanel } from "./browser-panel";
 import {
   Sheet,
   SheetContent,
+  SheetTitle,
 } from "@/components/ui/sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
@@ -66,11 +67,15 @@ export function RightRail({
   onWorkbenchTabsAction,
 }: RightRailProps) {
   const isMobile = useIsMobile();
+  const tabList = useRef<HTMLDivElement>(null);
   const [uncontrolledWorkbenchTabs, setUncontrolledWorkbenchTabs] = useState(DEFAULT_WORKBENCH_TABS);
   const selectedWorkbenchTabs = onWorkbenchTabsChange || onWorkbenchTabsAction
     ? workbenchTabs
     : uncontrolledWorkbenchTabs;
   const selectedWorkbenchTab = getActiveWorkbenchTab(selectedWorkbenchTabs);
+  useEffect(() => {
+    tabList.current?.querySelector<HTMLElement>('[data-state="active"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [selectedWorkbenchTab?.id, open]);
   const setSelectedWorkbenchTabs = (next: WorkbenchTabsState) => {
     if (onWorkbenchTabsChange) onWorkbenchTabsChange(next);
     else setUncontrolledWorkbenchTabs(next);
@@ -184,11 +189,13 @@ export function RightRail({
           selectedWorkbenchTab?.kind === "browser" && "bg-background",
         )}
       >
-        <div className="flex h-9 min-w-0 shrink-0 items-center border-b border-border/70 bg-sidebar/60">
+        <div className="mew-drag-region flex h-9 min-w-0 shrink-0 items-center border-b border-border/70 bg-sidebar/60">
           <TabsList
+            ref={tabList}
             aria-label="Workbench tabs"
-            className="h-9 min-w-0 max-w-[calc(100%_-_4.5rem)] flex-none justify-start gap-0.5 overflow-x-auto rounded-none border-0 bg-transparent p-0 px-1"
+            className="mew-tab-strip h-9 min-w-0 max-w-[calc(100%_-_4.5rem)] flex-none justify-start gap-0.5 overflow-x-auto rounded-none border-0 bg-transparent p-0 px-1"
           >
+            {selectedWorkbenchTabs.tabs.length === 0 && <span className="mx-1 flex h-7 items-center gap-1.5 rounded-md border border-border bg-muted/70 px-2 text-[11px]"><Globe className="h-3.5 w-3.5" />New tab</span>}
             {selectedWorkbenchTabs.tabs.map((tab) => {
               const meta = workbenchTabMeta(tab.kind);
               const Icon = meta.icon;
@@ -208,7 +215,7 @@ export function RightRail({
                     value={tab.id}
                     aria-label={tab.title}
                     onClick={() => applyWorkbenchAction({ type: "select", id: tab.id })}
-                    className="h-7 gap-1.5 rounded-md border-0 px-2 text-[11px] font-normal text-muted-foreground shadow-none data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none"
+                    className="h-7 gap-1.5 rounded-md border-0 px-2 text-[11px] font-normal text-muted-foreground shadow-none hover:text-foreground data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none"
                   >
                     <Icon className="h-3.5 w-3.5" aria-hidden="true" />
                     <span className="max-w-32 truncate">{tab.title}</span>
@@ -292,7 +299,7 @@ export function RightRail({
           }}
           sessionId={tab.sessionId ?? sessionId ?? undefined}
           launcher={<div className="mx-auto w-full max-w-[44rem] px-6 py-8">
-            <h2 className="mb-4 text-[11px] font-medium">Tools</h2>
+            <h2 className="mb-4 text-xs font-medium">Tools</h2>
             <div className="grid grid-cols-2 gap-x-3 gap-y-1">
               {NEW_TAB_TOOLS.map((surface) => {
                 const Icon = surface.icon;
@@ -352,8 +359,11 @@ export function RightRail({
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent
         side="right"
+        aria-describedby={undefined}
+        showCloseButton={false}
         className="w-full gap-0 p-0 sm:inset-y-2 sm:right-2 sm:h-auto sm:max-h-[calc(100vh-1rem)] sm:w-[min(24rem,calc(100vw-2rem))] sm:max-w-md sm:rounded-xl"
       >
+        <SheetTitle className="sr-only">Workbench</SheetTitle>
         {workbenchContent}
       </SheetContent>
     </Sheet>

@@ -25,8 +25,6 @@ struct HostTheme {
     background: gpui::Rgba,
     #[serde(skip)]
     foreground: gpui::Rgba,
-    #[serde(skip)]
-    chrome: gpui::Rgba,
 }
 
 impl Bootstrap {
@@ -46,7 +44,6 @@ impl Bootstrap {
                     css: theme.css_variables(),
                     background: theme_rgb(&theme, "background"),
                     foreground: theme_rgb(&theme, "foreground"),
-                    chrome: theme_rgb(&theme, "status_bar.background"),
                 }
             })
             .collect();
@@ -391,7 +388,7 @@ impl WebShell {
                 portal,
                 viewport: BrowserRect {
                     x: 0.,
-                    y: 32.,
+                    y: 0.,
                     width: 0.,
                     height: 0.,
                     visible: false,
@@ -548,14 +545,14 @@ impl Drop for WebShell {
 impl Render for WebShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let native = self.native.clone();
-        let (background, foreground, chrome) = self
+        let (background, foreground) = self
             .bootstrap
             .lock()
             .ok()
             .and_then(|bootstrap| {
                 bootstrap
                     .palette(window.appearance())
-                    .map(|theme| (theme.background, theme.foreground, theme.chrome))
+                    .map(|theme| (theme.background, theme.foreground))
             })
             .unwrap_or_default();
         div()
@@ -572,15 +569,6 @@ impl Render for WebShell {
                 cx.listener(|shell, _: &ToggleWorkbench, _, _| shell.menu("toggle-workbench")),
             )
             .on_action(cx.listener(|shell, _: &FocusSidebarSearch, _, _| shell.menu("search")))
-            .child(
-                div()
-                    .h(px(32.))
-                    .flex_shrink_0()
-                    .bg(chrome)
-                    .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
-                        window.start_window_move()
-                    }),
-            )
             .child(if let Some(error) = &self.error {
                 div()
                     .p(px(24.))

@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useReducer, type CSSProperties, type ReactNode } from "react";
 import { useSessionStore } from "../stores/session";
-import { createWorkbenchTab } from "../lib/workbench-tabs";
+import { createWorkbenchTab, type WorkbenchTabKind } from "../lib/workbench-tabs";
 import { isDesktopHost } from "../lib/host";
 import { getClient } from "../lib/client";
 import { useIsMobile } from "../hooks/use-mobile";
@@ -27,6 +27,7 @@ interface WorkspaceFrameContextValue {
   dispatch: (action: WorkspaceSurfacesAction) => void;
   toggleSidebar: () => void;
   toggleWorkbench: () => void;
+  openWorkbenchSurface: (kind: WorkbenchTabKind) => void;
 }
 
 const WorkspaceFrameContext = createContext<WorkspaceFrameContextValue | null>(null);
@@ -105,6 +106,14 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
       dispatch,
       toggleSidebar: () => dispatch({ type: "toggle-sidebar" }),
       toggleWorkbench: () => dispatch({ type: "toggle-workbench" }),
+      openWorkbenchSurface: (kind) => {
+        const existing = surfaces.workbenchTabs.tabs.find((tab) => tab.kind === kind);
+        const { sessionId: selectedId, sessionCwd } = useSessionStore.getState();
+        dispatch({ type: "workbench-tabs-action", action: existing
+          ? { type: "select", id: existing.id }
+          : { type: "add", tab: createWorkbenchTab(kind, { sessionId: selectedId ?? undefined, cwd: sessionCwd ?? undefined }) } });
+        dispatch({ type: "set-workbench-open", open: true });
+      },
     }),
     [surfaces, dispatch],
   );
@@ -112,6 +121,8 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
   return (
     <WorkspaceFrameContext.Provider value={contextValue}>
       <SidebarProvider
+        data-desktop-host={isDesktopHost() ? "" : undefined}
+        data-sidebar-open={surfaces.sidebarOpen}
         open={surfaces.sidebarOpen}
         onOpenChange={(open) => dispatch({ type: "set-sidebar-open", open })}
         style={
@@ -156,7 +167,7 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
               <ResizablePanel
                 id="conversation"
                 defaultSize={`${100 - surfaces.workbenchSize}%`}
-                minSize="24rem"
+                minSize="40%"
                 className="motion-panel-size min-w-0"
               >
                 <SidebarInset className="max-h-screen h-full">
@@ -168,7 +179,7 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
                 id="workbench"
                 panelRef={workbenchPanelRef}
                 defaultSize={`${surfaces.workbenchSize}%`}
-                minSize="22rem"
+                minSize="18rem"
                 maxSize="65%"
                 collapsible
                 collapsedSize="0%"

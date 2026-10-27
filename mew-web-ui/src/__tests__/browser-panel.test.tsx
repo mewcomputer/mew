@@ -6,6 +6,17 @@ import type { MewClient } from "@mew/web-client";
 afterEach(() => { cleanup(); delete window.mewQuery; });
 
 describe("browser address editing", () => {
+  it("dismisses browser tools with Escape or an outside click", () => {
+    render(<BrowserPanel client={null} connected={false} tab={{ id: "new", kind: "browser", title: "New tab", closable: true }} onTabChange={() => {}} />);
+    const trigger = screen.getByRole("button", { name: "Open browser tools" });
+    fireEvent.click(trigger);
+    expect(screen.getByRole("button", { name: "Text snapshot" })).toBeTruthy();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("button", { name: "Text snapshot" })).toBeNull();
+    fireEvent.click(trigger);
+    fireEvent.mouseDown(document.body);
+    expect(screen.queryByRole("button", { name: "Text snapshot" })).toBeNull();
+  });
   it("keeps an unfinished address while background page metadata changes", () => {
     window.mewQuery = ({ onSuccess }) => onSuccess("{}");
     const client = { on: vi.fn(), off: vi.fn() } as unknown as MewClient;

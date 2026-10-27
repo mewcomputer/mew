@@ -81,7 +81,7 @@ export function NativeBrowserPage({ client, connected, sessionId, tabId, url, ac
     let lastUpdate = "";
     const update = () => {
       const bounds = element.getBoundingClientRect();
-      const overlay = Array.from(document.querySelectorAll('[role="dialog"][data-state="open"], [role="alertdialog"][data-state="open"], [data-radix-menu-content][data-state="open"], [cmdk-dialog], [data-mew-overlay], [role="dialog"]')).some((node) => !node.contains(element));
+      const overlay = Array.from(document.querySelectorAll('[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"], [cmdk-dialog], [data-mew-overlay]')).some((node) => !node.contains(element));
       const request = {
         type: "browser_update" as const, sessionId, tabId, url,
         rect: { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height },

@@ -4,7 +4,7 @@ import type { Attachment } from "@mew/web-client";
 import { useSessionStore, permissionResponders } from "@/stores/session";
 import { getClient } from "@/lib/client";
 import { useComposerFocusShortcut, useSessionAttach } from "@/lib/hooks";
-import { ConversationHeader } from "@/components/conversation-header";
+import { ConversationLayout } from "@/components/conversation-layout";
 import { VirtualChatSurface } from "@/components/virtual-chat-surface";
 import { InputArea } from "@/components/input-area";
 import { StatusFooter } from "@/components/status-footer";
@@ -54,8 +54,7 @@ function SessionRouteComponent() {
   };
 
   return (
-    <>
-      <ConversationHeader />
+    <ConversationLayout>
       <div className="relative flex min-h-0 flex-1 flex-col">
         <VirtualChatSurface />
       </div>
@@ -66,6 +65,6 @@ function SessionRouteComponent() {
         <StatusFooter />
       </div>
       <PermissionToast onResolve={handlePermission} />
-    </>
+    </ConversationLayout>
   );
 }

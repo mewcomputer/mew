@@ -96,6 +96,13 @@ describe("RightRail", () => {
     expect(screen.queryByText("Which file should I edit?")).toBeNull();
   });
 
+  it("uses the workbench toolbar as the single sheet close control", () => {
+    render(<RightRail mode="sheet" open onOpenChange={vi.fn()} />);
+    expect(screen.getByRole("dialog").getAttribute("aria-labelledby")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Close workbench" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Close$/ })).toBeNull();
+  });
+
   it("exposes every section as a keyboard-navigable tab", () => {
     render(<RightRail open onOpenChange={vi.fn()} />);
 

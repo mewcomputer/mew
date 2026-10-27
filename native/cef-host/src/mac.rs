@@ -7,11 +7,12 @@ use objc2::{
     sel,
 };
 use objc2_app_kit::{
-    NSApp, NSApplication, NSApplicationDelegate, NSApplicationTerminateReply, NSBackspaceCharacter,
-    NSDeleteCharacter, NSDeleteFunctionKey, NSDownArrowFunctionKey, NSEvent, NSEventModifierFlags,
-    NSLeftArrowFunctionKey, NSRightArrowFunctionKey, NSUpArrowFunctionKey, NSView, NSWindow,
+    NSApp, NSApplication, NSApplicationDelegate, NSApplicationTerminateReply,
+    NSAutoresizingMaskOptions, NSBackspaceCharacter, NSDeleteCharacter, NSDeleteFunctionKey,
+    NSDownArrowFunctionKey, NSEvent, NSEventModifierFlags, NSLeftArrowFunctionKey,
+    NSRightArrowFunctionKey, NSUpArrowFunctionKey, NSView, NSWindow,
 };
-use objc2_foundation::{NSArray, NSMutableArray, NSString};
+use objc2_foundation::{NSArray, NSMutableArray, NSPoint, NSString};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,6 +26,84 @@ struct NativeKeyEquivalents {
 
 thread_local! {
     static NATIVE_KEY_EQUIVALENTS: RefCell<NativeKeyEquivalents> = RefCell::default();
+}
+
+#[derive(Default)]
+pub struct AppDragViewState {
+    regions: RefCell<Vec<cef::DraggableRegion>>,
+}
+
+define_class! {
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = AppDragViewState]
+    pub struct AppDragView;
+
+    unsafe impl NSObjectProtocol for AppDragView {}
+
+    impl AppDragView {
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool { true }
+
+        #[unsafe(method(hitTest:))]
+        fn hit_test(&self, point: NSPoint) -> Option<&NSView> {
+            if self.isHiddenOrHasHiddenAncestor() { return None; }
+            let parent = unsafe { self.superview() }?;
+            let point = self.convertPoint_fromView(point, Some(&parent));
+            let bounds = self.bounds();
+            if point.x < bounds.origin.x || point.y < bounds.origin.y
+                || point.x >= bounds.origin.x + bounds.size.width
+                || point.y >= bounds.origin.y + bounds.size.height
+            { return None; }
+            let draggable = self.ivars().regions.borrow().iter().fold(false, |draggable, region| {
+                let rect = &region.bounds;
+                if rect.width > 0 && rect.height > 0
+                    && point.x >= f64::from(rect.x) && point.x < f64::from(rect.x) + f64::from(rect.width)
+                    && point.y >= f64::from(rect.y) && point.y < f64::from(rect.y) + f64::from(rect.height)
+                { region.draggable != 0 } else { draggable }
+            });
+            draggable.then_some(self.as_ref())
+        }
+
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool { true }
+
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &NSEvent) {
+            if let Some(window) = self.window() {
+                window.performWindowDragWithEvent(event);
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl AppDragView {
+    pub fn attach(parent: &NSView) -> Retained<Self> {
+        let mtm = MainThreadMarker::new().expect("native drag regions require the main thread");
+        let view = Self::alloc(mtm).set_ivars(AppDragViewState::default());
+        let view: Retained<Self> =
+            unsafe { msg_send![super(view), initWithFrame: parent.bounds()] };
+        view.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        parent.addSubview(&view);
+        view
+    }
+
+    pub fn set_regions(&self, regions: &[cef::DraggableRegion]) {
+        {
+            let mut current = self.ivars().regions.borrow_mut();
+            current.clear();
+            current.extend_from_slice(regions);
+        }
+        if !regions.is_empty()
+            && let Some(parent) = unsafe { self.superview() }
+        {
+            parent.addSubview(self);
+        }
+    }
 }
 
 fn native_key_equivalent_imp() -> Imp {

@@ -109,6 +109,7 @@ mod mac_impl {
         handler: AppRequestHandler,
         router: Arc<BrowserSideRouter>,
         pending: Mutex<HashMap<i64, Weak<QueryResponse>>>,
+        drag_view: Mutex<Option<objc2::rc::Retained<mac::AppDragView>>>,
     }
 
     // CEF objects are only touched from the macOS main thread. Page controllers
@@ -177,7 +178,7 @@ mod mac_impl {
 
         fn close(&self) {
             self.closed.store(true, Ordering::Release);
-            self.cancel_app_requests();
+            self.invalidate_app_document();
             if !self.runtime.initialized.load(Ordering::Acquire) {
                 return;
             }
@@ -200,15 +201,20 @@ mod mac_impl {
             self.native_view.store(0, Ordering::Release);
         }
 
-        fn cancel_app_requests(&self) {
-            if let Some(app) = &self.app
-                && let Ok(mut pending) = app.pending.lock()
-            {
-                for response in pending
-                    .drain()
-                    .filter_map(|(_, response)| response.upgrade())
+        fn invalidate_app_document(&self) {
+            if let Some(app) = &self.app {
+                if let Ok(mut pending) = app.pending.lock() {
+                    for response in pending
+                        .drain()
+                        .filter_map(|(_, response)| response.upgrade())
+                    {
+                        response.cancel();
+                    }
+                }
+                if let Ok(view) = app.drag_view.lock()
+                    && let Some(view) = view.as_ref()
                 {
-                    response.cancel();
+                    view.set_regions(&[]);
                 }
             }
         }
@@ -423,6 +429,7 @@ mod mac_impl {
                 handler: app_request_handler,
                 router: router.clone(),
                 pending: Mutex::new(HashMap::new()),
+                drag_view: Mutex::new(None),
             });
             let state = Arc::new(state);
             if router
@@ -475,7 +482,7 @@ mod mac_impl {
             self.state.initialized.store(false, Ordering::Release);
             if let Ok(pages) = self.state.pages.lock() {
                 for page in pages.iter().filter_map(Weak::upgrade) {
-                    page.cancel_app_requests();
+                    page.invalidate_app_document();
                 }
             }
             self.owns_runtime = false;
@@ -502,6 +509,13 @@ mod mac_impl {
                 return;
             }
             apply_rect(handle, rect);
+            if let Some(app) = &self.state.app
+                && let Ok(view) = app.drag_view.lock()
+                && let Some(view) = view.as_ref()
+            {
+                let parent = unsafe { &*(handle as *const NSView) };
+                view.setFrame(parent.bounds());
+            }
         }
 
         pub fn navigate_on_main_thread(&self, url: &str) {
@@ -898,6 +912,10 @@ mod mac_impl {
                 self.state.app.as_ref().map(|_| MewAppRequestHandler::new(self.state.clone()))
             }
 
+            fn drag_handler(&self) -> Option<DragHandler> {
+                self.state.app.as_ref().map(|_| MewAppDragHandler::new(self.state.clone()))
+            }
+
             fn on_process_message_received(
                 &self, browser: Option<&mut Browser>, frame: Option<&mut Frame>,
                 source_process: ProcessId, message: Option<&mut ProcessMessage>,
@@ -909,6 +927,25 @@ mod mac_impl {
                     return 0;
                 }
                 i32::from(app.router.on_process_message_received(browser.cloned(), frame.cloned(), source_process, message.cloned()))
+            }
+        }
+    }
+
+    wrap_drag_handler! {
+        struct MewAppDragHandler {
+            state: Arc<PageState>,
+        }
+
+        impl DragHandler {
+            fn on_draggable_regions_changed(&self, browser: Option<&mut Browser>, frame: Option<&mut Frame>, regions: Option<&[DraggableRegion]>) {
+                let (Some(browser), Some(frame)) = (browser, frame) else { return };
+                if !self.state.accepts_app_frame(browser, frame) { return; }
+                if let Some(app) = &self.state.app
+                    && let Ok(view) = app.drag_view.lock()
+                    && let Some(view) = view.as_ref()
+                {
+                    view.set_regions(regions.unwrap_or_default());
+                }
             }
         }
     }
@@ -935,7 +972,7 @@ mod mac_impl {
                     if !allowed {
                         return 1;
                     }
-                    self.state.cancel_app_requests();
+                    self.state.invalidate_app_document();
                 }
                 app.router.on_before_browse(browser.cloned(), Some(frame.clone()));
                 0
@@ -951,7 +988,7 @@ mod mac_impl {
             fn on_render_process_terminated(
                 &self, browser: Option<&mut Browser>, _status: TerminationStatus, _error_code: i32, _error_string: Option<&CefString>,
             ) {
-                self.state.cancel_app_requests();
+                self.state.invalidate_app_document();
                 if let Some(app) = &self.state.app {
                     app.router.on_render_process_terminated(browser.cloned());
                 }
@@ -1053,6 +1090,11 @@ mod mac_impl {
                     // claim an active workbench tab. Keep the child hidden
                     // until the first visible bounds update arrives.
                     let view = unsafe { &*(handle as *const NSView) };
+                    if let Some(app) = &self.state.app
+                        && let Ok(mut drag_view) = app.drag_view.lock()
+                    {
+                        *drag_view = Some(mac::AppDragView::attach(view));
+                    }
                     mac::register_browser_view(view);
                     view.setHidden(true);
                     if let Ok(last_rect) = self.state.last_rect.lock()
@@ -1091,7 +1133,7 @@ mod mac_impl {
             }
 
             fn on_before_close(&self, browser: Option<&mut Browser>) {
-                self.state.cancel_app_requests();
+                self.state.invalidate_app_document();
                 if let Some(app) = &self.state.app {
                     app.router.on_before_close(browser.cloned());
                 }
@@ -1310,6 +1352,7 @@ mod mac_impl {
                 handler: Arc::new(|_, _| panic!("no native query was sent")),
                 router: BrowserSideRouter::new(crate::app_bridge::router_config()),
                 pending: Default::default(),
+                drag_view: Default::default(),
             });
             page
         }
@@ -1340,6 +1383,22 @@ mod mac_impl {
             runtime.initialized.store(true, Ordering::Release);
             let handler = super::MewAppRequestHandler::new(Arc::new(app_page(runtime)));
             assert_eq!(handler.on_before_browse(None, None, None, 0, 0), 1);
+        }
+
+        #[test]
+        fn only_trusted_app_clients_receive_native_drag_regions() {
+            use cef::ImplClient;
+            let runtime = Arc::new(RuntimeState::new(String::new()));
+            let external = Arc::new(PageState::new(
+                0,
+                "https://example.com/",
+                runtime.clone(),
+                Arc::new(|_| {}),
+            ));
+            let client = super::MewBrowserClient::new(external);
+            assert!(client.drag_handler().is_none());
+            let client = super::MewBrowserClient::new(Arc::new(app_page(runtime)));
+            assert!(client.drag_handler().is_some());
         }
 
         #[test]

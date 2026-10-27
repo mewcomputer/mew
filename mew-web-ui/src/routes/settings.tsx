@@ -84,7 +84,7 @@ function SettingsRouteComponent() {
 
   return (
     <>
-      <div className="flex items-center gap-2 px-3 py-1.5">
+      <div className="mew-conversation-header mew-drag-region flex h-9 shrink-0 items-center gap-2 px-3">
         <Button
           variant="ghost"
           size="icon"

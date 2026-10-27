@@ -155,7 +155,103 @@ fn main() {
     }
     native_browser_accessibility(mtm);
     native_app_edit_menu(mtm);
+    native_app_draggable_regions(mtm);
     println!("native editing and browser accessibility: all checks passed");
+}
+
+#[cfg(target_os = "macos")]
+fn native_app_draggable_regions(mtm: objc2::MainThreadMarker) {
+    use cef::{DraggableRegion, Rect};
+    use objc2::MainThreadOnly;
+    use objc2_app_kit::{NSBackingStoreType, NSButton, NSView, NSWindow, NSWindowStyleMask};
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
+
+    let window = unsafe {
+        NSWindow::initWithContentRect_styleMask_backing_defer(
+            NSWindow::alloc(mtm),
+            NSRect::new(NSPoint::ZERO, NSSize::new(500., 400.)),
+            NSWindowStyleMask::Borderless,
+            NSBackingStoreType::Buffered,
+            false,
+        )
+    };
+    let parent = NSView::new(mtm);
+    window.setContentView(Some(&parent));
+    let browser = NSView::new(mtm);
+    browser.setFrame(NSRect::new(NSPoint::new(20., 30.), NSSize::new(300., 200.)));
+    parent.addSubview(&browser);
+    let button = NSButton::new(mtm);
+    button.setFrame(NSRect::new(NSPoint::new(240., 164.), NSSize::new(60., 36.)));
+    browser.addSubview(&button);
+    let overlay = mew_cef_host::mac::AppDragView::attach(&browser);
+    let region = |x, y, width, height, draggable| DraggableRegion {
+        bounds: Rect {
+            x,
+            y,
+            width,
+            height,
+        },
+        draggable,
+    };
+    overlay.set_regions(&[region(0, 0, 300, 36, 1), region(240, 0, 60, 36, 0)]);
+    assert!(
+        overlay.hitTest(NSPoint::new(100., 180.)).is_some(),
+        "CSS header coordinates must flip into AppKit coordinates"
+    );
+    let drag_target = browser.hitTest(NSPoint::new(120., 210.)).unwrap();
+    let overlay_view: &NSView = &overlay;
+    assert!(
+        std::ptr::eq(&*drag_target, overlay_view),
+        "draggable chrome must intercept the actual native hit test"
+    );
+    assert!(
+        overlay.hitTest(NSPoint::new(270., 180.)).is_none(),
+        "interactive no-drag controls must pass through"
+    );
+    let target = browser.hitTest(NSPoint::new(290., 210.)).unwrap();
+    let button_view: &NSView = &button;
+    assert!(
+        std::ptr::eq(&*target, button_view),
+        "native control must remain the actual hit target"
+    );
+    assert!(overlay.hitTest(NSPoint::new(100., 100.)).is_none());
+    assert!(
+        overlay.hitTest(NSPoint::new(100., 164.)).is_none(),
+        "bottom edge is exclusive"
+    );
+    assert!(overlay.hitTest(NSPoint::new(-1., 180.)).is_none());
+    let new_content = NSView::new(mtm);
+    new_content.setFrame(browser.bounds());
+    browser.addSubview(&new_content);
+    overlay.set_regions(&[region(0, 0, 300, 36, 1), region(240, 0, 60, 36, 0)]);
+    let drag_target = browser.hitTest(NSPoint::new(120., 210.)).unwrap();
+    assert!(
+        std::ptr::eq(&*drag_target, overlay_view),
+        "region updates must keep drag handling above new browser content"
+    );
+    new_content.removeFromSuperview();
+    overlay.set_regions(&[
+        region(0, 0, 300, 36, 1),
+        region(240, 0, 60, 36, 0),
+        region(250, 5, 10, 10, 1),
+    ]);
+    assert!(
+        overlay.hitTest(NSPoint::new(255., 190.)).is_some(),
+        "regions must respect CEF's ordered union and subtraction"
+    );
+    browser.setFrameSize(NSSize::new(400., 250.));
+    assert!(
+        overlay.hitTest(NSPoint::new(100., 238.)).is_some(),
+        "overlay must resize with the app view"
+    );
+    browser.setHidden(true);
+    assert!(overlay.hitTest(NSPoint::new(100., 238.)).is_none());
+    browser.setHidden(false);
+    overlay.set_regions(&[]);
+    assert!(
+        overlay.hitTest(NSPoint::new(100., 238.)).is_none(),
+        "empty updates must release every drag hit target"
+    );
 }
 
 #[cfg(target_os = "macos")]
