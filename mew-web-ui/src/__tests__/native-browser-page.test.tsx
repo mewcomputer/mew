@@ -6,6 +6,39 @@ import type { MewClient } from "@mew/web-client";
 afterEach(() => { cleanup(); delete window.mewQuery; vi.restoreAllMocks(); document.querySelectorAll('[data-test-overlay], [role="dialog"]').forEach((node) => node.remove()); });
 
 describe("native browser surface", () => {
+  it.each(["menu", "dialog"])("keeps the browser visible beside a non-overlapping %s", async (role) => {
+    const calls: Record<string, unknown>[] = [];
+    window.mewQuery = ({ request, onSuccess }) => { calls.push(JSON.parse(request)); onSuccess("{}"); };
+    const { getByLabelText } = render(<NativeBrowserPage client={{} as MewClient} connected={false} sessionId={`chat-overlay-${role}`} tabId="tab" url="https://example.com" active onChange={() => {}} onError={() => {}} />);
+    vi.spyOn(getByLabelText("Browser page"), "getBoundingClientRect").mockReturnValue(new DOMRect(800, 80, 400, 600));
+    window.dispatchEvent(new Event("resize"));
+    expect(calls.at(-1)).toMatchObject({ visible: true });
+    const overlay = document.createElement("div");
+    overlay.role = role;
+    overlay.dataset.testOverlay = "";
+    vi.spyOn(overlay, "getBoundingClientRect").mockReturnValue(new DOMRect(500, 40, 288, 320));
+    document.body.append(overlay);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls.at(-1)).toMatchObject({ visible: true });
+    vi.spyOn(overlay, "getBoundingClientRect").mockReturnValue(new DOMRect(600, 40, 288, 320));
+    overlay.setAttribute("data-state", "open");
+    await waitFor(() => expect(calls.at(-1)).toMatchObject({ visible: false }));
+  });
+
+  it("hides native content while a modal outside its bounds blocks the workspace", async () => {
+    const calls: Record<string, unknown>[] = [];
+    window.mewQuery = ({ request, onSuccess }) => { calls.push(JSON.parse(request)); onSuccess("{}"); };
+    const { getByLabelText } = render(<NativeBrowserPage client={{} as MewClient} connected={false} sessionId="modal-overlay" tabId="tab" url="https://example.com" active onChange={() => {}} onError={() => {}} />);
+    vi.spyOn(getByLabelText("Browser page"), "getBoundingClientRect").mockReturnValue(new DOMRect(800, 80, 400, 600));
+    window.dispatchEvent(new Event("resize"));
+    const overlay = document.createElement("div");
+    overlay.role = "dialog";
+    overlay.setAttribute("aria-modal", "true");
+    vi.spyOn(overlay, "getBoundingClientRect").mockReturnValue(new DOMRect(400, 40, 288, 320));
+    document.body.append(overlay);
+    await waitFor(() => expect(calls.at(-1)).toMatchObject({ visible: false }));
+  });
+
   it.each(["menu", "listbox"])("hides beneath an open %s and restores the page after dismissal", async (role) => {
     vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue({ x: 400, y: 80, width: 500, height: 600, top: 80, right: 900, bottom: 680, left: 400, toJSON: () => ({}) });
     const calls: Record<string, unknown>[] = [];

@@ -72,7 +72,7 @@ view; keyboard divider resizing also verified the summary appearing inside the
 chat pane and tucking away as that pane narrows. The compact summary remains in
 the chat header when the workbench is open.
 
-All 190 React tests, the production build, 334 isolated serial desktop tests,
+All 193 React tests, the production build, 334 isolated serial desktop tests,
 20 native CEF library tests and the real AppKit editing/accessibility/drag
 harness passed. The generated-theme check and debug packaging passed. The
 existing Vite large-chunk and Rust dependency future-compatibility warnings
@@ -82,8 +82,12 @@ this pass does not establish production provider or full migration parity.
 Photos are in the task's visualization folder:
 `mew-polish-07-narrow-header.png`, `mew-polish-09-browser-summary-light.png`,
 `mew-polish-10-collapsed.png`, `mew-polish-12-summary-compact.png` and
-`mew-polish-14-summary-in-chat.png`. Earlier wide-summary photos show the
-superseded page-edge placement; photo 14 shows the corrected chat-pane layout.
+`mew-polish-14-summary-in-chat.png`, `mew-polish-15-chat-summary-browser.png`
+and `mew-polish-16-chat-popup-browser.png`. Earlier wide-summary photos show the
+superseded page-edge placement; photos 14-16 show the corrected chat-pane layout.
+The native browser remains visible beside a compact summary that does not
+overlap it. Overlapping tool menus and modal dialogs still hide native content
+until dismissal; bounds and modal regressions cover this distinction.
 
 The complete baseline remains the replacement's release bar. Direct subagent
 messaging is required for v1, but its runtime/controller work and the remaining

@@ -81,7 +81,13 @@ export function NativeBrowserPage({ client, connected, sessionId, tabId, url, ac
     let lastUpdate = "";
     const update = () => {
       const bounds = element.getBoundingClientRect();
-      const overlay = Array.from(document.querySelectorAll('[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"], [cmdk-dialog], [data-mew-overlay]')).some((node) => !node.contains(element));
+      const overlay = Array.from(document.querySelectorAll('[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"], [cmdk-dialog], [data-mew-overlay]')).some((node) => {
+        if (node.contains(element)) return false;
+        const rect = node.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return false;
+        return node.getAttribute("aria-modal") === "true"
+          || (rect.left < bounds.right && rect.right > bounds.left && rect.top < bounds.bottom && rect.bottom > bounds.top);
+      });
       const request = {
         type: "browser_update" as const, sessionId, tabId, url,
         rect: { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height },
@@ -95,7 +101,7 @@ export function NativeBrowserPage({ client, connected, sessionId, tabId, url, ac
     const resize = new ResizeObserver(update);
     resize.observe(element);
     const mutations = new MutationObserver(update);
-    mutations.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-state", "role"] });
+    mutations.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-state", "role", "aria-modal"] });
     window.addEventListener("resize", update);
     document.addEventListener("visibilitychange", update);
     document.addEventListener("scroll", update, true);

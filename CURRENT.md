@@ -3841,3 +3841,17 @@ failure. Verification includes regressions for delayed send results, restored
 drafts, picker keyboard/failure behavior, tool disclosure and clipboard errors.
 The full 193-test React suite and production build pass. Packaged photos cover
 the composer and model menu in narrow and wide light/dark windows.
+
+
+## 2026-10-27: retain browser visibility beside chat popovers
+
+The compact chat summary no longer blanks a browser in the neighboring pane.
+Native browser occlusion checks actual overlay bounds; non-overlapping menus
+and popovers leave it visible, while overlapping overlays and workspace-blocking
+modal dialogs still hide it. Three added regressions cover both non-modal
+roles, transitions into overlap and a modal outside the browser bounds.
+
+The regressions failed before the fix. All 193 React tests and the production
+build pass afterward. Rebuilt and packaged the desktop app, then photographed
+the compact summary beside a real retained browser and checked that browser
+tools still hide/restore native content. No runtime or baseline expansion.
