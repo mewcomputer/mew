@@ -3612,3 +3612,22 @@ provider prompt was submitted. The QA app/owned daemon are stopped and original
 fixture settings restored. Details/captures are in the existing Codex UX review.
 Physical IME candidates and VoiceOver remain unverified; saved narrow work-pane
 fitting remains separate.
+
+## 2026-10-26: workspace canvas and familiar chat concepts
+
+Created an interactive design prototype outside the product source, using one
+sample mew workspace with movable topic areas, ongoing chats, artifacts and
+subagents grouped under their parent chat. Canvas and familiar chat views share
+the same organization and drafts. Topic areas and structured topic lanes provide
+two compositions to compare before selecting an implementation direction.
+
+The prototype exercises artifact previews, topic moves, stop-and-archive and
+explicit restoration. Archived chats retain their history; placed artifacts
+remain available, and restoring a chat leaves its subagents stopped. These are
+proposed interface behaviors, not changes to the application or daemon.
+
+Browser checks passed for view switching, draft preservation, grouped subagents,
+native drag-and-drop, topic selectors, previews, archive/restoration and local
+follow-ups. Both views fit 320, 360, 420, 768 and 1056 px browser widths without
+horizontal overflow. Light/dark and both compositions were visually inspected;
+narrow header overlap was corrected and rechecked. No provider calls were made.
