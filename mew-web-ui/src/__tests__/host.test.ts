@@ -7,6 +7,7 @@ import {
   getHostBootstrap,
   hostRequest,
   isDesktopHost,
+  isElectronHost,
 } from "@/lib/host";
 
 describe("host runtime", () => {
@@ -35,6 +36,7 @@ describe("host runtime", () => {
 afterEach(() => {
   resetHost();
   delete window.mewQuery;
+  delete window.mewListen;
 });
 
 describe("native host", () => {
@@ -48,6 +50,43 @@ describe("native host", () => {
     expect(getWebSocketUrl()).toBe(bootstrap.daemonUrl);
     expect(getHostBootstrap()).toEqual(bootstrap);
     expect(isDesktopHost()).toBe(true);
+    expect(isElectronHost()).toBe(false);
+  });
+
+  it("uses an explicit Electron browser mode without changing daemon or theme startup", async () => {
+    const bootstrap = { browserMode: "electron", daemonUrl: "ws://127.0.0.1:25566", themeMode: "system", lightTheme: "light", darkTheme: "dark", themes: [] };
+    window.mewQuery = ({ onSuccess }) => onSuccess(JSON.stringify(bootstrap));
+    await initializeHost();
+    expect(isElectronHost()).toBe(true);
+    expect(getHostBootstrap()).toEqual(bootstrap);
+    expect(getWebSocketUrl()).toBe(bootstrap.daemonUrl);
+  });
+
+  it("bridges typed preload events once and unsubscribes when the host resets", async () => {
+    const unsubscribe = vi.fn();
+    let receive: Parameters<NonNullable<Window["mewListen"]>>[0] | undefined;
+    window.mewListen = vi.fn((listener) => { receive = listener; return unsubscribe; });
+    window.mewQuery = ({ onSuccess }) => onSuccess(JSON.stringify({ browserMode: "electron", daemonUrl: "ws://127.0.0.1:25566", themeMode: "dark", lightTheme: "light", darkTheme: "dark", themes: [] }));
+    const browser = vi.fn();
+    const menu = vi.fn();
+    window.addEventListener("mew:browser-event", browser);
+    window.addEventListener("mew:menu-action", menu);
+    try {
+      await Promise.all([initializeHost(), initializeHost()]);
+      expect(window.mewListen).toHaveBeenCalledOnce();
+      const detail = { sessionId: "chat", tabId: "tab", pageInstance: "page", kind: "ready" as const, title: "Example", url: "https://example.com" };
+      receive!({ type: "browser", detail });
+      receive!({ type: "menu", detail: "new-tab" });
+      expect(browser.mock.calls[0]?.[0].detail).toEqual(detail);
+      expect(menu.mock.calls[0]?.[0].detail).toBe("new-tab");
+      resetHost();
+      expect(unsubscribe).toHaveBeenCalledOnce();
+      await initializeHost();
+      expect(window.mewListen).toHaveBeenCalledTimes(2);
+    } finally {
+      window.removeEventListener("mew:browser-event", browser);
+      window.removeEventListener("mew:menu-action", menu);
+    }
   });
 
   it("leaves a failed native bootstrap retryable", async () => {

@@ -27,6 +27,7 @@ import {
   type WorkbenchTabsState,
 } from "../lib/workbench-tabs";
 import { getClient } from "../lib/client-ref";
+import { isElectronHost } from "../lib/host";
 import { FileTreePanel, ChangesPanel } from "./file-tree";
 import { BrowserPanel } from "./browser-panel";
 import {
@@ -55,8 +56,10 @@ interface RightRailProps {
   onOpenChange: (open: boolean) => void;
   mode?: "sheet" | "dock";
   workbenchTabs?: WorkbenchTabsState;
+  workbenchSessionId?: string;
+  sessionTabs?: Record<string, WorkbenchTabsState>;
   onWorkbenchTabsChange?: (tabs: WorkbenchTabsState) => void;
-  onWorkbenchTabsAction?: (action: WorkbenchTabsAction) => void;
+  onWorkbenchTabsAction?: (action: WorkbenchTabsAction, sessionId?: string) => void;
 }
 
 export function RightRail({
@@ -65,6 +68,8 @@ export function RightRail({
   onOpenChange,
   mode = "sheet",
   workbenchTabs = DEFAULT_WORKBENCH_TABS,
+  workbenchSessionId,
+  sessionTabs,
   onWorkbenchTabsChange,
   onWorkbenchTabsAction,
 }: RightRailProps) {
@@ -82,8 +87,8 @@ export function RightRail({
     if (onWorkbenchTabsChange) onWorkbenchTabsChange(next);
     else setUncontrolledWorkbenchTabs(next);
   };
-  const applyWorkbenchAction = (action: WorkbenchTabsAction) => {
-    if (onWorkbenchTabsAction) onWorkbenchTabsAction(action);
+  const applyWorkbenchAction = (action: WorkbenchTabsAction, owner?: string) => {
+    if (onWorkbenchTabsAction) onWorkbenchTabsAction(action, owner);
     else setSelectedWorkbenchTabs(workbenchTabsReducer(selectedWorkbenchTabs, action));
   };
   const subagents = useSessionStore((s) => s.subagents);
@@ -94,6 +99,15 @@ export function RightRail({
   const sessionId = useSessionStore((s) => s.sessionId);
   const sessionCwd = useSessionStore((s) => s.sessionCwd);
   const availableSessions = useSessionStore((s) => s.availableSessions);
+  const electron = isElectronHost();
+  const currentOwner = workbenchSessionId ?? sessionId ?? undefined;
+  const tabValue = (id: string, owner = currentOwner) => electron ? `${owner}/${id}` : id;
+  const renderedTabs = [
+    ...selectedWorkbenchTabs.tabs.map((tab) => ({ tab, owner: currentOwner })),
+    ...(electron ? Object.entries(sessionTabs ?? {}).filter(([owner]) => owner !== currentOwner).flatMap(([owner, tabs]) => tabs.tabs.filter((tab) => tab.kind === "browser").map((tab) => ({ tab, owner }))) : []),
+  ];
+  // Moving an attached webview through the DOM can destroy its guest process.
+  if (electron) renderedTabs.sort((a, b) => tabValue(a.tab.id, a.owner).localeCompare(tabValue(b.tab.id, b.owner)));
   const sessionHasWorkspace = Boolean(
     sessionCwd || availableSessions.find((s) => s.session_id === sessionId)?.cwd,
   );
@@ -184,8 +198,11 @@ export function RightRail({
   const workbenchContent = (
     <div className="flex min-h-0 flex-1 flex-col">
       <Tabs
-        value={selectedWorkbenchTab?.id ?? ""}
-        onValueChange={(id) => applyWorkbenchAction({ type: "select", id })}
+        value={selectedWorkbenchTab ? tabValue(selectedWorkbenchTab.id) : ""}
+        onValueChange={(value) => {
+          const tab = selectedWorkbenchTabs.tabs.find((tab) => tabValue(tab.id) === value);
+          if (tab) applyWorkbenchAction({ type: "select", id: tab.id });
+        }}
         className={cn(
           "flex min-h-0 flex-1 flex-col",
           selectedWorkbenchTab?.kind === "browser" && "bg-background",
@@ -214,7 +231,7 @@ export function RightRail({
                   className={cn("group my-1 flex h-7 shrink-0 items-center rounded-md border border-transparent", tab.id === selectedWorkbenchTab?.id && "border-border bg-muted/70")}
                 >
                   <TabsTrigger
-                    value={tab.id}
+                    value={tabValue(tab.id)}
                     aria-label={tab.title}
                     onClick={() => applyWorkbenchAction({ type: "select", id: tab.id })}
                     className="h-7 gap-1.5 rounded-md border-0 px-2 text-[11px] font-normal text-muted-foreground shadow-none hover:text-foreground data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none"
@@ -261,29 +278,33 @@ export function RightRail({
           </button>
         </div>
         <div className="min-h-0 flex-1 overflow-hidden">
-          {selectedWorkbenchTabs.tabs.length === 0 ? (
+          {selectedWorkbenchTabs.tabs.length === 0 && (
             renderWorkbenchSurface(createWorkbenchTab("browser", { id: "launcher" }), true)
-          ) : selectedWorkbenchTabs.tabs.map((tab) => (
+          )}
+          {renderedTabs.map(({ tab, owner }) => {
+            const selected = owner === currentOwner && tab.id === selectedWorkbenchTab?.id;
+            return (
             <TabsContent
-              key={tab.id}
-              value={tab.id}
+              key={electron ? `${owner}/${tab.id}` : tab.id}
+              value={tabValue(tab.id, owner)}
               forceMount
-              hidden={tab.id !== selectedWorkbenchTab?.id}
+              hidden={!selected}
               className={cn(
                 "mt-0 h-full min-h-0 overflow-hidden focus-visible:outline-none",
-                tab.id !== selectedWorkbenchTab?.id && "hidden",
+                !selected && "hidden",
               )}
             >
-              {renderWorkbenchSurface(tab, tab.id === selectedWorkbenchTab?.id)}
+              {renderWorkbenchSurface(tab, selected && (!electron || owner === sessionId), electron ? owner : undefined)}
             </TabsContent>
-          ))}
+            );
+          })}
         </div>
       </Tabs>
 
     </div>
   );
 
-  function renderWorkbenchSurface(tab: WorkbenchTab, active: boolean) {
+  function renderWorkbenchSurface(tab: WorkbenchTab, active: boolean, owner?: string) {
     switch (tab.kind) {
       case "agents":
         return renderActivitySurface("agents");
@@ -298,9 +319,9 @@ export function RightRail({
           tab={tab}
           onTabChange={(patch) => {
             if (tab.id === "launcher") applyWorkbenchAction({ type: "add", tab: createWorkbenchTab("browser", { ...patch, sessionId: sessionId ?? undefined }) });
-            else applyWorkbenchAction({ type: "update", id: tab.id, patch });
+            else applyWorkbenchAction({ type: "update", id: tab.id, patch }, owner);
           }}
-          sessionId={tab.sessionId ?? sessionId ?? undefined}
+          sessionId={owner === "new" ? undefined : owner ?? tab.sessionId ?? sessionId ?? undefined}
           launcher={<div className="mx-auto w-full max-w-[44rem] px-6 py-8">
             <h2 className="mb-4 text-xs font-medium">Tools</h2>
             <div className="grid grid-cols-2 gap-x-3 gap-y-1">

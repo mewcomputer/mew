@@ -140,6 +140,19 @@ describe("workspace surfaces", () => {
     expect(loadWorkspaceSurfaces({ getItem: () => JSON.stringify(state) }).sessionTabs?.["chat-b"]?.activeTabId).toBe("file-b");
   });
 
+  it("keeps browser metadata with its background chat and ignores owners that have no saved tabs", () => {
+    const state: WorkspaceSurfacesState = {
+      ...DEFAULT_WORKSPACE_SURFACES,
+      sessionId: "chat-b",
+      workbenchTabs: { tabs: [{ id: "same-id", kind: "browser", title: "B", closable: true }], activeTabId: "same-id" },
+      sessionTabs: { "chat-a": { tabs: [{ id: "same-id", kind: "browser", title: "A", closable: true }], activeTabId: "same-id" } },
+    };
+    const next = workspaceSurfacesReducer(state, { type: "workbench-tabs-action", sessionId: "chat-a", action: { type: "update", id: "same-id", patch: { title: "A changed", payload: { url: "https://a.example" } } } });
+    expect(next.workbenchTabs).toBe(state.workbenchTabs);
+    expect(next.sessionTabs?.["chat-a"]?.tabs[0]).toMatchObject({ title: "A changed", payload: { url: "https://a.example" } });
+    expect(workspaceSurfacesReducer(next, { type: "workbench-tabs-action", sessionId: "missing-chat", action: { type: "update", id: "same-id", patch: { title: "Wrong" } } })).toBe(next);
+  });
+
   it("imports the previous sidebar visibility without treating it as the activity summary", () => {
     expect(loadWorkspaceSurfaces({ getItem: () => JSON.stringify({ summaryOpen: false }) }).sidebarOpen).toBe(false);
     expect(loadWorkspaceSurfaces({ getItem: () => JSON.stringify({ summaryOpen: false, sidebarOpen: true }) }).sidebarOpen).toBe(true);

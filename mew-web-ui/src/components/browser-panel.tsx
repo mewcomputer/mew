@@ -297,8 +297,8 @@ export function BrowserPanel({
 
       {!tabUrl ? <div className="min-h-0 flex-1 overflow-auto">{launcher}</div> : native && client && sessionId ? (
         <NativeBrowserPage client={client} connected={connected} sessionId={sessionId} tabId={tab.id} url={tabUrl} active={active} present={present} obscured={toolsOpen} onError={setBrowserError} onChange={(event) => {
-          if (event.kind === "ready") setNativePageInstance(event.pageInstance);
-          if (event.kind === "closed") setNativePageInstance(null);
+          if (event.kind === "ready") { setNativePageInstance(event.pageInstance); setBrowserError(null); }
+          if (event.kind === "closed") { close(); return; }
           setBusy(false); setCurrentUrl(event.url); setTitle(event.title);
           if (!addressDirty.current) setUrl(event.url);
           if (event.kind === "changed") onTabChange({ title: event.title || tab.title, payload: { ...tab.payload, url: event.url } });

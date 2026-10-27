@@ -177,6 +177,19 @@ desktop-build: build-js
     cargo build --release -p mew-cef-host --bin mew-cef-host-helper --no-default-features
     {{justfile_directory()}}/scripts/package-desktop-native.sh
 
+# Run the opt-in Electron client with the shared embedded UI and Rust host.
+desktop-electron-dev *args: build-js
+    pnpm --filter mew-web-ui build
+    cargo build -p mew
+    MEW_DESKTOP_PROFILE=debug node "{{justfile_directory()}}/apps/mew-electron/package.cjs"
+    "{{justfile_directory()}}/target/debug/bundle/macos/mew-electron.app/Contents/MacOS/mew-electron" "$@"
+
+# Build the opt-in Electron app with the shared embedded UI and Rust host.
+desktop-electron-build: build-js
+    pnpm --filter mew-web-ui build
+    cargo build --release -p mew
+    MEW_DESKTOP_PROFILE=release node "{{justfile_directory()}}/apps/mew-electron/package.cjs"
+
 # Build macOS desktop release assets; CLI/TUI use the independent workflow.
 desktop-package: desktop-build
     {{justfile_directory()}}/scripts/package-desktop-release.sh

@@ -183,7 +183,9 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
                 open={surfaces.workbenchOpen}
                 onOpenChange={(open) => dispatch({ type: "set-workbench-open", open })}
                 workbenchTabs={surfaces.workbenchTabs}
-                onWorkbenchTabsAction={(action) => dispatch({ type: "workbench-tabs-action", action })}
+                workbenchSessionId={surfaces.sessionId}
+                sessionTabs={surfaces.sessionTabs}
+                onWorkbenchTabsAction={(action, sessionId) => dispatch({ type: "workbench-tabs-action", action, sessionId })}
               />
             </>
           ) : (
@@ -233,7 +235,9 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
                   present={workbenchPresent}
                   onOpenChange={(open) => dispatch({ type: "set-workbench-open", open })}
                   workbenchTabs={surfaces.workbenchTabs}
-                  onWorkbenchTabsAction={(action) => dispatch({ type: "workbench-tabs-action", action })}
+                  workbenchSessionId={surfaces.sessionId}
+                  sessionTabs={surfaces.sessionTabs}
+                  onWorkbenchTabsAction={(action, sessionId) => dispatch({ type: "workbench-tabs-action", action, sessionId })}
                 />
               </ResizablePanel>
             </ResizablePanelGroup>

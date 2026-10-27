@@ -1,0 +1,58 @@
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const { parseRequest, isAppUrl, guestRequestAllowed, debugEndpoint } = require('./policy.cjs');
+
+test('host requests reject malformed, oversized and ambiguous input', () => {
+  for (const value of [null, '{}', 'null', '{', JSON.stringify({ type: 'bootstrap', extra: true }), ' '.repeat(16385)]) {
+    assert.throws(() => parseRequest(value));
+  }
+  assert.deepEqual(parseRequest('{"type":"bootstrap"}'), { type: 'bootstrap' });
+});
+
+test('browser updates validate identities, navigation and finite bounds', () => {
+  const request = { type: 'browser_update', sessionId: 'session', tabId: 'tab', url: 'https://example.com/', rect: { x: 0, y: 1, width: 400, height: 600 }, visible: true };
+  assert.deepEqual(parseRequest(JSON.stringify(request)), request);
+  for (const change of [{ sessionId: '' }, { tabId: 1 }, { url: 'file:///etc/passwd' }, { url: 'https://u:p@example.com' }, { visible: 'yes' }, { rect: { ...request.rect, width: -1 } }]) {
+    assert.throws(() => parseRequest(JSON.stringify({ ...request, ...change })));
+  }
+  assert.throws(() => parseRequest(JSON.stringify({ ...request, rect: { ...request.rect, width: null } })));
+  assert.deepEqual(parseRequest(JSON.stringify({ type: 'browser_bind', sessionId: 's', tabId: 't', pageInstance: 'p', guestId: 42 })), { type: 'browser_bind', sessionId: 's', tabId: 't', pageInstance: 'p', guestId: 42 });
+  assert.throws(() => parseRequest('{"type":"browser_bind","sessionId":"s","tabId":"t","pageInstance":"p","guestId":0}'));
+});
+
+test('only the exact local app origin is privileged', () => {
+  const appUrl = 'http://127.0.0.1:41001/';
+  assert.equal(isAppUrl('http://127.0.0.1:41001/chat/test', appUrl), true);
+  for (const value of ['http://localhost:41001/', 'http://127.0.0.1:41002/', 'http://user@127.0.0.1:41001/', 'file:///app.html', 'garbage']) {
+    assert.equal(isAppUrl(value, appUrl), false);
+  }
+  assert.equal(isAppUrl('mew://app/session/test', 'mew://app/'), true);
+  for (const value of ['mew://other/', 'file:///app.html', 'https://app/', 'mew://user@app/']) {
+    assert.equal(isAppUrl(value, 'mew://app/'), false);
+  }
+});
+
+test('guest traffic cannot reach host control ports through aliases or websockets', () => {
+  const ports = new Set(['41001', '41002', '41003']);
+  for (const host of ['127.0.0.1', 'localhost', '[::1]', '2130706433', 'untrusted.example']) {
+    for (const protocol of ['http:', 'https:', 'ws:', 'wss:']) {
+      assert.equal(guestRequestAllowed(`${protocol}//${host}:41002/path`, ports), false);
+    }
+  }
+  for (const value of ['https://example.com/', 'http://127.0.0.1:42000/', 'wss://example.com/socket', 'data:image/png;base64,AA==', 'blob:https://example.com/123', 'about:blank']) {
+    assert.equal(guestRequestAllowed(value, ports), true);
+  }
+  for (const value of ['file:///etc/passwd', 'javascript:alert(1)', 'devtools://devtools/', 'ftp://example.com/', 'garbage', 'https://user:password@example.com/']) {
+    assert.equal(guestRequestAllowed(value, ports), false);
+  }
+  assert.equal(guestRequestAllowed('http://localhost/', new Set(['80'])), false);
+  assert.equal(guestRequestAllowed('wss://localhost/', new Set(['443'])), false);
+  assert.equal(guestRequestAllowed('data:text/plain,hello', new Set(['80', '443'])), true);
+});
+
+test('debugging endpoint accepts only an actual ephemeral port file', () => {
+  assert.equal(debugEndpoint('43210\n/devtools/browser/abc\n'), 'http://127.0.0.1:43210');
+  for (const value of ['', '0\n/devtools/browser/a', '65536\n/devtools/browser/a', '43210', 'abc\n/devtools/browser/a']) {
+    assert.throws(() => debugEndpoint(value));
+  }
+});

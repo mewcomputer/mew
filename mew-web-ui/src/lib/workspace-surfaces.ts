@@ -24,7 +24,7 @@ export type WorkspaceSurfacesAction =
   | { type: "set-workbench-open"; open: boolean }
   | { type: "set-workbench-size"; size: number }
   | { type: "set-workbench-tabs"; tabs: WorkbenchTabsState }
-  | { type: "workbench-tabs-action"; action: WorkbenchTabsAction };
+  | { type: "workbench-tabs-action"; sessionId?: string; action: WorkbenchTabsAction };
 
 export const WORKSPACE_SURFACES_STORAGE_KEY = "mew.workspaceSurfaces";
 
@@ -61,11 +61,17 @@ export function workspaceSurfacesReducer(
       return { ...state, workbenchSize: clampWorkbenchSize(action.size) };
     case "set-workbench-tabs":
       return { ...state, workbenchTabs: action.tabs };
-    case "workbench-tabs-action":
+    case "workbench-tabs-action": {
+      if (action.sessionId && action.sessionId !== state.sessionId) {
+        const tabs = state.sessionTabs?.[action.sessionId];
+        if (!tabs) return state;
+        return { ...state, sessionTabs: { ...state.sessionTabs, [action.sessionId]: workbenchTabsReducer(tabs, action.action) } };
+      }
       return {
         ...state,
         workbenchTabs: workbenchTabsReducer(state.workbenchTabs, action.action),
       };
+    }
   }
 }
 

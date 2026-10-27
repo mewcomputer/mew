@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { RightRail } from "../components/right-rail";
 import { useSessionStore } from "../stores/session";
+import { initializeHost, resetHost } from "../lib/host";
 
 const {
   browserListeners,
@@ -19,6 +20,7 @@ const {
     off: vi.fn((event: string) => {
       listeners.delete(event);
     }),
+    hasConfirmedSession: () => true,
     watchWorkspace: vi.fn(),
     gitStatus: vi.fn(),
     browserOpen: vi.fn(),
@@ -60,6 +62,7 @@ describe("RightRail", () => {
   afterEach(() => {
     cleanup();
     delete window.mewQuery;
+    resetHost();
     vi.restoreAllMocks();
     watchWorkspaceMock.mockClear();
     gitStatusMock.mockClear();
@@ -81,6 +84,55 @@ describe("RightRail", () => {
 
   beforeEach(() => {
     useSessionStore.setState({ connectionState: "connected" });
+  });
+
+  it("retains visited Electron guests through pane, tab and chat switches and closes only the removed owner", async () => {
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue(new DOMRect(800, 80, 400, 600));
+    const requests: Array<{ type: string; sessionId?: string; tabId?: string }> = [];
+    window.mewQuery = ({ request, onSuccess }) => {
+      const value = JSON.parse(request);
+      if (value.type === "bootstrap") { onSuccess(JSON.stringify({ browserMode: "electron", daemonUrl: "ws://127.0.0.1:25566", themeMode: "dark", lightTheme: "light", darkTheme: "dark", themes: [] })); return; }
+      requests.push(value);
+      onSuccess(JSON.stringify(value.type === "browser_update" && value.visible ? { partition: `${value.sessionId}/${value.tabId}`, pageInstance: `${value.sessionId}/${value.tabId}` } : {}));
+    };
+    await initializeHost();
+    useSessionStore.setState({ sessionId: "chat-a" });
+    const a1 = { id: "shared-id", kind: "browser" as const, title: "A one", closable: true, sessionId: "chat-a", payload: { url: "https://a.example" } };
+    const a2 = { ...a1, id: "a-two", title: "A two", payload: { url: "https://a.example/two" } };
+    const b = { ...a1, title: "B", sessionId: "chat-b", payload: { url: "https://b.example" } };
+    const tabsA = { tabs: [a1, a2], activeTabId: a1.id };
+    const tabsB = { tabs: [b], activeTabId: b.id };
+    const changed = vi.fn();
+    const props = { mode: "dock" as const, open: true, onOpenChange: vi.fn(), workbenchSessionId: "chat-a", workbenchTabs: tabsA, sessionTabs: { "chat-b": tabsB }, onWorkbenchTabsAction: changed };
+    const view = render(<RightRail {...props} />);
+    await waitFor(() => expect(view.container.querySelectorAll("webview")).toHaveLength(1));
+    const first = view.container.querySelector("webview")!;
+    const firstPanel = first.closest('[role="tabpanel"]')!;
+    const removedNodes: Node[] = [];
+    const moves = new MutationObserver((records) => records.forEach((record) => removedNodes.push(...record.removedNodes)));
+    moves.observe(firstPanel.parentElement!, { childList: true });
+    view.rerender(<RightRail {...props} open={false} />);
+    expect(view.container.querySelector("webview")).toBe(first);
+    view.rerender(<RightRail {...props} workbenchTabs={{ ...tabsA, activeTabId: a2.id }} />);
+    await waitFor(() => expect(view.container.querySelectorAll("webview")).toHaveLength(2));
+    expect(first.isConnected).toBe(true);
+    useSessionStore.setState({ sessionId: "chat-b" });
+    view.rerender(<RightRail {...props} workbenchSessionId="chat-b" workbenchTabs={tabsB} sessionTabs={{ "chat-a": tabsA }} />);
+    await waitFor(() => expect(view.container.querySelectorAll("webview")).toHaveLength(3));
+    expect(first.isConnected).toBe(true);
+    expect(removedNodes).not.toContain(firstPanel);
+    moves.disconnect();
+    const secondChatGuest = view.container.querySelector('webview[partition="chat-b/shared-id"]')!;
+    fireEvent(window, new CustomEvent("mew:browser-event", { detail: { sessionId: "chat-a", tabId: a1.id, pageInstance: "chat-a/shared-id", kind: "ready", url: a1.payload.url, title: "A" } }));
+    fireEvent(window, new CustomEvent("mew:browser-event", { detail: { sessionId: "chat-a", tabId: a1.id, pageInstance: "chat-a/shared-id", kind: "changed", url: "https://a.example/changed", title: "A changed" } }));
+    expect(changed).toHaveBeenCalledWith({ type: "update", id: a1.id, patch: { title: "A changed", payload: { url: "https://a.example/changed" } } }, "chat-a");
+    expect(screen.getByRole("tab", { name: "B" }).getAttribute("aria-selected")).toBe("true");
+    expect(requests.some((request) => request.type === "browser_close")).toBe(false);
+    view.rerender(<RightRail {...props} workbenchSessionId="chat-b" workbenchTabs={{ tabs: [], activeTabId: "" }} sessionTabs={{ "chat-a": tabsA }} />);
+    expect(secondChatGuest.isConnected).toBe(false);
+    expect(first.isConnected).toBe(true);
+    await waitFor(() => expect(requests).toContainEqual({ type: "browser_close", sessionId: "chat-b", tabId: b.id }));
+    expect(requests.some((request) => request.type === "browser_close" && request.sessionId === "chat-a")).toBe(false);
   });
 
   it("keeps questions in the main interface instead of duplicating them in the rail", () => {
