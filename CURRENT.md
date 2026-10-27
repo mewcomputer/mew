@@ -3653,3 +3653,23 @@ stop/archive and idle restoration. Conversation/workbench layouts fit 320,
 to grow the preview instead of clipping. Light/dark, a named theme and narrow
 views were inspected; final checks reported no JavaScript errors. No provider
 calls or application/daemon changes were made.
+
+## 2026-10-27: tabbed workbench beside the chat
+
+Updated the familiar chat prototype with a right workbench that stays beside the
+conversation. Its new-tab launcher opens changes, files, terminal, activity and
+side chats, with an address/search field and suggested artifacts/pages. Files
+open independently; grouped subagents open as side-chat tabs under their parent.
+Each chat retains its own tabs, active selection and pane width. Collapsing the
+pane keeps tabs available; closing its last tab returns to the chat. The pane
+can expand and restore the conversation alongside it.
+
+Browser checks passed for launcher/tool navigation, independent file tabs,
+duplicate-tool reuse, local terminal/URL previews, browser history and address
+validation, subagent follow-ups, draft retention, chat switching, keyboard tab
+navigation, pointer/keyboard resizing and close/collapse/expand behavior. Layouts
+fit 320, 360, 420, 620, 768, 920, 1056 and 1440 px browser widths; narrow layouts
+stack the pane below the conversation. Light and existing named themes were
+visually inspected, with no JavaScript errors. This remains a design prototype;
+no provider calls, application implementation or generated-theme changes were
+made.
