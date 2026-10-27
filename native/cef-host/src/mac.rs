@@ -11,6 +11,7 @@ use objc2_app_kit::{
     NSDeleteCharacter, NSDeleteFunctionKey, NSDownArrowFunctionKey, NSEvent, NSEventModifierFlags,
     NSLeftArrowFunctionKey, NSRightArrowFunctionKey, NSUpArrowFunctionKey, NSView, NSWindow,
 };
+use objc2_foundation::{NSArray, NSMutableArray};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,6 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 struct NativeKeyEquivalents {
     original_handlers: BTreeMap<usize, Imp>,
     browser_views: Vec<Weak<NSView>>,
+    accessibility_handlers: BTreeMap<usize, Imp>,
 }
 
 thread_local! {
@@ -64,6 +66,103 @@ pub fn register_browser_view(view: &NSView) {
             state.browser_views.push(Weak::new(view));
         }
     });
+    if let Some(content) = window.contentView() {
+        register_accessibility_children(&content);
+    }
+}
+
+fn register_accessibility_children(view: &NSView) {
+    let class = view.class();
+    let children = class.instance_method(sel!(accessibilityChildren)).unwrap();
+    let children_imp: Imp = unsafe {
+        std::mem::transmute(native_accessibility_children as unsafe extern "C-unwind" fn(_, _) -> _)
+    };
+    if std::ptr::fn_addr_eq(children.implementation(), children_imp) {
+        return;
+    }
+    NATIVE_KEY_EQUIVALENTS.with_borrow_mut(|state| {
+        state
+            .accessibility_handlers
+            .insert(class as *const _ as usize, children.implementation());
+        // AccessKit owns the content view's AX children. Preserve its tree and
+        // compose the native CEF children that sit outside that tree.
+        unsafe {
+            objc2::ffi::class_replaceMethod(
+                class as *const _ as *mut _,
+                sel!(accessibilityChildren),
+                children_imp,
+                objc2::ffi::method_getTypeEncoding(children),
+            );
+        }
+    });
+}
+
+fn original_accessibility_children(view: &NSView) -> Imp {
+    NATIVE_KEY_EQUIVALENTS.with_borrow(|state| {
+        let mut class = Some(view.class());
+        while let Some(current) = class {
+            if let Some(handlers) = state
+                .accessibility_handlers
+                .get(&(current as *const _ as usize))
+            {
+                return *handlers;
+            }
+            class = current.superclass();
+        }
+        unreachable!("native accessibility bridge must retain its original handlers")
+    })
+}
+
+fn accessible_browser_views(parent: &NSView) -> Vec<Retained<NSView>> {
+    NATIVE_KEY_EQUIVALENTS.with_borrow(|state| {
+        state
+            .browser_views
+            .iter()
+            .filter_map(Weak::load)
+            .filter(|view| {
+                !std::ptr::eq(&**view, parent)
+                    && !view.isHiddenOrHasHiddenAncestor()
+                    && view.isDescendantOf(parent)
+            })
+            .collect()
+    })
+}
+
+#[link(name = "AppKit", kind = "framework")]
+unsafe extern "C" {
+    fn NSAccessibilityUnignoredChildrenForOnlyChild(
+        child: *mut std::ffi::c_void,
+    ) -> *mut NSArray<NSObject>;
+}
+
+unsafe extern "C-unwind" fn native_accessibility_children(
+    view: &NSView,
+    selector: Sel,
+) -> *mut NSArray<NSObject> {
+    let original: unsafe extern "C-unwind" fn(&NSView, Sel) -> *mut NSArray<NSObject> =
+        unsafe { std::mem::transmute(original_accessibility_children(view)) };
+    let children = unsafe { original(view, selector) };
+    let browsers = accessible_browser_views(view);
+    if browsers.is_empty() {
+        return children;
+    }
+    let combined = NSMutableArray::<NSObject>::new();
+    if let Some(children) = unsafe { children.as_ref() } {
+        combined.addObjectsFromArray(children);
+    }
+    for browser in browsers {
+        let children = unsafe {
+            NSAccessibilityUnignoredChildrenForOnlyChild(Retained::as_ptr(&browser) as *mut _)
+        };
+        if let Some(children) = unsafe { children.as_ref() } {
+            for child in children {
+                if !combined.containsObject(&child) {
+                    combined.addObject(&child);
+                }
+            }
+        }
+    }
+    Retained::autorelease_return(combined).cast()
 }
 
 unsafe extern "C-unwind" fn native_key_equivalent(

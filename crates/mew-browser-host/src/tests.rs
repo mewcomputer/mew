@@ -233,16 +233,16 @@ fn unchanged_visibility_produces_no_native_visibility_changes() {
     state.insert_page(first.clone());
     state.insert_page(second.clone());
     assert!(state
-        .visibility_changes(Some(&first.owner))
+        .visibility_changes(Some((&first.owner, true)))
         .eq([(&first.owner, true)]));
     state.set_visible(&first.owner, true);
     assert!(state
-        .visibility_changes(Some(&first.owner))
+        .visibility_changes(Some((&first.owner, true)))
         .next()
         .is_none());
     assert_eq!(
         state
-            .visibility_changes(Some(&second.owner))
+            .visibility_changes(Some((&second.owner, true)))
             .collect::<Vec<_>>(),
         vec![(&first.owner, false), (&second.owner, true)]
     );
@@ -259,7 +259,29 @@ fn native_closed_pages_stay_hidden_when_visibility_is_requested() {
     state.set_visible(&first.owner, true);
     assert!(!state.pages[&first.owner].visible);
     assert!(state
-        .visibility_changes(Some(&first.owner))
+        .visibility_changes(Some((&first.owner, true)))
         .next()
         .is_none());
+}
+
+#[test]
+fn hidden_page_layout_updates_preserve_another_active_page() {
+    let mut state = BrowserState::default();
+    let first = page("local", "a", "first");
+    let second = page("local", "b", "second");
+    state.insert_page(first.clone());
+    state.insert_page(second.clone());
+    state.set_visible(&first.owner, true);
+    assert!(state
+        .visibility_changes(Some((&second.owner, false)))
+        .next()
+        .is_none());
+    state.set_visible(&second.owner, false);
+    assert!(state.pages[&first.owner].visible);
+    assert!(!state.pages[&second.owner].visible);
+    assert!(state
+        .visibility_changes(Some((&first.owner, false)))
+        .eq([(&first.owner, false)]));
+    state.set_visible(&first.owner, false);
+    assert!(!state.pages[&first.owner].visible);
 }

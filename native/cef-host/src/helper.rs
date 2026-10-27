@@ -38,7 +38,11 @@ fn main() {
     };
 
     let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
-    let mut app = MewCefHelperApp::new();
+    #[cfg(target_os = "macos")]
+    let renderer = Some(mew_cef_host::app_bridge::render_process_handler());
+    #[cfg(not(target_os = "macos"))]
+    let renderer = None;
+    let mut app = MewCefHelperApp::new(renderer);
     execute_process(
         Some(args.as_main_args()),
         Some(&mut app),
@@ -46,10 +50,29 @@ fn main() {
     );
 }
 
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn renderer_callbacks_share_the_handler_that_received_app_origins() {
+        let app = MewCefHelperApp::new(Some(mew_cef_host::app_bridge::render_process_handler()));
+        let first = app.render_process_handler().unwrap();
+        let next = app.render_process_handler().unwrap();
+        assert_eq!(first.get_raw(), next.get_raw());
+    }
+}
+
 wrap_app! {
-    struct MewCefHelperApp;
+    struct MewCefHelperApp {
+        renderer: Option<RenderProcessHandler>,
+    }
 
     impl App {
+        fn render_process_handler(&self) -> Option<RenderProcessHandler> {
+            self.renderer.clone()
+        }
+
         fn on_before_command_line_processing(
             &self,
             _process_type: Option<&cef::CefString>,

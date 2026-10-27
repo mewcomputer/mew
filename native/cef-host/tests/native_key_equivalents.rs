@@ -153,7 +153,82 @@ fn main() {
         dispatch("v", command | extra);
         assert_eq!((native.state(), host.state()), (0, 1));
     }
-    println!("native key equivalents: all responder ownership checks passed");
+    native_browser_accessibility(mtm);
+    println!("native key equivalents and browser accessibility: all checks passed");
+}
+
+#[cfg(target_os = "macos")]
+fn native_browser_accessibility(mtm: objc2::MainThreadMarker) {
+    use objc2::{MainThreadOnly, msg_send, rc::Retained, runtime::NSObject};
+    use objc2_app_kit::{NSBackingStoreType, NSButton, NSView, NSWindow, NSWindowStyleMask};
+    use objc2_foundation::{NSArray, NSPoint, NSRect, NSSize};
+
+    let bounds = NSRect::new(NSPoint::ZERO, NSSize::new(200., 200.));
+    let window = unsafe {
+        NSWindow::initWithContentRect_styleMask_backing_defer(
+            NSWindow::alloc(mtm),
+            bounds,
+            NSWindowStyleMask::Borderless,
+            NSBackingStoreType::Buffered,
+            false,
+        )
+    };
+    let host = NSView::new(mtm);
+    host.setFrame(bounds);
+    window.setContentView(Some(&host));
+    let chrome = NSButton::new(mtm);
+    host.addSubview(&chrome);
+    // AppKit's explicit children list represents a host that owns its AX tree.
+    let declared = NSArray::<NSObject>::from_slice(&[&chrome]);
+    unsafe {
+        let _: () = msg_send![&*host, setAccessibilityChildren: &*declared];
+    }
+    let children =
+        || -> Retained<NSArray<NSObject>> { unsafe { msg_send![&*host, accessibilityChildren] } };
+    assert!(children().containsObject(&chrome));
+
+    let app = NSView::new(mtm);
+    app.setFrame(bounds);
+    host.addSubview(&app);
+    let composer = NSButton::new(mtm);
+    composer.setFrame(bounds);
+    app.addSubview(&composer);
+    let composer_node: Retained<NSObject> = unsafe { msg_send![&*composer, cell] };
+    assert!(!children().containsObject(&composer_node));
+    mew_cef_host::mac::register_browser_view(&app);
+    mew_cef_host::mac::register_browser_view(&app);
+    assert!(children().containsObject(&chrome));
+    assert!(
+        children().containsObject(&composer_node),
+        "native app controls must join the host AX tree"
+    );
+
+    let external = NSView::new(mtm);
+    external.setFrame(bounds);
+    host.addSubview(&external);
+    let page_control = NSButton::new(mtm);
+    page_control.setFrame(bounds);
+    external.addSubview(&page_control);
+    let page_node: Retained<NSObject> = unsafe { msg_send![&*page_control, cell] };
+    mew_cef_host::mac::register_browser_view(&external);
+    assert_eq!(
+        children().count(),
+        3,
+        "app and browser siblings must both be accessible, without duplicates"
+    );
+    external.setHidden(true);
+    assert!(children().containsObject(&composer_node));
+    assert!(
+        !children().containsObject(&page_node),
+        "hidden native pages must leave the AX tree"
+    );
+    app.removeFromSuperview();
+    assert_eq!(
+        children().count(),
+        1,
+        "detached pages must leave the AX tree even while retained"
+    );
+    assert!(children().containsObject(&chrome));
 }
 
 #[cfg(not(target_os = "macos"))]

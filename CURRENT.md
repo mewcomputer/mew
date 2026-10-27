@@ -3703,3 +3703,22 @@ until the complete baseline is accepted.
 Verified the checklist's repository links and desktop recipe dry runs. The
 inventory distinguishes inspected coverage from acceptance performed; unchecked
 items do not imply replacement parity.
+
+## 2026-10-27: embedded UI assets and trusted CEF application page
+
+Extracted the web bridge's embedded asset serving into its library so the
+desktop can serve the same compiled React assets from an ephemeral loopback
+listener. Added a CEF application-page binding restricted to its exact browser,
+main frame and local origin, with cancellable one-shot replies and a separate
+request context. External pages cannot use the binding or replace the app.
+Renderer handlers are retained across callbacks. Hidden-page updates preserve
+the active browser, and the native accessibility tree composes visible CEF roots
+with the host's existing children.
+
+Verified real TCP asset/bridge tests, 11 browser-host tests, 14 supervisor tests,
+19 CEF library tests plus the helper lifetime test, and the real hidden AppKit
+editing/accessibility harness. One existing opt-in CEF parser test remains
+ignored without its runtime environment. Strict workspace Clippy, formatting
+and architecture checks passed. The package opened the React app through the
+native binding and displayed a real external browser page; final native window
+acceptance is recorded separately from these component checks.

@@ -21,17 +21,12 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::Parser;
 use futures::{SinkExt, StreamExt};
-use include_dir::{include_dir, Dir};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use mew_web_bridge::serve_http;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UnixStream};
 use tokio_tungstenite::tungstenite::{client::ClientRequestBuilder, protocol::WebSocketConfig};
 use tokio_tungstenite::{client_async_with_config, WebSocketStream};
 use tracing::{error, info, warn};
-
-/// The built React app, embedded at compile time from `mew-web-ui/dist/`.
-/// Run `pnpm --filter mew-web-ui build` (or `just build-web`) to regenerate.
-/// Vite hashes asset filenames, so we serve them dynamically by path.
-static UI_DIST: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../../mew-web-ui/dist");
 
 #[derive(Parser, Debug)]
 #[command(name = "mew-web", about = "WebSocket bridge + chat UI for mew daemon")]
@@ -151,87 +146,6 @@ async fn peek_request<R: tokio::io::AsyncBufRead + Unpin>(
         .to_string();
     Ok(Some(s))
 }
-
-/// Serve a static HTTP response for a non-WS GET request, pulling files
-/// from the embedded `mew-web-ui/dist/` directory. SPA fallback: any
-/// unknown path serves `index.html` so client-side routing works.
-async fn serve_http(mut stream: TcpStream, method: &str, path: &str) -> Result<()> {
-    if method != "GET" {
-        let body = "Method Not Allowed";
-        let resp = format!(
-            "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: {}\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        stream.write_all(resp.as_bytes()).await?;
-        stream.shutdown().await?;
-        return Ok(());
-    }
-
-    // Strip query string, normalize path.
-    let clean_path = path.split('?').next().unwrap_or("/");
-    // Trim leading '/' and the optional leading slash.
-    let rel = clean_path.trim_start_matches('/');
-
-    // Try to find the file in the embedded dist directory.
-    let (bytes, mime) = if rel.is_empty() {
-        // "/" → index.html
-        (index_html_bytes(), "text/html; charset=utf-8")
-    } else if let Some(file) = UI_DIST.get_file(rel) {
-        (file.contents(), mime_type(rel))
-    } else {
-        // SPA fallback: serve index.html for unknown paths so client-side
-        // routing (TanStack Router) handles them.
-        (index_html_bytes(), "text/html; charset=utf-8")
-    };
-
-    let resp = format!(
-        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: {}\r\nCache-Control: no-cache\r\n\r\n",
-        bytes.len(),
-        mime
-    );
-    stream.write_all(resp.as_bytes()).await?;
-    stream.write_all(bytes).await?;
-    stream.shutdown().await?;
-    Ok(())
-}
-
-/// Get the bytes of `index.html` from the embedded dist directory.
-fn index_html_bytes() -> &'static [u8] {
-    UI_DIST
-        .get_file("index.html")
-        .map(|f| f.contents())
-        .unwrap_or(FALLBACK_INDEX_HTML)
-}
-
-/// Map a file extension to a MIME type. Covers all the asset types Vite
-/// produces for a React app (JS, CSS, fonts, SVG, images, source maps).
-fn mime_type(path: &str) -> &'static str {
-    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
-    match ext.as_str() {
-        "html" => "text/html; charset=utf-8",
-        "js" | "mjs" => "application/javascript; charset=utf-8",
-        "css" => "text/css; charset=utf-8",
-        "json" => "application/json; charset=utf-8",
-        "svg" => "image/svg+xml",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "ico" => "image/x-icon",
-        "woff" => "font/woff",
-        "woff2" => "font/woff2",
-        "ttf" => "font/ttf",
-        "otf" => "font/otf",
-        "eot" => "application/vnd.ms-fontobject",
-        "map" => "application/json; charset=utf-8",
-        "txt" => "text/plain; charset=utf-8",
-        _ => "application/octet-stream",
-    }
-}
-
-/// Minimal fallback if index.html is somehow missing from the dist.
-const FALLBACK_INDEX_HTML: &[u8] = b"<!DOCTYPE html><html><body><h1>mew-web</h1><p>UI not built. Run <code>just build-web</code>.</p></body></html>";
 
 /// Connect to the daemon over a Unix socket and perform the client-side
 /// WebSocket handshake.
@@ -444,12 +358,3 @@ async fn main() -> Result<()> {
         });
     }
 }
-
-// ---------------------------------------------------------------------------
-// Embedded UI assets
-// ---------------------------------------------------------------------------
-//
-// The built React app is embedded via `include_dir!` (see UI_DIST above).
-// The dist is produced by `pnpm --filter mew-web-ui build` (a.k.a. `just
-// build-web`). Vite hashes asset filenames (e.g. `index-BNDoaku_.js`), so
-// we serve them dynamically by path lookup rather than hardcoded constants.

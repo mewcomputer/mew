@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+pub use crate::app_bridge::{AppRequestHandler, AppResponse};
+
 #[derive(Clone, Debug)]
 pub enum BrowserEvent {
     Closed,
@@ -25,13 +27,21 @@ pub type BrowserEventCallback = Arc<dyn Fn(BrowserEvent) + Send + Sync + 'static
 
 #[cfg(target_os = "macos")]
 mod mac_impl {
-    use super::{BrowserEvent, BrowserEventCallback};
-    use crate::mac;
+    use super::{AppRequestHandler, AppResponse, BrowserEvent, BrowserEventCallback};
+    use crate::{
+        app_bridge::{APP_URL_KEY, QueryResponse, TrustedAppOrigin, router_config},
+        mac,
+    };
+    use cef::wrapper::message_router::{
+        BrowserSideCallback, BrowserSideHandler, BrowserSideRouter, MessageRouterBrowserSide,
+        MessageRouterBrowserSideHandlerCallbacks,
+    };
     use cef::*;
     use objc2::sel;
     use objc2_app_kit::{NSResponder, NSView};
     use objc2_foundation::{NSObjectNSDelayedPerforming, NSPoint, NSRect, NSSize};
     use std::{
+        collections::HashMap,
         ffi::{CString, c_void},
         os::unix::ffi::OsStrExt,
         path::PathBuf,
@@ -91,6 +101,14 @@ mod mac_impl {
         native_view: AtomicUsize,
         closed: AtomicBool,
         browser_event: BrowserEventCallback,
+        app: Option<AppPage>,
+    }
+
+    struct AppPage {
+        origin: TrustedAppOrigin,
+        handler: AppRequestHandler,
+        router: Arc<BrowserSideRouter>,
+        pending: Mutex<HashMap<i64, Weak<QueryResponse>>>,
     }
 
     // CEF objects are only touched from the macOS main thread. Page controllers
@@ -117,6 +135,7 @@ mod mac_impl {
                 native_view: AtomicUsize::new(0),
                 closed: AtomicBool::new(false),
                 browser_event,
+                app: None,
             }
         }
 
@@ -132,6 +151,13 @@ mod mac_impl {
 
         fn navigate(&self, url: &str) {
             if self.closed.load(Ordering::Acquire) {
+                return;
+            }
+            if self
+                .app
+                .as_ref()
+                .is_some_and(|app| !app.origin.allows_navigation(url))
+            {
                 return;
             }
 
@@ -151,6 +177,7 @@ mod mac_impl {
 
         fn close(&self) {
             self.closed.store(true, Ordering::Release);
+            self.cancel_app_requests();
             if !self.runtime.initialized.load(Ordering::Acquire) {
                 return;
             }
@@ -162,12 +189,97 @@ mod mac_impl {
             if let Ok(mut registration) = self.devtools_registration.lock() {
                 *registration = None;
             }
+            if let Some(app) = &self.app {
+                app.router.on_before_close(browser.clone());
+            }
             if let Some(browser) = browser
                 && let Some(host) = browser.host()
             {
                 host.close_browser(1);
             }
             self.native_view.store(0, Ordering::Release);
+        }
+
+        fn cancel_app_requests(&self) {
+            if let Some(app) = &self.app
+                && let Ok(mut pending) = app.pending.lock()
+            {
+                for response in pending
+                    .drain()
+                    .filter_map(|(_, response)| response.upgrade())
+                {
+                    response.cancel();
+                }
+            }
+        }
+
+        fn accepts_app_frame(&self, browser: &Browser, frame: &Frame) -> bool {
+            let Some(app) = &self.app else { return false };
+            if !self.accepts_callbacks() {
+                return false;
+            }
+            let expected = self
+                .browser
+                .lock()
+                .ok()
+                .and_then(|browser| browser.as_ref().map(|browser| browser.identifier()))
+                .unwrap_or_default();
+            app.origin.allows_frame(
+                expected,
+                browser.identifier(),
+                frame.is_main() != 0,
+                &CefString::from(&frame.url()).to_string(),
+            )
+        }
+    }
+
+    struct AppQueryHandler(Weak<PageState>);
+
+    impl BrowserSideHandler for AppQueryHandler {
+        fn on_query_str(
+            &self,
+            browser: Option<Browser>,
+            frame: Option<Frame>,
+            query_id: i64,
+            request: &str,
+            persistent: bool,
+            callback: Arc<Mutex<dyn BrowserSideCallback>>,
+        ) -> bool {
+            let (Some(page), Some(browser), Some(frame)) = (self.0.upgrade(), browser, frame)
+            else {
+                return false;
+            };
+            if persistent || !page.accepts_app_frame(&browser, &frame) {
+                return false;
+            }
+            let Some(app) = &page.app else { return false };
+            let response = AppResponse::new(callback);
+            if let Ok(mut pending) = app.pending.lock() {
+                pending.retain(|_, response| response.strong_count() > 0);
+                pending.insert(query_id, response.downgrade());
+            } else {
+                response.failure(-1, "app requests are unavailable");
+                return true;
+            }
+            (app.handler)(request, response);
+            true
+        }
+
+        fn on_query_canceled(
+            &self,
+            _browser: Option<Browser>,
+            _frame: Option<Frame>,
+            query_id: i64,
+        ) {
+            if let Some(page) = self.0.upgrade()
+                && let Some(app) = &page.app
+                && let Ok(mut pending) = app.pending.lock()
+                && let Some(response) = pending
+                    .remove(&query_id)
+                    .and_then(|response| response.upgrade())
+            {
+                response.cancel();
+            }
         }
     }
 
@@ -209,7 +321,10 @@ mod mac_impl {
             let configured_port = std::env::var("MEW_CEF_DEBUG_PORT").ok();
             let debug_port = resolve_debug_port(configured_port.as_deref())?;
             let state = Arc::new(RuntimeState::new(format!("http://127.0.0.1:{debug_port}")));
-            let app = Box::leak(Box::new(MewCefApp::new(state.clone())));
+            let app = Box::leak(Box::new(MewCefApp::new(
+                state.clone(),
+                crate::app_bridge::render_process_handler(),
+            )));
             let cache_dir = cache_dir();
             std::fs::create_dir_all(&cache_dir)
                 .map_err(|_| "failed to create the CEF cache directory".to_owned())?;
@@ -287,6 +402,39 @@ mod mac_impl {
                 self.state.clone(),
                 browser_event,
             ));
+            self.schedule_page(state)
+        }
+
+        pub fn create_app_page(
+            &self,
+            parent_view: usize,
+            url: &str,
+            browser_event: BrowserEventCallback,
+            app_request_handler: AppRequestHandler,
+        ) -> Result<CefPageController, String> {
+            if !self.state.initialized.load(Ordering::Acquire) {
+                return Err("CEF runtime is not initialized".into());
+            }
+            let origin = TrustedAppOrigin::new(url)?;
+            let router = BrowserSideRouter::new(router_config());
+            let mut state = PageState::new(parent_view, url, self.state.clone(), browser_event);
+            state.app = Some(AppPage {
+                origin,
+                handler: app_request_handler,
+                router: router.clone(),
+                pending: Mutex::new(HashMap::new()),
+            });
+            let state = Arc::new(state);
+            if router
+                .add_handler(Arc::new(AppQueryHandler(Arc::downgrade(&state))), true)
+                .is_none()
+            {
+                return Err("CEF could not register the app query handler".into());
+            }
+            self.schedule_page(state)
+        }
+
+        fn schedule_page(&self, state: Arc<PageState>) -> Result<CefPageController, String> {
             self.state
                 .pages
                 .lock()
@@ -325,6 +473,11 @@ mod mac_impl {
         /// disarms all pages without invoking CEF and lets the OS reclaim them.
         pub fn prepare_for_process_exit(&mut self) {
             self.state.initialized.store(false, Ordering::Release);
+            if let Ok(pages) = self.state.pages.lock() {
+                for page in pages.iter().filter_map(Weak::upgrade) {
+                    page.cancel_app_requests();
+                }
+            }
             self.owns_runtime = false;
         }
 
@@ -353,6 +506,22 @@ mod mac_impl {
 
         pub fn navigate_on_main_thread(&self, url: &str) {
             self.state.navigate(url);
+        }
+
+        /// Dispatch host events only to the trusted application document.
+        pub fn execute_javascript_on_main_thread(&self, script: &str) {
+            let browser = self
+                .state
+                .browser
+                .lock()
+                .ok()
+                .and_then(|browser| browser.clone());
+            if let Some(browser) = browser
+                && let Some(frame) = browser.main_frame()
+                && self.state.accepts_app_frame(&browser, &frame)
+            {
+                frame.execute_java_script(Some(&CefString::from(script)), None, 0);
+            }
         }
 
         pub fn set_visible_on_main_thread(&self, visible: bool) {
@@ -443,13 +612,32 @@ mod mac_impl {
             WindowInfo::default().set_as_child(state.parent_view as *mut c_void, &bounds);
         window_info.hidden = 1;
         let settings = BrowserSettings::default();
+        let mut extra_info = None;
+        let mut request_context = None;
+        if state.app.is_some() {
+            extra_info = dictionary_value_create();
+            if let Some(info) = extra_info.as_mut() {
+                info.set_string(
+                    Some(&CefString::from(APP_URL_KEY)),
+                    Some(&CefString::from(state.initial_url.as_str())),
+                );
+            }
+            request_context =
+                request_context_create_context(Some(&RequestContextSettings::default()), None);
+            if extra_info.is_none() || request_context.is_none() {
+                state.emit(BrowserEvent::Error {
+                    message: "CEF could not isolate the app page".into(),
+                });
+                return;
+            }
+        }
         if browser_host_create_browser(
             Some(&window_info),
             client.as_mut(),
             Some(&CefString::from(state.initial_url.as_str())),
             Some(&settings),
-            None,
-            None,
+            extra_info.as_mut(),
+            request_context.as_mut(),
         ) == 0
         {
             state.emit(BrowserEvent::Error {
@@ -488,7 +676,8 @@ mod mac_impl {
         }
 
         let helper_state = Arc::new(RuntimeState::new(String::new()));
-        let mut helper_app = MewCefApp::new(helper_state);
+        let mut helper_app =
+            MewCefApp::new(helper_state, crate::app_bridge::render_process_handler());
         let exit_code = cef::execute_process(
             Some(args.as_main_args()),
             Some(&mut helper_app),
@@ -636,6 +825,7 @@ mod mac_impl {
     wrap_app! {
         struct MewCefApp {
             state: Arc<RuntimeState>,
+            renderer: RenderProcessHandler,
         }
 
         impl App {
@@ -664,6 +854,10 @@ mod mac_impl {
 
             fn browser_process_handler(&self) -> Option<BrowserProcessHandler> {
                 Some(MewBrowserProcessHandler::new(self.state.clone()))
+            }
+
+            fn render_process_handler(&self) -> Option<RenderProcessHandler> {
+                Some(self.renderer.clone())
             }
         }
     }
@@ -698,6 +892,70 @@ mod mac_impl {
 
             fn display_handler(&self) -> Option<DisplayHandler> {
                 Some(MewDisplayHandler::new(self.state.clone()))
+            }
+
+            fn request_handler(&self) -> Option<RequestHandler> {
+                self.state.app.as_ref().map(|_| MewAppRequestHandler::new(self.state.clone()))
+            }
+
+            fn on_process_message_received(
+                &self, browser: Option<&mut Browser>, frame: Option<&mut Frame>,
+                source_process: ProcessId, message: Option<&mut ProcessMessage>,
+            ) -> i32 {
+                let Some(app) = &self.state.app else { return 0 };
+                if source_process != ProcessId::RENDERER
+                    || !browser.as_ref().zip(frame.as_ref()).is_some_and(|(browser, frame)| self.state.accepts_app_frame(browser, frame))
+                {
+                    return 0;
+                }
+                i32::from(app.router.on_process_message_received(browser.cloned(), frame.cloned(), source_process, message.cloned()))
+            }
+        }
+    }
+
+    wrap_request_handler! {
+        struct MewAppRequestHandler {
+            state: Arc<PageState>,
+        }
+
+        impl RequestHandler {
+            fn on_before_browse(
+                &self, browser: Option<&mut Browser>, frame: Option<&mut Frame>,
+                request: Option<&mut Request>, _user_gesture: i32, _is_redirect: i32,
+            ) -> i32 {
+                let Some(app) = &self.state.app else { return 0 };
+                if !self.state.accepts_callbacks() {
+                    return 1;
+                }
+                let Some(frame) = frame else { return 1 };
+                if frame.is_main() != 0 {
+                    let allowed = request.as_ref().is_some_and(|request| {
+                        app.origin.allows_navigation(&CefString::from(&request.url()).to_string())
+                    });
+                    if !allowed {
+                        return 1;
+                    }
+                    self.state.cancel_app_requests();
+                }
+                app.router.on_before_browse(browser.cloned(), Some(frame.clone()));
+                0
+            }
+
+            fn on_open_urlfrom_tab(
+                &self, _browser: Option<&mut Browser>, _frame: Option<&mut Frame>,
+                _target_url: Option<&CefString>, _target_disposition: WindowOpenDisposition, _user_gesture: i32,
+            ) -> i32 {
+                1
+            }
+
+            fn on_render_process_terminated(
+                &self, browser: Option<&mut Browser>, _status: TerminationStatus, _error_code: i32, _error_string: Option<&CefString>,
+            ) {
+                self.state.cancel_app_requests();
+                if let Some(app) = &self.state.app {
+                    app.router.on_render_process_terminated(browser.cloned());
+                }
+                self.state.emit(BrowserEvent::Error { message: "the app renderer stopped".into() });
             }
         }
     }
@@ -756,6 +1014,9 @@ mod mac_impl {
                 _client: Option<&mut Option<Client>>, _settings: Option<&mut BrowserSettings>,
                 _extra_info: Option<&mut Option<DictionaryValue>>, _no_javascript_access: Option<&mut i32>,
             ) -> i32 {
+                if self.state.app.is_some() {
+                    return 1;
+                }
                 // A popup must not replace the opener's native handle or target.
                 if self.state.accepts_callbacks()
                     && let Some(units) = target_url.and_then(CefString::as_slice) {
@@ -782,6 +1043,9 @@ mod mac_impl {
                     frame.load_url(Some(&CefString::from(url.as_str())));
                 }
                 if let Some(host) = browser.host() {
+                    if self.state.app.is_some() {
+                        host.set_accessibility_state(State::ENABLED);
+                    }
                     let handle = host.window_handle() as usize;
                     self.state.native_view.store(handle, Ordering::Release);
                     // The browser is created before GPUI has had a chance to
@@ -825,7 +1089,11 @@ mod mac_impl {
                 1
             }
 
-            fn on_before_close(&self, _browser: Option<&mut Browser>) {
+            fn on_before_close(&self, browser: Option<&mut Browser>) {
+                self.state.cancel_app_requests();
+                if let Some(app) = &self.state.app {
+                    app.router.on_before_close(browser.cloned());
+                }
                 self.state.emit(BrowserEvent::Closed);
                 self.state.closed.store(true, Ordering::Release);
                 self.state.native_view.store(0, Ordering::Release);
@@ -1033,6 +1301,127 @@ mod mac_impl {
             assert!(page.pending_navigation.lock().unwrap().is_none());
         }
 
+        fn app_page(runtime: Arc<RuntimeState>) -> PageState {
+            use cef::wrapper::message_router::{BrowserSideRouter, MessageRouterBrowserSide};
+            let mut page = PageState::new(0, "http://127.0.0.1:8080/", runtime, Arc::new(|_| {}));
+            page.app = Some(super::AppPage {
+                origin: crate::app_bridge::TrustedAppOrigin::new(&page.initial_url).unwrap(),
+                handler: Arc::new(|_, _| panic!("no native query was sent")),
+                router: BrowserSideRouter::new(crate::app_bridge::router_config()),
+                pending: Default::default(),
+            });
+            page
+        }
+
+        #[test]
+        fn app_popups_and_external_navigation_cannot_replace_the_app() {
+            let runtime = Arc::new(RuntimeState::new("http://127.0.0.1:1".into()));
+            runtime.initialized.store(true, Ordering::Release);
+            let page = Arc::new(app_page(runtime));
+            let handler = super::MewLifeSpanHandler::new(page.clone());
+            assert_eq!(request_popup(&handler, Some("https://example.com/")), 1);
+            assert_eq!(request_popup(&handler, Some("http://127.0.0.1:8080/")), 1);
+            assert!(page.pending_navigation.lock().unwrap().is_none());
+            page.navigate("https://example.com/");
+            page.navigate("http://127.0.0.1:8081/");
+            assert!(page.pending_navigation.lock().unwrap().is_none());
+            page.navigate("http://127.0.0.1:8080/chat/42");
+            assert_eq!(
+                page.pending_navigation.lock().unwrap().as_deref(),
+                Some("http://127.0.0.1:8080/chat/42")
+            );
+        }
+
+        #[test]
+        fn app_navigation_without_a_frame_is_rejected() {
+            use cef::ImplRequestHandler;
+            let runtime = Arc::new(RuntimeState::new("http://127.0.0.1:1".into()));
+            runtime.initialized.store(true, Ordering::Release);
+            let handler = super::MewAppRequestHandler::new(Arc::new(app_page(runtime)));
+            assert_eq!(handler.on_before_browse(None, None, None, 0, 0), 1);
+        }
+
+        #[test]
+        fn embedded_subprocess_keeps_the_same_renderer_handler() {
+            use cef::{ImplApp, ImplRenderProcessHandler};
+            let runtime = Arc::new(RuntimeState::new(String::new()));
+            let app = super::MewCefApp::new(runtime, crate::app_bridge::render_process_handler());
+            let first = app.render_process_handler().unwrap();
+            let next = app.render_process_handler().unwrap();
+            assert_eq!(first.get_raw(), next.get_raw());
+        }
+
+        #[test]
+        fn denied_app_links_do_not_report_a_runtime_failure() {
+            use cef::ImplRequestHandler;
+            let runtime = Arc::new(RuntimeState::new("http://127.0.0.1:1".into()));
+            runtime.initialized.store(true, Ordering::Release);
+            let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let captured = events.clone();
+            let mut page = app_page(runtime);
+            page.browser_event = Arc::new(move |event| captured.lock().unwrap().push(event));
+            let page = Arc::new(page);
+            page.navigate("https://example.com/");
+            let popup = super::MewLifeSpanHandler::new(page.clone());
+            assert_eq!(request_popup(&popup, Some("https://example.com/")), 1);
+            let request = super::MewAppRequestHandler::new(page.clone());
+            assert_eq!(
+                request.on_open_urlfrom_tab(
+                    None,
+                    None,
+                    None,
+                    cef::WindowOpenDisposition::NEW_FOREGROUND_TAB,
+                    1
+                ),
+                1
+            );
+            assert!(events.lock().unwrap().is_empty());
+            assert!(page.pending_navigation.lock().unwrap().is_none());
+            assert!(page.accepts_callbacks());
+        }
+
+        #[test]
+        fn closing_an_uncreated_app_page_disarms_its_pending_response() {
+            use cef::wrapper::message_router::BrowserSideCallback;
+            struct Replies(Arc<AtomicUsize>);
+            impl BrowserSideCallback for Replies {
+                fn success_str(&self, _: &str) {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                }
+                fn success_binary(&self, _: &[u8]) {
+                    panic!("not a binary bridge");
+                }
+                fn failure(&self, _: i32, _: &str) {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            let runtime = Arc::new(RuntimeState::new("http://127.0.0.1:1".into()));
+            let page = app_page(runtime);
+            let replies = Arc::new(AtomicUsize::new(0));
+            let response =
+                super::AppResponse::new(Arc::new(std::sync::Mutex::new(Replies(replies.clone()))));
+            page.app
+                .as_ref()
+                .unwrap()
+                .pending
+                .lock()
+                .unwrap()
+                .insert(7, response.downgrade());
+            page.close();
+            response.success("stale");
+            drop(response);
+            assert_eq!(replies.load(Ordering::Relaxed), 0);
+            assert!(
+                page.app
+                    .as_ref()
+                    .unwrap()
+                    .pending
+                    .lock()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+
         #[test]
         fn closing_an_embedded_page_never_requests_the_parent_window_close() {
             let runtime = Arc::new(RuntimeState::new("http://127.0.0.1:1".into()));
@@ -1135,7 +1524,7 @@ pub use mac_impl::{
 
 #[cfg(not(target_os = "macos"))]
 mod non_macos {
-    use super::BrowserEventCallback;
+    use super::{AppRequestHandler, BrowserEventCallback};
 
     #[derive(Clone, Copy, Debug)]
     pub struct BrowserRect {
@@ -1161,6 +1550,15 @@ mod non_macos {
         ) -> Result<CefPageController, String> {
             Err("native browser is unavailable on this platform".into())
         }
+        pub fn create_app_page(
+            &self,
+            _parent_view: usize,
+            _url: &str,
+            _event: BrowserEventCallback,
+            _handler: AppRequestHandler,
+        ) -> Result<CefPageController, String> {
+            Err("native app pages are unavailable on this platform".into())
+        }
         pub fn shutdown(&mut self) {}
         pub fn prepare_for_process_exit(&mut self) {}
         pub fn do_message_loop_work() {}
@@ -1175,6 +1573,7 @@ mod non_macos {
             false
         }
         pub fn navigate_on_main_thread(&self, _url: &str) {}
+        pub fn execute_javascript_on_main_thread(&self, _script: &str) {}
         pub fn close(&self) {}
     }
 
