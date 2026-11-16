@@ -3765,6 +3765,77 @@ fn subagent_with_real_runner(
 }
 
 #[tokio::test]
+async fn collected_subagent_result_excludes_narration_but_preserves_child_history() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut progress = FakeProvider::text_response("checking the repository");
+    progress.pop();
+    progress.extend(FakeProvider::tool_call(
+        "progress_update",
+        "child-progress",
+        serde_json::json!({"message": "checking"}),
+    ));
+    let (agent, _) = subagent_with_real_runner(
+        tmp.path(),
+        vec![progress, FakeProvider::text_response("the final result")],
+        vec![Arc::new(mew_tools::tools::progress_update::ProgressUpdate)],
+        tmp.path().to_path_buf(),
+        vec![],
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let task = agent
+        .start_subagent("worker", "inspect", None, None, &tx)
+        .await
+        .unwrap();
+    let mut child_id = None;
+    let mut streamed = String::new();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(event) = rx.recv().await {
+            match event {
+                AgentEvent::SubagentStart {
+                    child_session_id, ..
+                } => child_id = Some(child_session_id),
+                AgentEvent::SubagentProgress { child_event, .. } => {
+                    if let AgentEvent::Provider(ProviderEvent::PartDelta {
+                        field: "text",
+                        delta,
+                        ..
+                    }) = *child_event
+                    {
+                        streamed.push_str(&delta);
+                    }
+                }
+                AgentEvent::SubagentEnd { .. } => break,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("child did not finish");
+    let (result, _) = agent.wait_subagent(&task).await.unwrap();
+    assert!(
+        matches!(result, mew_subagents::SubagentResult::Complete { text, .. } if text == "the final result")
+    );
+    assert_eq!(streamed, "checking the repositorythe final result");
+    let child_root = tmp
+        .path()
+        .join(agent.session_id.to_string())
+        .join("subagents");
+    let history = mew_session::Reader::load_from(&child_root, &child_id.unwrap())
+        .await
+        .unwrap();
+    let child_text: Vec<_> = history
+        .iter()
+        .flat_map(|message| &message.parts)
+        .filter_map(|part| match part {
+            Part::Text(text) if !text.synthetic => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(child_text.contains(&"checking the repository"));
+    assert!(child_text.contains(&"the final result"));
+}
+
+#[tokio::test]
 async fn subagent_start_preserves_child_progress_text_and_tool_events() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (agent, _provider) = subagent_with_real_runner(
