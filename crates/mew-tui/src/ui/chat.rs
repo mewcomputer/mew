@@ -581,8 +581,8 @@ pub(crate) fn build_chat_lines(
                     // Render each tool call individually (the original
                     // inline rendering path). For a single tool call, this
                     // is identical to the old behavior.
-                    for i in run_start..run_end {
-                        let tc = if let Part::ToolCall(tc) = &msg.parts[i] {
+                    for part in &msg.parts[run_start..run_end] {
+                        let tc = if let Part::ToolCall(tc) = part {
                             tc
                         } else {
                             unreachable!()
@@ -1929,6 +1929,54 @@ mod tests {
             }),
             raw_input: String::new(),
         }
+    }
+
+    #[test]
+    fn expanded_tool_batch_renders_each_call_in_order() {
+        use mew_message::{Message, Part, Role};
+
+        let mut app = App::new();
+        let first = tool_call_part("read", serde_json::json!({ "path": "alpha.txt" }));
+        let second = tool_call_part("grep", serde_json::json!({ "pattern": "beta" }));
+        let third = tool_call_part("glob", serde_json::json!({ "pattern": "gamma*" }));
+        app.tool_batch_expanded.insert(first.base.id);
+        app.push_message(Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: Role::Assistant,
+            parts: vec![
+                Part::ToolCall(first),
+                Part::ToolCall(second),
+                Part::ToolCall(third),
+            ],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        });
+
+        let built = build_chat_lines(&mut app, 78, 80);
+        let rendered = built
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let positions: Vec<_> = ["alpha.txt", "'beta'", "gamma*"]
+            .iter()
+            .map(|text| {
+                rendered
+                    .find(text)
+                    .expect("tool arguments should be visible")
+            })
+            .collect();
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     #[test]

@@ -2331,3 +2331,11 @@ building. This avoids the bundled downloader's outdated index size limit.
 
 The actual Linux and macOS archives passed checksum and extraction checks; the
 macOS SDK also built the CEF host with locked dependencies.
+
+### 2026-11-16: fix Rust 1.100 clippy failures
+
+The terminal chat renderer and desktop selection copier iterate over their rows
+without indexing range loops, preserving the original ordering and bounds.
+
+Workspace Clippy passed with Rust 1.100 and Zig 0.15.2. The expanded tool batch
+rendering regression and all 154 desktop tests passed.
