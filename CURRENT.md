@@ -2314,3 +2314,12 @@ helper reports 0.34.0 and matches the workflow's pinned SHA256. CEF reports
 executables and property lists passed verification. Build dependencies stayed in
 task caches; global tools were not replaced. The app was not launched, leaving
 focus, browser ownership and terminal interaction for the requested live pass.
+
+### 2026-11-16: make Rust dependency resolution reproducible
+
+The workspace now tracks Cargo.lock and CI uses locked resolution. This keeps
+fff-search's debouncer on its compatible notify prerelease rather than picking
+an incompatible newer prerelease in a clean checkout.
+
+The locked workspace passed Clippy, and mew-tools tests passed, including its
+search integration tests. Cargo metadata also verified the lockfile is current.

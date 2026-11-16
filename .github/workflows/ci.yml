@@ -65,10 +65,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: cargo clippy
-        run: cargo clippy --all -- -D warnings
+        run: cargo clippy --locked --all -- -D warnings
 
       - name: cargo test
-        run: cargo test --all
+        run: cargo test --locked --all
 
   web-ci:
     name: Web UI + Client typecheck
