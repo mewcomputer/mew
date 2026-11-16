@@ -100,7 +100,7 @@ Be direct and specific. Reference file paths and line numbers.
 | `tools` | no | Tool allowlist. Inherits all tools if omitted |
 | `model` | no | Pin a `provider/model` pair, or use tier keywords (`micro`, `deci`) when the active provider is a router |
 | `max_turns` | no | Maximum turns before stopping (default: 500) |
-| `max_duration_secs` | no | Wall-clock cap in seconds (default: 300) |
+| `max_duration_secs` | no | Time limit in seconds (default: 600) |
 | `template` | no | When `true`, render the body through minijinja before using it as the system prompt |
 
 ### System prompt composition
@@ -149,10 +149,13 @@ Subagent runs are bounded by two caps:
 - **Turn cap** (`max_turns`, default 500): the subagent stops after this
   many turns, even if it hasn't produced a final answer. The result is
   marked as possibly incomplete.
-- **Time cap** (`max_duration_secs`, default 300 seconds / 5 minutes):
-  the subagent is cancelled if it exceeds this wall-clock duration.
+- **Time cap** (`max_duration_secs`, default 600 seconds / 10 minutes):
+  elapsed time is checked after each provider message, and the subagent stops
+  when the limit is reached. A stalled message can exceed the limit.
 
-Both can be overridden per subagent in the frontmatter.
+Both can be overridden per subagent in the frontmatter. The default time cap can
+also be changed with `[orchestration] default_max_duration_secs`; an explicit
+per-subagent limit takes precedence.
 
 ## Depth limiting
 

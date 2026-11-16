@@ -2357,3 +2357,12 @@ including tests that load multiple plugins. The audit test checks that its
 plugin started and looks for an entry from its own session.
 
 The broker integration test compiled, and the two-plugin collision test passed.
+
+### 2026-11-16: increase the default subagent time limit
+
+Subagents now default to 600 seconds. Built-in agents inherit the configured
+orchestration default, while explicit per-agent limits retain precedence. The
+limit is checked after each provider message, so a stalled message can exceed it.
+
+The mew-agent, mew-config and mew-subagents tests passed, including coverage for
+the default and both override paths. The architecture check passed.

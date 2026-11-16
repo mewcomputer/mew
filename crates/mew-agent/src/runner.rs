@@ -917,6 +917,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn builtin_agents_use_configured_timeout_and_honor_per_agent_override() {
+        let root = tempfile::tempdir().unwrap();
+        for mut def in mew_subagents::Loader::builtin_defaults() {
+            for (override_secs, expected_timeout) in [(None, true), (Some(60), false)] {
+                if let Some(secs) = override_secs {
+                    def.max_duration_secs = Some(secs);
+                }
+                let provider =
+                    Arc::new(ScriptedProvider::new(vec![(Duration::ZERO, turn("done"))]));
+                let runner =
+                    SimpleRunner::new(provider, vec![], Arc::new(mew_hooks::NopDispatcher))
+                        .with_session_root(root.path().to_path_buf())
+                        .with_spawn_policy(vec![], 1, 4, 0);
+                let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+                let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+                let result = runner
+                    .run(SubagentRunOptions {
+                        def: &def,
+                        prompt: "prompt".into(),
+                        parent_call_id: "call".into(),
+                        parent_session_id: SessionId::new(),
+                        event_tx: tx,
+                        cancel: tokio_util::sync::CancellationToken::new(),
+                        model: None,
+                        parent_depth: 0,
+                    })
+                    .await
+                    .unwrap();
+                drain.abort();
+                assert!(
+                    matches!(result, SubagentResult::Complete { hit_time_limit, .. } if hit_time_limit == expected_timeout),
+                    "{} override={override_secs:?}: {result:?}",
+                    def.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn configured_default_matches_runner_default() {
+        assert_eq!(
+            mew_config::OrchestrationConfig::default().default_max_duration_secs,
+            600
+        );
+        assert_eq!(mew_subagents::DEFAULT_MAX_DURATION_SECS, 600);
+    }
+
+    #[tokio::test]
     async fn test_turn_limit_trips_before_time_limit() {
         // 5 turns available, generous time budget.
         let script: Vec<_> = (0..5)
@@ -994,7 +1042,7 @@ mod tests {
     #[tokio::test]
     async fn test_defaults_apply_when_def_omits_both_caps() {
         // No caps on the def. The runner should apply built-in defaults
-        // (500 turns, 300s) — neither will trip on a short script.
+        // (500 turns, 600s) — neither will trip on a short script.
         let script: Vec<_> = (0..2)
             .map(|i| (Duration::from_millis(0), turn(&format!("t{i}"))))
             .collect();
