@@ -2323,3 +2323,11 @@ an incompatible newer prerelease in a clean checkout.
 
 The locked workspace passed Clippy, and mew-tools tests passed, including its
 search integration tests. Cargo metadata also verified the lockfile is current.
+
+### 2026-11-16: provision the CEF SDK for CI
+
+CI now downloads and verifies the CEF SDK matching the locked bindings before
+building. This avoids the bundled downloader's outdated index size limit.
+
+The actual Linux and macOS archives passed checksum and extraction checks; the
+macOS SDK also built the CEF host with locked dependencies.
