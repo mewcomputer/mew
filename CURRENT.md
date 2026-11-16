@@ -2339,3 +2339,13 @@ without indexing range loops, preserving the original ordering and bounds.
 
 Workspace Clippy passed with Rust 1.100 and Zig 0.15.2. The expanded tool batch
 rendering regression and all 154 desktop tests passed.
+
+### 2026-11-16: avoid copying plugin executables in Unix tests
+
+Unix plugin tests now link to the built sample executable instead of copying it
+immediately before launch. This avoids opening each test executable for writing
+while other test processes start, which can make Linux reject exec with ETXTBSY.
+
+All 17 plugin integration and restart tests passed, including 24 concurrent
+launches. A Linux container reproduced ETXTBSY with a held writable descriptor
+and completed 1,600 concurrent launches through symbolic links.

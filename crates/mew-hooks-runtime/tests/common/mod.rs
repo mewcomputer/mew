@@ -54,18 +54,14 @@ pub fn sample_plugin_path() -> PathBuf {
     target
 }
 
-/// Create a temp directory containing a copy of the sample plugin binary.
+/// Create a temp directory containing the sample plugin executable.
 pub fn make_plugin_dir_with_binary() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
     let src = sample_plugin_path();
     let dst = dir.path().join("sample-plugin");
-    std::fs::copy(&src, &dst).expect("copy plugin binary");
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&dst).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&dst, perms).unwrap();
-    }
+    std::os::unix::fs::symlink(&src, &dst).expect("link plugin binary");
+    #[cfg(not(unix))]
+    std::fs::copy(&src, &dst).expect("copy plugin binary");
     dir
 }
