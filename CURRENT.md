@@ -2349,3 +2349,11 @@ while other test processes start, which can make Linux reject exec with ETXTBSY.
 All 17 plugin integration and restart tests passed, including 24 concurrent
 launches. A Linux container reproduced ETXTBSY with a held writable descriptor
 and completed 1,600 concurrent launches through symbolic links.
+
+### 2026-11-16: stabilize broker plugin test setup
+
+Broker integration fixtures also link their built plugin executables on Unix,
+including tests that load multiple plugins. The audit test checks that its
+plugin started and looks for an entry from its own session.
+
+The broker integration test compiled, and the two-plugin collision test passed.
