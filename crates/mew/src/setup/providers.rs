@@ -299,6 +299,37 @@ pub(crate) async fn load_catalog(cfg: &Config) -> Option<Catalog> {
     Some(cat)
 }
 
+pub(crate) fn provider_thinking_variants(
+    cat: &Catalog,
+    provider_id: &str,
+    model_id: &str,
+) -> Vec<mew_catalog::ThinkingVariant> {
+    let model = cat
+        .providers
+        .get(provider_id)
+        .and_then(|models| models.get(model_id))
+        .or_else(|| {
+            cat.providers
+                .iter()
+                .filter(|(provider, _)| catalog_provider_matches(provider_id, provider))
+                .find_map(|(_, models)| models.get(model_id))
+        });
+    if let Some(model) = model {
+        if !model.thinking_variants.is_empty() {
+            return model.thinking_variants.clone();
+        }
+        return Catalog::empty().thinking_variants(model_id);
+    }
+    if cat
+        .providers
+        .values()
+        .any(|models| models.contains_key(model_id))
+    {
+        return Catalog::empty().thinking_variants(model_id);
+    }
+    cat.thinking_variants(model_id)
+}
+
 /// Resolve a thinking variant name to provider params, returning the params
 /// plus the canonical resolved name (a clamped/snapped `budget:<n>` when the
 /// input was a numeric budget, the variant name otherwise).
@@ -308,11 +339,12 @@ pub(crate) async fn load_catalog(cfg: &Config) -> Option<Catalog> {
 /// explicit off variant (callers treat that as a plain disable).
 pub(crate) fn resolve_reasoning(
     cat: Option<&Catalog>,
+    provider_id: &str,
     model_id: &str,
     variant_name: Option<&str>,
 ) -> Option<(mew_provider::ReasoningConfig, String)> {
     let cat = cat?;
-    let variants = cat.thinking_variants(model_id);
+    let variants = provider_thinking_variants(cat, provider_id, model_id);
     if variants.is_empty() {
         return None;
     }
@@ -350,7 +382,16 @@ pub(crate) fn resolve_reasoning(
             (variant, name.to_string())
         }
         None => {
-            let default = cat.default_thinking(model_id)?;
+            let default = variants
+                .iter()
+                .find(|v| v.name == "high")
+                .or_else(|| variants.iter().find(|v| v.name == "thinking"))
+                .or_else(|| variants.iter().find(|v| v.name == "xhigh"))
+                .or_else(|| {
+                    variants
+                        .iter()
+                        .find(|v| !matches!(v.name.as_str(), "none" | "off"))
+                })?;
             (default.clone(), default.name.clone())
         }
     };
@@ -1141,14 +1182,33 @@ mod tests {
 
     #[test]
     fn resolve_reasoning_none_catalog() {
-        assert!(resolve_reasoning(None, "test-model", None).is_none());
+        assert!(resolve_reasoning(None, "", "test-model", None).is_none());
     }
 
     #[test]
     fn resolve_reasoning_empty_variants_nonbuiltin_model() {
         // "test-model" doesn't match any builtin pattern, so thinking_variants returns empty.
         let cat = Catalog::empty();
-        assert!(resolve_reasoning(Some(&cat), "test-model", None).is_none());
+        assert!(resolve_reasoning(Some(&cat), "", "test-model", None).is_none());
+    }
+
+    #[test]
+    fn resolve_reasoning_default_prefers_an_enabled_level_over_none() {
+        let mut cat = Catalog::empty();
+        cat.merge_local(vec![mew_catalog::Model {
+            id: "hy3".into(),
+            provider: "opencode-go".into(),
+            thinking_variants: ["none", "low"]
+                .into_iter()
+                .map(|name| mew_catalog::ThinkingVariant {
+                    name: name.into(),
+                    params: serde_json::json!({"reasoning_effort": name}),
+                })
+                .collect(),
+            ..Default::default()
+        }]);
+        let (_, name) = resolve_reasoning(Some(&cat), "opencode-go", "hy3", None).unwrap();
+        assert_eq!(name, "low");
     }
 
     #[test]
@@ -1165,7 +1225,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let result = resolve_reasoning(Some(&cat), "test-model", Some("high"));
+        let result = resolve_reasoning(Some(&cat), "", "test-model", Some("high"));
         assert!(result.is_some(), "should find the 'high' variant");
         let (config, name) = result.unwrap();
         assert_eq!(name, "high");
@@ -1176,14 +1236,18 @@ mod tests {
     fn resolve_reasoning_none_variant_name() {
         // "test-model" has no explicit off/none variant, so an off request
         // is a plain disable (None) rather than an error.
-        assert!(resolve_reasoning(Some(&cat_with_variant()), "test-model", Some("none")).is_none());
-        assert!(resolve_reasoning(Some(&cat_with_variant()), "test-model", Some("off")).is_none());
+        assert!(
+            resolve_reasoning(Some(&cat_with_variant()), "", "test-model", Some("none")).is_none()
+        );
+        assert!(
+            resolve_reasoning(Some(&cat_with_variant()), "", "test-model", Some("off")).is_none()
+        );
     }
 
     #[test]
     fn resolve_reasoning_default_when_no_name() {
         let cat = cat_with_variant();
-        let result = resolve_reasoning(Some(&cat), "test-model", None);
+        let result = resolve_reasoning(Some(&cat), "", "test-model", None);
         assert!(result.is_some(), "should find the default variant");
         let (_, name) = result.unwrap();
         assert_eq!(name, "high");
@@ -1194,7 +1258,7 @@ mod tests {
         // qwen3.8-max thinks by default, so "off" must resolve to an
         // explicit enable_thinking: false rather than a plain disable.
         let cat = Catalog::empty();
-        let (config, name) = resolve_reasoning(Some(&cat), "qwen3.8-max", Some("off")).unwrap();
+        let (config, name) = resolve_reasoning(Some(&cat), "", "qwen3.8-max", Some("off")).unwrap();
         assert_eq!(name, "off");
         assert_eq!(config.params["enable_thinking"], serde_json::json!(false));
         assert!(config.params.get("thinking_budget").is_none());
@@ -1203,7 +1267,8 @@ mod tests {
     #[test]
     fn resolve_reasoning_qwen38_effort_variants_enable_thinking() {
         let cat = Catalog::empty();
-        let (config, name) = resolve_reasoning(Some(&cat), "qwen3.8-max", Some("xhigh")).unwrap();
+        let (config, name) =
+            resolve_reasoning(Some(&cat), "", "qwen3.8-max", Some("xhigh")).unwrap();
         assert_eq!(name, "xhigh");
         assert_eq!(config.params["enable_thinking"], serde_json::json!(true));
         assert_eq!(config.params["reasoning_effort"], "xhigh");
@@ -1213,18 +1278,18 @@ mod tests {
     fn resolve_reasoning_budget_parse_clamp_snap() {
         let cat = Catalog::empty();
         // Exact multiple passes through.
-        let (config, name) = resolve_reasoning(Some(&cat), "qwen3.8-max", Some("budget:8192"))
+        let (config, name) = resolve_reasoning(Some(&cat), "", "qwen3.8-max", Some("budget:8192"))
             .expect("budget resolves");
         assert_eq!(name, "budget:8192");
         assert_eq!(config.params["thinking_budget"], 8192);
         assert_eq!(config.params["enable_thinking"], serde_json::json!(true));
         // Out-of-range clamps to the declared range.
         let (_, name) =
-            resolve_reasoning(Some(&cat), "qwen3.8-max", Some("budget:999999999")).unwrap();
+            resolve_reasoning(Some(&cat), "", "qwen3.8-max", Some("budget:999999999")).unwrap();
         assert_eq!(name, "budget:262144");
         // Off-step values snap to the nearest step.
         let (config, name) =
-            resolve_reasoning(Some(&cat), "qwen3.8-max", Some("budget:200001")).unwrap();
+            resolve_reasoning(Some(&cat), "", "qwen3.8-max", Some("budget:200001")).unwrap();
         assert_eq!(name, "budget:199680");
         assert_eq!(config.params["thinking_budget"], 199680);
     }
@@ -1233,13 +1298,15 @@ mod tests {
     fn resolve_reasoning_budget_unknown_or_unsupported_returns_none() {
         let cat = Catalog::empty();
         // Unparseable budget.
-        assert!(resolve_reasoning(Some(&cat), "qwen3.8-max", Some("budget:abc")).is_none());
+        assert!(resolve_reasoning(Some(&cat), "", "qwen3.8-max", Some("budget:abc")).is_none());
         // Model without budget metadata (deepseek-v4 has no thinking_budget).
-        assert!(resolve_reasoning(Some(&cat), "deepseek-v4", Some("budget:8192")).is_none());
+        assert!(resolve_reasoning(Some(&cat), "", "deepseek-v4", Some("budget:8192")).is_none());
         // Model with no thinking at all.
-        assert!(resolve_reasoning(Some(&cat), "kimi-for-coding", Some("budget:8192")).is_none());
+        assert!(
+            resolve_reasoning(Some(&cat), "", "kimi-for-coding", Some("budget:8192")).is_none()
+        );
         // Unknown variant name still resolves to None.
-        assert!(resolve_reasoning(Some(&cat), "qwen3.8-max", Some("bogus")).is_none());
+        assert!(resolve_reasoning(Some(&cat), "", "qwen3.8-max", Some("bogus")).is_none());
     }
 
     #[test]
@@ -1247,7 +1314,7 @@ mod tests {
         let cat = Catalog::empty();
         // deepseek-v4 has effort variants but no off variant: off → None
         // (callers treat it as a plain disable).
-        assert!(resolve_reasoning(Some(&cat), "deepseek-v4", Some("off")).is_none());
+        assert!(resolve_reasoning(Some(&cat), "", "deepseek-v4", Some("off")).is_none());
     }
 
     fn cat_with_variant() -> Catalog {

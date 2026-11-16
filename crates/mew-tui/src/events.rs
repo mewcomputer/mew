@@ -2003,16 +2003,14 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             }
             // Model picker: Right with an empty filter opens the thinking
             // variant picker for the selected model. The item IDs are in
-            // "provider/model" format, but thinking_variants is keyed by the
-            // bare model id, so the provider prefix is stripped. The
-            // SwitchModel action keeps the agent's active model in sync with
-            // the variants being chosen.
+            // "provider/model" format, matching the thinking variants key.
+            // SwitchModel keeps the agent's active model in sync with the
+            // variants being chosen.
             if key.code == KeyCode::Right {
                 if let Some(ref picker) = app.picker {
                     if picker.kind == "model" && picker.filter.is_empty() {
                         if let Some(selected) = picker.selected_item() {
-                            let bare_model = selected.id.rsplit('/').next().unwrap_or(&selected.id);
-                            if app.thinking_variants.contains_key(bare_model) {
+                            if app.thinking_variants.contains_key(&selected.id) {
                                 let id = selected.id.clone();
                                 app.open_thinking_variant_picker_for(Some(&id));
                                 return Some(Action::SwitchModel(id));

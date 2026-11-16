@@ -752,6 +752,49 @@ fn parse_models_dev_model(val: &serde_json::Value, provider_id: &str) -> Option<
         })
         .unwrap_or_default();
 
+    // These gateways accept OpenAI-style reasoning_effort for Hy models.
+    // Other providers can use different request fields for the same levels.
+    let thinking_variants = if reasoning
+        && matches!(provider_id, "opencode" | "opencode-go" | "openrouter")
+        && id.rsplit('/').next().is_some_and(|name| {
+            let name = name.to_ascii_lowercase();
+            name.starts_with("hy3") || name.starts_with("hy4")
+        }) {
+        val.get("reasoning_options")
+            .and_then(|options| options.as_array())
+            .filter(|options| {
+                let has_toggle = options
+                    .iter()
+                    .any(|option| option.get("type").and_then(|v| v.as_str()) == Some("toggle"));
+                let has_off_effort = options
+                    .iter()
+                    .filter_map(|option| option.get("values").and_then(|v| v.as_array()))
+                    .flatten()
+                    .any(|value| value.as_str() == Some("none"));
+                !has_toggle || has_off_effort
+            })
+            .and_then(|options| {
+                options
+                    .iter()
+                    .find(|option| option.get("type").and_then(|v| v.as_str()) == Some("effort"))
+            })
+            .and_then(|option| option.get("values"))
+            .and_then(|values| values.as_array())
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.as_str())
+                    .map(|effort| ThinkingVariant {
+                        name: effort.to_string(),
+                        params: serde_json::json!({"reasoning_effort": effort}),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
     Some(Model {
         id,
         provider: provider_id.to_string(),
@@ -763,7 +806,7 @@ fn parse_models_dev_model(val: &serde_json::Value, provider_id: &str) -> Option<
         text_output,
         shape: String::new(),
         pricing,
-        thinking_variants: Vec::new(),
+        thinking_variants,
         responses_lite: false,
         prompt_cache_retention_secs: None,
         multi_agent_version: None,
@@ -1987,6 +2030,67 @@ mod tests {
         }]);
         assert_eq!(cat.shape_for("test-model"), "anthropic");
         assert_eq!(cat.lookup("test-model").unwrap().provider, "custom");
+    }
+
+    #[test]
+    fn models_dev_hy_efforts_are_scoped_to_each_provider() {
+        let catalog = parse(
+            br#"{
+          "opencode-go": {"models": {"hy3": {
+            "id": "hy3", "reasoning": true,
+            "reasoning_options": [{"type": "effort", "values": ["none", "low", "high"]}]
+          }}},
+          "openrouter": {"models": {"hy3": {
+            "id": "hy3", "reasoning": true,
+            "reasoning_options": [{"type": "effort", "values": ["none", "high"]}]
+          }}}
+        }"#,
+        )
+        .unwrap();
+        for (provider, names) in [
+            ("opencode-go", vec!["none", "low", "high"]),
+            ("openrouter", vec!["none", "high"]),
+        ] {
+            let model = &catalog.providers[provider]["hy3"];
+            assert_eq!(
+                model
+                    .thinking_variants
+                    .iter()
+                    .map(|v| v.name.as_str())
+                    .collect::<Vec<_>>(),
+                names
+            );
+            for variant in &model.thinking_variants {
+                assert_eq!(variant.params["reasoning_effort"], variant.name);
+            }
+        }
+    }
+
+    #[test]
+    fn models_dev_does_not_guess_wire_fields_or_fabricate_hy_levels() {
+        let catalog = parse(
+            br#"{
+          "other": {"models": {"hy3": {"id": "hy3", "reasoning": true,
+            "reasoning_options": [{"type": "effort", "values": ["low", "high"]}]
+          }}},
+          "opencode-go": {"models": {"hy4": {"id": "hy4", "reasoning": true,
+            "reasoning_options": [{"type": "toggle"}]
+          }}},
+          "opencode": {"models": {"hy3-free": {"id": "hy3-free", "reasoning": true,
+            "reasoning_options": [{"type": "toggle"}, {"type": "effort", "values": ["low", "high"]}]
+          }}}
+        }"#,
+        )
+        .unwrap();
+        assert!(catalog.providers["other"]["hy3"]
+            .thinking_variants
+            .is_empty());
+        assert!(catalog.providers["opencode-go"]["hy4"]
+            .thinking_variants
+            .is_empty());
+        assert!(catalog.providers["opencode"]["hy3-free"]
+            .thinking_variants
+            .is_empty());
     }
 
     #[test]
