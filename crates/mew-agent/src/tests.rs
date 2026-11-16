@@ -4914,8 +4914,173 @@ async fn shell_job_bounds_inherited_pipe_drain_and_reports_incomplete_output() {
     assert!(chunk.done && chunk.incomplete);
 }
 
+async fn wait_for_shell_job_output(agent: &Agent, id: &str, text: &str) {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if agent.shell_job_status(id).await.unwrap().1.contains(text) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("job did not produce the expected output");
+}
+
 #[tokio::test]
-async fn cancelled_shell_job_bounds_inherited_pipe_drain() {
+async fn job_cancel_tool_reports_success_only_after_the_job_stops() {
+    let provider = Arc::new(CapturingProvider::new(vec![]));
+    let agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![Arc::new(mew_tools::tools::jobs::JobCancel)],
+        None,
+    );
+    let cwd = tempfile::tempdir().unwrap();
+    let id = agent
+        .start_shell_job("printf 'ready\\n'; sleep 5", cwd.path())
+        .await;
+    wait_for_shell_job_output(&agent, &id, "ready").await;
+    let mut calls = FakeProvider::tool_call(
+        "job_cancel",
+        "cancel-live",
+        serde_json::json!({"job_id": id}),
+    );
+    calls.pop();
+    calls.extend(FakeProvider::tool_call(
+        "job_cancel",
+        "cancel-missing",
+        serde_json::json!({"job_id": "missing"}),
+    ));
+    provider
+        .scripts
+        .lock()
+        .unwrap()
+        .extend([calls, FakeProvider::text_response("done")]);
+    let mut events = agent.run("cancel the job".into());
+    let mut observed_cancel = false;
+    let mut outcomes = Vec::new();
+    while let Some(event) = events.recv().await {
+        match event {
+            AgentEvent::JobUpdate { job_id, state, .. } if job_id == id && state == "cancelled" => {
+                assert!(matches!(
+                    agent.shell_job_status(&id).await.unwrap().0,
+                    crate::agent::ShellJobState::Cancelled
+                ));
+                observed_cancel = true;
+            }
+            AgentEvent::ToolEnd { call_id, success } if call_id.starts_with("cancel-") => {
+                outcomes.push((call_id, success))
+            }
+            _ => {}
+        }
+    }
+    assert!(observed_cancel);
+    assert_eq!(
+        outcomes,
+        vec![
+            ("cancel-live".into(), true),
+            ("cancel-missing".into(), false)
+        ]
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelling_shell_job_terminates_descendants_without_affecting_other_jobs() {
+    let agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let cwd = tempfile::tempdir().unwrap();
+    let sibling = agent
+        .start_shell_job(
+            "i=0; while [ ! -f sibling_gate ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i+1)); done; [ -f sibling_gate ] && printf survived > sibling.txt",
+            cwd.path(),
+        )
+        .await;
+    let id = agent
+        .start_shell_job(
+            "sh -c '(printf \"ready\\n\"; i=0; while [ ! -f descendant_gate ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i+1)); done; [ -f descendant_gate ] && printf leaked > descendant.txt) & wait' & wait",
+            cwd.path(),
+        )
+        .await;
+    wait_for_shell_job_output(&agent, &id, "ready").await;
+    assert!(agent.cancel_shell_job(&id).await);
+    let (state, _) = agent.shell_job_block(&id, 3).await.unwrap();
+    assert!(matches!(state, crate::agent::ShellJobState::Cancelled));
+    std::fs::write(cwd.path().join("descendant_gate"), "").unwrap();
+    std::fs::write(cwd.path().join("sibling_gate"), "").unwrap();
+    let (other, _) = agent.shell_job_block(&sibling, 5).await.unwrap();
+    assert!(matches!(
+        other,
+        crate::agent::ShellJobState::Completed { exit_code: 0 }
+    ));
+    assert_eq!(
+        std::fs::read_to_string(cwd.path().join("sibling.txt")).unwrap(),
+        "survived"
+    );
+    let leaked = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while !cwd.path().join("descendant.txt").exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(leaked.is_err(), "cancelled descendant continued running");
+}
+
+#[tokio::test]
+async fn cancelling_a_new_job_does_not_lose_the_completion_notification() {
+    let agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let cwd = tempfile::tempdir().unwrap();
+    let id = agent.start_shell_job("sleep 5", cwd.path()).await;
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        agent.cancel_shell_job(&id),
+    )
+    .await
+    .expect("cancellation did not complete"));
+    assert!(matches!(
+        agent.shell_job_status(&id).await.unwrap().0,
+        crate::agent::ShellJobState::Cancelled
+    ));
+    assert!(!agent.cancel_shell_job("missing").await);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancellation_returns_only_after_the_job_has_stopped() {
+    let agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let cwd = tempfile::tempdir().unwrap();
+    let id = agent
+        .start_shell_job("printf 'ready\\n'; sleep 5", cwd.path())
+        .await;
+    wait_for_shell_job_output(&agent, &id, "ready").await;
+    assert!(agent.cancel_shell_job(&id).await);
+    assert!(matches!(
+        agent.shell_job_status(&id).await.unwrap().0,
+        crate::agent::ShellJobState::Cancelled
+    ));
+}
+
+#[tokio::test]
+async fn cancelled_shell_job_drains_output_after_children_stop() {
     let agent = Agent::new(
         Arc::new(FakeProvider::new(vec![])),
         Arc::new(NopDispatcher),
@@ -4927,22 +5092,7 @@ async fn cancelled_shell_job_bounds_inherited_pipe_drain() {
     let id = agent
         .start_shell_job("sleep 5 & printf 'ready\\n'; wait", cwd.path())
         .await;
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        loop {
-            if agent
-                .shell_job_status(&id)
-                .await
-                .unwrap()
-                .1
-                .contains("ready")
-            {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
+    wait_for_shell_job_output(&agent, &id, "ready").await;
     assert!(agent.cancel_shell_job(&id).await);
     let (state, output) = tokio::time::timeout(
         std::time::Duration::from_secs(2),
@@ -4952,9 +5102,42 @@ async fn cancelled_shell_job_bounds_inherited_pipe_drain() {
     .unwrap()
     .unwrap();
     assert!(matches!(state, crate::agent::ShellJobState::Cancelled));
+    if cfg!(unix) {
+        assert_eq!(output, "ready\n");
+        assert!(!agent.shell_job_output(&id, 0).await.unwrap().incomplete);
+    } else {
+        assert!(output.contains("output incomplete"));
+        assert!(agent.shell_job_output(&id, 0).await.unwrap().incomplete);
+    }
+    assert!(!agent.cancel_shell_job(&id).await);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelled_shell_job_bounds_detached_process_pipe_drain() {
+    let agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let cwd = tempfile::tempdir().unwrap();
+    let id = agent.start_shell_job(
+        "python3 -c 'import os,time; os.setsid(); print(\"ready\", flush=True); time.sleep(3)' & wait",
+        cwd.path(),
+    ).await;
+    wait_for_shell_job_output(&agent, &id, "ready").await;
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        agent.cancel_shell_job(&id)
+    )
+    .await
+    .unwrap());
+    let (state, output) = agent.shell_job_status(&id).await.unwrap();
+    assert!(matches!(state, crate::agent::ShellJobState::Cancelled));
     assert!(output.contains("output incomplete"));
     assert!(agent.shell_job_output(&id, 0).await.unwrap().incomplete);
-    assert!(!agent.cancel_shell_job(&id).await);
 }
 
 #[tokio::test]

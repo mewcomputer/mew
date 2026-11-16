@@ -1755,19 +1755,26 @@ impl Agent {
         })
     }
 
-    /// Cancel a running shell job by killing the process. Returns true if
-    /// the job existed and was running.
+    /// Cancel a running shell job and wait for it to reach a terminal state.
+    /// Returns true if the job existed and was running.
     pub async fn cancel_shell_job(&self, job_id: &str) -> bool {
-        let jobs = self.shell_jobs.lock().await;
-        let Some(job) = jobs.get(job_id) else {
-            return false;
+        let (cancel, done, state) = {
+            let jobs = self.shell_jobs.lock().await;
+            let Some(job) = jobs.get(job_id) else {
+                return false;
+            };
+            (job.cancel.clone(), job.done.clone(), job.state.clone())
         };
-        let state = job.state.lock().await;
-        if state.is_terminal() {
+        let notified = done.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        let current = state.lock().await;
+        if current.is_terminal() {
             return false;
         }
-        drop(state);
-        job.cancel.cancel();
+        cancel.cancel();
+        drop(current);
+        notified.await;
         true
     }
 }
@@ -1792,6 +1799,8 @@ async fn run_shell_job(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
     cmd.kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
@@ -1846,8 +1855,35 @@ async fn run_shell_job(
     let final_state = tokio::select! {
         biased;
         _ = cancel.cancelled() => {
-            let _ = child.kill().await;
-            ShellJobState::Cancelled
+            #[cfg(unix)]
+            let stopped = {
+                use nix::errno::Errno;
+                use nix::sys::signal::{killpg, Signal};
+                use nix::unistd::Pid;
+
+                let group_result = child.id()
+                    .and_then(|id| i32::try_from(id).ok())
+                    .ok_or_else(|| "job process id is unavailable".to_string())
+                    .and_then(|id| match killpg(Pid::from_raw(id), Signal::SIGKILL) {
+                        Ok(()) | Err(Errno::ESRCH) => Ok(()),
+                        Err(error) => Err(format!("failed to kill job process group: {error}")),
+                    });
+                match group_result {
+                    Ok(()) => child.wait().await.map(|_| ()).map_err(|e| format!("wait failed: {e}")),
+                    Err(error) => {
+                        if child.start_kill().is_ok() {
+                            let _ = child.wait().await;
+                        }
+                        Err(error)
+                    }
+                }
+            };
+            #[cfg(not(unix))]
+            let stopped = child.kill().await.map_err(|e| format!("failed to kill job: {e}"));
+            match stopped {
+                Ok(()) => ShellJobState::Cancelled,
+                Err(reason) => ShellJobState::Failed { reason },
+            }
         }
         status = child.wait() => {
             match status {

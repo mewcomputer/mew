@@ -2407,3 +2407,16 @@ of an unrelated model with the same id.
 
 The catalog tests and thinking-resolution tests passed, including duplicate
 model ids with different provider levels and budget ranges.
+
+# 2026-11-16 — Cancel background shell process groups
+
+Background shell cancellation killed only the `sh` leader and reported success
+before it stopped. On Unix each job now runs in its own process group, and
+cancellation kills that group and waits for the job to reach a terminal state.
+The tool reports failures instead of emitting a false cancelled update. A child
+that explicitly creates another process group or session can still outlive the
+job; the bounded pipe drain reports incomplete output in that case.
+
+Verified real subprocess and sibling-isolation regressions, immediate and
+repeated cancellation, detached pipe handling, the `job_cancel` tool flow,
+`cargo test -p mew-agent -p mew-daemon -p mew-tools`, and `just arch-check`.
