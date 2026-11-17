@@ -755,7 +755,12 @@ async fn handle_switch_model<T: CommandTarget>(cx: &mut Ctx<'_, T>, spec: &str) 
             cx.app.active_thinking_variant = None;
             if let Some(ref prev) = prev_variant {
                 if let Some(c) = cx.cat {
-                    if let Some(mapped) = c.map_variant(prev, &switched.model_id) {
+                    if let Some(mapped) = crate::setup::providers::map_provider_thinking_variant(
+                        c,
+                        &switched.provider_id,
+                        &switched.model_id,
+                        prev,
+                    ) {
                         // set_thinking resolves the variant via the catalog
                         // and applies the reasoning config to the agent.
                         if cx.target.set_thinking(&mapped.name).await.is_ok() {

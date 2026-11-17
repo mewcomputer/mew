@@ -2398,3 +2398,12 @@ Verified the catalog parsing regressions, OpenAI adapter off regression,
 `cargo check -p mew --bin mew --tests`, and `just arch-check`. No live provider
 request was made. The generated local Cargo.lock needed notify 9.0.0-rc.4:
 rc.9 is incompatible with fff-notify-debouncer-full 0.9.4.
+
+### 2026-11-16: preserve provider-specific thinking on model switches
+
+Thinking-level carryover now uses the destination provider's variants and
+budget. Numeric budget resolution also selects that provider's range instead
+of an unrelated model with the same id.
+
+The catalog tests and thinking-resolution tests passed, including duplicate
+model ids with different provider levels and budget ranges.

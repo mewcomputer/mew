@@ -299,13 +299,12 @@ pub(crate) async fn load_catalog(cfg: &Config) -> Option<Catalog> {
     Some(cat)
 }
 
-pub(crate) fn provider_thinking_variants(
-    cat: &Catalog,
+fn provider_catalog_model<'a>(
+    cat: &'a Catalog,
     provider_id: &str,
     model_id: &str,
-) -> Vec<mew_catalog::ThinkingVariant> {
-    let model = cat
-        .providers
+) -> Option<&'a mew_catalog::Model> {
+    cat.providers
         .get(provider_id)
         .and_then(|models| models.get(model_id))
         .or_else(|| {
@@ -313,8 +312,15 @@ pub(crate) fn provider_thinking_variants(
                 .iter()
                 .filter(|(provider, _)| catalog_provider_matches(provider_id, provider))
                 .find_map(|(_, models)| models.get(model_id))
-        });
-    if let Some(model) = model {
+        })
+}
+
+pub(crate) fn provider_thinking_variants(
+    cat: &Catalog,
+    provider_id: &str,
+    model_id: &str,
+) -> Vec<mew_catalog::ThinkingVariant> {
+    if let Some(model) = provider_catalog_model(cat, provider_id, model_id) {
         if !model.thinking_variants.is_empty() {
             return model.thinking_variants.clone();
         }
@@ -328,6 +334,40 @@ pub(crate) fn provider_thinking_variants(
         return Catalog::empty().thinking_variants(model_id);
     }
     cat.thinking_variants(model_id)
+}
+
+fn provider_thinking_budget(
+    cat: &Catalog,
+    provider_id: &str,
+    model_id: &str,
+) -> Option<mew_catalog::ThinkingBudget> {
+    if let Some(model) = provider_catalog_model(cat, provider_id, model_id) {
+        return model
+            .thinking_budget
+            .clone()
+            .or_else(|| Catalog::empty().thinking_budget(model_id));
+    }
+    if cat
+        .providers
+        .values()
+        .any(|models| models.contains_key(model_id))
+    {
+        return Catalog::empty().thinking_budget(model_id);
+    }
+    cat.thinking_budget(model_id)
+}
+
+pub(crate) fn map_provider_thinking_variant(
+    cat: &Catalog,
+    provider_id: &str,
+    model_id: &str,
+    variant: &str,
+) -> Option<mew_catalog::ThinkingVariant> {
+    Catalog::map_variant_to(
+        variant,
+        &provider_thinking_variants(cat, provider_id, model_id),
+        provider_thinking_budget(cat, provider_id, model_id).as_ref(),
+    )
 }
 
 /// Resolve a thinking variant name to provider params, returning the params
@@ -363,7 +403,7 @@ pub(crate) fn resolve_reasoning(
         // range. Requires budget metadata; unknown budgets resolve to `None`
         // (treated as unknown variants by callers).
         Some(name) if name.starts_with("budget:") => {
-            let budget = cat.thinking_budget(model_id)?;
+            let budget = provider_thinking_budget(cat, provider_id, model_id)?;
             let n = name
                 .strip_prefix("budget:")
                 .and_then(|s| s.parse::<i64>().ok())?;
@@ -1179,6 +1219,78 @@ mod tests {
     }
 
     // --- resolve_reasoning ---
+
+    #[test]
+    fn switched_model_keeps_thinking_level_for_the_selected_provider() {
+        let mut cat = Catalog::empty();
+        for (provider, levels) in [
+            ("opencode-go", vec!["none", "low", "high"]),
+            ("openrouter", vec!["none", "high"]),
+        ] {
+            cat.merge_local(vec![mew_catalog::Model {
+                id: "hy3".into(),
+                provider: provider.into(),
+                thinking_variants: levels
+                    .into_iter()
+                    .map(|name| mew_catalog::ThinkingVariant {
+                        name: name.into(),
+                        params: serde_json::json!({"reasoning_effort": name}),
+                    })
+                    .collect(),
+                ..Default::default()
+            }]);
+        }
+        assert_eq!(
+            map_provider_thinking_variant(&cat, "opencode-go", "hy3", "low")
+                .unwrap()
+                .name,
+            "low"
+        );
+        assert_eq!(
+            map_provider_thinking_variant(&cat, "openrouter", "hy3", "low")
+                .unwrap()
+                .name,
+            "none"
+        );
+    }
+
+    #[test]
+    fn thinking_budget_uses_the_selected_provider() {
+        let mut cat = Catalog::empty();
+        for (provider, min, max) in [("first", 100, 1000), ("second", 2000, 3000)] {
+            cat.merge_local(vec![mew_catalog::Model {
+                id: "shared".into(),
+                provider: provider.into(),
+                thinking_variants: vec![mew_catalog::ThinkingVariant {
+                    name: "high".into(),
+                    ..Default::default()
+                }],
+                thinking_budget: Some(mew_catalog::ThinkingBudget {
+                    min,
+                    max,
+                    step: 100,
+                    default: min,
+                    by_effort: Vec::new(),
+                }),
+                ..Default::default()
+            }]);
+        }
+        assert_eq!(
+            map_provider_thinking_variant(&cat, "first", "shared", "budget:5000")
+                .unwrap()
+                .name,
+            "budget:1000"
+        );
+        let (_, name) =
+            resolve_reasoning(Some(&cat), "first", "shared", Some("budget:5000")).unwrap();
+        assert_eq!(name, "budget:1000");
+        assert_eq!(
+            map_provider_thinking_variant(&cat, "second", "shared", "budget:5000")
+                .unwrap()
+                .name,
+            "budget:3000"
+        );
+    }
 
     #[test]
     fn resolve_reasoning_none_catalog() {

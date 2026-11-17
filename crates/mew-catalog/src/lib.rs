@@ -275,9 +275,10 @@ impl Catalog {
     /// For boolean models, the "thinking" variant.
     pub fn default_thinking(&self, model_id: &str) -> Option<ThinkingVariant> {
         let variants = self.thinking_variants(model_id);
-        if variants.is_empty() {
-            return None;
-        }
+        Self::default_variant(&variants)
+    }
+
+    fn default_variant(variants: &[ThinkingVariant]) -> Option<ThinkingVariant> {
         // Prefer "high" as default for effort-based models,
         // "thinking" for boolean models, "xhigh" for qwen3.8-style models
         // (whose API default effort is xhigh), otherwise first variant.
@@ -299,6 +300,15 @@ impl Catalog {
     /// effort mapping and finally the target's default.
     pub fn map_variant(&self, variant: &str, model_id: &str) -> Option<ThinkingVariant> {
         let variants = self.thinking_variants(model_id);
+        Self::map_variant_to(variant, &variants, self.thinking_budget(model_id).as_ref())
+    }
+
+    /// Map a thinking level to a particular model's variants and budget.
+    pub fn map_variant_to(
+        variant: &str,
+        variants: &[ThinkingVariant],
+        budget: Option<&ThinkingBudget>,
+    ) -> Option<ThinkingVariant> {
         if variants.is_empty() {
             return None;
         }
@@ -307,7 +317,7 @@ impl Catalog {
             return Some(v.clone());
         }
         // Numeric budget carry-over: clamp/snap to the target's range.
-        if let Some(budget) = self.thinking_budget(model_id) {
+        if let Some(budget) = budget {
             if let Some(n) = variant
                 .strip_prefix("budget:")
                 .and_then(|s| s.parse::<i64>().ok())
@@ -353,7 +363,7 @@ impl Catalog {
             }
         }
         // Fall back to the default for this model.
-        self.default_thinking(model_id)
+        Self::default_variant(variants)
     }
 
     /// Built-in thinking variant defaults based on model ID patterns.
