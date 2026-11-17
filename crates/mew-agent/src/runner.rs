@@ -1930,6 +1930,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn empty_final_message_does_not_reuse_earlier_narration() {
+        let mut first = turn("earlier status");
+        first.pop();
+        first.extend(mew_provider_fake::FakeProvider::tool_call(
+            "progress_update",
+            "progress",
+            serde_json::json!({"message": "working"}),
+        ));
+        let last = vec![mew_provider::ProviderEvent::MessageEnd {
+            finish: mew_message::Finish::Stop,
+            usage: mew_message::Tokens::default(),
+            cost: 0.0,
+        }];
+        let (result, _) = run_typed(vec![first, last], make_def(Some(10), Some(60))).await;
+        assert!(
+            matches!(&result, SubagentResult::Error { reason } if reason == "no assistant message received"),
+            "unexpected result: {result:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_output_schema_valid_first_try_passes_untouched() {
         let def = typed_def(serde_json::json!({"type": "object", "required": ["answer"]}));
         let (result, provider) = run_typed(vec![turn("{\"answer\": 42}")], def).await;

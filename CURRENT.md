@@ -2378,3 +2378,9 @@ and the child transcript remain available separately.
 
 Verified `cargo test -p mew-agent` (208 tests), `cargo test -p mew-prompts`
 (64 tests), and `just arch-check`.
+
+### 2026-11-16: verify empty subagent final responses
+
+A partless final provider message reports an agent error rather than returning
+an earlier progress message. The regression test exercises that sequence with
+an actual subagent runner; all 211 mew-agent tests passed.
