@@ -36,7 +36,7 @@ anything else, so `RUST_LOG` and `MEW_CRED_*` vars work from there.
 ```toml
 default_model = "deepseek-v4-flash"
 default_persona = "builder"
-plan_path = "PLAN.md"
+plan_path = "plans/"
 
 [providers.deepseek]
 # ... see below
@@ -58,7 +58,7 @@ roots = ["~/code"]
 |-------|------|---------|-------------|
 | `default_model` | string | (empty) | Model ID used when no `--model` flag or state entry exists |
 | `default_persona` | string | `"builder"` | Persona loaded at startup. `"none"` or `"default"` starts without one |
-| `plan_path` | string | `"PLAN.md"` | Where the planner persona writes and builder reads. Relative or absolute |
+| `plan_path` | string | `"plans/"` | Each `write_plan` call creates a new pronounceable name (for example, `plans/vale-nori.md`); use the returned path with `edit_plan`. Other relative or absolute paths name one fixed file |
 | `providers` | table | (built-in) | Provider definitions keyed by provider ID |
 | `models` | array | `[]` | Custom model entries that override or extend the catalog |
 | `permissions` | table | (empty) | Permission rules and classifier config. See [Permissions](/docs/using-mew/permissions/) |

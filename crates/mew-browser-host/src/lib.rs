@@ -1,4 +1,4 @@
-//! Retained native browser pages scoped to a confirmed connection and session.
+//! Retained native browser pages scoped to a confirmed connection, session and tab.
 
 use anyhow::{bail, Result};
 use mew_cef_host::embed::{
@@ -21,6 +21,7 @@ pub struct BrowserRect {
 pub struct BrowserOwner {
     pub connection_profile: String,
     pub session_id: String,
+    pub tab_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -100,10 +101,14 @@ impl BrowserState {
 
     fn visibility_changes<'a>(
         &'a self,
-        visible_owner: Option<&'a BrowserOwner>,
+        target: Option<(&'a BrowserOwner, bool)>,
     ) -> impl Iterator<Item = (&'a BrowserOwner, bool)> {
         self.pages.iter().filter_map(move |(owner, state)| {
-            let visible = !state.closed && visible_owner == Some(owner);
+            let visible = match target {
+                Some((target, true)) => !state.closed && target == owner,
+                Some((target, false)) if target != owner => state.visible,
+                _ => false,
+            };
             (state.visible != visible).then_some((owner, visible))
         })
     }
@@ -153,6 +158,19 @@ pub struct BrowserPortal {
 }
 
 impl BrowserPortal {
+    /// Host the trusted application in this runtime, separately from tool pages.
+    pub fn create_app_page(
+        &self,
+        parent_view: usize,
+        url: &str,
+        callback: mew_cef_host::embed::BrowserEventCallback,
+        handler: mew_cef_host::embed::AppRequestHandler,
+    ) -> Result<CefPageController> {
+        self.controller
+            .create_app_page(parent_view, url, callback, handler)
+            .map_err(|error| anyhow::anyhow!(error))
+    }
+
     /// Initialize the process runtime once. Pages are created separately under
     /// their native parent view and remain alive when the panel is hidden.
     pub fn initialize() -> Result<Option<Self>> {
@@ -264,7 +282,7 @@ impl BrowserPortal {
 
     pub fn set_visible(&self, owner: &BrowserOwner, visible: bool) -> Result<()> {
         self.require_page(owner)?;
-        self.apply_visibility(visible.then_some(owner));
+        self.apply_visibility(Some((owner, visible)));
         Ok(())
     }
 
@@ -272,15 +290,15 @@ impl BrowserPortal {
         self.apply_visibility(None);
     }
 
-    fn apply_visibility(&self, visible_owner: Option<&BrowserOwner>) {
+    fn apply_visibility(&self, target: Option<(&BrowserOwner, bool)>) {
         let changes: Vec<_> = match self.state.lock() {
             Ok(mut state) => {
                 let changes = state
-                    .visibility_changes(visible_owner)
+                    .visibility_changes(target)
                     .map(|(owner, visible)| (owner.clone(), visible))
                     .collect();
-                if let Some(owner) = visible_owner {
-                    state.set_visible(owner, true);
+                if let Some((owner, visible)) = target {
+                    state.set_visible(owner, visible);
                 } else {
                     for page in state.pages.values_mut() {
                         page.visible = false;
@@ -299,6 +317,12 @@ impl BrowserPortal {
 
     pub fn focus(&self, owner: &BrowserOwner) -> Result<bool> {
         Ok(self.require_page(owner)?.focus_on_main_thread())
+    }
+
+    pub fn set_interactive(&self, owner: &BrowserOwner, interactive: bool) -> Result<()> {
+        self.require_page(owner)?
+            .set_interactive_on_main_thread(interactive);
+        Ok(())
     }
 
     pub fn blur(&self, owner: &BrowserOwner) -> Result<bool> {

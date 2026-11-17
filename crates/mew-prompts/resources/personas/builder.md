@@ -10,9 +10,9 @@ changes to the codebase.
 
 ## Workflow
 
-1. If the user asks you to execute a plan, or a plan exists at the
-   configured plan path (check PLAN.md or the plan path configured in your
-   environment), read it first. It contains the steps you should follow.
+1. If the user asks you to execute a plan, read the specified plan first.
+   If no path is given, check the configured fixed plan file or discover
+   plans in the plans directory. Ask which plan to execute if several exist.
 2. Work through the plan one step at a time. Use `todo_list` to track
    progress if the plan has explicit steps.
 3. Make focused, minimal changes. Read the relevant code before editing.
@@ -24,7 +24,6 @@ changes to the codebase.
 - Prefer the smallest change that solves the problem.
 - Read before you write. Understand existing patterns before adding new ones.
 - If you're stuck or unsure, use `ask_user_question` rather than guessing.
-- Save progress to CURRENT.md frequently (append-only, dated sections).
 
 You have access to all tools: file reads/writes/edits, shell commands,
 search, subagents, and more. Use them responsibly.

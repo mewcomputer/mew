@@ -14,7 +14,132 @@ pub(super) fn transcript_part_block_count(
     }
 }
 
+fn markdown_scroll_groups(
+    blocks: &[MarkdownRenderBlock],
+    previous: Vec<MarkdownScrollGroup>,
+    preserve: bool,
+) -> Vec<MarkdownScrollGroup> {
+    let mut previous = previous.into_iter().peekable();
+    let mut groups: Vec<MarkdownScrollGroup> = Vec::new();
+    for (index, block) in blocks.iter().enumerate() {
+        let is_code = matches!(block.block, MarkdownBlock::Code { .. });
+        if !is_code && !matches!(block.block, MarkdownBlock::Table(_)) {
+            continue;
+        }
+        if block.continuation {
+            if let Some(group) = groups.last_mut().filter(|group| group.blocks.end == index) {
+                group.blocks.end += 1;
+                continue;
+            }
+        }
+        while previous
+            .peek()
+            .is_some_and(|group| group.blocks.start < index)
+        {
+            previous.next();
+        }
+        let handle = previous
+            .next_if(|group| preserve && group.blocks.start == index && group.is_code == is_code)
+            .map_or_else(gpui::ScrollHandle::new, |group| group.handle);
+        groups.push(MarkdownScrollGroup {
+            blocks: index..index + 1,
+            is_code,
+            handle,
+            code_width: RefCell::new(None),
+        });
+    }
+    groups
+}
+
 impl DesktopShell {
+    pub(super) fn markdown_scroll_group(
+        &self,
+        message_index: usize,
+        encoded_block_index: usize,
+    ) -> Option<(&CachedMarkdown, &MarkdownScrollGroup)> {
+        let cached = self
+            .markdown_cache
+            .get(message_index)?
+            .get(encoded_block_index / 1_000_000)?;
+        let block_index = encoded_block_index % 1_000_000;
+        cached
+            .scroll_groups
+            .iter()
+            .find(|group| group.blocks.contains(&block_index))
+            .map(|group| (cached, group))
+    }
+
+    pub(super) fn markdown_scroll_handle(
+        &self,
+        message_index: usize,
+        encoded_block_index: usize,
+    ) -> Option<&gpui::ScrollHandle> {
+        self.markdown_scroll_group(message_index, encoded_block_index)
+            .map(|(_, group)| &group.handle)
+    }
+
+    pub(super) fn markdown_code_width(
+        &self,
+        message_index: usize,
+        encoded_block_index: usize,
+        window: &mut Window,
+    ) -> Option<Pixels> {
+        let (cached, group) = self.markdown_scroll_group(message_index, encoded_block_index)?;
+        let mut style = window.text_style();
+        style.font_family = DEFAULT_FONT_FAMILY.into();
+        let font = style.font();
+        let font_size = window.rem_size() * 0.75;
+        if let Some(width) = group
+            .code_width
+            .borrow()
+            .as_ref()
+            .filter(|width| width.font == font && width.font_size == font_size)
+        {
+            return Some(width.width);
+        }
+        let mut width = px(0.);
+        for block in &cached.render_blocks[group.blocks.clone()] {
+            let MarkdownBlock::Code { text, .. } = &block.block else {
+                continue;
+            };
+            let mut runs = Vec::new();
+            let mut offset = 0;
+            for highlight in &block.syntax_highlights {
+                if offset < highlight.range.start {
+                    runs.push(style.to_run(highlight.range.start - offset));
+                }
+                let mut run = style.to_run(highlight.range.len());
+                if highlight.bold {
+                    run.font.weight = gpui::FontWeight::BOLD;
+                }
+                if highlight.italic {
+                    run.font.style = gpui::FontStyle::Italic;
+                }
+                runs.push(run);
+                offset = highlight.range.end;
+            }
+            if offset < text.len() {
+                runs.push(style.to_run(text.len() - offset));
+            }
+            if let Ok(lines) =
+                window
+                    .text_system()
+                    .shape_text(text.clone().into(), font_size, &runs, None, None)
+            {
+                width = lines
+                    .iter()
+                    .fold(width, |width, line| width.max(line.width()));
+            }
+        }
+        let width = width.ceil();
+        *group.code_width.borrow_mut() = Some(MarkdownCodeWidth {
+            font,
+            font_size,
+            width,
+        });
+        Some(width)
+    }
+
     pub(super) fn prepare_for_history_prepend(&mut self, added_messages: usize) {
         if added_messages == 0 {
             return;
@@ -35,7 +160,7 @@ impl DesktopShell {
             self.clear_review();
             return;
         }
-        if self.auxiliary_view != AuxiliaryView::Changes || self.layout.workbench_collapsed {
+        if self.work_tabs.active().kind != WorkTabKind::Changes || self.layout.workbench_collapsed {
             return;
         }
         let Some(session_id) = self.model.attached_session.as_deref() else {
@@ -81,6 +206,7 @@ impl DesktopShell {
         let mut changed = self.markdown_cache.len() != self.model.ui.transcript.len();
         let mut changed_message_start = None;
         let mut changed_message_end = None;
+        let mut highlighter = None;
         self.markdown_cache.truncate(self.model.ui.transcript.len());
         for (index, item) in self.model.ui.transcript.iter().enumerate() {
             let part_count = if item.parts.is_empty() {
@@ -109,10 +235,27 @@ impl DesktopShell {
                 source_identity: 0,
                 source_len: 0,
                 render_blocks: Vec::new(),
+                scroll_groups: Vec::new(),
                 streaming: None,
+                completed_tool: false,
             });
             for (part_index, cached_part) in cached_parts.iter_mut().enumerate().take(part_count) {
                 let part = item.parts.get(part_index);
+                let completed_tool = matches!(
+                    part,
+                    Some(TranscriptPart::ToolCall {
+                        status: ToolStatus::Completed,
+                        ..
+                    })
+                );
+                if cached_part.completed_tool != completed_tool {
+                    changed = true;
+                    changed_message_start =
+                        Some(changed_message_start.map_or(index, |start: usize| start.min(index)));
+                    changed_message_end =
+                        Some(changed_message_end.map_or(index, |end: usize| end.max(index)));
+                    cached_part.completed_tool = completed_tool;
+                }
                 let Some((source, source_identity)) = (match part {
                     None => Some((
                         Cow::Borrowed(item.text.as_str()),
@@ -139,6 +282,7 @@ impl DesktopShell {
                     cached_part.source_identity = 0;
                     cached_part.source_len = 0;
                     cached_part.render_blocks.clear();
+                    cached_part.scroll_groups.clear();
                     cached_part.streaming = None;
                     continue;
                 };
@@ -173,29 +317,52 @@ impl DesktopShell {
                             document
                         };
                         let mut blocks = virtualize_document(&document);
-                        highlight_code_blocks(&mut blocks);
+                        if blocks
+                            .iter()
+                            .any(|block| matches!(block.block, MarkdownBlock::Code { .. }))
+                        {
+                            let highlighter = highlighter.get_or_insert_with(|| {
+                                SyntectHighlighter::from_theme_tokens(|token| {
+                                    theme_rgb_value(&self.theme, token)
+                                })
+                            });
+                            highlight_code_blocks(&mut blocks, highlighter);
+                        }
                         (blocks, Some(streaming))
                     }
                     Some(_) => (Vec::new(), None),
                 };
+                let scroll_groups = markdown_scroll_groups(
+                    &render_blocks,
+                    std::mem::take(&mut cached_part.scroll_groups),
+                    source.as_ref().starts_with(cached_part.source.as_str()),
+                );
                 *cached_part = CachedMarkdown {
                     source: source.into_owned(),
                     source_identity,
                     source_len,
                     render_blocks,
+                    scroll_groups,
                     streaming,
+                    completed_tool,
                 };
             }
         }
         if !changed {
             return false;
         }
+        if self.pending_transcript_scroll_anchor.is_none() {
+            self.pending_transcript_scroll_anchor = self.current_transcript_scroll_anchor();
+        }
         if self.markdown_cache.len() != self.model.ui.transcript.len() {
             self.rebuild_transcript_rows_from_cache();
         } else if let (Some(message_start), Some(message_end)) =
             (changed_message_start, changed_message_end)
         {
-            self.rebuild_transcript_rows_in_range(message_start, message_end);
+            let (message_start, message_end) =
+                self.rebuild_transcript_rows_in_range(message_start, message_end);
+            changed_message_start = Some(message_start);
+            changed_message_end = Some(message_end);
         } else {
             self.rebuild_transcript_rows_from_cache();
         }
@@ -229,6 +396,7 @@ impl DesktopShell {
         for (message_index, item) in self.model.ui.transcript.iter().enumerate() {
             new_rows.extend(self.transcript_rows_for_message(message_index, item));
         }
+        self.group_completed_tool_rows(&mut new_rows);
         self.transcript_rows = new_rows;
         self.transcript_rows_append_only = self.transcript_rows.len() >= old_rows.len()
             && self.transcript_rows.starts_with(&old_rows);
@@ -267,19 +435,88 @@ impl DesktopShell {
                 message_index,
                 part_index,
                 block_index,
+                tool_group_len: 0,
             }));
         }
         rows
     }
 
-    fn rebuild_transcript_rows_in_range(&mut self, message_start: usize, message_end: usize) {
+    fn group_completed_tool_rows(&self, rows: &mut Vec<TranscriptRenderRow>) {
+        let mut read = 0;
+        let mut write = 0;
+        while read < rows.len() {
+            let first = rows[read];
+            let mut end = read;
+            while end < rows.len() {
+                let row = rows[end];
+                let item = &self.model.ui.transcript[row.message_index];
+                if item.role != TranscriptRole::Assistant
+                    || !matches!(
+                        item.parts.get(row.part_index),
+                        Some(TranscriptPart::ToolCall {
+                            status: ToolStatus::Completed,
+                            ..
+                        })
+                    )
+                {
+                    break;
+                }
+                end += 1;
+            }
+            let count = end - read;
+            if count < 2 {
+                rows[write] = first;
+                read += 1;
+                write += 1;
+                continue;
+            }
+            let header = TranscriptRenderRow {
+                // Tool calls have one detail block; block 1 identifies their group header
+                // independently of the first call when restoring a scroll anchor.
+                block_index: 1,
+                tool_group_len: count,
+                ..first
+            };
+            if self.tool_group_is_expanded(header) {
+                // Insert only at the unread boundary so the remaining rows stay intact.
+                rows.copy_within(read..end, write);
+                rows.insert(write, header);
+                write += count + 1;
+                read = end + 1;
+            } else {
+                rows[write] = header;
+                write += 1;
+                read = end;
+            }
+        }
+        rows.truncate(write);
+    }
+
+    fn rebuild_transcript_rows_in_range(
+        &mut self,
+        message_start: usize,
+        message_end: usize,
+    ) -> (usize, usize) {
         let Some(last_message) = self.model.ui.transcript.len().checked_sub(1) else {
             self.transcript_rows.clear();
             self.transcript_rows_append_only = false;
-            return;
+            return (0, 0);
         };
-        let message_start = message_start.min(last_message);
-        let message_end = message_end.min(last_message).max(message_start);
+        let mut message_start = message_start.min(last_message);
+        let mut message_end = message_end.min(last_message).max(message_start);
+        // A completed run can cross provider messages within the same assistant turn.
+        while message_start > 0
+            && self.model.ui.transcript[message_start].role == TranscriptRole::Assistant
+            && self.model.ui.transcript[message_start - 1].role == TranscriptRole::Assistant
+        {
+            message_start -= 1;
+        }
+        while message_end < last_message
+            && self.model.ui.transcript[message_end].role == TranscriptRole::Assistant
+            && self.model.ui.transcript[message_end + 1].role == TranscriptRole::Assistant
+        {
+            message_end += 1;
+        }
         let old_rows = std::mem::take(&mut self.transcript_rows);
         let row_start = old_rows
             .iter()
@@ -289,7 +526,7 @@ impl DesktopShell {
             .iter()
             .position(|row| row.message_index > message_end)
             .unwrap_or(old_rows.len());
-        let replacement = (message_start..=message_end)
+        let mut replacement = (message_start..=message_end)
             .filter_map(|message_index| {
                 self.model
                     .ui
@@ -299,6 +536,7 @@ impl DesktopShell {
             })
             .flat_map(|(message_index, item)| self.transcript_rows_for_message(message_index, item))
             .collect::<Vec<_>>();
+        self.group_completed_tool_rows(&mut replacement);
         let mut new_rows =
             Vec::with_capacity(old_rows.len() - (row_end - row_start) + replacement.len());
         new_rows.extend_from_slice(&old_rows[..row_start]);
@@ -307,6 +545,7 @@ impl DesktopShell {
         self.transcript_rows_append_only =
             new_rows.len() >= old_rows.len() && new_rows.starts_with(&old_rows);
         self.transcript_rows = new_rows;
+        (message_start, message_end)
     }
 
     pub(super) fn request_older_history(&mut self) {
@@ -457,8 +696,8 @@ impl DesktopShell {
 
     pub(super) fn sync_workspace_watch(&mut self) {
         let desired = if matches!(
-            self.auxiliary_view,
-            AuxiliaryView::Local | AuxiliaryView::Changes
+            self.work_tabs.active().kind,
+            WorkTabKind::Files | WorkTabKind::Changes
         ) && !self.layout.workbench_collapsed
             && self.model.session_is_ready()
         {
@@ -488,7 +727,7 @@ impl DesktopShell {
                 enabled: true,
             });
             self.watching_workspace_session = desired;
-            if self.auxiliary_view == AuxiliaryView::Local {
+            if self.work_tabs.active().kind == WorkTabKind::Files {
                 self.request_dir_listing(None);
             }
         }
@@ -507,7 +746,7 @@ impl DesktopShell {
     }
 
     pub(super) fn refresh_file_tree(&mut self, session_id: &str) {
-        if self.auxiliary_view != AuxiliaryView::Local
+        if self.work_tabs.active().kind != WorkTabKind::Files
             || self.watching_workspace_session.as_deref() != Some(session_id)
         {
             return;

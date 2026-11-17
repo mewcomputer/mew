@@ -72,6 +72,38 @@ struct PendingGoalProposal: Identifiable {
     var id: String { "\(daemon):\(sessionId):\(requestId)" }
 }
 
+struct WorkspaceReview {
+    let daemon: String
+    let sessionId: String
+    let requestId: String
+    var files: [ReviewFile] = []
+    var isLoading = true
+    var error: String?
+}
+
+struct WorkerHistory {
+    let daemon: String
+    let sessionId: String
+    let childSessionId: String
+    let requestId: String
+    var messages: [ChatMessage] = []
+    var isLoading = true
+    var error: String?
+}
+
+struct JobOutputDetail {
+    let daemon: String
+    let sessionId: String
+    let jobId: String
+    var requestId = ""
+    var output = ""
+    var nextOffset: UInt64 = 0
+    var isLoading = false
+    var done = false
+    var incomplete = false
+    var error: String?
+}
+
 // MARK: - App Store
 
 /// The single source of truth for the app, mirroring the web UI's session store.
@@ -84,6 +116,7 @@ final class AppStore: ObservableObject {
 
     // Per-daemon session lists
     @Published var sessionLists: [String: [SessionSummary]] = [:]
+    @Published private var sessionAlertTimes: [String: [String: Int64]] = [:]
     @Published var projectLists: [String: [ProjectInfo]] = [:]
     @Published var directoryListings: [String: DirListing] = [:]
     @Published var directoryLoading: Set<String> = []
@@ -91,35 +124,44 @@ final class AppStore: ObservableObject {
 
     // Navigation stack, driven both by NavigationLinks and programmatically
     // (e.g. to push a freshly created session).
-    @Published var path: [NavigationRoute] = []
+    @Published var path: [NavigationRoute] = [] {
+        didSet {
+            if path != oldValue { pendingNewSessionDaemon = nil }
+            synchronizeNavigation()
+        }
+    }
+
+    // The list filter is independent of the chat currently open.
+    @Published var sessionFilter: String? {
+        didSet {
+            preferences.set(sessionFilter, forKey: "mew.sessionFilter")
+            if sessionFilter != oldValue { pendingNewSessionDaemon = nil }
+        }
+    }
 
     // Active daemon + session
     @Published var selectedDaemonId: DaemonId?
     @Published var selectedSessionId: String?
 
-    // Node id of the daemon we just asked for a new session on, so the
-    // resulting SessionReloaded can navigate into it. Cleared once consumed.
+    // Creation results navigate only while the originating location is still open.
     private var pendingNewSessionDaemon: String?
 
     // Chat state for the active session
     @Published var messages: [ChatMessage] = []
+    @Published var isLoadingSession = false
+    @Published var sessionLoadError: String?
+    @Published var review: WorkspaceReview?
+    @Published var historyBefore: UInt64?
+    @Published var isLoadingOlderHistory = false
+    @Published var historyError: String?
+    @Published var subagents: [WorkerInfo] = []
+    @Published var jobs: [BackgroundJob] = []
+    @Published var workerHistory: WorkerHistory?
+    @Published var jobOutput: JobOutputDetail?
 
-    /// Messages filtered to exclude empty entries (no visible content).
-    var visibleMessages: [ChatMessage] {
-        messages.filter { msg in
-            msg.parts.contains { part in
-                switch part.kind {
-                case .text:
-                    return (part.text?.isEmpty == false)
-                case .reasoning:
-                    return (part.text?.isEmpty == false)
-                case .toolCall:
-                    return part.toolName != nil
-                case .error:
-                    return (part.text?.isEmpty == false)
-                }
-            }
-        }
+    /// Completed content; preserve turn boundaries before hiding non-renderable messages.
+    var conversationItems: [ConversationItem] {
+        ConversationItem.grouped(messages: messages, hidingPartId: streamingText.isEmpty ? nil : streamingPartId)
     }
     @Published var streamingText: String = ""
     @Published var streamingPartId: String?
@@ -131,7 +173,18 @@ final class AppStore: ObservableObject {
     @Published var pendingGoals: [PendingGoalProposal] = []
 
     // Models
-    @Published var availableModels: [ModelSummary] = []
+    @Published var modelsByDaemon: [String: [ModelSummary]] = [:]
+    @Published var daemonSettings: [String: AutomationSettings] = [:]
+    @Published var daemonSettingsErrors: [String: String] = [:]
+    @Published var managementSettings: [String: DaemonManagementSettings] = [:]
+    @Published var managementErrors: [String: String] = [:]
+    @Published private(set) var managementRequestIds: [String: String] = [:]
+    private var managementTimeouts: [String: Task<Void, Never>] = [:]
+    @Published var drafts: [NavigationRoute: String] = [:]
+    private var settingsRequests: [String: Task<Void, Never>] = [:]
+    private var removedDaemons: Set<String> = []
+    let preferences: UserDefaults
+    var pendingRestoredChat: NavigationRoute?
 
     // Permission mode, current model, thinking variant (per daemon)
     @Published var permissionMode: [String: String] = [:]
@@ -152,6 +205,25 @@ final class AppStore: ObservableObject {
     // Alerts
     @Published var alerts: [AlertItem] = []
     @Published var activeBanner: AlertItem?
+    @Published private(set) var feedback: PhoneFeedback?
+    var isAppActive = false {
+        didSet {
+            if !isAppActive {
+                activeBanner = nil
+                feedback = nil
+            }
+        }
+    }
+    @Published var phoneSettings: PhoneSettings {
+        didSet {
+            phoneSettings.save(to: preferences)
+            if !phoneSettings.haptics { feedback = nil }
+            if let banner = activeBanner,
+               !phoneSettings.allowsAlert(kind: banner.kind, daemon: banner.daemon) {
+                activeBanner = nil
+            }
+        }
+    }
 
     @Published private var pendingSubmissions: [String: Set<String>] = [:]
 
@@ -163,9 +235,9 @@ final class AppStore: ObservableObject {
     @Published var isConnecting: Bool = false
 
     // Font preference (persisted to UserDefaults)
-    @Published var fontChoice: MewFontChoice = MewFontChoice(rawValue: UserDefaults.standard.string(forKey: "mew.fontChoice") ?? "Mi Sans") ?? .miSans {
+    @Published var fontChoice: MewFontChoice {
         didSet {
-            UserDefaults.standard.set(fontChoice.rawValue, forKey: "mew.fontChoice")
+            preferences.set(fontChoice.rawValue, forKey: "mew.fontChoice")
         }
     }
 
@@ -174,6 +246,13 @@ final class AppStore: ObservableObject {
     private var listener: CoreListenerBridge?
 
     // MARK: - Lifecycle
+
+    init(defaults: UserDefaults = .standard) {
+        preferences = defaults
+        sessionFilter = defaults.string(forKey: "mew.sessionFilter")
+        phoneSettings = PhoneSettings(defaults: defaults)
+        fontChoice = MewFontChoice(rawValue: defaults.string(forKey: "mew.fontChoice") ?? "Mi Sans") ?? .miSans
+    }
 
     func start() {
         guard core == nil else { return }
@@ -208,6 +287,13 @@ final class AppStore: ObservableObject {
                 let id = DaemonId(nodeId: daemon.nodeId)
                 self.connect(daemonId: id)
             }
+            if !path.isEmpty {
+                synchronizeNavigation()
+                if let daemon = selectedDaemonId, let session = selectedSessionId {
+                    core.attach(id: daemon, sessionId: session)
+                }
+            }
+            restoreWorkingLocation()
         } catch {
             print("Failed to initialize mobile core: \(error)")
         }
@@ -219,18 +305,68 @@ final class AppStore: ObservableObject {
         core?.nodeId() ?? ""
     }
 
-    func addDaemon(nodeId: String, name: String) {
-        guard let core else { return }
-        let id = core.addDaemon(nodeId: nodeId, name: name)
+    @discardableResult
+    func addDaemon(info: DialInfo, name: String, replacingDaemonNodeId: String? = nil) -> String? {
+        if let replacingDaemonNodeId, info.nodeId != replacingDaemonNodeId {
+            return "This invite is for a different machine. Use a new invite from the machine you're pairing again."
+        }
+        guard let core else { return "Connection storage is unavailable. Try again shortly." }
+        let wasSaved = daemons.contains { $0.nodeId == info.nodeId }
+        let id: DaemonId
+        if let token = info.pairingToken {
+            id = core.addDaemonWithToken(nodeId: info.nodeId, name: name, token: token)
+        } else {
+            id = core.addDaemon(nodeId: info.nodeId, name: name)
+        }
         daemons = core.listDaemons()
+        removedDaemons.remove(info.nodeId)
+        if wasSaved { core.disconnect(id: id) }
         connect(daemonId: id)
+        if wasSaved, selectedDaemonId?.nodeId == id.nodeId, let session = selectedSessionId {
+            retrySessionAttachment(daemonNodeId: id.nodeId, sessionId: session)
+        }
+        return nil
     }
 
     func removeDaemon(_ daemon: DaemonEntry) {
         guard let core else { return }
+        if pendingNewSessionDaemon == daemon.nodeId { pendingNewSessionDaemon = nil }
         let id = DaemonId(nodeId: daemon.nodeId)
         core.removeDaemon(id: id)
+        removedDaemons.insert(daemon.nodeId)
+        phoneSettings.mutedMachines.remove(daemon.nodeId)
         daemons = core.listDaemons()
+        forgetWorkingLocation(daemonNodeId: daemon.nodeId)
+        daemonStatuses.removeValue(forKey: daemon.nodeId)
+        sessionLists.removeValue(forKey: daemon.nodeId)
+        modelsByDaemon.removeValue(forKey: daemon.nodeId)
+        daemonSettings.removeValue(forKey: daemon.nodeId)
+        clearManagementSettings(daemonNodeId: daemon.nodeId)
+        settingsRequests.removeValue(forKey: daemon.nodeId)?.cancel()
+        pendingPermissions.removeAll { $0.daemon == daemon.nodeId }
+        pendingAskUser.removeAll { $0.daemon == daemon.nodeId }
+        pendingGoals.removeAll { $0.daemon == daemon.nodeId }
+        alerts.removeAll { $0.daemon == daemon.nodeId }
+        if activeBanner?.daemon == daemon.nodeId { activeBanner = nil }
+    }
+
+    func renameDaemon(_ daemon: DaemonEntry, name: String) -> String? {
+        guard let core else { return "Connection storage is unavailable. Try again shortly." }
+        do {
+            try core.renameDaemon(id: DaemonId(nodeId: daemon.nodeId), name: name)
+            daemons = core.listDaemons()
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    func retryConnection(daemonNodeId: String) {
+        let id = DaemonId(nodeId: daemonNodeId)
+        if core?.retryConnection(id: id) == true,
+           selectedDaemonId?.nodeId == daemonNodeId, let session = selectedSessionId {
+            core?.attach(id: id, sessionId: session)
+        }
     }
 
     func connect(daemonId: DaemonId) {
@@ -245,51 +381,110 @@ final class AppStore: ObservableObject {
 
     // MARK: - Session management
 
-    func selectDaemon(_ daemon: DaemonEntry) {
-        selectedDaemonId = DaemonId(nodeId: daemon.nodeId)
-        if let core {
-            core.listSessions(id: selectedDaemonId!)
+    func sessionTimeline(daemonNodeId: String?, includeArchived: Bool, now: Date = Date(),
+                         calendar: Calendar = .current) -> [SessionTimelineSection] {
+        var items: [SessionTimelineItem] = []
+        let machines = daemonNodeId.map { [$0] } ?? daemons.map(\.nodeId)
+        for machine in machines {
+            for session in sessionLists[machine] ?? [] where includeArchived || !session.archived {
+                let activityAt = max(session.createdAt, session.lastMessageAt ?? 0,
+                    sessionAlertTimes[machine]?[session.sessionId] ?? 0)
+                items.append(SessionTimelineItem(daemonNodeId: machine, session: session, activityAt: activityAt))
+            }
         }
+        return SessionTimelineSection.grouped(items, now: now, calendar: calendar)
     }
 
-    func openAlertSession(_ alert: AlertItem) {
-        guard !alert.sessionId.isEmpty,
-              alert.daemon != selectedDaemonId?.nodeId || alert.sessionId != selectedSessionId else { return }
-        selectedDaemonId = DaemonId(nodeId: alert.daemon)
-        path.append(.chat(daemonNodeId: alert.daemon, sessionId: alert.sessionId))
+    private func clearChat() {
+        messages = []
+        streamingText = ""
+        streamingPartId = nil
+        isStreaming = false
+        isLoadingSession = false
+        sessionLoadError = nil
+        subagents = []
+        jobs = []
+        workerHistory = nil
+        jobOutput = nil
+        review = nil
+        historyBefore = nil
+        isLoadingOlderHistory = false
+        historyError = nil
     }
 
-    func selectSession(_ sessionId: String) {
-        guard let daemonId = selectedDaemonId, let core else { return }
-        selectedSessionId = sessionId
-        core.attach(id: daemonId, sessionId: sessionId)
-
-        // Pull snapshot for initial state
-        if let snap = core.snapshot(id: daemonId) {
-            applySnapshot(snap)
-        }
+    func clearSelection() {
+        clearChat()
+        selectedSessionId = nil
+        selectedDaemonId = nil
     }
 
-    func newSession(cwd: String? = nil) {
-        guard let daemonId = selectedDaemonId, let core else { return }
-        let nodeId = daemonId.nodeId
-        pendingNewSessionDaemon = nodeId
-        core.newSession(id: daemonId, cwd: cwd)
-        // Safety net: if the session never comes back (e.g. the daemon rejects
-        // the cwd), clear the flag so a later reload for this daemon doesn't
-        // spuriously navigate.
-        Task { [weak self] in
-            try? await Task.sleep(for: .seconds(10))
-            if self?.pendingNewSessionDaemon == nodeId {
-                self?.pendingNewSessionDaemon = nil
+    func refreshSessions(daemonNodeId: String?) {
+        if let daemonNodeId {
+            core?.listSessions(id: DaemonId(nodeId: daemonNodeId))
+        } else {
+            for daemon in daemons {
+                if case .connected? = daemonStatuses[daemon.nodeId] {
+                    core?.listSessions(id: DaemonId(nodeId: daemon.nodeId))
+                }
             }
         }
     }
 
-    func fetchProjects() {
-        guard let daemonId = selectedDaemonId, let core else { return }
-        projectsLoading.insert(daemonId.nodeId)
-        core.listProjects(id: daemonId)
+    func openAlertSession(_ alert: AlertItem) {
+        guard daemons.contains(where: { $0.nodeId == alert.daemon }), !alert.sessionId.isEmpty,
+              alert.daemon != selectedDaemonId?.nodeId || alert.sessionId != selectedSessionId else { return }
+        path.append(.chat(daemonNodeId: alert.daemon, sessionId: alert.sessionId))
+    }
+
+    func selectSession(_ sessionId: String, daemonNodeId: String? = nil) {
+        guard let nodeId = daemonNodeId ?? selectedDaemonId?.nodeId else { return }
+        let daemonId = DaemonId(nodeId: nodeId)
+        let changed = selectedDaemonId?.nodeId != nodeId || selectedSessionId != sessionId
+        if changed {
+            clearChat()
+            isLoadingSession = true
+        }
+        selectedDaemonId = daemonId
+        selectedSessionId = sessionId
+        if changed {
+            core?.attach(id: daemonId, sessionId: sessionId)
+        }
+
+        // Pull snapshot for initial state
+        if changed || sessionLoadError == nil, let snap = core?.snapshot(id: daemonId) {
+            applySnapshot(snap)
+        }
+    }
+
+    func retrySessionAttachment(daemonNodeId: String, sessionId: String) {
+        guard selectedDaemonId?.nodeId == daemonNodeId, selectedSessionId == sessionId,
+              let core else { return }
+        sessionLoadError = nil
+        isLoadingSession = true
+        core.attach(id: DaemonId(nodeId: daemonNodeId), sessionId: sessionId)
+    }
+
+    @discardableResult
+    func newSession(cwd: String? = nil, daemonNodeId: String) -> Bool {
+        guard case .connected? = daemonStatuses[daemonNodeId], let core else { return false }
+        pendingNewSessionDaemon = daemonNodeId
+        core.newSession(id: DaemonId(nodeId: daemonNodeId), cwd: cwd)
+        return true
+    }
+
+    private func failSessionCreation(daemon: String, message: String) {
+        guard pendingNewSessionDaemon == daemon else { return }
+        pendingNewSessionDaemon = nil
+        let item = AlertItem(daemon: daemon, sessionId: "", kind: "error",
+            title: "Couldn't create conversation", detail: message)
+        alerts.append(item)
+        if isAppActive { activeBanner = item }
+    }
+
+    func fetchProjects(daemonNodeId: String) {
+        guard let core else { return }
+        projectsLoading.insert(daemonNodeId)
+        core.listProjects(id: DaemonId(nodeId: daemonNodeId))
     }
 
     /// Browse a directory on the daemon. The result arrives as a
@@ -302,13 +497,83 @@ final class AppStore: ObservableObject {
         core.listDir(id: daemonId, sessionId: sessionId, path: path)
     }
 
+    func refreshReview(daemon: String, sessionId: String) {
+        guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
+        let requestId = UUID().uuidString
+        var files: [ReviewFile] = []
+        if let review, review.daemon == daemon, review.sessionId == sessionId {
+            files = review.files
+        }
+        review = WorkspaceReview(daemon: daemon, sessionId: sessionId, requestId: requestId, files: files)
+        if core?.readSessionDiff(id: DaemonId(nodeId: daemon), sessionId: sessionId, requestId: requestId) != true {
+            review?.isLoading = false
+            review?.error = "Connect to this session before reviewing changes."
+        }
+    }
+
+    @discardableResult
+    func loadOlderHistory() -> Bool {
+        guard let daemonId = selectedDaemonId, let sessionId = selectedSessionId,
+              historyBefore != nil, !isLoadingOlderHistory,
+              case .connected? = daemonStatuses[daemonId.nodeId] else { return false }
+        isLoadingOlderHistory = true
+        historyError = nil
+        if core?.loadOlderHistory(id: daemonId, sessionId: sessionId) != true {
+            isLoadingOlderHistory = false
+            historyError = "Couldn't request older messages. Reconnect and try again."
+            return false
+        }
+        return true
+    }
+
+    func openWorkerHistory(daemon: String, sessionId: String, childSessionId: String) {
+        guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
+        let requestId = UUID().uuidString
+        var messages: [ChatMessage] = []
+        if let workerHistory, workerHistory.daemon == daemon, workerHistory.sessionId == sessionId,
+           workerHistory.childSessionId == childSessionId {
+            messages = workerHistory.messages
+        }
+        workerHistory = WorkerHistory(daemon: daemon, sessionId: sessionId, childSessionId: childSessionId,
+            requestId: requestId, messages: messages)
+        if core?.readSubagentHistory(id: DaemonId(nodeId: daemon), sessionId: sessionId, childSessionId: childSessionId, requestId: requestId) != true {
+            workerHistory?.isLoading = false
+            workerHistory?.error = "Connect to the parent conversation to read this worker's history."
+        }
+    }
+
+    func openJobOutput(daemon: String, sessionId: String, jobId: String) {
+        guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
+        jobOutput = JobOutputDetail(daemon: daemon, sessionId: sessionId, jobId: jobId)
+        requestJobOutput()
+    }
+
+    func loadMoreJobOutput() {
+        guard jobOutput?.isLoading == false, jobOutput?.done == false else { return }
+        requestJobOutput()
+    }
+
+    private func requestJobOutput() {
+        guard let detail = jobOutput, selectedDaemonId?.nodeId == detail.daemon,
+              selectedSessionId == detail.sessionId else { return }
+        let requestId = UUID().uuidString
+        jobOutput?.requestId = requestId
+        jobOutput?.isLoading = true
+        jobOutput?.error = nil
+        if core?.readJobOutput(id: DaemonId(nodeId: detail.daemon), sessionId: detail.sessionId,
+            jobId: detail.jobId, requestId: requestId, offset: detail.nextOffset) != true {
+            jobOutput?.isLoading = false
+            jobOutput?.error = "Connect to this conversation to read job output."
+        }
+    }
+
     private func directoryKey(sessionId: String, path: String?) -> String {
         let p = path ?? ""
         return "\(sessionId)::\(p)"
     }
 
     var canSendPrompt: Bool {
-        guard !isStreaming, let daemonId = selectedDaemonId,
+        guard sessionLoadError == nil, !isLoadingSession, !isStreaming, let daemonId = selectedDaemonId,
               let sessionId = selectedSessionId,
               case .connected? = daemonStatuses[daemonId.nodeId],
               let snapshot = core?.snapshot(id: daemonId) else { return false }
@@ -323,18 +588,17 @@ final class AppStore: ObservableObject {
             pendingSubmissions[daemonId.nodeId, default: []].insert(sessionId)
             lastPrompt[sessionId] = text
         }
+        emitFeedback(.sent)
         return true
     }
 
     /// Re-send the last prompt for the selected session (retry after a failed
     /// turn). No-op if there's no stored prompt to retry.
     func retryLastTurn() {
-        guard let daemonId = selectedDaemonId, let core else { return }
         guard let sessionId = selectedSessionId,
               let prompt = lastPrompt[sessionId],
               !prompt.isEmpty else { return }
-        if canSendPrompt, core.prompt(id: daemonId, text: prompt) {
-            pendingSubmissions[daemonId.nodeId, default: []].insert(sessionId)
+        if sendPrompt(prompt) {
             lastTurnFailed[sessionId] = false
         }
     }
@@ -382,6 +646,12 @@ final class AppStore: ObservableObject {
         core.listModels(id: daemonId)
     }
 
+    func selectedModel(daemonNodeId: String) -> ModelSummary? {
+        guard !isLoadingSession, let model = currentModel[daemonNodeId],
+              let provider = currentProvider[daemonNodeId] else { return nil }
+        return modelsByDaemon[daemonNodeId]?.first { $0.provider == provider && $0.model == model }
+    }
+
     func switchModel(provider: String, model: String) {
         guard let daemonId = selectedDaemonId, let core else { return }
         core.switchModel(id: daemonId, provider: provider, model: model)
@@ -413,39 +683,119 @@ final class AppStore: ObservableObject {
         core.switchPersona(id: daemonId, name: name)
     }
 
-    func setAutoTitle(enabled: Bool) {
-        guard let daemonId = selectedDaemonId, let core else { return }
-        core.setAutoTitle(id: daemonId, enabled: enabled)
+    func readDaemonSettings(daemonNodeId: String) {
+        beginSettingsRequest(daemonNodeId: daemonNodeId,
+            accepted: core?.readAutomationSettings(id: DaemonId(nodeId: daemonNodeId)) == true)
     }
 
-    func setAutoSummary(enabled: Bool) {
-        guard let daemonId = selectedDaemonId, let core else { return }
-        core.setAutoSummary(id: daemonId, enabled: enabled)
+    func setAutoTitle(daemonNodeId: String, enabled: Bool) {
+        beginSettingsRequest(daemonNodeId: daemonNodeId,
+            accepted: core?.setAutoTitle(id: DaemonId(nodeId: daemonNodeId), enabled: enabled) == true)
     }
 
-    func archiveSession(_ sessionId: String, archived: Bool) {
-        guard let daemonId = selectedDaemonId, let core else { return }
-        core.archiveSession(id: daemonId, sessionId: sessionId, archived: archived)
+    func setAutoSummary(daemonNodeId: String, enabled: Bool) {
+        beginSettingsRequest(daemonNodeId: daemonNodeId,
+            accepted: core?.setAutoSummary(id: DaemonId(nodeId: daemonNodeId), enabled: enabled) == true)
     }
 
-    func pinSession(_ sessionId: String, pinned: Bool) {
-        guard let daemonId = selectedDaemonId, let core else { return }
-        core.pinSession(id: daemonId, sessionId: sessionId, pinned: pinned)
+    private func beginSettingsRequest(daemonNodeId: String, accepted: Bool) {
+        settingsRequests.removeValue(forKey: daemonNodeId)?.cancel()
+        daemonSettingsErrors.removeValue(forKey: daemonNodeId)
+        guard accepted else {
+            daemonSettingsErrors[daemonNodeId] = "Couldn't send the request. Reconnect and try again."
+            return
+        }
+        settingsRequests[daemonNodeId] = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(5)) } catch { return }
+            self?.daemonSettingsErrors[daemonNodeId] = "The daemon didn't confirm its settings. Update the daemon and try again."
+            self?.settingsRequests.removeValue(forKey: daemonNodeId)
+        }
     }
 
-    func deleteSession(_ sessionId: String) {
-        guard let daemonId = selectedDaemonId, let core else { return }
-        core.deleteSession(id: daemonId, sessionId: sessionId)
+    func readDaemonManagementSettings(daemonNodeId: String) {
+        beginManagementRequest(daemonNodeId: daemonNodeId) { id, request in
+            core?.readDaemonSettings(id: id, requestId: request) == true
+        }
     }
 
-    func renameSession(_ sessionId: String, title: String) {
-        guard let daemonId = selectedDaemonId, let core else { return }
-        core.renameSession(id: daemonId, sessionId: sessionId, title: title)
+    func saveSessionDefaults(daemonNodeId: String, sessionId: String) {
+        guard selectedDaemonId?.nodeId == daemonNodeId, selectedSessionId == sessionId, canSendPrompt else {
+            managementErrors[daemonNodeId] = "Open this conversation and wait for it to finish loading before saving its defaults."
+            return
+        }
+        beginManagementRequest(daemonNodeId: daemonNodeId) { id, request in
+            core?.saveSessionDefaults(id: id, sessionId: sessionId, requestId: request) == true
+        }
+    }
+
+    func resetSessionDefaults(daemonNodeId: String) {
+        beginManagementRequest(daemonNodeId: daemonNodeId) { id, request in
+            core?.resetSessionDefaults(id: id, requestId: request) == true
+        }
+    }
+
+    func revokeDevice(daemonNodeId: String, deviceId: String) {
+        guard managementSettings[daemonNodeId]?.devices?.contains(where: { $0.id == deviceId }) == true else {
+            managementErrors[daemonNodeId] = "Refresh settings before revoking this device."
+            return
+        }
+        beginManagementRequest(daemonNodeId: daemonNodeId) { id, request in
+            core?.revokeDevice(id: id, deviceId: deviceId, requestId: request) == true
+        }
+    }
+
+    private func beginManagementRequest(daemonNodeId: String, send: (DaemonId, String) -> Bool) {
+        guard managementRequestIds[daemonNodeId] == nil else { return }
+        guard !removedDaemons.contains(daemonNodeId), case .connected? = daemonStatuses[daemonNodeId] else {
+            managementErrors[daemonNodeId] = "Connect to this machine to manage its settings."
+            return
+        }
+        managementErrors.removeValue(forKey: daemonNodeId)
+        let request = UUID().uuidString
+        guard send(DaemonId(nodeId: daemonNodeId), request) else {
+            managementErrors[daemonNodeId] = "Couldn't send the request. Reconnect and try again."
+            return
+        }
+        managementRequestIds[daemonNodeId] = request
+        managementTimeouts[daemonNodeId] = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(5)) } catch { return }
+            guard let self, managementRequestIds[daemonNodeId] == request else { return }
+            managementRequestIds.removeValue(forKey: daemonNodeId)
+            managementTimeouts.removeValue(forKey: daemonNodeId)
+            managementErrors[daemonNodeId] = "The daemon didn't confirm the request. Update the daemon if needed, then refresh settings before trying again."
+        }
+    }
+
+    private func clearManagementSettings(daemonNodeId: String) {
+        managementSettings.removeValue(forKey: daemonNodeId)
+        managementErrors.removeValue(forKey: daemonNodeId)
+        managementRequestIds.removeValue(forKey: daemonNodeId)
+        managementTimeouts.removeValue(forKey: daemonNodeId)?.cancel()
+    }
+
+    func archiveSession(_ sessionId: String, daemonNodeId: String, archived: Bool) {
+        guard case .connected? = daemonStatuses[daemonNodeId], let core else { return }
+        core.archiveSession(id: DaemonId(nodeId: daemonNodeId), sessionId: sessionId, archived: archived)
+    }
+
+    func pinSession(_ sessionId: String, daemonNodeId: String, pinned: Bool) {
+        guard case .connected? = daemonStatuses[daemonNodeId], let core else { return }
+        core.pinSession(id: DaemonId(nodeId: daemonNodeId), sessionId: sessionId, pinned: pinned)
+    }
+
+    func deleteSession(_ sessionId: String, daemonNodeId: String) {
+        guard case .connected? = daemonStatuses[daemonNodeId], let core else { return }
+        core.deleteSession(id: DaemonId(nodeId: daemonNodeId), sessionId: sessionId)
+    }
+
+    func renameSession(_ sessionId: String, daemonNodeId: String, title: String) {
+        guard case .connected? = daemonStatuses[daemonNodeId], let core else { return }
+        core.renameSession(id: DaemonId(nodeId: daemonNodeId), sessionId: sessionId, title: title)
     }
 
     // MARK: - Event handling (called by CoreListenerBridge)
 
-    func handleEvent(_ event: CoreEvent) {
+    func handleEvent(_ event: CoreEvent, receivedAt: Date = Date()) {
         switch event {
         case .daemonStatusChanged(let daemon, let status):
             daemonStatuses[daemon] = status
@@ -456,14 +806,90 @@ final class AppStore: ObservableObject {
                     core.listSessions(id: id)
                 }
             } else {
+                failSessionCreation(daemon: daemon,
+                    message: "Connection lost before the conversation was created. Reconnect and try again.")
+                settingsRequests.removeValue(forKey: daemon)?.cancel()
+                daemonSettings.removeValue(forKey: daemon)
+                daemonSettingsErrors.removeValue(forKey: daemon)
+                clearManagementSettings(daemonNodeId: daemon)
                 pendingSubmissions.removeValue(forKey: daemon)
+                if workerHistory?.daemon == daemon, workerHistory?.isLoading == true {
+                    workerHistory?.isLoading = false
+                    workerHistory?.error = "Connection lost. Reconnect and refresh this worker's history."
+                }
+                if jobOutput?.daemon == daemon, jobOutput?.isLoading == true {
+                    jobOutput?.isLoading = false
+                    jobOutput?.error = "Connection lost. Reconnect to read more output."
+                }
+                if selectedDaemonId?.nodeId == daemon, isLoadingOlderHistory {
+                    isLoadingOlderHistory = false
+                    historyError = "Connection lost. Reconnect to load older messages."
+                }
+                if review?.daemon == daemon, review?.isLoading == true {
+                    review?.isLoading = false
+                    review?.error = "Connection lost. Reconnect and refresh to review changes."
+                }
             }
+
+        case .activityUpdated(let daemon, let sessionId, let workers, let backgroundJobs):
+            guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
+            subagents = workers
+            jobs = backgroundJobs
+
+        case .workerHistoryLoaded(let daemon, let sessionId, let childSessionId, let requestId, let messages, let error):
+            guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId,
+                  workerHistory?.daemon == daemon, workerHistory?.sessionId == sessionId,
+                  workerHistory?.childSessionId == childSessionId, workerHistory?.requestId == requestId,
+                  workerHistory?.isLoading == true else { return }
+            if error == nil { workerHistory?.messages = messages }
+            workerHistory?.error = error
+            workerHistory?.isLoading = false
+
+        case .jobOutputLoaded(let daemon, let sessionId, let jobId, let requestId, let offset, let nextOffset, let output, let done, let incomplete):
+            guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId,
+                  jobOutput?.daemon == daemon, jobOutput?.sessionId == sessionId,
+                  jobOutput?.jobId == jobId, jobOutput?.requestId == requestId,
+                  jobOutput?.isLoading == true else { return }
+            guard offset == jobOutput?.nextOffset, nextOffset >= offset,
+                  nextOffset - offset == UInt64(output.utf8.count) else {
+                jobOutput?.error = "The daemon returned an invalid output chunk. Refresh to try again."
+                jobOutput?.isLoading = false
+                return
+            }
+            jobOutput?.output.append(output)
+            jobOutput?.nextOffset = nextOffset
+            jobOutput?.done = done
+            jobOutput?.incomplete = jobOutput?.incomplete == true || incomplete
+            jobOutput?.isLoading = false
+
+        case .jobOutputFailed(let daemon, let sessionId, let jobId, let requestId, let message):
+            guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId,
+                  jobOutput?.daemon == daemon, jobOutput?.sessionId == sessionId,
+                  jobOutput?.jobId == jobId, jobOutput?.requestId == requestId,
+                  jobOutput?.isLoading == true else { return }
+            jobOutput?.error = message
+            jobOutput?.isLoading = false
+
+        case .reviewLoaded(let daemon, let sessionId, let requestId, let files):
+            guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId,
+                  review?.daemon == daemon, review?.sessionId == sessionId,
+                  review?.requestId == requestId, review?.isLoading == true else { return }
+            review?.files = files
+            review?.isLoading = false
+
+        case .reviewFailed(let daemon, let sessionId, let requestId, let message):
+            guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId,
+                  review?.daemon == daemon, review?.sessionId == sessionId,
+                  review?.requestId == requestId, review?.isLoading == true else { return }
+            review?.isLoading = false
+            review?.error = message
 
         case .daemonVersion(let daemon, let version):
             daemonVersions[daemon] = version
 
         case .sessionList(let daemon, let sessions):
             sessionLists[daemon] = sessions
+            validateRestoredChat(daemonNodeId: daemon, sessions: sessions)
             // Seed per-session turn-failure state from the rail summaries so
             // the ChatView retry banner is correct on fresh attach (before any
             // providerMessageEnded event fires for this session).
@@ -492,17 +918,33 @@ final class AppStore: ObservableObject {
             pendingPermissions.removeAll { $0.daemon == daemon }
             pendingAskUser.removeAll { $0.daemon == daemon }
             pendingGoals.removeAll { $0.daemon == daemon }
+            if selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId {
+                historyBefore = nil
+                isLoadingOlderHistory = false
+                historyError = nil
+            }
+
+        case .historyExtended(let daemon, let sessionId):
+            guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
+            refreshMessages()
+            isLoadingOlderHistory = false
+            historyError = nil
+
+        case .sessionCreated(let daemon, let sessionId):
+            guard pendingNewSessionDaemon == daemon else { return }
+            pendingNewSessionDaemon = nil
+            path.append(.chat(daemonNodeId: daemon, sessionId: sessionId))
+
+        case .sessionCreationFailed(let daemon, let message):
+            failSessionCreation(daemon: daemon, message: message)
+
+        case .sessionAttachmentFailed(let daemon, let sessionId, let message):
+            guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
+            isLoadingSession = false
+            sessionLoadError = message
 
         case .sessionReloaded(let daemon, let sessionId):
             guard selectedDaemonId?.nodeId == daemon else { return }
-            // A newly created session becomes selected before its snapshot is applied.
-            if pendingNewSessionDaemon == daemon {
-                pendingNewSessionDaemon = nil
-                selectedSessionId = sessionId
-                path.append(.chat(daemonNodeId: daemon, sessionId: sessionId))
-            } else if selectedSessionId == nil {
-                selectedSessionId = sessionId
-            }
             guard selectedSessionId == sessionId else { return }
             // Pull snapshot after reload
             if let snap = core?.snapshot(id: DaemonId(nodeId: daemon)) {
@@ -510,11 +952,6 @@ final class AppStore: ObservableObject {
             }
             // Re-fetch persona list — it may have changed during disconnection.
             listPersonas()
-            // Re-send auto-title/summary settings (daemon resets on reconnect).
-            let autoTitle = UserDefaults.standard.bool(forKey: "autoTitle_\(sessionId)")
-            if autoTitle { setAutoTitle(enabled: true) }
-            let autoSummary = UserDefaults.standard.bool(forKey: "autoSummary_\(sessionId)")
-            if autoSummary { setAutoSummary(enabled: true) }
         case .textDelta(let daemon, let sessionId, let partId, let delta):
             guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
             if streamingPartId == partId {
@@ -524,8 +961,12 @@ final class AppStore: ObservableObject {
                 streamingText = delta
             }
 
-        case .partUpdated(let daemon, let sessionId, let partId, _, _):
+        case .partUpdated(let daemon, let sessionId, let partId, _, let state):
             guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
+            if state == "completed", streamingPartId == partId {
+                streamingPartId = nil
+                streamingText = ""
+            }
             // Update the message part in place
             updatePartInMessages(partId: partId)
 
@@ -601,6 +1042,15 @@ final class AppStore: ObservableObject {
             pendingAskUser.removeAll { $0.daemon == daemon && $0.requestId == requestId }
 
         case .alert(let daemon, let sessionId, let kind, let title, let detail):
+            guard !removedDaemons.contains(daemon) else { return }
+            if !sessionId.isEmpty {
+                let timestamp = Int64(receivedAt.timeIntervalSince1970 * 1_000)
+                sessionAlertTimes[daemon, default: [:]][sessionId] = max(
+                    sessionAlertTimes[daemon]?[sessionId] ?? 0, timestamp)
+                if sessionLists[daemon]?.contains(where: { $0.sessionId == sessionId }) != true {
+                    refreshSessions(daemonNodeId: daemon)
+                }
+            }
             switch kind {
             case "error", "turncomplete", "turnfailed":
                 pendingSubmissions[daemon]?.remove(sessionId)
@@ -615,11 +1065,23 @@ final class AppStore: ObservableObject {
                 detail: detail
             )
             alerts.append(item)
-            if kind == "error" || daemon != selectedDaemonId?.nodeId || sessionId != selectedSessionId {
-                activeBanner = item
+            if isAppActive, phoneSettings.allowsAlert(kind: kind, daemon: daemon) {
+                if kind == "error" || kind == "turnfailed" || daemon != selectedDaemonId?.nodeId || sessionId != selectedSessionId {
+                    activeBanner = item
+                }
+                switch kind {
+                case "turncomplete": emitFeedback(.completed)
+                case "error", "turnfailed": emitFeedback(.failed)
+                default: emitFeedback(.attention)
+                }
             }
             if kind == "error", daemon == selectedDaemonId?.nodeId, sessionId == selectedSessionId {
+                isLoadingSession = false
                 lastTurnFailed[sessionId] = true
+                if isLoadingOlderHistory {
+                    isLoadingOlderHistory = false
+                    historyError = detail ?? title
+                }
             }
 
         case .attentionChanged(let daemon, let sessionId, let permissions, let questions):
@@ -631,10 +1093,37 @@ final class AppStore: ObservableObject {
         case .todosUpdated(_, let sessionId, let todoItems):
             todos[sessionId] = todoItems
 
-        case .modelList(_, let models):
-            availableModels = models
+        case .modelList(let daemon, let models):
+            modelsByDaemon[daemon] = models
 
-        case .slashResult(_, _, let text):
+        case .automationSettings(let daemon, let settings):
+            daemonSettings[daemon] = settings
+            daemonSettingsErrors.removeValue(forKey: daemon)
+            settingsRequests.removeValue(forKey: daemon)?.cancel()
+
+        case .daemonManagementSettings(let daemon, let requestId, let settings):
+            guard !removedDaemons.contains(daemon), case .connected? = daemonStatuses[daemon] else { return }
+            if let requestId {
+                guard managementRequestIds[daemon] == requestId else { return }
+                managementRequestIds.removeValue(forKey: daemon)
+                managementTimeouts.removeValue(forKey: daemon)?.cancel()
+                managementErrors.removeValue(forKey: daemon)
+            } else if managementSettings[daemon] == nil {
+                return
+            }
+            managementSettings[daemon] = settings
+
+        case .daemonManagementFailed(let daemon, let requestId, let message):
+            guard managementRequestIds[daemon] == requestId else { return }
+            managementRequestIds.removeValue(forKey: daemon)
+            managementTimeouts.removeValue(forKey: daemon)?.cancel()
+            managementErrors[daemon] = message
+
+        case .autoSummaryChanged(let daemon, let enabled):
+            daemonSettings[daemon]?.autoSummaryEnabled = enabled
+
+        case .slashResult(let daemon, let sessionId, let text):
+            guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
             // Append the slash result as a synthetic assistant message so it
             // appears inline in the chat transcript.
             messages.append(ChatMessage(
@@ -678,9 +1167,49 @@ final class AppStore: ObservableObject {
 
     // MARK: - Helpers
 
+    private func emitFeedback(_ kind: PhoneFeedback.Kind) {
+        guard isAppActive, phoneSettings.haptics else { return }
+        feedback = PhoneFeedback(kind: kind)
+    }
+
+    /// Export an allowlist of connection metadata, excluding free-form names and errors.
+    var connectionDiagnostics: String {
+        func version(_ value: String?) -> String {
+            guard let value else { return "unknown" }
+            let core = value.split(separator: "-", maxSplits: 1).first.map(String.init) ?? ""
+            let parts = core.split(separator: ".", omittingEmptySubsequences: false)
+            guard (2...4).contains(parts.count), parts.allSatisfy({ !$0.isEmpty && $0.count <= 5 && $0.allSatisfy(\.isNumber) }) else {
+                return "unknown"
+            }
+            return core
+        }
+        let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+        var lines = ["mew connection diagnostics",
+            "App: \(version(appVersion))",
+            "iOS: \(version(UIDevice.current.systemVersion))",
+            "Saved machines: \(daemons.count)"]
+        for (index, daemon) in daemons.enumerated() {
+            let status: String
+            switch daemonStatuses[daemon.nodeId] ?? .disconnected {
+            case .connected: status = "connected"
+            case .connecting: status = "connecting"
+            case .disconnected: status = "disconnected"
+            case .backoff: status = "retrying"
+            case .pairedLost: status = "pairing required"
+            }
+            lines.append("Machine \(index + 1): \(status); daemon \(version(daemonVersions[daemon.nodeId] ?? daemon.lastKnownVersion))")
+        }
+        return lines.joined(separator: "\n")
+    }
+
     private func applySnapshot(_ snap: DaemonSnapshot) {
         if let session = snap.sessions.first(where: { $0.sessionId == selectedSessionId }) {
+            isLoadingSession = false
+            sessionLoadError = nil
             messages = session.messages
+            historyBefore = session.historyBefore
+            subagents = session.subagents
+            jobs = session.jobs
             isStreaming = session.running
             if let daemon = selectedDaemonId?.nodeId {
                 pendingPermissions.removeAll { $0.daemon == daemon && $0.sessionId == session.sessionId }

@@ -1,10 +1,13 @@
-import { useRef, useState } from "react";
+import { useEffect, useState } from "react";
+import { ChevronDown, Loader2 } from "lucide-react";
 import type { ModelInfo } from "@mew/web-client";
-import { cn } from "../lib/utils";
 import { useSessionStore } from "../stores/session";
-import { useOutsideClick } from "../lib/useOutsideClick";
 import { shortModel } from "../lib/format";
 import { getClient } from "../lib/client-ref";
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadioGroup,
+  DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger,
+} from "./ui/dropdown-menu";
 
 export function ModelPill() {
   const availableModels = useSessionStore((s) => s.availableModels);
@@ -12,201 +15,102 @@ export function ModelPill() {
   const currentProvider = useSessionStore((s) => s.currentProvider);
   const currentThinkingVariant = useSessionStore((s) => s.currentThinkingVariant);
   const [open, setOpen] = useState(false);
-  const [thinkingOpen, setThinkingOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const sessionId = useSessionStore((s) => s.sessionId);
+  useEffect(() => { setOpen(false); setError(null); }, [sessionId]);
 
-  useOutsideClick(ref, open, () => {
-    setOpen(false);
-    setThinkingOpen(false);
-  });
-
-  const handleSwitch = async (model: ModelInfo) => {
+  const switchModel = async (model: ModelInfo) => {
     const client = getClient();
-    if (!client) return;
-    setThinkingOpen(false);
-    setOpen(false);
-    const result = await client.switchModel(model.provider, model.model);
-    if (result) {
-      useSessionStore.getState().setCurrentModel(result.provider, result.model);
-      useSessionStore.getState().setCurrentThinkingVariant(null);
+    if (!client || pending) return;
+    setPending(true);
+    setError(null);
+    try {
+      const result = await client.switchModel(model.provider, model.model);
+      if (useSessionStore.getState().sessionId !== sessionId) return;
+      if (result) {
+        useSessionStore.getState().setCurrentModel(result.provider, result.model);
+        useSessionStore.getState().setCurrentThinkingVariant(null);
+        setOpen(false);
+      }
+    } catch (error) {
+      if (useSessionStore.getState().sessionId === sessionId) {
+        setError(error instanceof Error ? error.message : "Could not switch models. Try again.");
+      }
+    } finally {
+      setPending(false);
     }
   };
 
-  const handleSetVariant = async (variant: string) => {
+  const setVariant = async (variant: string) => {
     const client = getClient();
-    if (!client) return;
-    setThinkingOpen(false);
-    setOpen(false);
-    const resolved = await client.setThinkingVariant(variant);
-    useSessionStore.getState().setCurrentThinkingVariant(resolved);
+    if (!client || pending) return;
+    setPending(true);
+    setError(null);
+    try {
+      const resolved = await client.setThinkingVariant(variant);
+      if (useSessionStore.getState().sessionId !== sessionId) return;
+      useSessionStore.getState().setCurrentThinkingVariant(resolved);
+      setOpen(false);
+    } catch (error) {
+      if (useSessionStore.getState().sessionId === sessionId) {
+        setError(error instanceof Error ? error.message : "Could not change thinking. Try again.");
+      }
+    } finally {
+      setPending(false);
+    }
   };
 
   const byProvider = new Map<string, ModelInfo[]>();
-  for (const m of availableModels) {
-    const list = byProvider.get(m.provider) ?? [];
-    list.push(m);
-    byProvider.set(m.provider, list);
+  for (const model of availableModels) {
+    const list = byProvider.get(model.provider) ?? [];
+    list.push(model);
+    byProvider.set(model.provider, list);
   }
-  const providers = [...byProvider.keys()].sort();
-
-  const label = currentModel ? shortModel(currentModel) : "model";
-  const currentModelInfo = availableModels.find(
-    (m) => m.provider === currentProvider && m.model === currentModel,
-  );
-  const variants = currentModelInfo?.thinking_variants ?? [];
+  const current = availableModels.find((model) => model.provider === currentProvider && model.model === currentModel);
+  const variants = current?.thinking_variants ?? [];
+  const label = current?.display_name || (currentModel ? shortModel(currentModel) : "Choose model");
 
   return (
-    <div ref={ref} className="relative">
-      <button
-        onClick={() => setOpen((o) => !o)}
-        className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-        title="Switch model"
-      >
-        <span className="truncate font-mono">{label}</span>
-        {currentThinkingVariant && (
-          <span className="rounded bg-primary/10 px-1 text-[9px] text-primary">
-            {currentThinkingVariant}
-          </span>
-        )}
-        <svg
-          className={cn("h-3 w-3 transition-transform", open && "rotate-180")}
-          viewBox="0 0 12 12"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-        >
-          <path d="M3 7.5L6 4.5L9 7.5" />
-        </svg>
-      </button>
-
-      {open && (
-        <div className="absolute bottom-full right-0 z-50 mb-1 w-72 rounded-lg border border-border bg-popover shadow-lg">
-          {variants.length > 0 && (
-            <div className="border-b border-border p-1">
-              <button
-                onClick={() => setThinkingOpen((o) => !o)}
-                className="flex w-full items-center justify-between rounded-md px-2 py-1 text-xs transition-colors hover:bg-accent"
-              >
-                <span className="text-muted-foreground">Thinking</span>
-                <span className="flex items-center gap-1">
-                  <span className="font-medium text-foreground">
-                    {currentThinkingVariant ?? "off"}
-                  </span>
-                  <svg
-                    className={cn("h-3 w-3 transition-transform", thinkingOpen && "rotate-180")}
-                    viewBox="0 0 12 12"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                  >
-                    <path d="M3 4.5L6 7.5L9 4.5" />
-                  </svg>
-                </span>
-              </button>
-              {thinkingOpen && (
-                <div className="mt-0.5 space-y-0.5">
-                  <VariantRow
-                    label="Off"
-                    active={currentThinkingVariant === null}
-                    onClick={() => handleSetVariant("")}
-                  />
-                  {variants.map((v) => (
-                    <VariantRow
-                      key={v.name}
-                      label={v.name}
-                      active={currentThinkingVariant === v.name}
-                      onClick={() => handleSetVariant(v.name)}
-                    />
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-          <div className="max-h-64 overflow-y-auto p-1">
-            {availableModels.length === 0 && (
-              <div className="px-3 py-4 text-center text-xs text-muted-foreground">
-                {getClient() ? "Loading models…" : "Not connected"}
-              </div>
-            )}
-            {providers.map((provider) => (
-              <div key={provider}>
-                <div className="px-2 py-1 text-[9px] font-semibold uppercase tracking-wide text-muted-foreground">
-                  {provider}
-                </div>
-                {byProvider.get(provider)!.map((m) => {
-                  const isActive =
-                    currentProvider === m.provider && currentModel === m.model;
-                  return (
-                    <button
-                      key={m.id}
-                      onClick={() => handleSwitch(m)}
-                      className={cn(
-                        "flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-accent",
-                        isActive && "bg-accent",
-                      )}
-                    >
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate font-medium text-foreground">
-                          {m.model}
-                        </div>
-                        {m.description && (
-                          <div className="truncate text-[10px] text-muted-foreground">
-                            {m.description}
-                          </div>
-                        )}
-                      </div>
-                      {isActive && (
-                        <svg
-                          className="ml-2 h-3 w-3 shrink-0 text-primary"
-                          viewBox="0 0 16 16"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2"
-                        >
-                          <path d="M3 8L6.5 11.5L13 5" />
-                        </svg>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
+    <DropdownMenu open={open} onOpenChange={(value) => { setOpen(value); setError(null); }}>
+      <DropdownMenuTrigger asChild>
+        <button type="button" title="Switch model" className="motion-pressable flex h-7 min-w-0 max-w-56 items-center gap-1.5 rounded-md px-1.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-accent-foreground data-[state=open]:bg-accent">
+          <span className="truncate" title={label}>{label}</span>
+          {currentThinkingVariant && <span className="max-w-16 truncate text-[10px] text-muted-foreground">{currentThinkingVariant}</span>}
+          {pending ? <Loader2 className="h-3 w-3 shrink-0 animate-spin" /> : <ChevronDown className="h-3 w-3 shrink-0" />}
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent side="top" align="end" sideOffset={10} aria-label="Model" aria-busy={pending} className="w-72 max-w-[calc(100vw-2rem)] rounded-xl p-1.5">
+        {error && <p role="alert" className="px-2 py-2 text-xs text-text-error">{error}</p>}
+        {variants.length > 0 && <>
+          <DropdownMenuLabel className="text-[11px] font-normal text-muted-foreground">Thinking</DropdownMenuLabel>
+          <DropdownMenuRadioGroup value={currentThinkingVariant ?? ""} onValueChange={(value) => void setVariant(value)} className="flex flex-wrap gap-1 px-1 pb-1">
+            {[{ name: "", label: "Off" }, ...variants.map((variant) => ({ name: variant.name, label: variant.name }))].map((variant) => (
+              <DropdownMenuRadioItem key={variant.name} value={variant.name} disabled={pending} onSelect={(event) => event.preventDefault()} className="min-h-7 rounded-md text-xs capitalize data-[state=checked]:bg-accent">{variant.label}</DropdownMenuRadioItem>
             ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function VariantRow({
-  label,
-  active,
-  onClick,
-}: {
-  label: string;
-  active: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className={cn(
-        "flex w-full items-center justify-between rounded-md px-2 py-1 text-left text-xs transition-colors hover:bg-accent",
-        active && "bg-accent",
-      )}
-    >
-      <span className="capitalize text-foreground">{label}</span>
-      {active && (
-        <svg
-          className="h-3 w-3 shrink-0 text-primary"
-          viewBox="0 0 16 16"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-        >
-          <path d="M3 8L6.5 11.5L13 5" />
-        </svg>
-      )}
-    </button>
+          </DropdownMenuRadioGroup>
+          <DropdownMenuSeparator />
+        </>}
+        <DropdownMenuRadioGroup value={`${currentProvider}/${currentModel}`} onValueChange={(id) => {
+          const model = availableModels.find((item) => item.id === id);
+          if (model) void switchModel(model);
+        }}>
+          {availableModels.length === 0 && <p className="px-2 py-4 text-xs text-muted-foreground">No models available. Check your provider settings.</p>}
+          {[...byProvider.keys()].sort().map((provider) => (
+            <div key={provider}>
+              <DropdownMenuLabel className="text-[11px] font-normal text-muted-foreground">{provider}</DropdownMenuLabel>
+              {byProvider.get(provider)!.map((model) => (
+                <DropdownMenuRadioItem key={model.id} value={model.id} disabled={pending} onSelect={(event) => event.preventDefault()} className="min-h-9 rounded-lg text-xs">
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate font-medium">{model.display_name || model.model}</span>
+                    {model.description && <span className="block truncate text-[11px] text-muted-foreground">{model.description}</span>}
+                  </span>
+                </DropdownMenuRadioItem>
+              ))}
+            </div>
+          ))}
+        </DropdownMenuRadioGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

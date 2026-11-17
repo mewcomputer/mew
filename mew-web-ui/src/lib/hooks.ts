@@ -1,4 +1,4 @@
-import { useEffect, type RefObject } from "react";
+import { useEffect, useState, type RefObject } from "react";
 import { useRouter } from "@tanstack/react-router";
 import { useSessionStore } from "../stores/session";
 import { getClient, SESSION_ID_KEY } from "./client";
@@ -92,48 +92,37 @@ export function useComposerFocusShortcut(inputRef: RefObject<HTMLTextAreaElement
   }, [inputRef]);
 }
 
-/** Sync store sessionId → router navigation. */
-export function useSessionNavigation() {
-  const router = useRouter();
-  useEffect(() => {
-    if (!router) return;
-    const unsub = useSessionStore.subscribe((state, prev) => {
-      if (state.sessionId && state.sessionId !== prev.sessionId) {
-        const current = router.state.location.pathname;
-        const expected = `/session/${state.sessionId}`;
-        if (current !== expected) {
-          router.navigate({ to: "/session/$sessionId", params: { sessionId: state.sessionId } });
-        }
-      }
-    });
-    return unsub;
-  }, [router]);
-}
-
 /** Attach to a session by ID, with cleanup. */
 export function useSessionAttach(sessionId: string) {
   const router = useRouter();
+  const connected = useSessionStore((state) => state.connectionState === "connected");
+  const attachedSession = useSessionStore((state) => state.sessionId);
+  const [settled, setSettled] = useState(true);
 
   useEffect(() => {
+    if (!connected) return;
     const client = getClient();
     const store = useSessionStore.getState();
+    let active = true;
+    localStorage.setItem(SESSION_ID_KEY, sessionId);
+    store.clearAlertsForSession(sessionId);
 
     // New-session flows receive SessionReady before navigation. The client
     // is already attached in that case, even if React has not observed the
     // store update yet; attaching again races the daemon and can surface a
     // misleading "session not found" error.
-    if (store.sessionId === sessionId || client.getSessionId() === sessionId) {
+    if (client.isSessionStable(sessionId)) {
       if (store.sessionId !== sessionId) store.setSessionId(sessionId);
+      setSettled(true);
       return;
     }
 
-    store.reset();
-    localStorage.setItem(SESSION_ID_KEY, sessionId);
-    // Clear alerts for this session since we're now viewing it.
-    store.clearAlertsForSession(sessionId);
-
+    setSettled(false);
+    if (store.sessionId !== sessionId) store.reset();
     client.attachSession(sessionId).catch(() => {
-      router.navigate({ to: "/" });
-    });
-  }, [sessionId, router]);
+      if (active && client.isConnected()) router.navigate({ to: "/" });
+    }).finally(() => { if (active) setSettled(true); });
+    return () => { active = false; };
+  }, [sessionId, router, connected, attachedSession]);
+  return connected && attachedSession === sessionId && settled && getClient().isSessionStable(sessionId);
 }

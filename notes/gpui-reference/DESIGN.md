@@ -1,150 +1,193 @@
-# Design Notes
+# mew native desktop design conventions
 
-> **Source note:** This guide was originally written for [tanlethanh/zedra](https://github.com/tanlethanh/zedra) and references zedra-specific code paths. The design principles generalize, but keep the original project context in mind when reading.
+Follow the existing desktop shell and [theme contract](THEMING.md). These are
+mew product conventions, not GPUI framework requirements.
 
-## Core Taste
+## Existing composition
 
-A serious tool, not a decorative app.
+The shell has three full-height panes: workspace/chat navigation, conversation,
+and work content. Each owns its 38 px top header. Dividers continue through the
+headers and content; avoid a global titlebar row spanning the three owners.
+Layout constants live in `shell/types.rs`; width constraints and transition math
+live in `shell/helpers.rs`.
 
-- Dark, flat, and quiet
-- Monotone-first, with color reserved for meaning
-- Dense but readable
-- Minimal chrome, minimal borders, minimal interruption
-- Touch-friendly without looking oversized
+The workspace-grouped navigation pane owns chat navigation. The conversation
+header shows the selected workspace and chat; conversation tabs are not a second
+navigation surface. Reserve native window controls in the navigation header, or
+in the conversation header while navigation is hidden. Use shared vertical
+dividers instead of enclosing rounded panels.
 
-The UI should read like a native code workspace: calm surfaces, compact rows, restrained icons, and subtle separators.
+Conversation width starts at 480 px and is retained per chat. Work content fills
+the remaining width, including space gained when the window grows. Dragging the
+conversation/work divider changes the conversation width. Preserve the 420 px
+conversation and 360 px work minima, including the divider. Narrow windows fold
+work content; navigation resizing also preserves the conversation minimum.
+Legacy saved workbench widths use the new conversation default.
 
-## Color System
+Work content has closable tabs for opened tools and browser pages. The plus
+control and Command-T open a new-tab page with URL entry and a launcher for
+Changes, Terminal, Files and Activity. Reopening a tool selects its existing tab;
+browser pages have independent identities, URLs, titles and retained native pages.
+Keep chat navigation in the left pane. Command-W closes a work tab while focus
+is in work content, and retains chat-close behavior in the conversation.
 
-Canonical tokens and wiring live in [THEMING.md](THEMING.md).
+Retain the tab order, selection and last browser target per chat. A first visit
+to another chat inherits pane sizing with a fresh tab workspace. Keep the active
+tab visible when the strip overflows, and keep the plus control accessible.
 
-New UI must read colors from `theme::palette(cx)` or the `theme::bg_primary(cx)`-style accessors at render time. Do not hardcode hex values in views.
+Changes gives the diff the flexible area, with changed files at the right of a
+wide work pane or above the diff in a narrower one. Terminal fills its selected
+work tab and falls back beneath the conversation in narrow windows where work
+is folded. Keep its retained entity and daemon session ownership across that
+move, and mount the entity in one place. Folded work content must not register
+hidden input fields or editing actions.
 
-| Role | Token (via `theme::`) |
-|------|------------------------|
-| Base background | `bg_primary`, `bg_surface` |
-| Raised surface | `bg_card`, `bg_overlay` |
-| Quiet card fill | `bg_card_dim` |
-| Quiet structure | `border_subtle` |
-| Control edge | `border_default`, `border_active` |
-| Primary text | `text_primary` |
-| Standard text | `text_secondary` |
-| Muted metadata | `text_muted` |
+New chat sits above the workspace list and inherits the selected workspace.
+Search and task filters open through the sidebar search control or Command-K.
+Chat rows keep a fixed 30 px height across activity states and working folders.
+Let layout truncate the normalized full title, with age at the right. Reserve a
+44 px trailing slot so pin/archive actions replace the age on hover or keyboard
+focus without moving the title. Those actions preserve the current selection.
+Right-click or Shift-F10 opens rename, pin, archive and group actions; Escape and
+outside clicks dismiss the menu. Full titles, working directories, workspace and
+status remain available through accessible labels and a hover preview. Read
+failures stay quiet in the list; unread failures and current requests retain
+distinct markers. Selecting a chat reveals its workspace, and selecting the
+already-attached chat preserves its loaded content. Closing a chat returns to
+the unbound composer while retaining its draft and view state for later use.
 
-Accent colors are semantic only.
+Inbox is a permanent sidebar entry with a live count of nonarchived requests and
+unread finished results. Its flat list puts requests first, then recent results,
+independent of workspace collapse, pins and recent-chat limits. Reading uses the
+shared client's acknowledgement state; opening a request does not answer it.
+Search also matches workspace identity. Keep a clear empty state and retain the
+workspace collapse state when leaving Inbox. The Archived entry opens archived
+chats with the same row actions for restoring them. Starting a chat returns
+either mode to the workspace list.
 
-- Green: healthy / connected / success (`accent_green`)
-- Yellow: connecting / warning (`accent_yellow`)
-- Red: failure / destructive (`accent_red`)
-- Blue: focus and active input state (`accent_blue`)
+Use shared neutral surfaces and semantic accents from the theme manifest in both
+light and dark modes. Existing desktop typography uses the platform UI font for
+chrome and the bundled mono font for terminal/code content; do not apply the
+old Zedra monospace-first rule to every control.
 
-Do not use accent color as decoration. Light and dark palettes are paired in `ThemePalette::dark()` / `light()`; keep new tokens in sync in both.
+## Controls and focus
 
-## Layout And Spacing
+Reuse the existing desktop element patterns, Tabler icons and
+`DesktopFocusExt::desktop_focus`. Give icon-only controls an accessible label.
+Keep selected, disabled, pending and error states visible without relying on
+hover alone. Preserve keyboard actions and field focus when adding pointer
+handlers.
 
-The spacing rhythm is compact and consistent.
+Mew's shell fields share `ComposerElement` and the shell input handler.
+GPUI does not supply a ready-made text input component for this application.
+Keep native composition, selection, range geometry and Unicode handling intact
+when styling or laying out those fields.
 
-- Small: `8`
-- Standard: `12`
-- Large: `16`
+## Content and errors
 
-Preferred visual behavior:
+Keep sessions and review rows easy to scan. Use the existing virtualized
+transcript, review and sidebar structures rather than building an unbounded
+element collection. Preserve per-session draft and scroll state during navigation.
 
-- Favor fixed, stable proportions over airy layouts
-- Keep headers and action zones compact
-- Use padding for breathing room, not extra framing
-- Let scrollable content stay dense and scan-friendly
+The transcript and composer share a centered content column capped at 680 px,
+with 24 px pane gutters. User bubbles fit within that column; assistant content
+uses its full width. Conversation body text is 15 px with 24 px leading, while
+headings and code set their own leading. Separate messages by 24 px and parts
+within a message by 8 px. Keep virtual paragraph chunks continuous. The first
+loaded turn has the same padding as later turns so history prepending preserves
+the visible text position.
 
-## Typography
+Long code fences remain virtualized but read as one surface. Split only between
+physical lines, preserve oversized lines for horizontal scrolling, and apply
+header/copy controls and outer padding only at the fence ends. Internal chunks
+keep the same line leading and share a measured content width and horizontal
+scroll position. Retain this state with the markdown cache; invalidate width
+when its source, font or syntax theme changes.
 
-The default voice is monospace-first.
+Lists retain ordered starts and nesting. Keep markers in a separate aligned
+column and indent nested content by 24 px so wrapped lines hang beneath their
+item text. Tables use real cells with shared equal-width columns, at least
+112 px each, and wrap content inside those columns. Use a quiet header surface
+and row dividers. Horizontal overflow belongs inside the reading column, with
+one scroll position across virtual chunks and a header only at the table start.
 
-- Most product UI should use the existing mono system
-- Standard sizes are small and information-dense
-- Prefer weight and color for emphasis over bigger text
-- Use truncation before wrapping in tight panels
+Consecutive completed assistant tools fold into one muted activity summary with
+a call count, including runs across provider messages. Prose, reasoning, user
+turns and unfinished/failed calls break the group. Disclosure reveals the
+original calls as individually virtualized rows; manually opened details remain
+visible when a group forms. Keep reading anchors stable as calls finish and
+history loads. A replacement summary starts at its top rather than retaining
+an offset into a taller call.
 
-One-off branding surfaces can break this rule, but workspace UI should not.
+Single completed tools use one muted 20 px action row with the command or path
+on the same line. Omit the completed badge, retain the full accessible label,
+and flatten explicit newlines only in the visual summary. Expanded, running and
+failed tools keep a distinct surface. Collapsed failures expose their first
+nonempty error line; expanded details retain the complete error and copy actions.
+Tool text and diff lists infer their content height inside bounded preview areas.
 
-## Borders, Radius, And Effects
+Running turns use a 24 px status line above the composer, aligned with the
+reading column. Keep it mounted through assistant text and tool updates, even
+when running metadata arrives before history. The composer owns Stop. Required
+actions replace the working line; waiting and failed turns retain their retry
+cards. Composer settings share one 28 px toolbar row, with 11 px labels and
+16 px leading. Setting controls stay 26 px tall and Send/Stop retain their 28 px
+targets. Names truncate inside bounded controls rather than wrapping the toolbar;
+retain complete accessible labels and measured picker anchors. Keep the model
+control at its natural width beside Send, without stretching a short name into
+an empty button. Effort has a separate fixed-width suffix so only the model name
+truncates. Below 480 px of conversation space, replace the persona label with a
+26 px icon control that opens the same picker and retains its full accessible
+label. A hover tooltip explains the selected persona in the compact state.
+Follow the measured composer width through pane animations and resizing.
+Wider panes show the selected persona text. Unset values use concise Model/Persona placeholders.
+Composer footer labels are also 11 px; draft text remains 15 px with 24 px leading.
+Long workspace paths truncate while preserving the full accessible label. Let
+populated footer metadata wrap before squeezing out the workspace path. Yield
+appears only with another attached client; retain the yielded status separately.
+Daemon presence contains peers only, including after reconnect.
+Long drafts reveal a quiet 24 px information row with visual-line count and an
+Expand/Collapse control. Keep the scrollbar visible while text overflows, inside
+the composer's existing right padding. Expansion grows upward within a measured
+height budget, retaining conversation space and the same toolbar. Short drafts
+keep their original composition without this row. Preserve an offscreen reading
+position when toggling; scrollbars must not alter the draft's text selection.
+Use provider-scoped catalog model names in the composer and picker, falling back
+to the raw model ID when no name is supplied. Search matches names and IDs;
+picker details retain the fully qualified identity used for switching models.
 
-- Prefer 1px separators over heavy containers
-- Use radius sparingly, usually `6` or `8`
-- Avoid shadows and depth effects
-- Avoid thick outlines
-- Avoid stacked borders inside already framed layouts
+Attachment chips wrap inside the reading column. Truncate the filename while
+keeping its named 24 px remove button visible, tabbable and independently
+clickable. Removing a file preserves the draft and returns focus to the editor.
 
-If a component feels busy, remove a line before adding a new one.
+Empty or whitespace-only drafts and pending model switches show a disabled Send
+surface, without click or Tab activation. Running questions expose Send answer
+or Send answers; ordinary running turns retain Stop. Pointer submission and
+Enter use the same question ownership and submission path. One question accepts
+a multiline answer. Multiple questions require one nonempty line per answer;
+invalid drafts remain intact with inline guidance. Every question offers scoped
+cancellation without discarding the draft. Measure the complete outer composer
+for required-action placement, including its border and overflow information row,
+and retain an 8 px gap above it.
 
-## Interaction Language
+The model picker uses one row inventory and popup size for layout and placement,
+including unique Recent entries and the remaining Other models. Use a retained
+variable-height list with 24 px section headers and 56 px model rows. Keep its
+state across renders; reset only when the inventory changes. Up/Down navigates
+selectable models and reveals offscreen targets; Enter chooses the highlighted
+provider/model identity. Query changes reset navigation. Constrain the picker's
+400 px width to the window and its height to space above or below the trigger.
+Keep search and effort fixed while the model list scrolls. Picker trigger measurements request their redraw
+after painting so open menus follow resizing.
 
-- Use native alerts for confirmation and failure
-- Use tiny status signals instead of banners when possible
-- Keep primary actions obvious but not loud
-- Prefer icon-only actions when the meaning is clear
-- Keep touch/click targets forgiving via hit slop, not visual bulk
-- Controls must read correctly without hover-only reveals, fills, or tooltips (hover may not exist on all platforms)
+Display connection and browser failures through the existing stateful surfaces.
+A deferred failure must request a redraw immediately. Use the existing native
+dialog APIs only when the interaction calls for them; Zedra's native mobile
+sheets are not part of mew's desktop architecture.
 
-## Component Rules
+## Verification
 
-### Panels
-
-- Full-height dark surfaces
-- Header and footer separated with subtle lines
-- No card-within-card feeling unless content truly benefits from grouping
-
-### Cards
-
-- Use `bg_card` from the active palette
-- Use a subtle 1px border
-- Keep padding tight
-- Avoid decorative fills and badges unless they carry state
-
-### Inputs
-
-- Prefer the shared GPUI input component
-- Dark surface, subtle border, blue focus
-- Placeholder should be muted
-- Keep copy short
-
-### Buttons
-
-- Default to chromeless or near-chromeless actions
-- Prefer monochrome icons and muted labels
-- Only increase contrast when the action is ready or focused
-- Avoid heavy filled buttons in workspace views
-- Express button state with pressed, selected, active, disabled, text, icon, and border styling rather than hover styling
-
-## Git View Guidance
-
-For git UI specifically:
-
-- Keep the file list dense and flat
-- Keep git status marks textual or monochrome
-- Put commit controls in a fixed bottom composer
-- Use one shared input plus one compact icon button
-- Commit actions should feel quiet and precise, not promotional
-
-Recommended direction for commit UI:
-
-- One-line message input
-- Small monotone commit icon
-- Subtle top separator for the composer area
-- No extra card frame around the whole git view
-
-## Do
-
-- Use neutral surfaces from the active palette (dark or light)
-- Reuse `theme.rs` tokens; follow [THEMING.md](THEMING.md) for color wiring
-- Reuse existing GPUI controls
-- Prefer subtraction over embellishment
-- Make state visible with text, opacity, and spacing
-
-## Avoid
-
-- Bright accent-heavy layouts
-- Thick borders
-- Large floating buttons
-- Multiple nested containers
-- Decorative gradients, glows, or shadows
-- Mixed visual languages inside one panel
+Check narrow/wide layouts, light/dark themes, long labels, keyboard focus and
+Unicode input. Verify behavior with real view/transport tests and native smoke
+checks. A screenshot demonstrates layout; it cannot establish callback
+ownership, cancellation or render cost.

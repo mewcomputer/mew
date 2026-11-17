@@ -17,21 +17,30 @@ struct ChatView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     // Composer
-    @State private var inputText: String = ""
+    private var inputText: String {
+        get { store.drafts[.chat(daemonNodeId: daemonNodeId, sessionId: sessionId)] ?? "" }
+        nonmutating set {
+            store.drafts[.chat(daemonNodeId: daemonNodeId, sessionId: sessionId)] = newValue.isEmpty ? nil : newValue
+        }
+    }
     @FocusState private var composerFocused: Bool
 
-    // Model picker (the store exposes no "current model", so we mirror the last
-    // selection locally for the toolbar label).
-    @State private var currentModel: ModelSummary?
+    private var currentModel: ModelSummary? { store.selectedModel(daemonNodeId: daemonNodeId) }
+
+    private var ownsSelection: Bool {
+        store.selectedDaemonId?.nodeId == daemonNodeId && store.selectedSessionId == sessionId
+    }
 
     // Auto-scroll
     @State private var autoScroll: Bool = true
     @State private var containerHeight: CGFloat = 0
-
-    // Loading state while waiting for session history replay
-    @State private var isLoadingSession: Bool = false
+    @State private var historyAnchor: String?
+    @State private var toolDisclosures = ToolDisclosures()
 
     // Sheets
+    @State private var showsReview = false
+    @State private var showsTools = false
+    @State private var showsActivity = false
 
     // File browser: nil = closed; non-nil = showing that path. The path
     // is the current directory being browsed; tap a folder to navigate in.
@@ -51,8 +60,21 @@ struct ChatView: View {
             }
             // Todo panel above the content when todos exist for this session.
             .safeAreaInset(edge: .top) {
-                if let todos = store.todos[sessionId], !todos.isEmpty {
-                    TodoPanelView(todos: todos)
+                VStack(spacing: 0) {
+                    if store.daemonStatuses[daemonNodeId] != .connected {
+                        HStack {
+                            DaemonConnectionStatusView(status: store.daemonStatuses[daemonNodeId] ?? .disconnected)
+                            Spacer(minLength: 8)
+                            NavigationLink("Details", value: NavigationRoute.daemonDetails(daemonNodeId: daemonNodeId))
+                                .frame(minHeight: 44)
+                        }
+                        .font(.callout)
+                        .padding(.horizontal, 16)
+                        .background(Color(.secondarySystemBackground))
+                    }
+                    if ownsSelection, let todos = store.todos[sessionId], !todos.isEmpty {
+                        TodoPanelView(todos: todos)
+                    }
                 }
             }
             .animation(
@@ -62,17 +84,9 @@ struct ChatView: View {
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { toolbarContent }
-            .task {
-                store.selectSession(sessionId)
-                isLoadingSession = true
-                // Short fallback; history replay clears it sooner via onChange below.
-                try? await Task.sleep(for: .seconds(2))
-                isLoadingSession = false
+            .onAppear {
                 store.listModels()
                 store.listPersonas()
-            }
-            .onChange(of: store.visibleMessages.isEmpty) { _, isEmpty in
-                if !isEmpty { isLoadingSession = false }
             }
             .sheet(item: Binding(
                 get: { store.pendingPermissions.first { $0.daemon == daemonNodeId && $0.sessionId == sessionId }.map { PermissionSheetItem(permission: $0) } },
@@ -125,33 +139,38 @@ struct ChatView: View {
                 )
                 .presentationDetents([.large])
             }
-            .onChange(of: store.availableModels) { initializeModelSelection() }
-            .onChange(of: store.currentModel) { updateModelSelection() }
-            .onChange(of: store.visibleMessages) {
-                if !store.visibleMessages.isEmpty {
-                    isLoadingSession = false
-                }
+            .sheet(isPresented: $showsReview) {
+                ReviewView(daemon: daemonNodeId, sessionId: sessionId)
             }
-    }
-
-    private func initializeModelSelection() {
-        if currentModel == nil {
-            currentModel = store.availableModels.first
-        }
-    }
-
-    private func updateModelSelection() {
-        if let daemonId = store.selectedDaemonId?.nodeId,
-           let modelName = store.currentModel[daemonId],
-           let model = store.availableModels.first(where: { $0.model == modelName }) {
-            currentModel = model
-        }
+            .sheet(isPresented: $showsTools) {
+                ToolHistoryView(messages: store.messages)
+            }
+            .sheet(isPresented: $showsActivity) {
+                ActivityView(daemon: daemonNodeId, sessionId: sessionId)
+            }
     }
 
     @ViewBuilder
     private var content: some View {
-        if store.visibleMessages.isEmpty && !store.isStreaming && store.streamingText.isEmpty {
-            if isLoadingSession {
+        if !ownsSelection {
+            ProgressView("Loading conversation…")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if let error = store.sessionLoadError {
+            ContentUnavailableView {
+                Label("Couldn't open this chat", systemImage: "exclamationmark.bubble")
+            } description: {
+                Text(error)
+            } actions: {
+                Button("Try again") {
+                    store.retrySessionAttachment(daemonNodeId: daemonNodeId, sessionId: sessionId)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(store.daemonStatuses[daemonNodeId] != .connected)
+                NavigationLink("Connection details", value: NavigationRoute.daemonDetails(daemonNodeId: daemonNodeId))
+                    .frame(minHeight: 44)
+            }
+        } else if store.conversationItems.isEmpty && store.historyBefore == nil && !store.isStreaming && store.streamingText.isEmpty {
+            if store.isLoadingSession {
                 ProgressView("Loading session…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -166,8 +185,7 @@ struct ChatView: View {
         // Prefer the AI-generated (or first-prompt) session title from the
         // session list. Fall back to the session ID if the list hasn't
         // arrived yet.
-        let daemonKey = store.selectedDaemonId?.nodeId ?? ""
-        let sessionTitle = store.sessionLists[daemonKey]?
+        let sessionTitle = store.sessionLists[daemonNodeId]?
             .first(where: { $0.sessionId == sessionId })?
             .title
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -181,7 +199,7 @@ struct ChatView: View {
 
     @ViewBuilder
     private var messageList: some View {
-        if store.messages.isEmpty && !store.isStreaming && store.streamingText.isEmpty {
+        if store.messages.isEmpty && store.historyBefore == nil && !store.isStreaming && store.streamingText.isEmpty {
             emptyState
         } else {
             scrollContent
@@ -190,6 +208,7 @@ struct ChatView: View {
 
     @ViewBuilder
     private var scrollContent: some View {
+        let items = store.conversationItems
         ScrollView {
             ScrollViewReader { proxy in
                 // Non-lazy so each message's MarkdownView parses once on load and
@@ -197,8 +216,31 @@ struct ChatView: View {
                 // into view. Trades more upfront work in long sessions for
                 // smoother scrolling.
                 VStack(alignment: .leading, spacing: 4) {
-                    ForEach(store.visibleMessages, id: \.id) { message in
-                        MessageItemView(message: message, fontChoice: store.fontChoice)
+                    if store.historyBefore != nil {
+                        VStack(spacing: 6) {
+                            Button {
+                                historyAnchor = items.first?.sourceMessageIds.first
+                                autoScroll = false
+                                if !store.loadOlderHistory() { historyAnchor = nil }
+                            } label: {
+                                if store.isLoadingOlderHistory {
+                                    ProgressView("Loading older messages…")
+                                } else {
+                                    Label("Load older messages", systemImage: "arrow.up")
+                                }
+                            }
+                            .disabled(store.isLoadingOlderHistory)
+                            if let error = store.historyError {
+                                Text(error)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                    }
+                    ForEach(items) { item in
+                        MessageItemView(message: item.message, fontChoice: store.fontChoice, disclosures: $toolDisclosures)
                     }
 
                     if showsStreamingBubble {
@@ -227,8 +269,19 @@ struct ChatView: View {
                 // Auto-scroll on any content change (new messages, streaming
                 // deltas, and growing reasoning/tool output within a message),
                 // not just when the message count changes.
-                .onChange(of: store.visibleMessages) {
-                    scrollToBottom(proxy: proxy)
+                .onChange(of: store.conversationItems) {
+                    if let anchor = historyAnchor {
+                        if !store.isLoadingOlderHistory {
+                            let target = items.first { $0.sourceMessageIds.contains(anchor) }?.id ?? anchor
+                            proxy.scrollTo(target, anchor: .top)
+                            historyAnchor = nil
+                        }
+                    } else {
+                        scrollToBottom(proxy: proxy)
+                    }
+                }
+                .onChange(of: store.historyError) {
+                    if store.historyError != nil { historyAnchor = nil }
                 }
                 // Streaming deltas arrive rapidly; scroll without animation so
                 // the growing text and an animated scroll don't fight (jitter).
@@ -327,18 +380,17 @@ struct ChatView: View {
 
     @ViewBuilder
     private var composer: some View {
-        let daemonId = store.selectedDaemonId?.nodeId ?? ""
+        let daemonId = daemonNodeId
         ChatBar(
-            text: $inputText,
+            text: Binding(get: { inputText }, set: { inputText = $0 }),
             focused: $composerFocused,
             model: currentModel,
-            availableModels: store.availableModels,
+            availableModels: store.modelsByDaemon[daemonNodeId] ?? [],
             isStreaming: store.isStreaming,
             canSend: canSend,
             onSubmit: send,
             onPickModel: { model in
                 store.switchModel(provider: model.provider, model: model.model)
-                currentModel = model
             },
             onRefreshModels: { store.listModels() },
             onAttachments: { fileBrowserPath = initialBrowserPath() },
@@ -352,6 +404,7 @@ struct ChatView: View {
             onPickPersona: { name in store.switchPersona(name: name) },
             usage: store.sessionUsage[sessionId]
         )
+        .disabled(!ownsSelection)
         .padding(.horizontal, 12)
         .padding(.bottom, 8)
     }
@@ -394,7 +447,7 @@ struct ChatView: View {
     }
 
     private var canSend: Bool {
-        !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && store.canSendPrompt
+        ownsSelection && !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && store.canSendPrompt
     }
 
     private func send() {
@@ -409,26 +462,29 @@ struct ChatView: View {
         inputText = ""
     }
 
-    // MARK: Toolbar (intentionally empty — model picker lives in the chatbar)
+    // MARK: Toolbar
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
+        ToolbarItem(placement: .principal) {
+            DaemonSwitcherButton(daemonNodeId: daemonNodeId, title: title)
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+            Button("Review changes", systemImage: "doc.text.magnifyingglass") {
+                showsReview = true
+            }
+        }
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
-                Toggle("Auto-title", isOn: Binding(
-                    get: { UserDefaults.standard.bool(forKey: "autoTitle_\(sessionId)") },
-                    set: { newVal in
-                        UserDefaults.standard.set(newVal, forKey: "autoTitle_\(sessionId)")
-                        store.setAutoTitle(enabled: newVal)
-                    }
-                ))
-                Toggle("Auto-summary", isOn: Binding(
-                    get: { UserDefaults.standard.bool(forKey: "autoSummary_\(sessionId)") },
-                    set: { newVal in
-                        UserDefaults.standard.set(newVal, forKey: "autoSummary_\(sessionId)")
-                        store.setAutoSummary(enabled: newVal)
-                    }
-                ))
+                Button("Tools", systemImage: "wrench.and.screwdriver") {
+                    showsTools = true
+                }
+                Button("Workers & jobs", systemImage: "person.2") {
+                    showsActivity = true
+                }
+                NavigationLink(value: NavigationRoute.daemonDetails(daemonNodeId: daemonNodeId)) {
+                    Label("Machine details", systemImage: "server.rack")
+                }
             } label: {
                 Image(systemName: "ellipsis.circle")
             }

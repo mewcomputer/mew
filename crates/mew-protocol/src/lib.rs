@@ -99,12 +99,33 @@ pub enum ClientMessage {
         title: String,
     },
 
-    /// Enable or disable auto-generated session titles.
+    /// Read this connection's title preference and the daemon's summary preference.
+    ReadAutomationSettings,
+
+    /// Read daemon-owned defaults and authorized devices. Requires full control.
+    ReadDaemonSettings {
+        request_id: String,
+    },
+    /// Copy the attached chat's confirmed policy into defaults for future chats.
+    SaveSessionDefaults {
+        session_id: String,
+        request_id: String,
+    },
+    /// Resume using the daemon's configured startup defaults for future chats.
+    ResetSessionDefaults {
+        request_id: String,
+    },
+    RevokeDevice {
+        device_id: String,
+        request_id: String,
+    },
+
+    /// Enable or disable titles generated after prompts from this connection.
     SetAutoTitle {
         enabled: bool,
     },
 
-    /// Enable or disable idle session summaries.
+    /// Enable or disable idle session summaries for the entire daemon.
     SetAutoSummary {
         enabled: bool,
     },
@@ -334,6 +355,8 @@ pub enum ClientMessage {
         page_instance: String,
         cdp_endpoint: String,
         target_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        focus_url: Option<String>,
     },
     /// Revoke this connection's matching page generation.
     UnregisterBrowserPage {
@@ -440,6 +463,16 @@ pub enum RemoteScope {
     Control,
 }
 
+/// Public device metadata. Pairing credentials and their digests never cross the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairedDeviceInfo {
+    pub id: String,
+    pub name: String,
+    pub node_id: String,
+    pub scope: Option<RemoteScope>,
+    pub paired_at: Option<u64>,
+}
+
 /// Info about a single available model, returned by `ListModels`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelInfo {
@@ -449,6 +482,9 @@ pub struct ModelInfo {
     pub provider: String,
     /// Model ID within the provider (e.g. "deepseek-v4-flash").
     pub model: String,
+    /// Catalog-provided name for display. Absent for unnamed models and older daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     /// Human-readable description for the picker UI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -647,6 +683,13 @@ pub enum PromptStatus {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionOperation {
+    Create,
+    Attach,
+}
+
 /// A message from the daemon to the frontend.
 ///
 /// This is the wire representation of `AgentEvent`. The variants that carry
@@ -681,6 +724,14 @@ pub enum ServerMessage {
         /// Current permission mode (lowercase id). Absent means "standard".
         #[serde(default, skip_serializing_if = "Option::is_none")]
         permission_mode: Option<String>,
+    },
+
+    /// A failed session command, scoped before any attachment exists.
+    /// A create operation has no session ID yet.
+    SessionOperationFailed {
+        operation: SessionOperation,
+        session_id: Option<String>,
+        message: String,
     },
 
     /// An error before or outside a session turn.
@@ -891,6 +942,31 @@ pub enum ServerMessage {
         models: Vec<ModelInfo>,
     },
 
+    /// Current values after reading or updating automation settings.
+    AutomationSettings {
+        /// Applies only to prompts submitted through this connection.
+        auto_title_enabled: bool,
+        /// Shared by every connection to this daemon.
+        auto_summary_enabled: bool,
+    },
+
+    DaemonSettings {
+        /// None denotes a change notification to other authorized clients.
+        request_id: Option<String>,
+        defaults: Option<mew_session::SessionPolicy>,
+        /// None when this daemon has no remote device manager.
+        devices: Option<Vec<PairedDeviceInfo>>,
+    },
+    DaemonSettingsFailed {
+        request_id: String,
+        message: String,
+    },
+
+    /// The daemon-wide summary preference changed through another connection.
+    AutoSummaryChanged {
+        enabled: bool,
+    },
+
     /// Response to `SwitchModel`: confirms the switch succeeded.
     ModelSwitched {
         provider: String,
@@ -1067,6 +1143,12 @@ pub enum ServerMessage {
         /// Missing in legacy daemons, which are incompatible with this revision.
         #[serde(default)]
         protocol_version: u32,
+        /// Supports the registered page's local focus callback before keyboard input.
+        #[serde(default)]
+        browser_focus_preflight: bool,
+        /// Reports lifecycle failures with their operation and session identity.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        scoped_session_failures: bool,
     },
 
     /// Response to `ListProjects`. Contains deduped project directories
@@ -1647,6 +1729,28 @@ mod tests {
     }
 
     #[test]
+    fn session_operation_failures_roundtrip_with_the_requested_scope() {
+        for (operation, session_id) in [
+            (SessionOperation::Create, None),
+            (
+                SessionOperation::Attach,
+                Some("missing-session".to_string()),
+            ),
+        ] {
+            let response = ServerMessage::SessionOperationFailed {
+                operation,
+                session_id: session_id.clone(),
+                message: "could not open conversation".into(),
+            };
+            assert!(
+                matches!(round_trip(&response), ServerMessage::SessionOperationFailed {
+                operation: actual, session_id: target, message,
+            } if actual == operation && target == session_id && message == "could not open conversation")
+            );
+        }
+    }
+
+    #[test]
     fn remote_auth_messages_roundtrip() {
         let hello = ClientMessage::RemoteHello {
             token: Some("one-time-token".into()),
@@ -1816,6 +1920,8 @@ mod tests {
         let pong = ServerMessage::Pong {
             version: "0.2.0".into(),
             protocol_version: PROTOCOL_VERSION,
+            browser_focus_preflight: false,
+            scoped_session_failures: false,
         };
         let j = encode_json(&pong).unwrap();
         assert!(j.contains(r#""type":"pong""#));
@@ -1825,9 +1931,12 @@ mod tests {
             ServerMessage::Pong {
                 version,
                 protocol_version,
+                browser_focus_preflight,
+                ..
             } => {
                 assert_eq!(version, "0.2.0");
                 assert_eq!(protocol_version, PROTOCOL_VERSION);
+                assert!(!browser_focus_preflight);
             }
             _ => panic!("expected Pong"),
         }
@@ -1843,6 +1952,57 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn pong_roundtrips_browser_focus_preflight_capability() {
+        let value = serde_json::json!({
+            "type": "pong",
+            "version": "0.2.0",
+            "protocol_version": PROTOCOL_VERSION,
+            "browser_focus_preflight": true
+        });
+        let pong: ServerMessage = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(pong).unwrap(), value);
+    }
+
+    #[test]
+    fn pong_reports_scoped_session_failures_only_when_advertised() {
+        let legacy: ServerMessage =
+            decode_json(r#"{"type":"pong","version":"old","protocol_version":3}"#).unwrap();
+        assert!(matches!(
+            legacy,
+            ServerMessage::Pong {
+                scoped_session_failures: false,
+                ..
+            }
+        ));
+        let current: ServerMessage = decode_json(r#"{"type":"pong","version":"new","protocol_version":3,"scoped_session_failures":true}"#).unwrap();
+        assert!(matches!(
+            current,
+            ServerMessage::Pong {
+                scoped_session_failures: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn legacy_pong_has_no_browser_focus_preflight_capability() {
+        for json in [
+            r#"{"type":"pong","version":"0.2.0"}"#,
+            r#"{"type":"pong","version":"0.2.0","protocol_version":3}"#,
+            r#"{"type":"pong","version":"0.2.0","protocol_version":3,"browser_focus_preflight":false}"#,
+        ] {
+            let pong: ServerMessage = decode_json(json).unwrap();
+            assert!(matches!(
+                pong,
+                ServerMessage::Pong {
+                    browser_focus_preflight: false,
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]
@@ -3274,6 +3434,7 @@ mod tests {
             page_instance: "page-a".into(),
             cdp_endpoint: "http://127.0.0.1:9223".into(),
             target_id: "target-a".into(),
+            focus_url: None,
         };
         assert_eq!(
             encode_json(&round_trip(&request)).unwrap(),
@@ -3296,6 +3457,24 @@ mod tests {
             encode_json(&round_trip(&response)).unwrap(),
             encode_json(&response).unwrap()
         );
+    }
+
+    #[test]
+    fn browser_page_registration_roundtrips_optional_focus_capability() {
+        for focus_url in [None, Some("http://127.0.0.1:9224/focus/page-token")] {
+            let mut value = serde_json::json!({
+                "type": "register_browser_page",
+                "session_id": "session-a",
+                "page_instance": "page-a",
+                "cdp_endpoint": "http://127.0.0.1:9223",
+                "target_id": "target-a"
+            });
+            if let Some(url) = focus_url {
+                value["focus_url"] = url.into();
+            }
+            let request: ClientMessage = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(request).unwrap(), value);
+        }
     }
 
     #[test]
@@ -3389,6 +3568,7 @@ mod tests {
             id: "deepseek/deepseek-v4-flash".into(),
             provider: "deepseek".into(),
             model: "deepseek-v4-flash".into(),
+            display_name: None,
             description: Some("Fast model".into()),
             thinking_variants: vec![
                 ThinkingVariantInfo {
@@ -3408,11 +3588,27 @@ mod tests {
     }
 
     #[test]
+    fn model_list_preserves_optional_display_names_without_changing_identity() {
+        for display_name in [Some("GPT-5.2"), None] {
+            let mut json = serde_json::json!({
+                "type": "model_list",
+                "models": [{"id":"openai/gpt-5.2", "provider":"openai", "model":"gpt-5.2"}]
+            });
+            if let Some(name) = display_name {
+                json["models"][0]["display_name"] = name.into();
+            }
+            let message: ServerMessage = serde_json::from_value(json.clone()).unwrap();
+            assert_eq!(serde_json::to_value(message).unwrap(), json);
+        }
+    }
+
+    #[test]
     fn test_model_info_with_thinking_budget() {
         let m = ModelInfo {
             id: "qwen/qwen3.8-max".into(),
             provider: "qwen".into(),
             model: "qwen3.8-max".into(),
+            display_name: None,
             description: None,
             thinking_variants: vec![
                 ThinkingVariantInfo { name: "low".into() },
@@ -3449,6 +3645,7 @@ mod tests {
             id: "test/model".into(),
             provider: "test".into(),
             model: "model".into(),
+            display_name: None,
             description: None,
             thinking_variants: vec![],
             thinking_budget: None,
@@ -3994,6 +4191,94 @@ mod tests {
             "duplicate type tags in DaemonMessage: {:?}",
             tags
         );
+    }
+}
+
+#[cfg(test)]
+mod automation_wire_tests {
+    use super::*;
+
+    #[test]
+    fn automation_settings_messages_roundtrip_both_setting_scopes() {
+        let command = encode_json(&ClientMessage::ReadAutomationSettings).unwrap();
+        assert_eq!(command, r#"{"type":"read_automation_settings"}"#);
+        assert!(matches!(
+            decode_json::<ClientMessage>(&command).unwrap(),
+            ClientMessage::ReadAutomationSettings
+        ));
+        for message in [
+            ServerMessage::AutomationSettings {
+                auto_title_enabled: false,
+                auto_summary_enabled: true,
+            },
+            ServerMessage::AutoSummaryChanged { enabled: false },
+        ] {
+            let decoded: ServerMessage = decode_json(&encode_json(&message).unwrap()).unwrap();
+            assert_eq!(
+                serde_json::to_value(decoded).unwrap(),
+                serde_json::to_value(message).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn daemon_management_wire_roundtrips_keep_request_and_target_identity() {
+        for command in [
+            ClientMessage::ReadDaemonSettings {
+                request_id: "read".into(),
+            },
+            ClientMessage::SaveSessionDefaults {
+                request_id: "save".into(),
+                session_id: "chat".into(),
+            },
+            ClientMessage::ResetSessionDefaults {
+                request_id: "reset".into(),
+            },
+            ClientMessage::RevokeDevice {
+                request_id: "revoke".into(),
+                device_id: "phone".into(),
+            },
+        ] {
+            let encoded = encode_json(&command).unwrap();
+            assert_eq!(
+                encoded,
+                encode_json(&decode_json::<ClientMessage>(&encoded).unwrap()).unwrap()
+            );
+        }
+        for message in [
+            ServerMessage::DaemonSettings {
+                request_id: None,
+                defaults: None,
+                devices: None,
+            },
+            ServerMessage::DaemonSettings {
+                request_id: Some("read".into()),
+                defaults: Some(mew_session::SessionPolicy {
+                    model: Some("model".into()),
+                    provider: Some("provider".into()),
+                    persona: None,
+                    thinking_variant: None,
+                    permission_mode: "standard".into(),
+                }),
+                devices: Some(vec![PairedDeviceInfo {
+                    id: "phone".into(),
+                    name: "My phone".into(),
+                    node_id: "node".into(),
+                    scope: Some(RemoteScope::Control),
+                    paired_at: Some(123),
+                }]),
+            },
+            ServerMessage::DaemonSettingsFailed {
+                request_id: "save".into(),
+                message: "read only".into(),
+            },
+        ] {
+            let encoded = encode_json(&message).unwrap();
+            assert_eq!(
+                encoded,
+                encode_json(&decode_json::<ServerMessage>(&encoded).unwrap()).unwrap()
+            );
+        }
     }
 }
 

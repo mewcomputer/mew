@@ -21,18 +21,18 @@ struct DaemonListView: View {
                             Button(role: .destructive) {
                                 daemonToDelete = daemon
                             } label: {
-                                Label("Delete", systemImage: "trash")
+                                Label("Remove", systemImage: "trash")
                             }
                         }
                         .swipeActions(edge: .leading) {
-                            NavigationLink(value: NavigationRoute.settings) {
-                                Label("Settings", systemImage: "gearshape")
+                            NavigationLink(value: NavigationRoute.daemonDetails(daemonNodeId: daemon.nodeId)) {
+                                Label("Machine details", systemImage: "gearshape")
                             }
                             .tint(.blue)
                         }
                         .contextMenu {
-                            NavigationLink(value: NavigationRoute.settings) {
-                                Label("Settings", systemImage: "gearshape")
+                            NavigationLink(value: NavigationRoute.daemonDetails(daemonNodeId: daemon.nodeId)) {
+                                Label("Machine details", systemImage: "gearshape")
                             }
                             Button("Remove", role: .destructive) {
                                 daemonToDelete = daemon
@@ -41,12 +41,12 @@ struct DaemonListView: View {
                 }
             }
         }
-        .navigationTitle("mew")
+        .navigationTitle("Machines")
         .toolbarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) {
-                Text("mew")
-                    .font(.mewDisplay(24))
+                Text("Machines")
+                    .font(.headline)
                     .foregroundStyle(.primary)
             }
             ToolbarItem(placement: .topBarTrailing) {
@@ -61,12 +61,9 @@ struct DaemonListView: View {
             }
         }
         .sheet(isPresented: $showAddDaemon) {
-            AddDaemonView { nodeId, name in
-                store.addDaemon(nodeId: nodeId, name: name)
+            AddDaemonView { info, name in
+                store.addDaemon(info: info, name: name)
             }
-        }
-        .onAppear {
-            store.daemons = store.daemons // refresh from store
         }
         .alert("Remove Daemon?", isPresented: Binding(
             get: { daemonToDelete != nil },
@@ -93,20 +90,15 @@ struct DaemonListView: View {
             acc + Int(s.pendingPermissions) + Int(s.pendingQuestions)
         } ?? 0
 
-        NavigationLink(value: NavigationRoute.sessions(daemonNodeId: daemon.nodeId)) {
+        Button {
+            store.openDaemon(daemon)
+        } label: {
             HStack(spacing: 12) {
-                statusDot(status)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(daemon.name)
                         .font(.headline)
-                    Text(daemon.nodeId.prefix(16) + "…")
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                    if let version = store.daemonVersions[daemon.nodeId] {
-                        Text("v\(version)")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                    }
+                    DaemonConnectionStatusView(status: status)
+                        .font(.caption)
                 }
                 Spacer()
                 if needsYou > 0 {
@@ -122,21 +114,6 @@ struct DaemonListView: View {
         }
     }
 
-    @ViewBuilder
-    private func statusDot(_ status: DaemonStatus) -> some View {
-        let (color, animated): (Color, Bool) = switch status {
-        case .connected: (.green, false)
-        case .connecting: (.yellow, true)
-        case .backoff: (.orange, true)
-        case .pairedLost: (.red, false)
-        case .disconnected: (.gray, false)
-        }
-        Circle()
-            .fill(color)
-            .frame(width: 10, height: 10)
-            .opacity(animated ? 0.6 : 1.0)
-            .modifier(PulseModifier(active: animated))
-    }
 }
 
 struct PulseModifier: ViewModifier {
@@ -167,7 +144,7 @@ struct PulseModifier: ViewModifier {
 
 struct AddDaemonView: View {
     @Environment(\.dismiss) private var dismiss
-    let onAdd: (String, String) -> Void
+    let onAdd: (DialInfo, String) -> String?
 
     @State private var nodeIdInput = ""
     @State private var name = ""
@@ -235,7 +212,10 @@ struct AddDaemonView: View {
         do {
             let info = try MewMobileCore.parseDialInfo(payload: trimmed)
             let displayName = name.isEmpty ? (info.name ?? "Daemon") : name
-            onAdd(info.nodeId, displayName)
+            if let error = onAdd(info, displayName) {
+                self.error = error
+                return
+            }
             dismiss()
         } catch {
             self.error = error.localizedDescription
@@ -246,11 +226,15 @@ struct AddDaemonView: View {
 /// Scanner sheet wrapping the camera view with a dismiss button.
 struct QRScannerSheet: View {
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var store: AppStore
     let onScan: (String) -> Void
 
     var body: some View {
         NavigationStack {
             QRScannerView { payload in
+                if store.phoneSettings.haptics {
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                }
                 onScan(payload)
             }
             .ignoresSafeArea()

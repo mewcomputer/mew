@@ -27,6 +27,7 @@ use mew_ui_model::{
     TranscriptRole, UsageSummary,
 };
 use ratatui::style::Color;
+use ratatui_mdstream::highlight::SyntectHighlighter;
 use std::{
     borrow::Cow,
     cell::RefCell,
@@ -68,14 +69,19 @@ mod sidebar;
 mod tests;
 mod topbar;
 mod types;
+mod web;
+mod work_tabs;
 mod workbench;
 
+use browser::BrowserRegistration;
 use composer::{ComposerElement, TextInputTarget};
-use drafts::{DraftOwner, PromptDraft, TaskDrafts};
+use drafts::{DraftEditKind, DraftOwner, PromptDraft, TaskDrafts};
 use helpers::*;
 pub(crate) use platform::run;
 use session_requests::SessionRequests;
 use types::*;
+pub(crate) use web::run as run_web;
+use work_tabs::{WorkTabKind, WorkTabs};
 
 actions!(
     mew_desktop,
@@ -83,20 +89,26 @@ actions!(
         Quit,
         NewConversation,
         CloseConversation,
+        NewWorkTab,
+        CloseWorkTab,
         ToggleSidebar,
         ToggleTerminal,
         ToggleWorkbench,
         FocusSidebarSearch,
         DismissPopovers,
+        TextUndo,
+        TextRedo,
+        TextCopy,
+        TextCut,
+        TextPaste,
+        TextSelectAll,
         ComposerBackspace,
         ComposerDelete,
         ComposerLeft,
         ComposerRight,
         ComposerSelectLeft,
         ComposerSelectRight,
-        ComposerSelectAll,
         ComposerHome,
         ComposerEnd,
-        ComposerPaste,
     ]
 );

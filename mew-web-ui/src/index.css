@@ -98,6 +98,17 @@
 
 /* Context inspector color palette — shared across all themes. */
 :root {
+  --mew-code-background: var(--markdown-code-fence-bg);
+  --mew-code-foreground: var(--text-body);
+  --mew-code-token-constant: var(--syntax-constant, var(--purple-fg));
+  --mew-code-token-string: var(--syntax-string, var(--green-fg));
+  --mew-code-token-comment: var(--syntax-comment, var(--text-muted));
+  --mew-code-token-keyword: var(--syntax-keyword, var(--red-fg));
+  --mew-code-token-parameter: var(--syntax-variable, var(--text-body));
+  --mew-code-token-function: var(--syntax-function, var(--blue-fg));
+  --mew-code-token-string-expression: var(--syntax-string, var(--green-fg));
+  --mew-code-token-punctuation: var(--syntax-operator, var(--text-body));
+  --mew-code-token-link: var(--markdown-link-text);
   --radius: 0.625rem;
   --radius-control: 0.5rem;
   --radius-panel: 0.75rem;
@@ -120,9 +131,9 @@
 }
 
 @theme inline {
-  --font-sans: "MiSans", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: ui-sans-serif, system-ui, sans-serif;
   --font-serif: ui-serif, Georgia, serif;
-  --font-display: "Banga", "MiSans", ui-sans-serif, system-ui, sans-serif;
+  --font-display: ui-sans-serif, system-ui, sans-serif;
   --font-mono:
     "IoskeleyMono", ui-monospace, SF Mono, SF Mono Regular, Consolas,
     "Liberation Mono", Menlo, Courier, monospace;
@@ -233,6 +244,62 @@ body {
   background-color: var(--background);
   color: var(--foreground);
   font-family: var(--font-sans);
+  font-size: 13px;
+}
+
+.mew-conversation-width {
+  width: 100%;
+  max-width: 46rem;
+}
+
+.mew-composer {
+  container: composer / inline-size;
+}
+
+.mew-tab-strip {
+  scrollbar-width: none;
+}
+
+.mew-tab-strip::-webkit-scrollbar {
+  display: none;
+}
+
+[data-desktop-host] .mew-drag-region {
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+[data-desktop-host] .mew-drag-region :is(button, input, a, [role="tab"], [role="separator"]) {
+  -webkit-app-region: no-drag;
+}
+
+[data-desktop-host] .mew-navigation-header {
+  padding-left: 4.5rem;
+}
+
+[data-desktop-host][data-sidebar-open="false"] [data-sidebar="header"] {
+  padding-top: 2.5rem;
+}
+
+[data-desktop-host][data-sidebar-open="false"] .mew-conversation-header {
+  padding-left: 3rem;
+}
+
+@media (max-width: 767px) {
+  [data-desktop-host] .mew-conversation-header {
+    padding-left: 5.5rem;
+  }
+}
+
+@container composer (max-width: 30rem) {
+  .mew-composer-permission-label {
+    display: none;
+  }
+}
+
+.chat-scroll-container .typeset {
+  --typeset-size: 14px;
+  --typeset-leading: 1.65;
 }
 
 .chat-scroll-container {
@@ -344,7 +411,7 @@ button:focus-visible,
 .motion-popover {
   opacity: 1;
   transform: translateY(0) scale(1);
-  transform-origin: var(--radix-dropdown-menu-content-transform-origin, var(--radix-select-content-transform-origin, var(--radix-tooltip-content-transform-origin, center)));
+  transform-origin: var(--radix-popover-content-transform-origin, var(--radix-dropdown-menu-content-transform-origin, var(--radix-select-content-transform-origin, var(--radix-tooltip-content-transform-origin, center))));
   transition: opacity var(--motion-menu) var(--ease-out), transform var(--motion-menu) var(--ease-out);
 }
 
@@ -414,6 +481,28 @@ button:focus-visible,
   transition-timing-function: var(--ease-out);
 }
 
+.mew-workspace-panels[data-workbench-motion="true"]:not(:has([data-separator="active"], [data-separator="focus"])) > [data-panel] {
+  transition: flex-grow var(--motion-panel) var(--ease-drawer);
+}
+
+.mew-summary-content {
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(0);
+  transition: opacity var(--motion-menu) var(--ease-out), transform var(--motion-menu) var(--ease-out), visibility var(--motion-menu);
+}
+
+[data-state="closed"] > .mew-summary-content {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateX(12px);
+}
+
+[data-summary-animate="false"] .mew-summary-content {
+  transition: none;
+}
+
 .motion-disclosure {
   display: grid;
   grid-template-rows: 0fr;
@@ -430,6 +519,10 @@ button:focus-visible,
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .mew-workspace-panels > [data-panel] {
+    transition: none !important;
+  }
+
   *,
   *::before,
   *::after {
@@ -441,16 +534,21 @@ button:focus-visible,
 
   .motion-enter,
   .motion-popover,
-  .motion-dialog,
   .motion-overlay,
   .motion-drawer,
-  .motion-panel-size {
+  .motion-panel-size,
+  .mew-summary-content {
     transition: none !important;
     transform: none !important;
   }
 
   .motion-disclosure {
     transition: none !important;
+  }
+
+  .motion-dialog {
+    transition: none !important;
+    transform: translate(-50%, -50%) !important;
   }
 }
 

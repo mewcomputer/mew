@@ -82,9 +82,11 @@ pub fn gpui_key_to_ghostty(key: &str) -> Option<Key> {
 }
 
 pub fn ctrl_char(key: &str) -> Option<u8> {
-    let ch = key.chars().next()?;
-    if ch.is_ascii_lowercase() {
-        let byte = ch as u8;
+    if key.len() != 1 {
+        return None;
+    }
+    let byte = key.as_bytes()[0];
+    if byte.is_ascii_lowercase() {
         return Some(byte & 0x1F);
     }
     match key {
@@ -94,5 +96,47 @@ pub fn ctrl_char(key: &str) -> Option<u8> {
         "^" => Some(0x1e),
         "_" => Some(0x1f),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn control_characters_require_a_single_ascii_key() {
+        for key in [
+            "up",
+            "down",
+            "left",
+            "right",
+            "home",
+            "end",
+            "pageup",
+            "pagedown",
+            "enter",
+            "tab",
+            "escape",
+            "backspace",
+            "delete",
+            "f1",
+            "",
+            "é",
+            "ab",
+        ] {
+            assert_eq!(ctrl_char(key), None, "{key:?} must reach the key encoder");
+        }
+        for key in b'a'..=b'z' {
+            assert_eq!(ctrl_char(&(key as char).to_string()), Some(key & 0x1f));
+        }
+        for (key, expected) in [
+            ("[", 0x1b),
+            ("\\", 0x1c),
+            ("]", 0x1d),
+            ("^", 0x1e),
+            ("_", 0x1f),
+        ] {
+            assert_eq!(ctrl_char(key), Some(expected));
+        }
     }
 }

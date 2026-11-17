@@ -7,6 +7,7 @@
 //!
 //! Run with `--check` to verify that the generated files are up-to-date.
 
+use ratatui_mdstream::highlight::SYNTAX_SCOPES;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -269,18 +270,6 @@ fn generate_tmtheme_from_table(resolved: &HashMap<String, String>) -> String {
         .cloned()
         .unwrap_or_else(|| "#ffffff".into());
 
-    let scopes: &[(&str, &str)] = &[
-        ("comment", "syntax.comment"),
-        ("string", "syntax.string"),
-        ("keyword", "syntax.keyword"),
-        ("entity.name.function, support.function", "syntax.function"),
-        ("constant.numeric", "syntax.number"),
-        ("entity.name.type, storage.type", "syntax.type"),
-        ("variable", "syntax.variable"),
-        ("keyword.operator", "syntax.operator"),
-        ("constant", "syntax.constant"),
-    ];
-
     let mut out = String::new();
     out.push_str(r#"<?xml version="1.0" encoding="UTF-8"?>"#);
     out.push('\n');
@@ -311,7 +300,7 @@ fn generate_tmtheme_from_table(resolved: &HashMap<String, String>) -> String {
     out.push_str("      </dict>\n");
     out.push_str("    </dict>\n");
 
-    for (scope, token) in scopes {
+    for (scope, token) in SYNTAX_SCOPES {
         let color = resolved.get(*token).cloned().unwrap_or_else(|| fg.clone());
         out.push_str("    <dict>\n");
         out.push_str(&format!(

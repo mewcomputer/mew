@@ -1,3 +1,4 @@
+use super::chat::{ToolTextSection, TranscriptCopySource};
 use super::*;
 
 const TRANSCRIPT_SCROLLBAR_MIN_THUMB: f32 = 28.;
@@ -22,8 +23,10 @@ pub(super) fn transcript_scrollbar_metrics(
         return None;
     }
 
-    let thumb_height = (viewport_height * viewport_height / (viewport_height + max_offset))
-        .clamp(TRANSCRIPT_SCROLLBAR_MIN_THUMB, viewport_height);
+    let thumb_height = (viewport_height * viewport_height / (viewport_height + max_offset)).clamp(
+        TRANSCRIPT_SCROLLBAR_MIN_THUMB.min(viewport_height),
+        viewport_height,
+    );
     let travel = (viewport_height - thumb_height).max(0.);
     let scroll_offset = (-f32::from(list.scroll_px_offset_for_scrollbar().y)).clamp(0., max_offset);
     let thumb_top = if travel > 0. {
@@ -44,7 +47,7 @@ pub(super) fn transcript_scrollbar_metrics(
 pub(super) fn tool_display_label(tool_name: &str) -> String {
     let name = tool_name.rsplit(['.', ':']).next().unwrap_or(tool_name);
     match name {
-        "bash" | "sh" | "shell" | "exec" | "run_command" => "Terminal".into(),
+        "bash" | "sh" | "shell" | "exec" | "exec_command" | "run_command" => "Terminal".into(),
         name if name.starts_with("browser") => "Browser".into(),
         name if name.contains("plan") => "Plan".into(),
         name if name.contains("handoff") => "Handoff".into(),
@@ -61,6 +64,47 @@ pub(super) fn tool_display_label(tool_name: &str) -> String {
             .collect::<Vec<_>>()
             .join(" "),
     }
+}
+
+fn tool_activity(tool_name: &str) -> (&'static str, TablerIcon) {
+    match tool_name.rsplit(['.', ':']).next().unwrap_or(tool_name) {
+        "read" | "read_file" => ("Read files", TablerIcon::File),
+        "write" | "write_file" | "edit" | "edit_file" | "edit_str_replace" | "apply_patch" => {
+            ("Edited files", TablerIcon::Pencil)
+        }
+        "grep" | "glob" | "search" | "search_files" | "list" | "list_directory" => {
+            ("Searched files", TablerIcon::Search)
+        }
+        "bash" | "sh" | "shell" | "exec" | "exec_command" | "run_command" => {
+            ("Ran commands", TablerIcon::Terminal2)
+        }
+        name if name.starts_with("browser") || name == "web_fetch" => {
+            ("Browsed pages", TablerIcon::Browser)
+        }
+        _ => ("Used tools", TablerIcon::Dots),
+    }
+}
+
+fn tool_activity_summary<'a>(parts: impl Iterator<Item = &'a TranscriptPart>) -> String {
+    let mut activities = Vec::new();
+    for part in parts {
+        if let TranscriptPart::ToolCall { tool_name, .. } = part {
+            let (label, _) = tool_activity(tool_name);
+            if !activities.contains(&label) {
+                activities.push(label);
+            }
+        }
+    }
+    let mut summary = String::new();
+    for label in activities {
+        if summary.is_empty() {
+            summary.push_str(label);
+        } else {
+            summary.push_str(", ");
+            summary.extend(label.chars().map(|ch| ch.to_ascii_lowercase()));
+        }
+    }
+    summary
 }
 
 pub(super) fn tool_summary(input: &str) -> Option<String> {
@@ -80,15 +124,7 @@ fn tool_value_text(value: &serde_json::Value) -> Option<String> {
     if text.is_empty() {
         return None;
     }
-    const MAX_SUMMARY_CHARS: usize = 120;
-    Some(if text.chars().count() > MAX_SUMMARY_CHARS {
-        format!(
-            "{}…",
-            text.chars().take(MAX_SUMMARY_CHARS - 1).collect::<String>()
-        )
-    } else {
-        text.to_owned()
-    })
+    Some(text.to_owned())
 }
 
 pub(super) fn formatted_tool_input(input: &str) -> String {
@@ -117,6 +153,7 @@ impl DesktopShell {
         tone: ActionButtonTone,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let id = SharedString::from(id);
         let label = label.into();
         let (background, foreground, hover) = match tone {
             ActionButtonTone::Primary => (
@@ -136,7 +173,8 @@ impl DesktopShell {
             ),
         };
         div()
-            .id(id)
+            .id(id.clone())
+            .debug_selector(move || id.to_string())
             .px(px(10.))
             .py(px(6.))
             .rounded(px(7.))
@@ -266,6 +304,12 @@ impl DesktopShell {
                 subagent,
                 ..
             } => {
+                let draft = self.model.ui.composer.trim();
+                let answer_lines = draft.lines();
+                let invalid_answers = questions.len() > 1
+                    && !draft.is_empty()
+                    && (answer_lines.clone().count() != questions.len()
+                        || answer_lines.clone().any(|line| line.trim().is_empty()));
                 let question_views = questions
                     .iter()
                     .enumerate()
@@ -328,26 +372,47 @@ impl DesktopShell {
                                 .unwrap_or_else(|| "input needed".into()),
                         )),
                     )
-                    .when(subagent.is_some(), |element| {
-                        element.child(self.render_action_button(
-                            format!("action-{request_id}-close-question"),
-                            "close question",
-                            ClientMessage::AskUserResponse {
-                                request_id: request_id.clone(),
-                                answers: vec![],
-                                cancelled: true,
-                            },
-                            ActionButtonTone::Secondary,
-                            cx,
-                        ))
-                    })
+                    .child(self.render_action_button(
+                        format!("action-{request_id}-close-question"),
+                        if subagent.is_some() {
+                            "close question"
+                        } else {
+                            "cancel question"
+                        },
+                        ClientMessage::AskUserResponse {
+                            request_id: request_id.clone(),
+                            answers: vec![],
+                            cancelled: true,
+                        },
+                        ActionButtonTone::Secondary,
+                        cx,
+                    ))
                     .children(question_views)
                     .when_some(option_views, |element, options| element.child(options))
+                    .when(invalid_answers, |element| {
+                        let id =
+                            SharedString::from(format!("question-answer-validation-{request_id}"));
+                        element.child(
+                            div()
+                                .id(id.clone())
+                                .debug_selector(move || id.to_string())
+                                .text_xs()
+                                .text_color(theme_rgb(&self.theme, "red.fg"))
+                                .child(SharedString::from(format!(
+                                    "Enter exactly {} nonempty answer lines, one per question.",
+                                    questions.len()
+                                ))),
+                        )
+                    })
                     .child(
                         div()
                             .text_xs()
                             .text_color(theme_rgb(&self.theme, "text.muted"))
-                            .child("answer each question on a new line, then press Enter"),
+                            .child(if questions.len() == 1 {
+                                "write your answer below, then press Enter"
+                            } else {
+                                "answer each question on its own line, then press Enter"
+                            }),
                     )
                     .into_any_element()
             }
@@ -413,6 +478,7 @@ impl DesktopShell {
             .join(",");
         div()
             .id("required-actions")
+            .debug_selector(|| "required-actions".into())
             .flex()
             .flex_col()
             .gap(px(8.))
@@ -453,11 +519,41 @@ impl DesktopShell {
             .markdown_cache
             .get(row.message_index)
             .and_then(|parts| parts.get(row.part_index));
+        let previous = index
+            .checked_sub(1)
+            .and_then(|index| self.transcript_rows.get(index));
+        let next = self.transcript_rows.get(index + 1);
+        let grouped_call = row.tool_group_len == 0
+            && matches!(
+                part,
+                TranscriptPart::ToolCall {
+                    status: ToolStatus::Completed,
+                    ..
+                }
+            )
+            && previous.is_some_and(|previous| {
+                previous.tool_group_len > 0
+                    || matches!(
+                        self.model.ui.transcript[previous.message_index]
+                            .parts
+                            .get(previous.part_index),
+                        Some(TranscriptPart::ToolCall {
+                            status: ToolStatus::Completed,
+                            ..
+                        })
+                    )
+            });
+        let space_after = next.is_some_and(|next| {
+            next.message_index == row.message_index && next.part_index == row.part_index
+        }) && !cached
+            .and_then(|cached| cached.render_blocks.get(row.block_index + 1))
+            .is_some_and(|block| block.continuation);
         let selection_block_index = row
             .part_index
             .saturating_mul(1_000_000)
             .saturating_add(row.block_index);
         let content = match part {
+            _ if row.tool_group_len > 0 => self.render_tool_group(row, cx),
             TranscriptPart::Text(_) => {
                 let Some(render_block) =
                     cached.and_then(|cached| cached.render_blocks.get(row.block_index))
@@ -469,18 +565,20 @@ impl DesktopShell {
                     row.message_index,
                     selection_block_index,
                     render_block.continuation,
+                    space_after,
                     animate,
                     !is_user,
                     &render_block.syntax_highlights,
+                    window,
                     cx,
                 )
             }
             TranscriptPart::Reasoning(_) => self.render_reasoning_part(
-                row.message_index,
-                row.part_index,
+                row,
                 cached,
                 selection_block_index,
-                row.block_index,
+                space_after,
+                window,
                 cx,
             ),
             TranscriptPart::ToolCall {
@@ -534,32 +632,45 @@ impl DesktopShell {
                 .transcript_rows
                 .get(index + 1)
                 .is_some_and(|next| next.message_index == row.message_index);
-        let content_max_width = chat_content_column_width(
-            f32::from(window.bounds().size.width) - CHAT_TRANSCRIPT_PADDING * 2.,
-        );
-
         div()
             .id(format!("transcript-row-{index}"))
             .flex()
             .w_full()
             .justify_center()
-            .when(is_user && !continues_after, |element| element.mb(px(8.)))
+            // Keep the first loaded turn's geometry stable when history is prepended.
+            .when(
+                !grouped_call
+                    && previous.is_none_or(|previous| previous.message_index != row.message_index),
+                |element| element.pt(px(24.)),
+            )
+            .when(
+                !grouped_call
+                    && previous.is_some_and(|previous| {
+                        previous.message_index == row.message_index
+                            && previous.part_index != row.part_index
+                    }),
+                |element| element.pt(px(8.)),
+            )
+            .when(grouped_call, |element| element.pt(px(6.)))
             .child(
                 div()
                     .flex()
                     .w_full()
-                    .max_w(px(content_max_width))
+                    .max_w(px(CHAT_CONTENT_MAX_WIDTH))
+                    .min_w_0()
                     .when(is_user, |element| element.justify_end())
                     .child(
                         div()
+                            .debug_selector(move || format!("transcript-content-{index}"))
                             .flex()
                             .flex_col()
                             .gap(px(6.))
-                            .max_w(px(650.))
+                            .min_w_0()
+                            .when(grouped_call, |element| element.pl(px(20.)))
                             .when(!is_user, |element| element.w_full().min_w_0())
                             .when(is_user, |element| {
                                 element
-                                    .flex_none()
+                                    .max_w(relative(0.9))
                                     .p(px(12.))
                                     .when(continues_before, |element| element.pt(px(2.)))
                                     .when(continues_after, |element| element.pb(px(2.)))
@@ -569,8 +680,8 @@ impl DesktopShell {
                             .child(
                                 div()
                                     .when(!is_user, |element| element.w_full().min_w_0())
-                                    .text_sm()
-                                    .line_height(px(20.))
+                                    .text_size(px(15.))
+                                    .line_height(px(24.))
                                     .text_color(theme_rgb(&self.theme, "text.body"))
                                     .child(content),
                             ),
@@ -580,7 +691,32 @@ impl DesktopShell {
     }
 
     fn toggle_chat_part(&mut self, key: String, cx: &mut Context<Self>) {
-        if !self.expanded_chat_parts.remove(&key) {
+        let group_keys = self
+            .transcript_rows
+            .iter()
+            .copied()
+            .find(|row| {
+                row.tool_group_len > 0 && self.tool_group_key(*row).as_deref() == Some(key.as_str())
+            })
+            .map(|row| {
+                self.tool_group_members(row)
+                    .flat_map(|(message, part_index, part)| match part {
+                        TranscriptPart::ToolCall { call_id, .. } => [
+                            format!("tool-group-{call_id}"),
+                            Self::chat_part_key(message, part_index),
+                        ],
+                        _ => unreachable!("tool groups contain only tool calls"),
+                    })
+                    .collect::<Vec<_>>()
+            });
+        if let Some(keys) = group_keys.filter(|keys| {
+            keys.iter()
+                .any(|key| self.expanded_chat_parts.contains(key))
+        }) {
+            for key in keys {
+                self.expanded_chat_parts.remove(&key);
+            }
+        } else if !self.expanded_chat_parts.remove(&key) {
             self.expanded_chat_parts.insert(key);
         }
         self.rebuild_transcript_rows_from_cache();
@@ -592,6 +728,95 @@ impl DesktopShell {
 
     pub(super) fn chat_part_key(message_index: usize, part_index: usize) -> String {
         format!("chat-part-{message_index}-{part_index}")
+    }
+
+    pub(super) fn tool_group_key(&self, row: TranscriptRenderRow) -> Option<String> {
+        match self
+            .model
+            .ui
+            .transcript
+            .get(row.message_index)?
+            .parts
+            .get(row.part_index)?
+        {
+            TranscriptPart::ToolCall { call_id, .. } => Some(format!("tool-group-{call_id}")),
+            _ => None,
+        }
+    }
+
+    fn tool_group_members(
+        &self,
+        row: TranscriptRenderRow,
+    ) -> impl Iterator<Item = (usize, usize, &TranscriptPart)> {
+        self.model
+            .ui
+            .transcript
+            .iter()
+            .enumerate()
+            .skip(row.message_index)
+            .flat_map(move |(message, item)| {
+                item.parts
+                    .iter()
+                    .enumerate()
+                    .skip(if message == row.message_index {
+                        row.part_index
+                    } else {
+                        0
+                    })
+                    .map(move |(part_index, part)| (message, part_index, part))
+            })
+            .take(row.tool_group_len)
+    }
+
+    fn tool_group_parts(&self, row: TranscriptRenderRow) -> impl Iterator<Item = &TranscriptPart> {
+        self.tool_group_members(row).map(|(_, _, part)| part)
+    }
+
+    pub(super) fn tool_group_is_expanded(&self, row: TranscriptRenderRow) -> bool {
+        !self.expanded_chat_parts.is_empty()
+            && self
+                .tool_group_members(row)
+                .any(|(message, part_index, part)| match part {
+                    TranscriptPart::ToolCall { call_id, .. } => {
+                        self.expanded_chat_parts
+                            .contains(&format!("tool-group-{call_id}"))
+                            || self
+                                .expanded_chat_parts
+                                .contains(&Self::chat_part_key(message, part_index))
+                    }
+                    _ => false,
+                })
+    }
+
+    fn render_tool_group(
+        &self,
+        row: TranscriptRenderRow,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let key = self
+            .tool_group_key(row)
+            .expect("tool groups start at a tool call");
+        let expanded = self.tool_group_is_expanded(row);
+        let (_, icon) = match &self.model.ui.transcript[row.message_index].parts[row.part_index] {
+            TranscriptPart::ToolCall { tool_name, .. } => tool_activity(tool_name),
+            _ => unreachable!(),
+        };
+        div()
+            .w_full()
+            .min_w_0()
+            .line_height(px(20.))
+            .child(self.render_part_header(
+                key,
+                icon,
+                tool_activity_summary(self.tool_group_parts(row)),
+                Some((
+                    format!("{} calls", row.tool_group_len),
+                    theme_rgb(&self.theme, "text.muted"),
+                )),
+                !expanded,
+                cx,
+            ))
+            .into_any_element()
     }
 
     fn render_part_header(
@@ -606,7 +831,10 @@ impl DesktopShell {
         let click_key = key.clone();
         div()
             .id(format!("{key}-header"))
+            .debug_selector(move || format!("{key}-header"))
             .flex()
+            .w_full()
+            .min_w_0()
             .items_center()
             .gap(px(7.))
             .cursor_pointer()
@@ -631,7 +859,13 @@ impl DesktopShell {
                 theme_rgb(&self.theme, "text.muted"),
                 px(13.),
             ))
-            .child(SharedString::from(label))
+            .child(div().min_w_0().truncate().child(SharedString::from(
+                if label.contains(['\r', '\n']) {
+                    label.replace(['\r', '\n'], " ")
+                } else {
+                    label
+                },
+            )))
             .when_some(status, |element, (label, color)| {
                 element.child(div().text_color(color).child(SharedString::from(label)))
             })
@@ -649,13 +883,19 @@ impl DesktopShell {
 
     fn render_reasoning_part(
         &self,
-        message_index: usize,
-        part_index: usize,
+        row: TranscriptRenderRow,
         cached: Option<&CachedMarkdown>,
         selection_block_index: usize,
-        block_index: usize,
+        space_after: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let TranscriptRenderRow {
+            message_index,
+            part_index,
+            block_index,
+            ..
+        } = row;
         let key = Self::chat_part_key(message_index, part_index);
         let collapsed = !self.expanded_chat_parts.contains(&key);
         let block = cached.and_then(|cached| cached.render_blocks.get(block_index));
@@ -673,9 +913,11 @@ impl DesktopShell {
                             message_index,
                             selection_block_index,
                             block.continuation,
+                            space_after,
                             false,
                             true,
                             &block.syntax_highlights,
+                            window,
                             cx,
                         ))
                 })
@@ -719,29 +961,62 @@ impl DesktopShell {
     ) -> gpui::AnyElement {
         let key = Self::chat_part_key(message_index, part_index);
         let collapsed = !self.expanded_chat_parts.contains(&key);
-        let (status_label, status_color) = match status {
-            ToolStatus::Pending => ("pending", theme_rgb(&self.theme, "text.muted")),
-            ToolStatus::Running => ("running", theme_rgb(&self.theme, "yellow.fg")),
-            ToolStatus::Completed => ("completed", theme_rgb(&self.theme, "green.fg")),
-            ToolStatus::Error => ("failed", theme_rgb(&self.theme, "red.fg")),
+        let compact = collapsed && status == ToolStatus::Completed;
+        let status_indicator = match status {
+            ToolStatus::Pending => Some(("pending".into(), theme_rgb(&self.theme, "text.muted"))),
+            ToolStatus::Running => Some(("running".into(), theme_rgb(&self.theme, "yellow.fg"))),
+            ToolStatus::Completed => None,
+            ToolStatus::Error => Some(("failed".into(), theme_rgb(&self.theme, "red.fg"))),
         };
-        let display_name = tool_display_label(tool_name);
         let summary = tool_summary(input);
+        let display_name = if status == ToolStatus::Completed {
+            let action = match tool_activity(tool_name).0 {
+                "Read files" => "Read file".into(),
+                "Edited files" => "Edited file".into(),
+                "Ran commands" => "Ran command".into(),
+                "Searched files" => "Searched files".into(),
+                "Browsed pages" => "Browsed page".into(),
+                _ => tool_display_label(tool_name),
+            };
+            summary
+                .as_ref()
+                .map(|summary| format!("{action} · {summary}"))
+                .unwrap_or(action)
+        } else {
+            tool_display_label(tool_name)
+        };
         let header = self.render_part_header(
             key,
-            TablerIcon::Terminal2,
+            tool_activity(tool_name).1,
             display_name,
-            Some((status_label.into(), status_color)),
+            status_indicator,
             collapsed,
             cx,
         );
-        let summary_view = summary.map(|summary| {
-            div()
-                .pl(px(20.))
-                .text_xs()
-                .text_color(theme_rgb(&self.theme, "text.body"))
-                .child(SharedString::from(summary))
-        });
+        let summary_view = summary
+            .filter(|_| status != ToolStatus::Completed)
+            .map(|summary| {
+                div()
+                    .pl(px(20.))
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .text_color(theme_rgb(&self.theme, "text.body"))
+                    .child(SharedString::from(summary))
+            });
+        let error_preview = error
+            .filter(|_| collapsed && status == ToolStatus::Error)
+            .and_then(|error| error.lines().map(str::trim).find(|line| !line.is_empty()))
+            .map(|error| {
+                div()
+                    .debug_selector(move || format!("tool-error-{message_index}-{part_index}"))
+                    .pl(px(20.))
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .text_color(theme_rgb(&self.theme, "red.fg"))
+                    .child(SharedString::from(error.to_owned()))
+            });
         let body = (!collapsed).then(|| {
             let mut body = div()
                 .id(format!("tool-body-{message_index}-{part_index}"))
@@ -751,14 +1026,31 @@ impl DesktopShell {
                 .pl(px(20.))
                 .child(
                     div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
                         .text_xs()
                         .text_color(theme_rgb(&self.theme, "text.muted"))
-                        .child("input"),
+                        .child("input")
+                        .child(self.render_content_copy_button(
+                            format!("copy-tool-input-{message_index}-{part_index}"),
+                            "Copy tool input",
+                            TranscriptCopySource::Tool {
+                                message_index,
+                                part_index,
+                                section: ToolTextSection::Input,
+                            },
+                            cx,
+                        )),
                 )
                 .child(self.render_tool_text(
                     format!("tool-input-{message_index}-{part_index}"),
                     &formatted_tool_input(input),
                     false,
+                    message_index,
+                    part_index,
+                    ToolTextSection::Input,
+                    cx,
                 ));
             if let Some(output) = output.filter(|output| !output.is_empty()) {
                 let output_key = format!("tool-output-{message_index}-{part_index}");
@@ -770,7 +1062,17 @@ impl DesktopShell {
                         .justify_between()
                         .text_xs()
                         .text_color(theme_rgb(&self.theme, "text.muted"))
-                        .child("output")
+                        .child(div().flex_1().child("output"))
+                        .child(self.render_content_copy_button(
+                            format!("copy-tool-output-{message_index}-{part_index}"),
+                            "Copy tool output",
+                            TranscriptCopySource::Tool {
+                                message_index,
+                                part_index,
+                                section: ToolTextSection::Output,
+                            },
+                            cx,
+                        ))
                         .when(
                             output.lines().count() > TOOL_OUTPUT_LINES_FOR_DISCLOSURE,
                             |element| {
@@ -784,7 +1086,15 @@ impl DesktopShell {
                             },
                         ),
                 );
-                body = body.child(self.render_tool_text(output_key, output, output_expanded));
+                body = body.child(self.render_tool_text(
+                    output_key,
+                    output,
+                    output_expanded,
+                    message_index,
+                    part_index,
+                    ToolTextSection::Output,
+                    cx,
+                ));
             }
             if let Some(diff) = diff.filter(|diff| !diff.is_empty()) {
                 let diff_key = format!("tool-diff-{message_index}-{part_index}");
@@ -796,7 +1106,17 @@ impl DesktopShell {
                         .justify_between()
                         .text_xs()
                         .text_color(theme_rgb(&self.theme, "text.muted"))
-                        .child("diff")
+                        .child(div().flex_1().child("diff"))
+                        .child(self.render_content_copy_button(
+                            format!("copy-tool-diff-{message_index}-{part_index}"),
+                            "Copy tool diff",
+                            TranscriptCopySource::Tool {
+                                message_index,
+                                part_index,
+                                section: ToolTextSection::Diff,
+                            },
+                            cx,
+                        ))
                         .when(diff.lines().count() > TOOL_DIFF_LINES_MAX, |element| {
                             element.child(self.render_tool_toggle(
                                 format!("{diff_key}-toggle"),
@@ -807,7 +1127,14 @@ impl DesktopShell {
                             ))
                         }),
                 );
-                body = body.child(self.render_tool_diff(diff_key, diff, diff_expanded));
+                body = body.child(self.render_tool_diff(
+                    diff_key,
+                    diff,
+                    diff_expanded,
+                    message_index,
+                    part_index,
+                    cx,
+                ));
             }
             if let Some(error) = error {
                 body = body.child(
@@ -823,14 +1150,21 @@ impl DesktopShell {
             .id(format!("tool-part-{message_index}-{part_index}-{call_id}"))
             .flex()
             .flex_col()
-            .gap(px(6.))
-            .p(px(10.))
-            .rounded(px(9.))
-            .bg(theme_rgb(&self.theme, "card").opacity(0.46))
-            .border_1()
-            .border_color(theme_rgb(&self.theme, "divider").opacity(0.7))
+            .w_full()
+            .min_w_0()
+            .gap(px(4.))
+            .line_height(px(20.))
+            .when(!compact, |element| {
+                element
+                    .p(px(10.))
+                    .rounded(px(9.))
+                    .bg(theme_rgb(&self.theme, "card").opacity(0.46))
+                    .border_1()
+                    .border_color(theme_rgb(&self.theme, "divider").opacity(0.7))
+            })
             .child(header)
             .when_some(summary_view, |element, summary| element.child(summary))
+            .when_some(error_preview, |element, error| element.child(error))
             .when_some(body, |element, body| element.child(body))
             .into_any_element()
     }
@@ -866,22 +1200,37 @@ impl DesktopShell {
             .into_any_element()
     }
 
-    fn render_tool_text(&self, id: String, text: &str, expanded: bool) -> gpui::AnyElement {
+    #[allow(clippy::too_many_arguments)]
+    fn render_tool_text(
+        &self,
+        id: String,
+        text: &str,
+        expanded: bool,
+        message_index: usize,
+        part_index: usize,
+        section: ToolTextSection,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let source_identity = text.as_ptr() as usize;
         let source_len = text.len();
-        let lines = {
+        let (lines, line_offsets) = {
             let mut cache = self.tool_text_cache.borrow_mut();
-            let cached = cache.entry(id.clone()).or_insert_with(|| ToolTextCache {
-                source_identity,
-                source_len,
-                lines: Arc::new(split_tool_text_lines(text)),
+            let cached = cache.entry(id.clone()).or_insert_with(|| {
+                let lines = split_tool_text_lines(text);
+                ToolTextCache {
+                    source_identity,
+                    source_len,
+                    line_offsets: Arc::new(tool_line_offsets(&lines)),
+                    lines: Arc::new(lines),
+                }
             });
             if cached.source_identity != source_identity || cached.source_len != source_len {
                 cached.source_identity = source_identity;
                 cached.source_len = source_len;
                 cached.lines = Arc::new(split_tool_text_lines(text));
+                cached.line_offsets = Arc::new(tool_line_offsets(&cached.lines));
             }
-            cached.lines.clone()
+            (cached.lines.clone(), cached.line_offsets.clone())
         };
         let line_count = lines.len();
         let state = {
@@ -903,32 +1252,73 @@ impl DesktopShell {
             .bg(theme_rgb(&self.theme, "background"))
             .rounded(px(6.))
             .p(px(8.))
-            .child(gpui::list(state, move |index, _, _| {
-                div()
-                    .id(format!("{id}-line-{index}"))
-                    .w_full()
-                    .min_w_0()
-                    .text_xs()
-                    .font_family(DEFAULT_FONT_FAMILY)
-                    .text_color(text_color)
-                    .whitespace_nowrap()
-                    .child(lines.get(index).cloned().unwrap_or_default())
-                    .into_any_element()
-            }))
+            .child(
+                gpui::list(
+                    state,
+                    cx.processor(move |shell, index: usize, _, cx| {
+                        let Some(line) = lines.get(index) else {
+                            return div().into_any_element();
+                        };
+                        let block_index = part_index
+                            .saturating_mul(1_000_000)
+                            .saturating_add(section.index());
+                        let source_offset = line_offsets[index];
+                        let highlights = shell.transcript_text_highlights(
+                            message_index,
+                            block_index,
+                            source_offset,
+                            line.len(),
+                            Vec::new(),
+                        );
+                        div()
+                            .id(format!("{id}-line-{index}"))
+                            .debug_selector(|| format!("{id}-line-{index}"))
+                            .w_full()
+                            .min_w_0()
+                            .text_xs()
+                            .line_height(px(18.))
+                            .font_family(DEFAULT_FONT_FAMILY)
+                            .text_color(text_color)
+                            .whitespace_nowrap()
+                            .child(shell.render_selectable_transcript_text(
+                                message_index,
+                                block_index,
+                                source_offset,
+                                line,
+                                &[],
+                                gpui::StyledText::new(line.clone()).with_highlights(highlights),
+                                cx,
+                            ))
+                            .into_any_element()
+                    }),
+                )
+                .with_sizing_behavior(gpui::ListSizingBehavior::Infer),
+            )
             .into_any_element()
     }
 
-    fn render_tool_diff(&self, id: String, diff: &str, expanded: bool) -> gpui::AnyElement {
+    fn render_tool_diff(
+        &self,
+        id: String,
+        diff: &str,
+        expanded: bool,
+        message_index: usize,
+        part_index: usize,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let line_count = diff.lines().count();
         let truncated = !expanded && line_count > TOOL_DIFF_LINES_MAX;
+        let mut source_offset = 0;
         let lines = diff
-            .lines()
+            .split('\n')
             .take(if expanded {
                 line_count
             } else {
                 TOOL_DIFF_LINES_MAX
             })
             .map(|line| {
+                let offset = source_offset;
+                source_offset += line.len() + 1;
                 let color = if line.starts_with('+') {
                     theme_rgb(&self.theme, "green.fg")
                 } else if line.starts_with('-') {
@@ -936,7 +1326,7 @@ impl DesktopShell {
                 } else {
                     theme_rgb(&self.theme, "text.muted")
                 };
-                (SharedString::from(line.to_owned()), color)
+                (SharedString::from(line.to_owned()), color, offset)
             })
             .collect::<Arc<[_]>>();
         let visible_line_count = lines.len();
@@ -958,21 +1348,47 @@ impl DesktopShell {
             .bg(theme_rgb(&self.theme, "background"))
             .rounded(px(6.))
             .p(px(8.))
-            .child(gpui::list(state, move |index, _, _| {
-                let Some((line, color)) = lines.get(index) else {
-                    return div().into_any_element();
-                };
-                div()
-                    .id(format!("{id}-line-{index}"))
-                    .w_full()
-                    .min_w_0()
-                    .text_xs()
-                    .font_family(DEFAULT_FONT_FAMILY)
-                    .text_color(*color)
-                    .whitespace_nowrap()
-                    .child(line.clone())
-                    .into_any_element()
-            }))
+            .child(
+                gpui::list(
+                    state,
+                    cx.processor(move |shell, index: usize, _, cx| {
+                        let Some((line, color, source_offset)) = lines.get(index) else {
+                            return div().into_any_element();
+                        };
+                        let block_index = part_index
+                            .saturating_mul(1_000_000)
+                            .saturating_add(ToolTextSection::Diff.index());
+                        let highlights = shell.transcript_text_highlights(
+                            message_index,
+                            block_index,
+                            *source_offset,
+                            line.len(),
+                            Vec::new(),
+                        );
+                        div()
+                            .id(format!("{id}-line-{index}"))
+                            .debug_selector(|| format!("{id}-line-{index}"))
+                            .w_full()
+                            .min_w_0()
+                            .text_xs()
+                            .line_height(px(18.))
+                            .font_family(DEFAULT_FONT_FAMILY)
+                            .text_color(*color)
+                            .whitespace_nowrap()
+                            .child(shell.render_selectable_transcript_text(
+                                message_index,
+                                block_index,
+                                *source_offset,
+                                line,
+                                &[],
+                                gpui::StyledText::new(line.clone()).with_highlights(highlights),
+                                cx,
+                            ))
+                            .into_any_element()
+                    }),
+                )
+                .with_sizing_behavior(gpui::ListSizingBehavior::Infer),
+            )
             .when(truncated, |element| {
                 element.child(
                     div()
@@ -1123,18 +1539,38 @@ impl DesktopShell {
         let Some(anchor) = self.pending_transcript_scroll_anchor else {
             return;
         };
-        let Some(item_ix) = self.transcript_rows.iter().position(|row| {
+        let exact = self.transcript_rows.iter().position(|row| {
             row.message_index == anchor.message_index
                 && row.part_index == anchor.part_index
                 && row.block_index == anchor.block_index
-        }) else {
+        });
+        let grouped = || {
+            let part = self
+                .model
+                .ui
+                .transcript
+                .get(anchor.message_index)?
+                .parts
+                .get(anchor.part_index)?;
+            self.transcript_rows.iter().position(|row| {
+                row.tool_group_len > 0
+                    && self
+                        .tool_group_parts(*row)
+                        .any(|member| std::ptr::eq(member, part))
+            })
+        };
+        let Some(item_ix) = exact.or_else(grouped) else {
             return;
         };
         self.transcript_list
             .set_follow_mode(gpui::FollowMode::Normal);
         self.transcript_list.scroll_to(gpui::ListOffset {
             item_ix,
-            offset_in_item: px(anchor.offset.max(0.)),
+            offset_in_item: px(if exact.is_some() {
+                anchor.offset.max(0.)
+            } else {
+                0.
+            }),
         });
         self.pending_transcript_scroll_anchor = None;
     }
@@ -1146,12 +1582,41 @@ impl DesktopShell {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let (title, detail, color, icon) = match attention {
-            TranscriptAttention::Running => (
-                "Working",
-                "The assistant is processing this turn.",
-                theme_rgb(&self.theme, "yellow.fg"),
-                TablerIcon::Square,
-            ),
+            TranscriptAttention::Running => {
+                let muted = theme_rgb(&self.theme, "text.muted");
+                return div()
+                    .id("conversation-working")
+                    .debug_selector(|| "conversation-working".into())
+                    .role(Role::Status)
+                    .aria_label("Working")
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .w_full()
+                    .py(px(2.))
+                    .text_xs()
+                    .line_height(px(20.))
+                    .text_color(muted)
+                    .child(
+                        div()
+                            .size(px(6.))
+                            .flex_shrink_0()
+                            .rounded_full()
+                            .bg(muted)
+                            .with_animation(
+                                "working-pulse",
+                                Animation::new(Duration::from_millis(1800))
+                                    .repeat_synced()
+                                    .with_max_fps(12.),
+                                |element, phase| {
+                                    element
+                                        .opacity(0.65 + 0.35 * (phase * std::f32::consts::PI).sin())
+                                },
+                            ),
+                    )
+                    .child("Working")
+                    .into_any_element();
+            }
             TranscriptAttention::Failed => (
                 "Last turn failed",
                 "Retry to send the last prompt again.",
@@ -1184,8 +1649,9 @@ impl DesktopShell {
             );
         }
 
-        let mut card = div()
+        let card = div()
             .id("conversation-attention")
+            .debug_selector(|| "conversation-attention".into())
             .flex()
             .items_start()
             .gap(px(8.))
@@ -1199,54 +1665,30 @@ impl DesktopShell {
             .child(tabler_icon(icon, color, px(14.)))
             .child(copy);
 
-        if matches!(attention, TranscriptAttention::Running) {
-            card = card.child(
-                div()
-                    .id("cancel-attention-turn")
-                    .px(px(7.))
-                    .py(px(4.))
-                    .rounded(px(5.))
-                    .bg(theme_rgb(&self.theme, "card"))
-                    .text_xs()
-                    .text_color(body)
-                    .cursor_pointer()
-                    .role(Role::Button)
-                    .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                    .aria_label("Cancel current turn")
-                    .on_click(cx.listener(|shell, _, _, cx| {
-                        shell.cancel_turn(cx);
-                    }))
-                    .child("cancel"),
-            );
-        } else if matches!(
-            attention,
-            TranscriptAttention::Failed | TranscriptAttention::Waiting
-        ) {
-            card = card.child(
-                div()
-                    .id("retry-attention-turn")
-                    .px(px(7.))
-                    .py(px(4.))
-                    .rounded(px(5.))
-                    .bg(theme_rgb(&self.theme, "card"))
-                    .text_xs()
-                    .text_color(body)
-                    .cursor_pointer()
-                    .role(Role::Button)
-                    .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                    .aria_label(if matches!(attention, TranscriptAttention::Failed) {
-                        "Retry last turn"
-                    } else {
-                        "Retry waiting turn"
-                    })
-                    .on_click(cx.listener(|shell, _, _, cx| {
-                        shell.retry_last_turn(cx);
-                    }))
-                    .child("retry"),
-            );
-        }
-
-        card.into_any_element()
+        card.child(
+            div()
+                .id("retry-attention-turn")
+                .debug_selector(|| "retry-attention-turn".into())
+                .px(px(7.))
+                .py(px(4.))
+                .rounded(px(5.))
+                .bg(theme_rgb(&self.theme, "card"))
+                .text_xs()
+                .text_color(body)
+                .cursor_pointer()
+                .role(Role::Button)
+                .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+                .aria_label(if matches!(attention, TranscriptAttention::Failed) {
+                    "Retry last turn"
+                } else {
+                    "Retry waiting turn"
+                })
+                .on_click(cx.listener(|shell, _, _, cx| {
+                    shell.retry_last_turn(cx);
+                }))
+                .child("retry"),
+        )
+        .into_any_element()
     }
 
     pub(super) fn render_center(
@@ -1299,21 +1741,24 @@ impl DesktopShell {
                 .items_center()
                 .justify_center()
                 .gap(px(8.))
-                .child(div().text_xl().child(if selected_session {
-                    "ready when you are"
-                } else {
-                    "start a coding session"
-                }))
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(theme_rgb(&self.theme, "text.muted"))
-                        .child(if selected_session {
-                            "Send a message to begin this conversation."
+                .when(!self.model.ui.running, |element| {
+                    element
+                        .child(div().text_xl().child(if selected_session {
+                            "ready when you are"
                         } else {
-                            "Choose a conversation or create a new one from the rail."
-                        }),
-                )
+                            "start a coding session"
+                        }))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(theme_rgb(&self.theme, "text.muted"))
+                                .child(if selected_session {
+                                    "Send a message to begin this conversation."
+                                } else {
+                                    "Choose a chat in the sidebar, or start a new chat."
+                                }),
+                        )
+                })
                 .into_any_element()
         } else {
             div()
@@ -1329,6 +1774,7 @@ impl DesktopShell {
                         .flex_col()
                         .flex_1()
                         .min_h_0()
+                        .px(px(CHAT_TRANSCRIPT_PADDING))
                         .child(
                             gpui::list(
                                 self.transcript_list.clone(),
@@ -1338,57 +1784,115 @@ impl DesktopShell {
                             .flex_1()
                             .min_h_0()
                             .w_full()
-                            .p(px(CHAT_TRANSCRIPT_PADDING)),
+                            .pb(px(CHAT_TRANSCRIPT_PADDING)),
                         )
                         .when_some(
                             self.render_transcript_scrollbar(cx),
                             |element, scrollbar| element.child(scrollbar),
                         ),
                 )
-                .when_some(transcript_attention_state, |element, attention| {
-                    element.child(
-                        div()
-                            .w_full()
-                            .max_w(px(CHAT_CONTENT_MAX_WIDTH))
-                            .self_center()
-                            .child(self.render_transcript_attention(
-                                attention,
-                                if matches!(attention, TranscriptAttention::Failed) {
-                                    failure_detail.as_deref()
-                                } else {
-                                    None
-                                },
-                                cx,
-                            )),
-                    )
-                })
                 .into_any_element()
         };
-        let model_display_label = non_empty_label(self.model.ui.model.as_deref(), "choose a model");
+        let transcript = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(transcript)
+            .when_some(transcript_attention_state, |element, attention| {
+                element.child(
+                    div()
+                        .w_full()
+                        .max_w(px(CHAT_CONTENT_MAX_WIDTH + CHAT_TRANSCRIPT_PADDING * 2.))
+                        .px(px(CHAT_TRANSCRIPT_PADDING))
+                        .self_center()
+                        .child(self.render_transcript_attention(
+                            attention,
+                            if matches!(attention, TranscriptAttention::Failed) {
+                                failure_detail.as_deref()
+                            } else {
+                                None
+                            },
+                            cx,
+                        )),
+                )
+            });
+        let model_display_label = self
+            .model
+            .ui
+            .models
+            .iter()
+            .find(|model| {
+                self.model.ui.current_provider.as_deref() == Some(model.provider.as_str())
+                    && self.model.ui.model.as_deref() == Some(model.model.as_str())
+            })
+            .map(model_display_name)
+            .or(self.model.ui.model.as_deref())
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or("Model");
         let thinking_label = self.model.ui.thinking_variant.as_deref().unwrap_or("");
         let model_display = if thinking_label.is_empty() {
-            model_display_label
+            model_display_label.to_owned()
         } else {
             format!("{model_display_label} · {thinking_label}")
         };
-        let persona_display =
-            non_empty_label(self.model.ui.current_persona.as_deref(), "choose a persona");
+        let persona_display = non_empty_label(self.model.ui.current_persona.as_deref(), "Persona");
+        let persona_hint_text: SharedString = format!("Persona: {persona_display}").into();
+        let persona_hint_background = theme_rgb(&self.theme, "popover");
+        let persona_hint_foreground = theme_rgb(&self.theme, "text.body");
+        let persona_hint_border = theme_rgb(&self.theme, "border");
+        let compact_settings = composer_settings_are_compact(self.composer_bounds);
         let permission_display = permission_mode_label(self.model.ui.permission_mode.as_deref());
-        let session_path = selected_session_path(
+        let session_path: SharedString = selected_session_path(
             &self.model.ui.conversations,
             self.model.ui.selected_session.as_deref(),
-        );
+        )
+        .unwrap_or_else(|| "No workspace selected".into())
+        .into();
         let usage_label = self.model.ui.usage.and_then(usage_summary_label);
         let presence_count = self.model.ui.presence.len();
         let control_yielded = self.model.ui.control_yielded_by.is_some();
 
         let composer_is_empty = self.model.ui.composer.is_empty();
         let composer_value = self.model.ui.composer.clone();
-        let turn_is_running = self.model.ui.running;
+        let question = self.pending_question();
+        let submit_label = match question.map(|action| &action.kind) {
+            Some(ActionKind::AskUser { questions, .. }) if questions.len() > 1 => "Send answers",
+            Some(_) => "Send answer",
+            None => "Send message",
+        };
+        let turn_is_running = self.model.ui.running && question.is_none();
+        let can_submit =
+            !self.model.ui.composer.trim().is_empty() && self.awaiting_model_switch.is_none();
         let composer_focused = self.composer_focus_handle.is_focused(window);
+        let expanded_composer_max_height = self.composer_expanded_max_height(window);
+        let composer_max_height = if self.composer_expanded {
+            expanded_composer_max_height
+        } else {
+            96.
+        };
+        self.attachment_remove_focus
+            .truncate(self.attachments.len());
+        while self.attachment_remove_focus.len() < self.attachments.len() {
+            let index = self.attachment_remove_focus.len();
+            let focus = cx.focus_handle().tab_stop(true);
+            let subscription = cx.on_focus(&focus, window, move |shell, window, cx| {
+                shell.attachment_scroll.scroll_to_item(index);
+                cx.defer_in(window, |_, _, cx| cx.notify());
+            });
+            self.attachment_remove_focus.push((focus, subscription));
+        }
+        if self.attachments.is_empty() {
+            self.attachment_scroll.set_offset(point(px(0.), px(0.)));
+            self.attachment_scroll.scroll_to_item(0);
+        }
         let attachments = self.attachments.clone();
         let attachment_error = self.attachment_error.clone();
+        let attachments_overflowing = self.attachment_scroll.max_offset().y > Pixels::ZERO;
+        let attachment_tray_shell = cx.entity().downgrade();
         let composer_focus_handle = self.composer_focus_handle.clone();
+        let composer_area_shell = cx.entity().downgrade();
+        let composer_container_shell = cx.entity().downgrade();
         let model_picker_trigger_shell = cx.entity().downgrade();
         let persona_picker_trigger_shell = cx.entity().downgrade();
         let permission_picker_trigger_shell = cx.entity().downgrade();
@@ -1400,14 +1904,16 @@ impl DesktopShell {
             .flex_1()
             .min_w_0()
             .min_h_0()
-            .rounded(px(SHELL_SURFACE_RADIUS))
-            .border_1()
-            .border_color(theme_rgb(&self.theme, "divider"))
             .overflow_hidden()
             .bg(theme_rgb(&self.theme, "background"))
             .child(
                 div()
                     .id("conversation-transcript")
+                    .track_focus(&self.transcript_focus_handle)
+                    .key_context("Transcript")
+                    .when(self.transcript_selected_text.is_some(), |element| {
+                        element.on_action(cx.listener(Self::copy_selected_transcript_text))
+                    })
                     .flex()
                     .flex_col()
                     .flex_1()
@@ -1474,14 +1980,22 @@ impl DesktopShell {
             .child(
                 div()
                     .id("composer-area")
+                    .relative()
                     .flex()
                     .flex_col()
                     .w_full()
-                    .max_w(px(CHAT_CONTENT_MAX_WIDTH))
+                    .max_w(px(CHAT_CONTENT_MAX_WIDTH + CHAT_TRANSCRIPT_PADDING * 2.))
                     .self_center()
                     .gap(px(8.))
-                    .px(px(24.))
+                    .px(px(CHAT_TRANSCRIPT_PADDING))
                     .pb(px(12.))
+                    .child(canvas(move |bounds, window, cx| {
+                        composer_area_shell.update(cx, |shell, cx| {
+                            let height_changed = shell.composer_area_bounds.is_none_or(|previous| previous.size.height != bounds.size.height);
+                            shell.composer_area_bounds = Some(bounds);
+                            if height_changed { cx.defer_in(window, |_, _, cx| cx.notify()); }
+                        }).ok();
+                    }, |_bounds, _state, _window, _cx| {}).absolute().inset_0().size_full())
                     .when_some(last_error, |element, error| {
                         element.child(
                             div()
@@ -1598,22 +2112,50 @@ impl DesktopShell {
                         )
                     })
                     .when(!attachments.is_empty(), |element| {
-                        element.child(
+                        element
+                            .when(attachments_overflowing, |element| {
+                                element.child(
+                                    div()
+                                        .debug_selector(|| "attachment-overflow-hint".into())
+                                        .text_size(px(11.))
+                                        .line_height(px(16.))
+                                        .text_color(theme_rgb(&self.theme, "text.muted"))
+                                        .child(format!("{} files · scroll for more", attachments.len())),
+                                )
+                            })
+                            .child(
                             div()
                                 .id("attachment-chips")
+                                .relative()
+                                .debug_selector(|| "attachment-chips".into())
+                                .max_h(px(70.))
+                                .flex_shrink_0()
+                                .overflow_y_scroll()
+                                .track_scroll(&self.attachment_scroll)
+                                .role(Role::Group)
+                                .aria_label("Attached files. Scroll to see more files.")
                                 .flex()
                                 .flex_wrap()
+                                .min_w_0()
+                                .w_full()
                                 .gap(px(6.))
                                 .children(attachments.iter().enumerate().map(
                                     |(index, attachment)| {
-                                        let label = Path::new(&attachment.path)
-                                            .file_name()
-                                            .and_then(|name| name.to_str())
-                                            .unwrap_or(&attachment.path)
-                                            .to_owned();
+                                        let label = SharedString::from(
+                                            Path::new(&attachment.path)
+                                                .file_name()
+                                                .and_then(|name| name.to_str())
+                                                .unwrap_or(&attachment.path)
+                                                .to_owned(),
+                                        );
                                         div()
                                             .id(format!("attachment-{index}"))
+                                            .debug_selector(move || {
+                                                format!("attachment-{index}")
+                                            })
                                             .flex()
+                                            .min_w_0()
+                                            .max_w(relative(1.))
                                             .items_center()
                                             .gap(px(5.))
                                             .px(px(8.))
@@ -1621,18 +2163,43 @@ impl DesktopShell {
                                             .rounded(px(7.))
                                             .bg(theme_rgb(&self.theme, "card"))
                                             .text_xs()
-                                            .child(SharedString::from(label))
+                                            .child(
+                                                div()
+                                                    .min_w_0()
+                                                    .truncate()
+                                                    .child(label.clone()),
+                                            )
                                             .child(
                                                 div()
                                                     .id(format!("remove-attachment-{index}"))
+                                                    .debug_selector(move || {
+                                                        format!("remove-attachment-{index}")
+                                                    })
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .size(px(24.))
+                                                    .flex_shrink_0()
+                                                    .rounded(px(4.))
                                                     .cursor_pointer()
+                                                    .role(Role::Button)
+                                                    .aria_label(format!("Remove attachment {label}"))
+                                                    .track_focus(&self.attachment_remove_focus[index].0)
+                                                    .desktop_focus(theme_rgb(
+                                                        &self.theme,
+                                                        "text.accent",
+                                                    ))
                                                     .text_color(theme_rgb(
                                                         &self.theme,
                                                         "text.muted",
                                                     ))
                                                     .on_click(cx.listener(
-                                                        move |shell, _, _, cx| {
+                                                        move |shell, _, window, cx| {
                                                             shell.remove_attachment(index, cx);
+                                                            window.focus(
+                                                                &shell.composer_focus_handle,
+                                                                cx,
+                                                            );
                                                         },
                                                     ))
                                                     .child(tabler_icon(
@@ -1643,12 +2210,21 @@ impl DesktopShell {
                                             )
                                             .into_any_element()
                                     },
-                                )),
+                                ))
+                                .child(canvas(move |_, window, cx| {
+                                    attachment_tray_shell.update(cx, |shell, cx| {
+                                        if (shell.attachment_scroll.max_offset().y > Pixels::ZERO) != attachments_overflowing {
+                                            cx.defer_in(window, |_, _, cx| cx.notify());
+                                        }
+                                    }).ok();
+                                }, |_, _, _, _| {}).absolute().inset_0()),
                         )
                     })
                     .child(
                         div()
                             .id("composer")
+                            .debug_selector(|| "composer".into())
+                            .relative()
                             .flex_col()
                             .items_stretch()
                             .gap(px(8.))
@@ -1658,7 +2234,8 @@ impl DesktopShell {
                             .rounded(px(16.))
                             .bg(theme_rgb(&self.theme, "panel.background"))
                             .p(px(10.))
-                            .text_sm()
+                            .text_size(px(15.))
+                            .line_height(px(24.))
                             .role(Role::Group)
                             .aria_label("Message composer. Drop files here to attach.")
                             .when(composer_focused, |element| {
@@ -1669,27 +2246,69 @@ impl DesktopShell {
                             .on_drop(cx.listener(|shell, path: &PathBuf, _, cx| {
                                 shell.add_attachment(path.clone(), cx);
                             }))
+                            // Absolute children otherwise measure inside the 1 px border.
+                            .child(canvas(move |bounds, window, cx| {
+                                composer_container_shell.update(cx, |shell, cx| {
+                                    if shell.composer_container_bounds != Some(bounds) {
+                                        shell.composer_container_bounds = Some(bounds);
+                                        if !shell.model.ui.pending_actions.is_empty() {
+                                            cx.defer_in(window, |_, _, cx| cx.notify());
+                                        }
+                                    }
+                                }).ok();
+                            }, |_bounds, _state, _window, _cx| {}).absolute().inset(px(-1.)))
                             .text_color(if composer_is_empty {
                                 theme_rgb(&self.theme, "text.muted")
                             } else {
                                 theme_rgb(&self.theme, "text.body")
                             })
+                            .when(self.composer_line_count > 4 || self.composer_expanded, |element| {
+                                element.child(div()
+                                    .id("composer-draft-info")
+                                    .debug_selector(|| "composer-draft-info".into())
+                                    .flex().items_center().justify_between().h(px(24.)).flex_none()
+                                    .text_size(px(11.)).line_height(px(16.))
+                                    .text_color(theme_rgb(&self.theme, "text.muted"))
+                                    .child(SharedString::from(format!("{} lines", self.composer_line_count)))
+                                    .when(expanded_composer_max_height > 96. || self.composer_expanded, |element| {
+                                        element.child(div()
+                                            .id("composer-expand-toggle")
+                                            .debug_selector(|| "composer-expand-toggle".into())
+                                            .h(px(24.)).px(px(6.)).rounded(px(4.))
+                                            .flex().items_center().cursor_pointer()
+                                            .role(Role::Button)
+                                            .aria_label(if self.composer_expanded { "Collapse composer" } else { "Expand composer" })
+                                            .aria_expanded(self.composer_expanded)
+                                            .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+                                            .text_color(theme_rgb(&self.theme, "secondary_foreground"))
+                                            .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
+                                            .on_click(cx.listener(|shell, _, window, cx| shell.toggle_composer_expanded(window, cx)))
+                                            .child(if self.composer_expanded { "Collapse" } else { "Expand" }))
+                                    }))
+                            })
                             .child(
                                 div()
                                     .id("composer-input-surface")
+                                    .relative()
                                     .flex()
                                     .w_full()
                                     .flex_none()
                                     .min_h(px(48.))
-                                    .max_h(px(96.))
+                                    .max_h(px(composer_max_height))
                                     .items_start()
                                     .key_context("Composer")
                                     .track_focus(&composer_focus_handle)
+                                    .when(self.task_drafts.edits.can_undo(), |element| element.on_action(cx.listener(Self::text_undo)))
+                                    .when(self.task_drafts.edits.can_redo(), |element| element.on_action(cx.listener(Self::text_redo)))
+                                    .on_action(cx.listener(Self::text_copy))
+                                    .on_action(cx.listener(Self::text_cut))
+                                    .on_action(cx.listener(Self::text_paste))
+                                    .on_action(cx.listener(Self::text_select_all))
                                     .role(Role::TextInput)
                                     .aria_label("Message composer")
                                     .aria_value(composer_value.clone())
                                     .aria_placeholder("Do anything…")
-                                    .aria_description("Type a message, then press Enter to send.")
+                                    .aria_description("Enter sends. Shift+Enter adds a new line. Long drafts scroll; use Expand composer for more space.")
                                     .cursor(gpui::CursorStyle::IBeam)
                                     .on_click(cx.listener(|shell, _, window, cx| {
                                         shell.release_browser_focus();
@@ -1704,8 +2323,6 @@ impl DesktopShell {
                                     .on_action(cx.listener(Self::composer_right))
                                     .on_action(cx.listener(Self::composer_select_left))
                                     .on_action(cx.listener(Self::composer_select_right))
-                                    .on_action(cx.listener(Self::composer_select_all))
-                                    .on_action(cx.listener(Self::composer_paste))
                                     .on_action(cx.listener(Self::composer_home))
                                     .on_action(cx.listener(Self::composer_end))
                                     .on_mouse_down(
@@ -1721,23 +2338,31 @@ impl DesktopShell {
                                         cx.listener(Self::composer_mouse_up),
                                     )
                                     .on_mouse_move(cx.listener(Self::composer_mouse_move))
+                                    .on_scroll_wheel(cx.listener(Self::composer_scroll_wheel))
                                     .child(ComposerElement {
                                         shell: cx.entity(),
                                         target: TextInputTarget::Composer,
-                                    }),
+                                    })
+                                    .when_some(self.render_composer_scrollbar(cx), |element, scrollbar| element.child(scrollbar)),
                             )
                             .child(
                                 div()
+                                    .id("composer-toolbar")
                                     .flex()
+                                    .flex_nowrap()
+                                    .h(px(28.))
+                                    .text_size(px(11.))
+                                    .line_height(px(16.))
                                     .items_center()
                                     .justify_start()
                                     .w_full()
-                                    .gap(px(8.))
+                                    .gap(px(4.))
                                     .child(
                                         div()
                                             .flex()
+                                            .flex_none()
                                             .items_center()
-                                            .gap(px(5.))
+                                            .gap(px(4.))
                                             .child(
                                                 div()
                                                     .id("attachment-picker-trigger")
@@ -1773,21 +2398,24 @@ impl DesktopShell {
                                             )
                                             .child(
                                                 div()
-                                                    .text_xs()
+                                                    .text_size(px(11.))
                                                     .text_color(theme_rgb(
                                                         &self.theme,
                                                         "secondary_foreground",
                                                     ))
                                                     .cursor_pointer()
                                                     .id("permission-picker-trigger")
+                                                    .debug_selector(|| "permission-picker-trigger".into())
                                                     .relative()
                                                     .role(Role::Button)
                                                     .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                                                     .aria_label(SharedString::from(format!(
                                                         "Choose permission mode: {permission_display}"
                                                     )))
-                                                    .px(px(6.))
-                                                    .py(px(4.))
+                                                    .px(px(4.))
+                                                    .h(px(26.))
+                                                    .min_w_0()
+                                                    .max_w(px(96.))
                                                     .rounded(px(6.))
                                                     .hover(|element| {
                                                         element.bg(theme_rgb(&self.theme, "muted"))
@@ -1797,7 +2425,7 @@ impl DesktopShell {
                                                     }))
                                                     .flex()
                                                     .items_center()
-                                                    .gap(px(4.))
+                                                    .gap(px(3.))
                                                     .child(tabler_icon(
                                                         TablerIcon::ShieldLock,
                                                         theme_rgb(
@@ -1806,7 +2434,7 @@ impl DesktopShell {
                                                         ),
                                                         px(13.),
                                                     ))
-                                                    .child(SharedString::from(permission_display.clone()))
+                                                    .child(div().min_w_0().truncate().child(SharedString::from(permission_display.clone())))
                                                     .child(tabler_icon(
                                                         TablerIcon::ChevronDown,
                                                         theme_rgb(
@@ -1817,7 +2445,7 @@ impl DesktopShell {
                                                     ))
                                                     .child(
                                                         canvas(
-                                                            move |bounds, _, cx| {
+                                                            move |bounds, window, cx| {
                                                                 permission_picker_trigger_shell
                                                                     .update(cx, |shell, cx| {
                                                                         if shell.permission_picker_bounds
@@ -1825,7 +2453,9 @@ impl DesktopShell {
                                                                         {
                                                                             shell.permission_picker_bounds =
                                                                                 Some(bounds);
-                                                                            cx.notify();
+                                                                            if shell.permission_picker_open {
+                                                                                cx.defer_in(window, |_, _, cx| cx.notify());
+                                                                            }
                                                                         }
                                                                     })
                                                                     .ok();
@@ -1840,21 +2470,35 @@ impl DesktopShell {
                                     )
                                     .child(
                                         div()
-                                            .text_xs()
+                                            .text_size(px(11.))
                                             .text_color(theme_rgb(
                                                 &self.theme,
                                                 "secondary_foreground",
                                             ))
                                             .cursor_pointer()
                                             .id("persona-picker-trigger")
+                                            .debug_selector(|| "persona-picker-trigger".into())
+                                            .tooltip(move |_, cx| {
+                                                cx.new(|_| PersonaHint {
+                                                    text: persona_hint_text.clone(),
+                                                    background: persona_hint_background,
+                                                    foreground: persona_hint_foreground,
+                                                    border: persona_hint_border,
+                                                }).into()
+                                            })
+                                            .min_w_0()
+                                            .max_w(px(96.))
                                             .relative()
                                             .role(Role::Button)
                                             .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                                             .aria_label(SharedString::from(format!(
                                                 "Choose persona: {persona_display}"
                                             )))
-                                            .px(px(6.))
-                                            .py(px(4.))
+                                            .px(px(4.))
+                                            .h(px(26.))
+                                            .when(compact_settings, |element| {
+                                                element.flex_none().w(px(26.)).max_w(px(26.)).justify_center()
+                                            })
                                             .rounded(px(6.))
                                             .hover(|element| {
                                                 element.bg(theme_rgb(&self.theme, "muted"))
@@ -1865,20 +2509,24 @@ impl DesktopShell {
                                             .flex()
                                             .items_center()
                                             .gap(px(4.))
-                                            .child(tabler_icon(
-                                                TablerIcon::UserCircle,
-                                                theme_rgb(&self.theme, "secondary_foreground"),
-                                                px(13.),
-                                            ))
-                                            .child(SharedString::from(persona_display))
-                                            .child(tabler_icon(
-                                                TablerIcon::ChevronDown,
-                                                theme_rgb(&self.theme, "secondary_foreground"),
-                                                px(12.),
-                                            ))
+                                            .when(compact_settings, |element| {
+                                                element.child(tabler_icon(
+                                                    TablerIcon::UserCircle,
+                                                    theme_rgb(&self.theme, "secondary_foreground"),
+                                                    px(14.),
+                                                ))
+                                            })
+                                            .when(!compact_settings, |element| {
+                                                element.child(div().debug_selector(|| "composer-persona-label".into()).min_w_0().truncate().child(SharedString::from(persona_display)))
+                                                    .child(tabler_icon(
+                                                        TablerIcon::ChevronDown,
+                                                        theme_rgb(&self.theme, "secondary_foreground"),
+                                                        px(12.),
+                                                    ))
+                                            })
                                             .child(
                                                 canvas(
-                                                    move |bounds, _, cx| {
+                                                    move |bounds, window, cx| {
                                                         persona_picker_trigger_shell
                                                             .update(cx, |shell, cx| {
                                                                 if shell.persona_picker_bounds
@@ -1886,7 +2534,9 @@ impl DesktopShell {
                                                                 {
                                                                     shell.persona_picker_bounds =
                                                                         Some(bounds);
-                                                                    cx.notify();
+                                                                    if shell.persona_picker_open {
+                                                                        cx.defer_in(window, |_, _, cx| cx.notify());
+                                                                    }
                                                                 }
                                                             })
                                                             .ok();
@@ -1898,24 +2548,26 @@ impl DesktopShell {
                                                 .size_full(),
                                             )
                                     )
-                                    .child(div().flex_1().min_w_0())
                                     .child(
                                         div()
-                                            .text_xs()
+                                            .text_size(px(11.))
                                             .text_color(theme_rgb(
                                                 &self.theme,
                                                 "secondary_foreground",
                                             ))
                                             .cursor_pointer()
                                             .id("model-picker-trigger")
+                                            .debug_selector(|| "model-picker-trigger".into())
+                                            .ml_auto()
+                                            .min_w_0()
                                             .relative()
                                             .role(Role::Button)
                                             .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                                             .aria_label(SharedString::from(format!(
                                                 "Choose model and effort: {model_display}"
                                             )))
-                                            .px(px(6.))
-                                            .py(px(4.))
+                                            .px(px(4.))
+                                            .h(px(26.))
                                             .rounded(px(6.))
                                             .hover(|element| {
                                                 element.bg(theme_rgb(&self.theme, "muted"))
@@ -1926,21 +2578,20 @@ impl DesktopShell {
                                             .flex()
                                             .items_center()
                                             .gap(px(4.))
-                                            .max_w(px(220.))
-                                            .child(tabler_icon(
-                                                TablerIcon::SlidersHorizontal,
-                                                theme_rgb(
-                                                    &self.theme,
-                                                    "secondary_foreground",
-                                                ),
-                                                px(13.),
-                                            ))
+                                            .max_w(px(280.))
                                             .child(
                                                 div()
+                                                    .debug_selector(|| "composer-model-label".into())
                                                     .min_w_0()
                                                     .truncate()
-                                                    .child(SharedString::from(model_display)),
+                                                    .child(SharedString::from(model_display_label.to_owned())),
                                             )
+                                            .when(!thinking_label.is_empty(), |element| {
+                                                element.child(div()
+                                                    .debug_selector(|| "composer-effort-label".into())
+                                                    .flex_none()
+                                                    .child(SharedString::from(format!("· {thinking_label}"))))
+                                            })
                                             .child(tabler_icon(
                                                 TablerIcon::ChevronDown,
                                                 theme_rgb(
@@ -1951,7 +2602,7 @@ impl DesktopShell {
                                             ))
                                             .child(
                                                 canvas(
-                                                    move |bounds, _, cx| {
+                                                    move |bounds, window, cx| {
                                                         model_picker_trigger_shell
                                                             .update(cx, |shell, cx| {
                                                                 if shell.model_picker_bounds
@@ -1959,7 +2610,11 @@ impl DesktopShell {
                                                                 {
                                                                     shell.model_picker_bounds =
                                                                         Some(bounds);
-                                                                    cx.notify();
+                                                                    if shell.model_picker_open {
+                                                                        cx.defer_in(window, |_, _, cx| {
+                                                                            cx.notify();
+                                                                        });
+                                                                    }
                                                                 }
                                                             })
                                                             .ok();
@@ -1974,6 +2629,8 @@ impl DesktopShell {
                                     .child(if turn_is_running {
                                         div()
                                             .id("cancel-turn")
+                                            .debug_selector(|| "cancel-turn".into())
+                                            .flex_none()
                                             .size(px(28.))
                                             .rounded_full()
                                             .bg(theme_rgb(&self.theme, "red.fg"))
@@ -1997,23 +2654,33 @@ impl DesktopShell {
                                     } else {
                                         div()
                                             .id("submit-prompt")
+                                            .debug_selector(|| "submit-prompt".into())
+                                            .flex_none()
                                             .size(px(28.))
                                             .rounded_full()
-                                            .bg(theme_rgb(&self.theme, "text.body"))
+                                            .bg(theme_rgb(&self.theme, if can_submit { "text.body" } else { "muted" }))
                                             .text_color(theme_rgb(&self.theme, "background"))
                                             .flex()
                                             .items_center()
                                             .justify_center()
-                                            .cursor_pointer()
                                             .role(Role::Button)
-                                            .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                                            .aria_label("Send message")
-                                            .on_click(cx.listener(|shell, _, _, cx| {
-                                                shell.submit_prompt(cx);
-                                            }))
+                                            .aria_label(submit_label)
+                                            .when(can_submit, |element| {
+                                                element.cursor_pointer()
+                                                    .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+                                                    .on_click(cx.listener(|shell, _, window, cx| {
+                                                        shell.submit_prompt(cx);
+                                                        window.focus(&shell.composer_focus_handle, cx);
+                                                    }))
+                                            })
+                                            .when(!can_submit, |element| {
+                                                element.a11y_synthetic_children(|builder| {
+                                                    builder.parent_node().set_disabled();
+                                                })
+                                            })
                                             .child(tabler_icon(
                                                 TablerIcon::ArrowUp,
-                                                theme_rgb(&self.theme, "background"),
+                                                theme_rgb(&self.theme, if can_submit { "background" } else { "text.muted" }),
                                                 px(15.),
                                             ))
                                             .into_any_element()
@@ -2031,42 +2698,50 @@ impl DesktopShell {
                     .child(
                         div()
                             .id("checkout-context")
+                            .debug_selector(|| "checkout-context".into())
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .justify_between()
-                            .gap(px(12.))
+                            .gap(px(8.))
                             .px(px(4.))
-                            .text_xs()
+                            .text_size(px(11.))
                             .text_color(theme_rgb(&self.theme, "text.muted"))
                             .child(
                                 div()
                                     .flex()
                                     .items_center()
                                     .gap(px(5.))
-                                    .min_w_0()
+                                    .min_w(px(138.))
+                                    .flex_1()
                                     .child(tabler_icon(
                                         TablerIcon::Folder,
                                         theme_rgb(&self.theme, "text.muted"),
                                         px(13.),
                                     ))
-                                    .child(SharedString::from(
-                                        session_path
-                                            .as_deref()
-                                            .unwrap_or("No workspace selected")
-                                            .to_owned(),
-                                    )),
+                                    .child(div().id("checkout-path").debug_selector(|| "checkout-path".into())
+                                        .min_w_0().truncate()
+                                        .role(Role::Label)
+                                        .aria_label(session_path.clone())
+                                        .child(session_path)),
                             )
                             .child(
                                 div()
                                     .id("session-status")
+                                    .debug_selector(|| "session-status".into())
                                     .flex()
                                     .flex_none()
+                                    .max_w_full()
+                                    .flex_wrap()
                                     .items_center()
-                                    .gap(px(10.))
+                                    .gap(px(8.))
                                     .when_some(usage_label, |element, label| {
                                         element.child(
                                             div()
                                                 .id("session-usage")
+                                                .min_w_0()
+                                                .max_w_full()
+                                                .truncate()
                                                 .child(SharedString::from(label)),
                                         )
                                     })
@@ -2092,15 +2767,17 @@ impl DesktopShell {
                                                 ))),
                                         )
                                     })
-                                    .child(if control_yielded {
+                                    .when(control_yielded || presence_count > 0, |element| element.child(if control_yielded {
                                         div()
                                             .id("control-yielded")
+                                            .debug_selector(|| "control-yielded".into())
                                             .text_color(theme_rgb(&self.theme, "text.warning"))
                                             .child("control yielded")
                                             .into_any_element()
                                     } else {
                                         div()
                                             .id("yield-control")
+                                            .debug_selector(|| "yield-control".into())
                                             .px(px(6.))
                                             .py(px(3.))
                                             .rounded(px(6.))
@@ -2116,49 +2793,10 @@ impl DesktopShell {
                                             }))
                                             .child("Yield")
                                             .into_any_element()
-                                    }),
+                                    })),
                             ),
                     ),
             );
-
-        let terminal_expanded = !self.layout.terminal_collapsed;
-        let terminal_animation_id = self.terminal_animation_id;
-        let terminal_surface = div()
-            .id("terminal-surface")
-            .flex()
-            .flex_col()
-            .flex_none()
-            .min_w_0()
-            .rounded(px(12.))
-            .border_1()
-            .border_color(theme_rgb(&self.theme, "divider"))
-            .overflow_hidden()
-            .bg(theme_rgb(&self.theme, "panel.background"))
-            .child(self.render_remote_terminal_strip(cx));
-        let terminal_surface = if terminal_animation_id == 0 {
-            terminal_surface
-                .h(px(if terminal_expanded {
-                    TERMINAL_EXPANDED_HEIGHT
-                } else {
-                    0.
-                }))
-                .into_any_element()
-        } else {
-            terminal_surface
-                .with_animation(
-                    ElementId::Name(format!("terminal-transition-{terminal_animation_id}").into()),
-                    Animation::new(Duration::from_millis(180)).with_easing(gpui::ease_out_quint()),
-                    move |element, delta| {
-                        let progress = if terminal_expanded { delta } else { 1. - delta };
-                        element
-                            .h(px(TERMINAL_EXPANDED_HEIGHT * progress))
-                            .opacity(progress)
-                            .relative()
-                            .top(px((1. - progress) * 10.))
-                    },
-                )
-                .into_any_element()
-        };
 
         div()
             .id("center-workspace")
@@ -2167,9 +2805,12 @@ impl DesktopShell {
             .flex_1()
             .min_w_0()
             .min_h_0()
-            .gap(px(if terminal_expanded { SHELL_GUTTER } else { 0. }))
             .child(conversation)
-            .child(terminal_surface)
+            .when(
+                self.layout.workbench_collapsed
+                    && self.work_tabs.active().kind == WorkTabKind::Terminal,
+                |element| element.child(self.render_terminal_dock(cx)),
+            )
     }
 
     pub(super) fn render_picker_overlays(
@@ -2179,47 +2820,46 @@ impl DesktopShell {
     ) -> gpui::AnyElement {
         let window_width = window.bounds().size.width;
         let window_height = window.bounds().size.height;
-        let model_option_count = self
-            .model
-            .ui
-            .models
-            .iter()
-            .filter(|model| {
-                model_matches_query(
-                    &model.id,
-                    &model.provider,
-                    &model.model,
-                    model.description.as_deref(),
-                    &self.model_picker_query,
-                )
-            })
-            .count();
-        let model_effort_option_count = {
-            let count = thinking_variants_for_model(
-                &self.model.ui.models,
-                self.model.ui.current_provider.as_deref(),
-                self.model.ui.model.as_deref(),
-            )
-            .len();
-            if count == 0 {
-                0
-            } else {
-                count + 1
-            }
-        };
-        let model_position = self.model_picker_open.then(|| {
-            self.model_picker_bounds.map(|bounds| {
-                picker_popup_position_in_window_right_aligned(
+        let model_popup = self
+            .model_picker_bounds
+            .filter(|_| self.model_picker_open)
+            .map(|bounds| {
+                self.refresh_model_picker_rows();
+                let thinking_variants = thinking_variants_for_model(
+                    &self.model.ui.models,
+                    self.model.ui.current_provider.as_deref(),
+                    self.model.ui.model.as_deref(),
+                );
+                let effort_option_count = if thinking_variants.is_empty() {
+                    0
+                } else {
+                    thinking_variants.len() + 1
+                };
+                let available_height = (window_height - px(16.)).max(Pixels::ZERO);
+                let available_above =
+                    (bounds.top() - px(16.)).clamp(Pixels::ZERO, available_height);
+                let available_below = (window_height - bounds.bottom() - px(16.))
+                    .clamp(Pixels::ZERO, available_height);
+                let popup_size = gpui::size(
+                    px(400.).min((window_width - px(16.)).max(Pixels::ZERO)),
+                    self.model_picker_inventory_height(effort_option_count)
+                        .min(available_above.max(available_below)),
+                );
+                let position = picker_popup_position_in_window_right_aligned(
                     bounds,
-                    px(300.),
-                    model_picker_height(model_option_count, model_effort_option_count),
+                    popup_size.width,
+                    popup_size.height,
                     window_width,
                     window_height,
                     px(8.),
                     px(8.),
+                );
+                (
+                    position,
+                    self.render_model_picker(popup_size, thinking_variants, cx)
+                        .into_any_element(),
                 )
-            })
-        });
+            });
         let persona_position = self.persona_picker_open.then(|| {
             self.persona_picker_bounds.map(|bounds| {
                 picker_popup_position_in_window(
@@ -2276,21 +2916,21 @@ impl DesktopShell {
         });
         let pending_actions_position = (self.model.session_is_ready()
             && !self.model.ui.pending_actions.is_empty())
-        .then(|| self.composer_bounds.map(pending_actions_anchor));
-        let pending_actions_width = self.composer_bounds.map(pending_actions_width);
+        .then(|| self.composer_container_bounds.map(pending_actions_anchor));
+        let pending_actions_width = self.composer_container_bounds.map(pending_actions_width);
 
         div()
             .id("picker-overlays")
             .absolute()
             .inset_0()
-            .when_some(model_position.flatten(), |element, position| {
+            .when_some(model_popup, |element, (position, popup)| {
                 element.child(
                     deferred(
                         anchored()
                             .anchor(Anchor::TopLeft)
                             .position(position)
                             .snap_to_window_with_margin(px(8.))
-                            .child(self.render_model_picker(cx)),
+                            .child(popup),
                     )
                     .with_priority(4),
                 )
@@ -2367,13 +3007,81 @@ fn split_tool_text_lines(text: &str) -> Vec<SharedString> {
     }
 }
 
+fn tool_line_offsets(lines: &[SharedString]) -> Vec<usize> {
+    let mut offset = 0;
+    lines
+        .iter()
+        .map(|line| {
+            let start = offset;
+            offset += line.len() + 1;
+            start
+        })
+        .collect()
+}
+
+struct PersonaHint {
+    text: SharedString,
+    background: gpui::Rgba,
+    foreground: gpui::Rgba,
+    border: gpui::Rgba,
+}
+
+impl Render for PersonaHint {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("composer-persona-hint")
+            .debug_selector(|| "composer-persona-hint".into())
+            .px(px(8.))
+            .py(px(5.))
+            .max_w(px(280.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(self.border)
+            .bg(self.background)
+            .text_color(self.foreground)
+            .text_size(px(12.))
+            .role(Role::Tooltip)
+            .aria_label(self.text.clone())
+            .child(self.text.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        formatted_tool_input, split_tool_text_lines, tool_display_label, tool_summary,
-        TranscriptRenderRow,
+        formatted_tool_input, split_tool_text_lines, tool_activity_summary, tool_display_label,
+        tool_summary, TranscriptRenderRow,
     };
     use gpui::SharedString;
+
+    #[test]
+    fn activity_summaries_name_each_kind_once_in_order_of_use() {
+        let parts: Vec<_> = [
+            "read",
+            "read_file",
+            "bash",
+            "edit",
+            "browser_open",
+            "glob",
+            "integration.unknown",
+        ]
+        .into_iter()
+        .map(|name| super::TranscriptPart::ToolCall {
+            tool_name: name.into(),
+            call_id: name.into(),
+            status: super::ToolStatus::Completed,
+            input: String::new(),
+            output: None,
+            error: None,
+            diff: None,
+        })
+        .collect();
+        assert_eq!(
+            tool_activity_summary(parts.iter()),
+            "Read files, ran commands, edited files, browsed pages, searched files, used tools"
+        );
+        assert_eq!(tool_activity_summary(parts[2..3].iter()), "Ran commands");
+    }
 
     #[test]
     fn tool_names_are_presented_as_human_facing_categories() {
@@ -2398,6 +3106,13 @@ mod tests {
         );
         assert_eq!(tool_summary(r#"{"plan":["one"]}"#), None);
         assert_eq!(tool_summary("not json"), None);
+    }
+
+    #[test]
+    fn tool_summary_keeps_complete_unicode_commands_for_accessible_labels() {
+        let command = format!("cargo test {}末尾", "very_long_package_name/".repeat(18));
+        let input = serde_json::json!({ "command": &command }).to_string();
+        assert_eq!(tool_summary(&input).as_deref(), Some(command.as_str()));
     }
 
     #[test]
@@ -2429,26 +3144,31 @@ mod tests {
                 message_index: 0,
                 part_index: 0,
                 block_index: 0,
+                tool_group_len: 0,
             },
             TranscriptRenderRow {
                 message_index: 1,
                 part_index: 0,
                 block_index: 0,
+                tool_group_len: 0,
             },
             TranscriptRenderRow {
                 message_index: 2,
                 part_index: 0,
                 block_index: 0,
+                tool_group_len: 0,
             },
             TranscriptRenderRow {
                 message_index: 2,
                 part_index: 0,
                 block_index: 1,
+                tool_group_len: 0,
             },
             TranscriptRenderRow {
                 message_index: 3,
                 part_index: 0,
                 block_index: 0,
+                tool_group_len: 0,
             },
         ];
 

@@ -22,6 +22,15 @@ describe("pending input recovery", () => {
     } as unknown as MewClient);
   });
 
+  it("shows consecutive identical prompts broadcast by the daemon", () => {
+    handlers.get("user-message")?.({ text: "try again" });
+    handlers.get("user-message")?.({ text: "try again" });
+    expect(store().messages.map((message) => message.parts)).toEqual([
+      [{ type: "text", text: "try again" }],
+      [{ type: "text", text: "try again" }],
+    ]);
+  });
+
   it("deduplicates replayed permission, question, and goal requests", () => {
     for (let replay = 0; replay < 2; replay++) {
       handlers.get("permission-request")?.({ request_id: "p", tool_name: "bash", input: {} }, () => {});
@@ -375,11 +384,9 @@ describe("assistant metadata preservation", () => {
         parts: [
           {
             type: "text",
-            base: {
-              id: "part-1",
-              message_id: "msg-1",
-              session_id: "sess-1",
-            },
+            id: "part-1",
+            message_id: "msg-1",
+            session_id: "sess-1",
             text: "Hello",
             synthetic: false,
           },
@@ -567,7 +574,7 @@ describe("assistant metadata preservation", () => {
         parts: [
           {
             type: "text",
-            base: { id: "part-empty", message_id: "msg-empty", session_id: "sess-1" },
+            id: "part-empty", message_id: "msg-empty", session_id: "sess-1",
             text: "",
             synthetic: false,
           },

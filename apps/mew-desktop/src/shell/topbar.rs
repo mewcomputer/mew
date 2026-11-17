@@ -7,7 +7,7 @@ impl DesktopShell {
         div()
             .id("connection-profile-picker")
             .absolute()
-            .bottom(px(34.))
+            .top(px(30.))
             .right(px(0.))
             .w(px(300.))
             .flex()
@@ -85,20 +85,50 @@ impl DesktopShell {
             .into_any_element()
     }
 
-    pub(super) fn render_topbar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some(session_id) = self.model.ui.selected_session.as_deref() {
-            if let Some(index) = self
-                .open_tabs
-                .iter()
-                .position(|tab| tab.session_id.as_deref() == Some(session_id))
-            {
-                self.active_tab = Some(index);
-            }
-        }
+    fn render_sidebar_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = theme_rgb(&self.theme, "text.muted");
-        let body = theme_rgb(&self.theme, "text.body");
+        div()
+            .id("sidebar-toggle")
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .size(px(26.))
+            .rounded(px(6.))
+            .cursor_pointer()
+            .role(Role::Button)
+            .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+            .aria_label("Toggle chats sidebar")
+            .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
+            .on_click(cx.listener(|shell, _, _, cx| {
+                shell.dispatch_shell_command(ShellCommand::ToggleSidebar, cx);
+            }))
+            .child(tabler_icon(TablerIcon::PanelLeft, muted, px(14.)))
+    }
+
+    pub(super) fn render_navigation_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("navigation-header")
+            .debug_selector(|| "navigation-header".into())
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_end()
+            .w_full()
+            .h(px(PANE_HEADER_HEIGHT))
+            .pl(px(72.))
+            .pr(px(8.))
+            .border_b_1()
+            .border_color(theme_rgb(&self.theme, "divider"))
+            .child(self.render_sidebar_toggle(cx))
+    }
+
+    pub(super) fn render_conversation_header(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let muted = theme_rgb(&self.theme, "text.muted");
         let background = theme_rgb(&self.theme, "background");
-        let card = theme_rgb(&self.theme, "card");
         let active_icon = theme_rgb(&self.theme, "text.accent");
         let connection_icon = match self.model.connection.label() {
             "connected" => theme_rgb(&self.theme, "green.fg"),
@@ -106,161 +136,95 @@ impl DesktopShell {
             "connection failed" => theme_rgb(&self.theme, "red.fg"),
             _ => muted,
         };
-        if let Some(index) = self.active_tab {
-            self.tab_scroll_handle.scroll_to_item(index);
-        }
-        let tab_scroll_offset = self.tab_scroll_handle.offset().x;
-        let tab_scroll_max = self.tab_scroll_handle.max_offset().x;
-        let tabs_have_overflow = tab_scroll_max > px(0.);
-        let tabs_have_left_overflow = tab_scroll_offset < px(-0.5);
-        let tabs_have_right_overflow = tab_scroll_offset > -tab_scroll_max + px(0.5);
-        let tabs = self
-            .open_tabs
-            .iter()
-            .enumerate()
-            .map(|(index, tab)| {
-                let selected = self.active_tab == Some(index);
-                let title = SharedString::from(tab.title.clone());
-                div()
-                    .id(format!("conversation-tab-{index}"))
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(6.))
-                    .max_w(px(200.))
-                    .h(px(28.))
-                    .px(px(8.))
-                    .rounded(px(7.))
-                    .cursor_pointer()
-                    .role(Role::Tab)
-                    .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                    .aria_selected(selected)
-                    .aria_label(SharedString::from(format!("Conversation: {}", tab.title)))
-                    .aria_keyshortcuts(format!("Command+{}", index + 1))
-                    .when(selected, |element| element.bg(card).text_color(body))
-                    .when(!selected, |element| element.text_color(muted))
-                    .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
-                    .on_click(cx.listener(move |shell, _, _, cx| {
-                        shell.select_tab(index, cx);
-                    }))
-                    .child(tabler_icon(
-                        TablerIcon::MessageCircle,
-                        if selected { active_icon } else { muted },
-                        px(13.),
-                    ))
-                    .child(div().flex_1().min_w_0().truncate().text_xs().child(title))
-                    .child(
-                        div()
-                            .id(format!("conversation-tab-close-{index}"))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .size(px(18.))
-                            .rounded(px(4.))
-                            .text_color(muted)
-                            .role(Role::Button)
-                            .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                            .aria_label(SharedString::from(format!(
-                                "Close conversation: {}",
-                                tab.title
-                            )))
-                            .hover(|element| {
-                                element.bg(theme_rgb(&self.theme, "muted")).text_color(body)
-                            })
-                            .on_click(cx.listener(move |shell, _, _, cx| {
-                                cx.stop_propagation();
-                                shell.close_tab(index, cx);
-                            }))
-                            .child(tabler_icon(TablerIcon::X, muted, px(12.))),
-                    )
-                    .into_any_element()
-            })
-            .collect::<Vec<_>>();
+        let selected = self.model.ui.selected_session.as_deref().and_then(|id| {
+            self.model
+                .ui
+                .conversations
+                .iter()
+                .find(|chat| chat.session_id == id)
+        });
+        let title = if self.settings_open {
+            "Settings".to_owned()
+        } else {
+            selected
+                .map(|chat| chat.title.clone())
+                .unwrap_or_else(|| "New chat".into())
+        };
+        let workspace = selected.and_then(|chat| {
+            let path = chat.workspace_path.as_deref().or(chat.cwd.as_deref())?;
+            Some(
+                self.model
+                    .ui
+                    .projects
+                    .iter()
+                    .find(|project| project.path == path)
+                    .map(|project| project.display_name.clone())
+                    .unwrap_or_else(|| {
+                        Path::new(path)
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or(path)
+                            .to_owned()
+                    }),
+            )
+        });
         div()
-            .id("shell-header")
+            .id("conversation-header")
+            .debug_selector(|| "conversation-header".into())
             .flex()
             .items_center()
-            .h(px(38.))
+            .h(px(PANE_HEADER_HEIGHT))
+            .flex_none()
             .bg(background)
-            .pl(px(72.))
-            .pr(px(8.))
-            .gap(px(6.))
+            .px(px(8.))
+            .gap(px(8.))
+            .border_b_1()
+            .border_color(theme_rgb(&self.theme, "divider"))
+            .when(self.layout.sidebar_collapsed, |element| {
+                element.pl(px(72.)).child(self.render_sidebar_toggle(cx))
+            })
             .child(
                 div()
-                    .id("sidebar-toggle")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(26.))
-                    .rounded(px(6.))
-                    .cursor_pointer()
-                    .role(Role::Button)
-                    .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                    .aria_label("Toggle sessions sidebar")
-                    .text_color(muted)
-                    .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
-                    .on_click(cx.listener(|shell, _, _, cx| {
-                        shell.dispatch_shell_command(ShellCommand::ToggleSidebar, cx);
-                    }))
-                    .child(tabler_icon(
-                        if self.layout.sidebar_collapsed {
-                            TablerIcon::PanelLeft
-                        } else {
-                            TablerIcon::PanelRight
-                        },
-                        muted,
-                        px(14.),
-                    )),
-            )
-            .child(
-                div()
-                    .relative()
+                    .id("conversation-context")
                     .flex()
                     .flex_1()
                     .min_w_0()
-                    .h_full()
+                    .items_center()
+                    .gap(px(8.))
+                    .text_sm()
+                    .when_some(
+                        workspace.filter(|_| !self.settings_open),
+                        |element, workspace| {
+                            element
+                                .child(tabler_icon(TablerIcon::Folder, muted, px(14.)))
+                                .child(
+                                    div()
+                                        .max_w(px(80.))
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_color(muted)
+                                        .child(SharedString::from(workspace)),
+                                )
+                                .child(div().text_color(muted).child("/"))
+                        },
+                    )
                     .child(
                         div()
-                            .id("conversation-tabs")
-                            .flex()
-                            .items_center()
-                            .gap(px(3.))
-                            .w_full()
-                            .h_full()
-                            .role(Role::Group)
-                            .aria_label("Open conversations")
-                            .overflow_x_scroll()
-                            .restrict_scroll_to_axis()
-                            .track_scroll(&self.tab_scroll_handle)
-                            .children(tabs),
-                    )
-                    .when(tabs_have_overflow && tabs_have_left_overflow, |element| {
-                        element.child(div().absolute().left_0().top_0().bottom_0().w(px(24.)).bg(
-                            linear_gradient(
-                                90.,
-                                linear_color_stop(background, 0.),
-                                linear_color_stop(background.opacity(0.), 1.),
-                            ),
-                        ))
-                    })
-                    .when(tabs_have_overflow && tabs_have_right_overflow, |element| {
-                        element.child(div().absolute().right_0().top_0().bottom_0().w(px(24.)).bg(
-                            linear_gradient(
-                                90.,
-                                linear_color_stop(background.opacity(0.), 0.),
-                                linear_color_stop(background, 1.),
-                            ),
-                        ))
-                    }),
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .child(SharedString::from(title)),
+                    ),
             )
             .child(
                 div()
                     .id("connection-profile-control")
                     .flex()
+                    .flex_none()
                     .items_center()
-                    .gap(px(5.))
-                    .h(px(26.))
-                    .px(px(7.))
+                    .justify_center()
+                    .size(px(26.))
                     .rounded(px(6.))
                     .relative()
                     .text_xs()
@@ -268,13 +232,15 @@ impl DesktopShell {
                     .cursor_pointer()
                     .role(Role::Button)
                     .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                    .aria_label("Connection profile")
+                    .aria_label(SharedString::from(format!(
+                        "Connection profile: {}",
+                        self.model.connection.label()
+                    )))
                     .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
                     .on_click(cx.listener(|shell, _, _, cx| {
                         shell.toggle_connection_picker(cx);
                     }))
                     .child(tabler_icon(TablerIcon::GitBranch, connection_icon, px(13.)))
-                    .child(SharedString::from(self.model.connection.label().to_owned()))
                     .when(self.connection_picker_open, |element| {
                         element.child(deferred(self.render_connection_picker(cx)).with_priority(3))
                     }),
@@ -291,10 +257,10 @@ impl DesktopShell {
                         div()
                             .id("review-changes")
                             .flex()
+                            .flex_none()
                             .items_center()
-                            .gap(px(5.))
-                            .h(px(26.))
-                            .px(px(7.))
+                            .justify_center()
+                            .size(px(26.))
                             .rounded(px(6.))
                             .text_xs()
                             .text_color(muted)
@@ -304,8 +270,7 @@ impl DesktopShell {
                             .aria_label("Review changes in this conversation")
                             .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
                             .on_click(cx.listener(|shell, _, _, cx| shell.open_review(cx)))
-                            .child(tabler_icon(TablerIcon::FileCode, muted, px(13.)))
-                            .child("Review changes"),
+                            .child(tabler_icon(TablerIcon::FileCode, muted, px(13.))),
                     )
                 },
             )
@@ -313,6 +278,7 @@ impl DesktopShell {
                 div()
                     .id("workbench-toggle")
                     .flex()
+                    .flex_none()
                     .items_center()
                     .justify_center()
                     .size(px(26.))
@@ -321,9 +287,9 @@ impl DesktopShell {
                     .role(Role::Button)
                     .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                     .aria_label(if self.layout.workbench_collapsed {
-                        "Show workbench"
+                        "Show work pane"
                     } else {
-                        "Hide workbench"
+                        "Hide work pane"
                     })
                     .text_color(muted)
                     .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
@@ -344,40 +310,42 @@ impl DesktopShell {
                         px(14.),
                     )),
             )
-            .child(
-                div()
-                    .id("terminal-toggle")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(26.))
-                    .rounded(px(6.))
-                    .cursor_pointer()
-                    .role(Role::Button)
-                    .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                    .aria_label(if self.layout.terminal_collapsed {
-                        "Show terminal"
-                    } else {
-                        "Hide terminal"
-                    })
-                    .text_color(if self.layout.terminal_collapsed {
-                        muted
-                    } else {
-                        body
-                    })
-                    .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
-                    .on_click(cx.listener(|shell, _, _, cx| {
-                        shell.toggle_terminal(cx);
-                    }))
-                    .child(tabler_icon(
-                        TablerIcon::Terminal2,
-                        if self.layout.terminal_collapsed {
-                            muted
-                        } else {
-                            active_icon
-                        },
-                        px(14.),
-                    )),
+            .when(
+                self.layout.workbench_collapsed || self.settings_open,
+                |element| element.child(self.render_terminal_toggle(cx)),
             )
+    }
+
+    pub(super) fn render_terminal_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let muted = theme_rgb(&self.theme, "text.muted");
+        let active_icon = theme_rgb(&self.theme, "text.accent");
+        let selected = self.work_tabs.active().kind == WorkTabKind::Terminal;
+        div()
+            .id("terminal-toggle")
+            .debug_selector(|| "terminal-toggle".into())
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .size(px(26.))
+            .rounded(px(6.))
+            .cursor_pointer()
+            .role(Role::Button)
+            .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+            .aria_label(if selected {
+                "Close terminal tab"
+            } else {
+                "Open terminal tab"
+            })
+            .text_color(if selected { active_icon } else { muted })
+            .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
+            .on_click(cx.listener(|shell, _, _, cx| {
+                shell.toggle_terminal(cx);
+            }))
+            .child(tabler_icon(
+                TablerIcon::Terminal2,
+                if selected { active_icon } else { muted },
+                px(14.),
+            ))
     }
 }

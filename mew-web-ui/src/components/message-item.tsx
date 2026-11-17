@@ -59,7 +59,7 @@ function ToolCallGroup({
   const uniqueNames = [...new Set(toolNames)];
 
   return (
-    <div className="min-w-0 max-w-[85%]">
+    <div className="w-full min-w-0 max-w-full">
       <button
         onClick={() => setExpanded(!expanded)}
         className="motion-pressable flex min-w-0 w-full items-center gap-2 rounded-lg border border-border bg-card px-4 py-2 text-left"
@@ -111,12 +111,6 @@ export const MessageItem = memo(function MessageItem({
         isUser ? "items-end" : "items-start",
       )}
     >
-      {!isUser && copyText && (
-        <CopyButton
-          text={copyText}
-          className="self-end opacity-0 group-hover:opacity-100"
-        />
-      )}
       {groupParts(message.parts).map((group, i) => {
         if (group.kind === "single") {
           const part = group.parts[0];
@@ -136,9 +130,9 @@ export const MessageItem = memo(function MessageItem({
         // Group of consecutive tool calls.
         return <ToolCallGroup key={i} parts={group.parts} />;
       })}
-      {!isUser && message.assistantMeta?.manifest && (
-        <MessageInspector manifest={message.assistantMeta.manifest} />
-      )}
+      {!isUser && (message.assistantMeta?.manifest ? (
+        <MessageInspector manifest={message.assistantMeta.manifest} actions={copyText && <CopyButton text={copyText} className="opacity-60" />} />
+      ) : copyText && <div role="group" aria-label="Message actions" className="flex min-h-7 items-center"><CopyButton text={copyText} className="opacity-60" /></div>)}
     </div>
   );
 });
@@ -159,8 +153,8 @@ function PartRenderer({
       return (
         <div
           className={cn(
-            "min-w-0 max-w-full rounded-lg py-2.5",
-            isUser ? "bg-primary text-primary-foreground px-4" : "",
+            "min-w-0 max-w-full py-1",
+            isUser ? "max-w-[90%] rounded-2xl bg-muted px-3.5 py-2 text-foreground" : "",
           )}
         >
           {part.streaming ? (

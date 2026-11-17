@@ -2440,3 +2440,1746 @@ Updated `AGENTS.md` for the native desktop workflow, locked CI dependencies,
 provider-specific thinking, subagent results and time limits, and background
 job cancellation. Verified the guidance against the implementation and CI,
 checked Cargo metadata with `--locked`, and ran `just arch-check`.
+### 2026-10-14: per-plan names and no CURRENT.md agent directives
+
+Removed the active CURRENT.md instructions from the repository guidance and
+built-in builder persona. The default plan location is now `plans/`: each
+`write_plan` call creates a collision-safe two-word filename using resona,
+returns its path, and `edit_plan` takes that path to revise any generated plan.
+Explicit fixed plan paths retain their overwrite/edit behavior. Generated plan
+paths are kept as references across context compaction.
+
+Verified the plan-tool tests, workspace-scoped agent tests, mew-agent,
+mew-config and prompt tests, formatting, architecture checks, and strict
+Clippy for the changed Rust crates. The full workspace CI gate was not run.
+
+### 2026-10-17: update pinned GPUI and preserve frame tracing
+
+Updated gpui and gpui_platform from ae394f3d to upstream revision 322cd509.
+Enabled GPUI's profiler feature and adapted the desktop frame probe to the
+unified trace toggle and draw/present event collector. A regression test uses
+real profiler events to verify draw durations, absent invalidation timestamps,
+invalidation counts, presentation exclusion, and collection without duplicates.
+
+The baseline passed all 154 desktop tests; the updated suite passes 155. The
+native desktop build and full macOS just ci gate passed: 2,477 Rust test
+executions, 30 JS tests, strict Clippy, formatting, architecture, generated
+themes, subprocess end-to-end checks, and the 38-page documentation build.
+An isolated native smoke test verified rendering, composer text entry, sidebar
+mouse and keyboard actions, retained text, and actual 60-frame trace reports.
+
+Native checks used the matching CEF SDK at target/cef-sdk. The first full gate
+exhausted disk space during test compilation; removing only generated artifacts
+created during this task and retrying with two compiler jobs completed the gate.
+The existing block crate future-compatibility and web bundle-size warnings remain.
+
+
+## 2026-10-17 - Ghostty 0.2.2 native API
+
+Upgraded the safe terminal wrapper to exactly 0.2.2 and aligned the existing
+vendored bindings and generator with its pinned Ghostty C revision. This takes
+the upstream render-setter pointer fix instead of masking invalid dirty-state
+values in the desktop. Unused Kitty graphics features remain disabled.
+
+The native archive now includes its SIMD dependencies, so the build links the
+single archive and preserves Cargo-scoped Zig outputs. Validation matched all
+173 exported bindings to the native headers and passed the real external-cache
+rebuild plus a linked, executed FFI probe. The production desktop build passed.
+
+
+## 2026-10-17 - Native terminal input and projection
+
+Restricted direct control bytes to single ASCII keys, retained named-key
+modifiers, and made idle selection/theme changes invalidate and notify the
+terminal. Ghostty now formats selections by terminal cells; projection retains
+full Unicode clusters and consumes wide tails without shifting later columns.
+Outside release ends selection without sending unrelated releases to the PTY.
+The new wrapper owns callback stability, so the extra terminal box is removed.
+
+All 15 terminal regressions passed, including dirty-state reset, Unicode and
+wide-cell copy, cached-row reuse, real GPUI notification and outside release.
+Native smoke also rendered Unicode PTY output and retained a composer draft
+after dragging a terminal selection into another pane.
+
+
+## 2026-10-17 - Cancellable desktop connection lifecycle
+
+Client shutdown now cancels blocked WebSocket command writes. Supervisor retry
+runs outside the GPUI foreground thread, preserves current drafts, ignores
+obsolete profile/generation completions and prevents duplicate retries. Shared
+child ownership lets quit synchronously kill and reap a daemon during startup
+or before completion reaches the UI. Failed OS worker creation restores the
+supervisor configuration for another attempt.
+
+The 14 supervisor tests and eight desktop lifecycle tests passed with real
+localhost handshakes, socket backpressure, subprocesses and an actual failed
+thread creation followed by a successful retry. Existing daemons remain
+attach-only. Tests explicitly permit external-thread wakeups in GPUI's harness.
+
+
+## 2026-10-17 - Painted text geometry and wrapped composer sizing
+
+Native IME range/caret bounds now reuse the focused shell field's painted
+shaping, converting UTF-16 ranges and rejecting stale text or field geometry.
+Caret placement before explicit newlines stays on its logical line. Composer
+height counts visual wrapped rows before applying its existing height cap.
+
+All ten composer tests passed, including actual paint-to-input-handler geometry
+and a narrow paragraph that previously received 48px instead of 78px. Native
+smoke verified Unicode paste, visible wrapped rows and retained drafts. Native
+OS IME candidate UI has not been exercised; terminal IME remains unsupported.
+
+
+## 2026-10-17 - Native failure feedback and quit shortcut
+
+Deferred browser initialization now notifies before returning an unavailable
+runtime or startup error. Expected missing-editor probes are silent. The native
+Quit menu now registers Cmd-Q; GUI smoke found that the shortcut was absent.
+
+Real GPUI/subprocess regressions cover visible browser failure notification and
+quiet application discovery. The missing quit binding reproduced in the real
+GPUI key map before the binding fix passed. An isolated fake-provider native
+conversation streamed successfully and displayed the browser-unavailable state.
+
+
+## 2026-10-17 - Isolated desktop CI configuration
+
+The existing macOS default-config-path test now checks the actual resolver in
+a subprocess without MEW_CONFIG_DIR or XDG_CONFIG_HOME overrides. This preserves
+the default-path assertion while letting full CI isolate desktop settings and
+sessions from the user's data. The prior assertion failed under the isolated
+environment; the focused regression and full isolated CI gate then passed.
+
+
+## 2026-10-17 - Mew-specific GPUI reference and project skill
+
+Refreshed the active guides against GPUI revision
+322cd509dcccaee1f6bc44725d270598ae8171ad and current desktop ownership, APIs and
+verification paths. The gpui-desktop project skill routes to those maintained
+guides, and AGENTS.md directs native desktop work through it. GPUI Community
+Edition is a secondary example source; historical Zedra-only effects, mobile
+presentations and HTTP devtools remain clearly separated from supported APIs.
+
+The skill validator, an independent field/theme use-case check and all local
+reference links passed. The full isolated macOS CI gate passed 2,511 Rust test
+executions, 30 JS tests, strict workspace Clippy, architecture/generated-theme
+checks, subprocess end-to-end checks and the 38-page documentation build. Final
+checks additionally passed all 187 desktop tests, 14 supervisor tests, three
+native ABI tests, strict Clippy across affected test targets and the native
+production build. The external Zig-cache regression rebuilt the real library
+and executed a statically linked FFI probe.
+
+Isolated GUI smoke covered Unicode paste and PTY output, wrapped composer sizing,
+fake-provider streaming, selection release into another pane, retained drafts,
+visible browser unavailability and Cmd-Q from a focused field. Quit exited
+cleanly without stopping the attach-only daemon; the disposable daemon and
+app bundle were then removed. Full packaged CEF rendering and native OS IME
+candidate UI were not exercised. The minimal temporary bundle initially found
+a CEF framework without helper assets; the successful smoke explicitly selected
+the unavailable-runtime path. Existing dependency/tooling build warnings remain.
+
+Optional follow-ups are to measure settings theme discovery and shell/transcript
+render reuse in a release build before changing their caching boundaries.
+
+## 2026-10-17 - Packaged CEF pump and native editing ownership
+
+The fully bundled macOS app reproduced a SIGTRAP when its first confirmed
+conversation initialized CEF inside GPUI's running AppKit loop. Embedded CEF now
+uses the external message pump, matching the retained GPUI pump and avoiding
+native run-loop observers installed halfway through an iteration.
+
+CEF's visible native first responder now receives editing key equivalents before
+the GPUI host view. Command arrows and deletion follow the same route as the
+clipboard shortcuts, including AppKit's Function flag on navigation events.
+Global mew commands retain their original window handler. Browser roots are weak
+references and only a focused visible descendant can receive the handoff.
+
+The real AppKit regression reproduced host interception before the fix and now
+passes focus, visibility, declined-command, repeated-registration and global
+shortcut cases. All 17 host/browser tests and strict Clippy passed. Packaged CEF
+painted a local fixture, accepted native input/clicks and scrolling, resized with
+the host window, retained distinct page state across conversations and exited
+cleanly. Clipboard commands additionally require the native Edit menu; that
+application-menu correction is verified separately from the responder bridge.
+
+## 2026-10-17 - Native IME geometry and Edit menu
+
+AppKit can query candidate geometry between a composition callback and GPUI's
+next paint. Shell text changes now reshape the focused field synchronously using
+its painted font, size and wrapping width. Paint invalidates native character
+coordinates when focused geometry, style or selection changes. The physical
+Pinyin check confirmed the popup beside the composer text after this correction.
+Temporary native-coordinate logging was removed and the GPUI dependency cache
+was restored exactly before rebuilding.
+
+The app now exposes native Cut, Copy, Paste and Select All menu items. Bindings
+are registered before menu creation, and typed editing actions live on each
+rendered shell field. Chromium can use AppKit's first responder while GPUI fields
+retain Unicode selection and composer image attachments. Duplicate raw paste
+and select-all paths were removed. Native page paste now works in UI automation;
+the physical clipboard roundtrip and clean-build multiline/resize Pinyin checks
+remain pending in the isolated QA window.
+
+All 194 desktop, 9 browser-host and 8 CEF tests passed, along with the real AppKit
+responder regression. New behavior coverage exercises composition bounds before
+repaint across all five fields, Unicode clipboard roundtrips, hidden-field menu
+availability and actual image attachment bytes. Strict Clippy for all affected
+targets, formatting, architecture and theme checks passed. The final native
+binary built and the complete debug app bundle was refreshed. The maintained
+focus/input and verification guides document these native integration rules.
+
+## 2026-10-17 - Visible field selection and window-move IME refresh
+
+The apparent Copy deletion reproduced as a paint defect: selected GPUI text kept
+its value but vanished because its inverted foreground lacked the selection
+background. Shell fields now paint the paired theme background before glyphs,
+at its intended opacity, and skip that pass when there is no selection. Native
+UI checks retained the selected composer text and pasted a second identical copy.
+The CEF input also completed an actual copy/paste roundtrip with its URL draft
+unchanged. App quit exited cleanly, reaped CEF helpers and left the attach-only
+QA daemon alive.
+
+The user confirmed first-line and multiline/resize Pinyin placement, then found
+that the popup did not follow window movement. The existing window-bounds
+observer now invalidates native character coordinates even when the field's
+local rectangle is unchanged. Physical candidate tracking during and after a
+window drag remains pending in the corrected isolated QA app.
+
+The five-field clipboard regression now checks the actual painted selection
+background as well as retained text, glyph geometry and clipboard contents.
+Removing the background-paint call reproduces its failure. All 211 affected Rust
+tests and the real AppKit responder regression passed; the focused paint test
+also passed after avoiding background work for empty selections. Strict desktop
+Clippy, formatting and the native build passed, and the debug bundle was
+refreshed. The input and native-smoke guides cover separate background painting
+and window movement.
+
+## 2026-10-17 - Native manual QA closeout
+
+The user clarified that the remaining IME report concerned live window resizing.
+Candidates dismiss during window drag and remain at their screen position during
+live resize, matching the user's comparison with other apps. Initial placement,
+second/wrapped-line composition and post-resize placement were confirmed in the
+native QA checks. The extra window-bounds invalidation added for the movement
+report was removed because no distinct mew defect remained. Composition callbacks
+still refresh shaped geometry before native queries, and painted field changes
+still invalidate native character coordinates.
+
+Cmd-C was the reported Copy shortcut. Its apparent deletion was reproduced as
+invisible selected GPUI text; the retained value and clipboard stayed intact.
+The selection-background fix remains, with real composer and CEF copy/paste
+roundtrips verified. Packaged CEF rendering, native input, resize, scrolling,
+retained pages and clean shutdown checks are complete for this macOS setup.
+
+All 194 desktop tests passed after removing the unnecessary invalidation; the
+unchanged 17 host/browser tests and real AppKit responder regression had already
+passed. Formatting, native build and final debug packaging passed. The QA app
+exited cleanly and its helpers were reaped. The isolated daemon and fixture
+server were then stopped, both disposable QA directories were removed, and small
+diagnostic logs/fixture sources were retained under the process temporary root.
+The selected keyboard layout is U.S. The native-smoke guide now records the
+observed platform behavior rather than requiring the popup to follow a drag.
+
+Optional follow-up: expose native Edit menu actions for terminal/transcript
+focus; their existing keyboard clipboard shortcuts remain supported.
+
+# 2026-10-22 — iOS tools browsing and remote workspace review
+
+Added a searchable tools sheet to the chat menu, reusing the transcript's
+input/output/error rows. Individual tool disclosures are accessible buttons with
+state and expansion hints. The chat toolbar now opens workspace review: changed
+file summaries, rename origins, binary/empty/error states, and horizontally
+scrollable line-numbered hunks. Review starts at the first line and left edge.
+
+Mobile core exposes the existing daemon diff API through typed UniFFI records
+and origin-preserving events. Requests require the confirmed attachment and
+expire when its generation changes. Swift accepts only the current daemon,
+session and request; disconnects stop loading and late replies cannot replace a
+newer review. Regenerated matching Swift/header bindings and device, simulator
+and host release libraries. Updated iOS docs, including the current single-use
+pairing flow and the existing older-history limitation.
+
+Verified 44 mobile unit tests, all 4 real iroh integration tests, and all 38 iOS
+application tests on iPhone 17 / iOS 26.4. Real-daemon review coverage reads fresh
+remote files after same-line-count edits and preserves non-repository failures.
+Inspected light/dark simulator renders; removed the temporary rendering fixture
+after correcting the initial scroll alignment. Scoped all-target mobile Clippy,
+workspace strict Clippy, formatting and architecture checks pass. The workspace
+still emits its existing future-compatibility notice for the block dependency.
+Native computer-use automation was unavailable, so a paired interactive phone
+walkthrough is not claimed.
+
+Follow-ups: expose older history pages and richer worker/job details. The existing
+project.yml also differs from the checked-in Xcode project's package pin and test
+target; this pass verified the checked-in project without regenerating it.
+
+# 2026-10-22 — iOS older conversation history
+
+Exposed the shared history cursor through mobile snapshots and added confirmed,
+single-flight older-page requests. Older pages emit a distinct mobile event so
+loading history does not replay attachment actions or persona preferences.
+Duplicate/non-advancing pages and replies after attachment changes are ignored.
+The chat offers older-message loading with progress, retry errors, and an anchor
+to retain the current reading position instead of following the streaming tail.
+
+Verified 47 mobile unit tests, 40 iOS application tests, regenerated matching
+device/simulator/host libraries and Swift bindings, and a real iroh integration
+test loading 61 messages over three pages in exact chronological order. The
+broader verification pass follows worker/job detail implementation.
+
+# 2026-10-22 — iOS worker and background job details
+
+Added live worker/job activity snapshots and a chat activity sheet. Worker
+transcripts load through the parent session without changing the selected
+conversation. Background output uses bounded UTF-8 chunks, validates byte
+offsets, rejects stale/duplicate replies, and preserves output on disconnect.
+Details show loading, empty, failure and incomplete-capture states.
+
+Verified 50 mobile unit tests and 43 iOS application tests, rebuilt matching
+device/simulator/host libraries and bindings, and exercised actual persisted
+child history and shell output through a real iroh daemon. The integration
+checks exact output across the 64 KiB boundary, a multi-byte character,
+missing jobs and unauthorized child reads. The daemon suite also passes
+(136 tests, one existing ignored test). Independent review found tool-state
+projection and streaming/history display defects to fix in the next chunk.
+
+# 2026-10-22 — iOS streaming and tool-state regression fixes
+
+Replaced Rust debug payloads with stable pending/running/completed/error tool
+states across history, live events and part updates. Tool rows and accessibility
+now receive the intended short state while input/output/error stay separate.
+Chat snapshots exclude the current streaming part from the completed transcript;
+part completion transfers it back without duplicating text or dropping earlier
+completed parts. Added regressions for both bugs and malformed/empty job chunks.
+
+Verified the regressions fail before their fixes, then pass. The final related
+Rust suites pass 289 tests, including 51 mobile unit tests and all seven real
+iroh tests. All 45 iOS application tests pass after removing temporary rendering
+fixtures. Inspected ten light/dark simulator captures covering chat history,
+tool states, activity, worker history and job output. Rebuilt matching device,
+simulator and host libraries/bindings; strict all-target mobile Clippy,
+formatting, architecture and generated-theme checks pass. Independent reviewers
+confirmed both required findings are resolved.
+
+# 2026-10-22 — bounded worker history and final iOS verification
+
+Bound child transcript reads to the shared 8 MiB history budget before
+decoding. Oversized transcripts return a request-scoped error instead of
+creating an unbounded mobile response. The real-daemon regression fails
+before the fix and passes after it, including exactly-at-limit reads and
+a valid read on the same connection after an oversized error.
+
+Final verification passes 425 related Rust tests across client/mobile,
+protocol, diff, session and daemon suites, plus all 45 iOS application
+tests. This includes seven real iroh tests and another mobile worker/job
+smoke test after the daemon bound. Strict all-target daemon and mobile
+Clippy pass, along with the earlier workspace/architecture/theme checks.
+One existing daemon browser test stays ignored because it requires Chrome
+and agent-browser; no mobile tests are skipped. Independent review found
+no issues with the bounded reader.
+
+Documented the worker-history size limit, corrected routine build commands
+to use the checked-in Xcode project, and added repeatable verification
+commands and a physical-phone checklist to dev-mobile.md. Interactive
+pairing, background/network transitions, VoiceOver and long-history phone
+performance still need a device walkthrough. Temporary screenshot fixtures
+and access-level changes are removed; captures remain outside the repo.
+
+# 2026-10-22 — iOS cleanliness and UX pass
+
+Review and worker refreshes retain the last successful content, scoped to the
+same daemon/parent/worker, with shared progress and retry feedback. Successful
+empty results still replace prior content. Worker initial failures now offer
+an inline retry. Job output distinguishes loading, no captured output and end
+of output; reload and incremental-read controls have specific labels.
+
+Tool disclosures have 44-point targets and use shared state colors. Corrected
+millisecond duration formatting, including clock-boundary cases, and update
+running timers once per second. Reused JSON formatting and eliminated temporary
+flatten/search arrays. Added behavior coverage for refresh retention, immediate
+send failures, empty replacement, origin isolation and time formatting.
+
+Three regressions failed before their fixes. All 49 iOS behavior tests pass
+after removing capture fixtures. Inspected light/dark tool states, refresh/error
+feedback, an empty completed job and a larger-text worker retry state. Captured
+a six-second GIF of real simulator renders driven by seeded refresh/failure/
+retry responses. Independent breaker/simplifier/operator review found no
+required changes; the captured-output wording nit was corrected. Project-file
+validation and diff whitespace checks pass.
+
+Verification follow-up: mew-agent/src/tools.rs creates some terminal ToolTime
+records with start and end both set at completion (e.g. the generic execution
+path at lines 657/672). A tool can show elapsed time while running then <1s on
+completion. The iOS formatter now interprets milliseconds correctly; preserving
+the original start in agent-produced metadata needs a separate runtime fix.
+
+# 2026-10-22 — compact iOS tools in conversation
+
+Removed text-message vertical padding from tool-only assistant entries and
+extra list-cell padding from the tools sheet. Disclosure buttons retain their
+44-point minimum. A rendered layout regression reproduces the former 70-point
+tool-only message and now verifies a compact 44–50-point height.
+
+All 50 iOS tests pass after removing the temporary capture fixture and expansion
+trigger. Inspected seeded conversations in light/dark mode with surrounding user
+and assistant text, collapsed tools and an expanded shell result. Saved context
+screenshots and a six-second disclosure preview outside the repository.
+
+# 2026-10-22 — consolidated iOS tool activity
+
+Consecutive tools at the same transcript level now share a compact disclosure,
+including calls spread across assistant messages. Summaries describe the work,
+such as "Edited 1 file and ran 2 commands" or "Ran 3 commands". Expanded rows
+show actual commands and file names, with input/output available per call.
+Assistant text, reasoning, errors and user/system turns separate groups;
+invisible user turns retain their boundary effect. Worker transcripts group
+independently. Pending and failed calls retain honest status labels.
+
+Group and per-call disclosure state follows tool identities when older pages
+merge into an existing run. Display metadata is cached to avoid repeatedly
+decoding large file-write inputs during live updates. The compact-row and
+invisible-turn regressions failed before their fixes. All 63 iOS tests pass
+after removing the temporary capture fixture and expansion trigger. Inspected
+light/dark collapsed and expanded conversations and saved a disclosure GIF
+outside the repository. Independent breaker, simplifier and operator review
+found no remaining required changes; project validation and whitespace checks
+pass. Physical-phone interaction checks remain on the verification checklist.
+
+# 2026-10-22 — consistent iOS chat body size
+
+Assistant paragraphs, lists, block quotes and links now use UIFont.systemFontSize,
+matching user messages in both streaming and committed replies. Verified seeded
+light/dark conversation renders with identical user and assistant text, plus list,
+link and quote samples. Removed the capture fixture; all 63 iOS tests pass.
+
+# 2026-10-22 — iOS app UX audit and navigation proposal
+
+Reviewed pairing, app settings, daemon selection/recovery, session discovery and
+chat controls, with the recent tool/review/activity work as context. Inspected
+11 seeded simulator captures, including light/dark settings, offline and lost
+pairing, new-chat entry, all-archived sessions and a pending chat switch. Two
+independent source assessments checked design ownership and actual behavior.
+Native computer control was unavailable; these are rendered fixture states,
+not an interactive phone walkthrough. The critique companion skill and its
+HTML detector were unavailable/inapplicable to this native SwiftUI app.
+
+Confirmed follow-up issues:
+
+- P1: AddDaemonView drops DialInfo.pairingToken before AppStore calls the
+  tokenless addDaemon API. New invite-based authorization cannot succeed
+  through this path; the core already provides addDaemonWithToken.
+- P1: selectSession retains previous messages/streaming state while attachment
+  is pending. The simulator showed a new Homelab chat title above the prior
+  MacBook Pro chat content. The recorded selected session and attach request
+  both targeted the new chat. Cross-daemon alert navigation also leaves a
+  prior chat on the back stack without restoring its daemon on return.
+- P2: Cold launch reconnects all saved daemons but restores no explicit daemon
+  selection or working context. Connection timestamps cannot identify the
+  user's last choice because all known daemons reconnect.
+- P2: Per-daemon Settings actions open global app settings. That form mixes
+  appearance, phone identity, paired-machine management and About.
+- P2: Daemon Rename has a no-op Save handler. Connected session pull-to-refresh
+  is also empty. Backoff's "retry now" calls connect, which ignores an existing
+  connection instead of restarting its backoff attempt.
+- P2: Auto-title displays a false default although the daemon defaults true;
+  reconnect only replays true values. Auto-summary is stored per session in
+  the UI but updates a shared daemon-wide atomic. Both need accurate scope
+  and authoritative values before relocating their controls.
+- P2: With only archived chats, the empty-state branch omits Show Archived.
+  Reproduced in the simulator with three archived entries still in the store.
+- P2: The model chip can initialize to the first catalog entry after the actual
+  model event has arrived. The store also discards the model-list daemon ID.
+- P3: Font settings promise app-wide changes but the root remains Mi Sans;
+  Forget/Remove only removes the local connection and does not revoke daemon
+  authorization. Copy should describe the actual effect.
+
+Recommended direction for discussion: a daemon picker reachable from sessions
+and chat, showing the selected daemon plus named connection states. Keep app
+settings global, local daemon identity/pairing in named daemon details, real
+daemon-wide configuration at daemon scope, and model/run controls with the chat.
+Move raw node IDs and versions into details; use explicit Retry and Pair again
+actions in recovery. Preserve drafts by daemon/session when switching.
+
+Restore the last explicitly selected daemon and its last working location by
+default, once identity transitions are reliable. Keep that daemon selected while
+offline with visible reconnect/switch actions. Missing chat falls back to its
+daemon's list; removed daemon falls back to the picker; no saved choice with one
+paired daemon opens its list. Explicit alert/picker actions take precedence over
+startup restoration. A new preference toggle is not needed initially.
+
+Removed all temporary audit fixtures. The existing 63 iOS tests pass; they do
+not cover the newly identified defects. Screenshots and attachment-state evidence
+are saved outside the repo under ios-ux-audit. Implementation order proposed:
+identity/pairing correctness, settings ownership and switcher, working-context
+restoration, then remaining discovery/copy refinements and phone verification.
+
+# 2026-10-22 — chronological iOS chat lists
+
+Per-daemon rails now sort by recent activity instead of pending/running/idle
+priority. Today, Yesterday, Previous 7 days, Previous 30 days and Older use
+local calendar boundaries. Rows retain attention badges, show workspace names,
+and allow two lines for titles. Pins remain markers rather than a sort override.
+
+Canonical millisecond message/creation timestamps are preserved. Live alert
+receipt times are held separately by daemon/session for the app lifetime, so a
+new alert promotes its chat without permanently prioritizing unresolved badges.
+Unknown-chat alerts request metadata from their originating daemon before the
+chat enters the list. Connected pull-to-refresh now requests sessions, including
+from empty states. Archive access remains visible when all chats are archived.
+
+The unknown-chat discovery regression failed before its fix. All 72 iOS tests
+pass after removing the capture fixture, including nine timeline tests for
+timestamp units/fallbacks, stable identities/ties, day/DST boundaries, filtering,
+alert promotion across list refreshes, late metadata, monotonic receipt times,
+and refresh origin isolation. Inspected light/dark alert promotion and archived/
+empty states; saved a seeded simulator GIF outside the repo. Independent review
+found no remaining required changes. Calendar cutoffs are calculated once per
+projection; a host benchmark of 2,400 entries improved from ~12 ms to ~0.06 ms.
+
+This chunk keeps existing per-daemon navigation. The optional question about a
+combined All-daemons view remains open for the switcher/navigation pass.
+
+# 2026-10-22 — compact iOS chat list
+
+Reduced chat-row insets and date-section spacing without shrinking body text.
+Titles use one line at standard text sizes and wrap fully at accessibility
+sizes. Workspace, activity, attention badges and pin markers remain visible;
+rows retain a 44-point minimum touch target. Date headings use a smaller
+semantic text style while retaining their native header contrast.
+
+Inspected seeded simulator captures at 393- and 320-point widths, in light
+and dark mode, and at accessibility text size. The populated reference now
+fits twelve chats instead of seven at the standard size. Before/after images
+are saved outside the repo under ios-compact-list. Removed the temporary
+capture fixture; all 72 iOS tests pass on the final sources.
+
+# 2026-10-22 — chat-list spacing adjustment
+
+Added two points of inset above and below each chat row in response to the
+compact-list preview feedback. The total four-point increase gives rows a
+little more separation. All 72 iOS tests pass after the adjustment.
+
+# 2026-10-22 — mobile daemon settings and connection APIs
+
+Added authoritative automation settings reads and setter replies. Auto-title
+retains its connection scope; auto-summary retains daemon-wide scope, with
+change notifications to attached clients. Mobile snapshots retain confirmed
+settings and clear them on disconnect. Added persistent local daemon nickname
+updates with save-failure rollback and a retry action that interrupts backoff
+without discarding the requested chat or cached state.
+
+Verified 120 protocol tests, 84 daemon tests (one existing browser-dependent
+ignore), and 59 mobile-core tests. Rebuilt device, simulator and host core
+artifacts and regenerated the Swift bindings with just ios-core. Swift screen
+and navigation integration follows in the next chunk.
+
+# 2026-10-22 — daemon settings and session recovery safeguards
+
+Settings notifications now reach authenticated websocket clients even before
+they attach a chat. Queued automation mutations expire with their connection;
+new-chat commands also expire on reconnect or superseding attachment. Mobile
+tracks actually sent create/attach replies, rejects stale ready/history events,
+and emits distinct creation and attachment failure events. Daemon failures
+carry operation/session identity alongside the legacy error reply. Older
+daemons retain generic errors but require an update for typed recovery.
+
+Verified 68 mobile-core, 126 protocol, 86 daemon-library and seven daemon
+integration tests, with one existing browser-dependent ignore. The real iroh
+listener/streaming round trip includes creation confirmation. Strict all-target
+Clippy and formatting pass. Rebuilt all iOS core slices from frozen sources and
+regenerated bindings. Disk exhaustion interrupted the final gate; removing only
+the rebuildable host incremental cache allowed the checks to finish.
+
+# 2026-10-22 — iOS settings ownership and working-location restoration
+
+Separated app preferences from saved-machine details. Daemon screens expose
+persisted local nicknames, retry and re-pair actions, confirmed automation
+settings with explicit connection/daemon scope, and accurate removal wording.
+Chat and list headers open a machine switcher with connection and attention
+state. Navigation restores the last explicitly selected machine and chat/list,
+retains offline selections, and falls back when saved targets disappear.
+
+Drafts and model selection remain scoped to their daemon/chat. Pairing preserves
+invite credentials, re-pair replaces the live connection, and attachment failures
+offer scoped retry while disabling sending. Delayed creation, history, slash
+replies and removed-machine alerts cannot select or populate another chat.
+
+All 101 iOS tests pass on both simulator and the paired iPhone 17 Pro with the
+final sources. Fixed physical test-target signing using the existing team and
+device signing identity; the normal phone app launch also succeeded. The Rust
+gates and real iroh creation/streaming smoke passed in the preceding chunk.
+Inspected seeded simulator screenshots in light/dark and accessibility sizes,
+plus a switching GIF showing independent drafts; captures live outside the repo.
+Removed all temporary capture fixtures and updated mobile/user documentation.
+
+New settings and typed attachment recovery require an updated daemon. Physical
+behavior tests passed, but a complete hands-on live-phone gesture/reconnect
+walkthrough remains outstanding.
+
+# 2026-10-22 — local iOS presentation and feedback settings
+
+Added persisted phone-only appearance, haptic feedback, foreground alert
+categories and machine mutes, plus review line wrapping, line numbers and
+independent text size. Review preferences have a live diff preview and follow
+Dynamic Type. Font and connection identity details are one tap from the main
+settings page. Diagnostic sharing exports only versions and connection states;
+names, identities, credentials, raw errors, paths and conversation content are
+excluded. Corrected banner icons to match the mobile core's actual alert kinds.
+
+Muted alerts retain request queues, conversation activity and submission/error
+state. Background events do not present or replay feedback. Accepted sends and
+retries share feedback behavior; rejected sends remain silent. Direct action
+failures remain visible while the app is active. The QR scanner also respects
+the haptic preference.
+
+All 116 tests pass on simulator and physical iPhone, including preference
+restoration/isolation, invalid-value fallbacks, alert scopes and lifecycle,
+request retention, failed-delivery recovery, retry feedback and accessible
+wrapped review layout. Inspected seeded light/dark simulator settings and
+scrolling/wrapped diff captures; saved a comparison GIF outside the repo and
+removed the temporary fixture. Physical haptic feel and a complete hands-on
+gesture walkthrough remain manual verification work.
+
+# 2026-10-22 — daemon new-chat defaults and device management
+
+Added full-control-only daemon settings reads, saving the exact attached chat's
+confirmed policy as new-chat defaults, reset to startup defaults, and paired
+device inspection/revocation. Defaults persist under the session directory and
+apply only to new chats. Failed writes preserve prior values; corrupt defaults
+fail visibly and can be reset. Legacy trusted nodes and scoped device records
+share management operations, while token-only connections report unavailable
+device management explicitly.
+
+Revocation persists before confirmation, closes existing connections and denies
+later commands. Authorization is rechecked through asynchronous waits and inside
+persisted mutations. Independent monitoring interrupts blocked operations; a
+receipt lock preserves self-revocation confirmation ordering. Shutdown bounds
+writer backpressure and waits for the peer's WebSocket close acknowledgment
+before dropping the QUIC transport. Protocol, Rust client, TypeScript client and
+mobile APIs retain request identities. Old-daemon decoder errors and queued
+management failures cannot fail an unrelated chat.
+
+Verified 107 daemon tests with one existing browser-dependent ignore, 74
+mobile-core tests, protocol roundtrips, 31 TypeScript client tests and typecheck,
+strict scoped all-target Clippy, formatting and architecture checks. The real
+iroh M0 round trip covers defaults read/save/reset and self-revocation receipt
+through clean connection closure. Rebuilt device/simulator/host core artifacts
+and regenerated the checked-in Swift bindings. All 125 iOS tests pass on both
+simulator and physical iPhone using the rebuilt core; the Swift integration is
+recorded in the next chunk.
+
+# 2026-10-22 — iOS new-chat defaults and paired-device screens
+
+Machine details now links to new-chat defaults and paired-device management.
+Defaults show confirmed policy, preview the open chat's settings before saving,
+and explain that changes affect new chats from every client. Save, reset and
+revocation require explicit confirmation. Device details show access scope,
+pairing date and copyable identity; self-revocation explains disconnection and
+re-pairing. Confirmed revocation retains its detail screen with an access-revoked
+state even after its list row disappears.
+
+Reads and mutations correlate daemon/request identities, prohibit overlapping
+requests, expire after five seconds, and invalidate on disconnect/removal.
+Unsolicited updates do not acknowledge another pending mutation, and failed
+operations retain prior confirmed values. Saving requires the exact confirmed
+selected chat. Updated-daemon and full-control requirements are visible.
+
+All 125 tests pass on simulator and physical iPhone from the final sources,
+including timeout/chat isolation and navigation through confirmed revocation.
+Inspected seeded simulator previews of defaults, paired devices, revocation,
+loading, offline and permission failures, plus dark mode and accessibility text.
+Saved a before/after revocation GIF outside the repo, removed capture fixtures
+and updated user/developer documentation. Full-workspace pre-commit Clippy,
+formatting and architecture checks pass. Physical haptic feel, VoiceOver,
+keyboard/gesture behavior and live network-change walkthroughs remain manual
+verification work.
+
+# 2026-10-22 — combined iOS chats with machine filters
+
+Chats is now the home screen, merging saved machines into one chronological
+timeline with All and per-machine filters. Rows retain machine-scoped identity,
+name their machine, and explicitly mark offline cached entries. The selected
+filter persists independently of the open chat and drafts; removed filters fall
+back to All. Machine management remains available from the toolbar, and the chat
+switcher retains each machine's remembered conversation.
+
+Pin/archive/rename/delete, project reads and new-chat creation carry explicit
+machine identities. All asks for a machine before the project picker; a machine
+filter uses its own connection. Offline mutations and creation are disabled.
+Returning to the list refreshes summaries through the navigation transition,
+including newly created empty chats. Pending creation cannot navigate after a
+filter or destination change. Accessibility text sizes stack row metadata, and
+the filter strip keeps the selected machine visible.
+
+All 135 tests pass on both simulator and the unlocked physical iPhone, including
+merged ordering/archives, duplicate chat IDs, offline cache, scoped mutations,
+filter/chat restoration, creation routing and create/Back/refresh behavior.
+Inspected seeded light/dark, filtered/offline, accessibility-size and chat-context
+captures, plus a GIF comparing filter and navigation states. Removed temporary
+capture fixtures and updated mobile documentation. Three review lenses found
+no remaining blockers after fixing list refresh and explicit offline labeling.
+Hands-on VoiceOver, gestures, keyboard and live network changes remain part of
+the wider verification pass.
+
+# 2026-10-24 — GPUI UX assessment against the Codex GUI reference
+
+Recorded a provisional comparison in
+`notes/gpui-codex-ux-review-2026-10-24.md`, using two independent native-source
+assessments and the interactive Codex workspace example in current official
+desktop documentation. The user prioritized crowded layout and starting or
+switching projects/chats. Findings center on expanded auxiliary-pane defaults,
+working-location selection, project identity in chat tabs, and composer density.
+
+Identified a source-level resize defect: the width-changed boolean short-circuits
+the workbench-collapse check. Also recorded silent follow-up submission while
+running, positional multi-question answers, and uneven control semantics.
+Recommendations retain existing panes, workspace grouping, drafts and view-state
+ownership. No product code was changed and no behavior tests were run.
+
+Verified 26 report source links and their line anchors, checked the cited source
+paths, and ran the whitespace diff check. Native computer use failed with an
+operating-system permission error, so installed-app side-by-side inspection,
+visual scoring, motion, and native interaction verification remain outstanding.
+The official documentation example is explicitly distinguished from the installed
+Codex app throughout the report.
+
+# 2026-10-24 — integrate the GPUI sidebar and consolidate chat navigation
+
+Used the user's Codex screenshot as the layout reference and their explicit
+decision to remove open-chat tabs. The workspace sidebar now owns chat
+navigation, continues into its titlebar surface, and places New chat above the
+project list. The titlebar shows workspace/chat context. Search and task filters
+open on demand through the search control or Command-K. Idle workspace-root
+chats use compact rows with full-row selection; path and age remain in tooltips
+and accessible labels, and nested directories/attention states retain detail.
+
+New chat inherits the selected workspace. Selecting a chat reveals its workspace;
+reselecting an attached chat keeps its loaded content. Closing a chat returns
+to the unbound composer while preserving its draft for reopening. Removed
+conversation-tab state, synchronization, and numeric tab shortcuts while
+retaining the existing draft, request, browser-page, and view-state ownership.
+Fixed the resize short-circuit so narrowing the window checks workbench collapse.
+
+Behavior regressions were reproduced before their fixes. All 199 desktop tests
+pass, including GPUI entity/navigation and painted-layout checks. Strict desktop
+all-target Clippy, native build, formatting, architecture, generated-theme, and
+diff checks pass. Tests used isolated settings/session directories and the
+installed CEF SDK. The compiler-cache wrapper failed with an OS permission error;
+running rustc directly completed the same checks. Updated desktop design guidance
+and the review follow-up after verification. Live native visual, pointer, and
+motion checks remain blocked by the computer-use OS permission error.
+
+# 2026-10-24 - rebuild the native desktop as three full-height panes
+
+Rebuilt the GPUI shell around the user's confirmed Codex reference: navigation,
+conversation and a larger work pane, each with its own aligned top header and
+continuous divider. Navigation keeps sole ownership of chat switching. The
+conversation starts at 480 px; work content receives the remaining width and
+additional space when the window grows. Divider dragging retains conversation
+width per chat. Legacy saved workbench widths adopt the new conversation default.
+
+Replaced the work pane's vertical icon rail with horizontal Browser, Changes,
+Files and Activity tabs. Changes uses the available document area for the diff,
+with changed files beside it in wide panes and above it in narrower panes. The
+terminal docks below work content in split view and below the conversation when
+work is folded. Navigation width also clamps on resize to preserve the minimum
+usable conversation width. Removed obsolete slide offsets and the work pane's
+clipped collapsed rail. Draft, browser, request and terminal ownership remain
+in their existing layers.
+
+Reproduced layout and legacy-sizing gaps before implementation. All 203 desktop
+and 131 config tests pass, including actual GPUI pane/header geometry, divider
+dragging, window growth, tab clicks, reduced-motion toggles, terminal docking,
+narrow-window minima and binary/text diff geometry. Strict desktop/config
+all-target Clippy, native desktop build, formatting, architecture and generated
+theme checks pass. Tests use isolated settings/session directories; the real
+local transport tests require sandbox permission for listeners/subprocesses.
+Updated design, animation and comparison notes after verification. Native
+inspection was retried and still fails with the computer-use OS permission
+error, so live appearance, motion, VoiceOver and packaged CEF smoke remain
+unverified.
+
+# 2026-10-24 - add a tabbed work workspace with independent browser pages
+
+Used the user's new-tab screenshot to replace the fixed work-view category
+strip with closable tabs, a persistent plus control and a new-tab launcher.
+The launcher provides URL entry and existing Changes, Terminal, Files and
+Activity tools. Tools reuse their open tab; each browser/new-tab view owns an
+independent retained page, URL draft, title and error state. Transcript links
+open separate browser tabs. File-tree actions retain their external-open behavior.
+
+Terminal now fills its selected work tab and keeps the narrow-window fallback
+below the conversation. The tab strip scrolls the selected tab into view while
+keeping the plus control accessible. Command-T opens a work tab and Command-W
+closes work content in its focus scope; conversation closing and drafts retain
+their existing behavior. Tab order, selection and browser target persist per
+chat. First visits inherit pane sizing with a fresh work workspace, and legacy
+saved views migrate into tool tabs.
+
+Extended native browser ownership with the tab identity. The daemon target
+follows each chat's last selected browser tab, and closing a tab revokes only
+its page. Registration and revocation replies drain before reactivation so late
+registration failures cannot mark a reselected page unavailable. Background
+metadata preserves address drafts and updates the matching tab. Folded work
+content unmounts input fields and avoids mounting the terminal entity twice.
+Removed the obsolete browser panel entry points and terminal dock animation.
+
+All 217 desktop, 131 config and 10 browser-host tests pass. The opt-in real-daemon
+browser test also passes with isolated headless Chrome and the bundled
+agent-browser 0.39.2. Strict all-target Clippy for the affected crates, native
+desktop build, formatting, architecture and generated-theme checks pass.
+Updated the design, ownership, skill and comparison guidance after verification.
+Native inspection was retried and still fails with the computer-use OS
+permission error; live appearance, CEF embedding, VoiceOver and motion remain
+unverified.
+
+# 2026-10-24 - verify native panes and fix browser lifecycle failures
+
+Native inspection works after reverting the recent Codex/OpenCode configuration
+changes. Used a disposable app/helper bundle identity with isolated settings,
+sessions, CEF cache, local HTML fixtures and a real fake-provider daemon. Direct
+Codex inspection is denied by the tool's safety policy; the supplied screenshots
+remain the visual comparison reference.
+
+Reproduced transcript rows touching the pane dividers and moved horizontal
+padding onto the list parent. Reproduced CEF target replies losing their owning
+JSON Value and kept it alive through nested dictionary reads. Reproduced blank
+tab replacement quitting the app: CEF's default handler closes the containing
+window. Embedded close handling now queues child-view removal, completing page
+destruction while preserving the GPUI window and sibling pages.
+
+Native testing also exposed extra Chromium windows from initially pinning a
+fresh agent-browser session. Registration now selects and persists the exact
+existing target before pinning it, checks JSON target identity and persistence
+warnings, and closes CLI sessions without reconnecting during cleanup. Extended
+the real-CLI regression to reject added page targets through registration,
+browser operations and owned-page closure. Each reproduced gap failed its
+regression before the fix.
+
+Verified native sidebar collapse/restore, new-chat navigation and draft return,
+Files and full-pane Terminal launch, independent retained browser inputs across
+tabs and chat navigation, restored browser navigation after restart on a tool
+tab, and blank-page retirement without app exit or extra Chromium windows.
+Native divider dragging could not be established through the inspection tool;
+the existing GPUI pointer/geometry tests cover it. VoiceOver, physical IME and
+motion quality remain unverified.
+
+All 218 desktop, 9 CEF host, 112 tools unit and 8 tools integration tests pass.
+The opt-in native CEF target-parser regression, real-CLI page-isolation test and
+all 5 daemon browser tests, including real Chrome integration, pass as well.
+Strict all-target Clippy for the affected crates, native build and packaging,
+formatting, architecture and generated-theme checks pass. Updated the native
+host and comparison notes after the smoke test.
+
+# 2026-10-24 - polish the active desktop conversation
+
+Focused on active chat, as requested. Transcript and composer now share a
+centered 680 px content column and 24 px pane gutters. Long user messages wrap
+within the pane instead of clipping at its left edge. Body text uses 15 px type
+and 24 px leading, with separate heading/code leading. Messages have clearer
+turn spacing; parts remain closer together, and virtual paragraph chunks do
+not gain an artificial gap. Consistent first-turn padding preserves the visible
+text position when older history is prepended.
+
+Collapsed completed tools use quieter rows, retaining disclosure and status.
+Native expansion exposed existing zero-height tool input/output previews;
+their virtual lists, including diffs, now infer content height within bounded
+previews. Heading parsing also retained the source newline, creating an empty
+line after headings; the parser now trims it. Composer settings wrap when long
+labels need room, send keeps its size, and the workspace path truncates with
+its full accessible label retained. Removed the obsolete window-width helper
+and replaced its pure cap test with actual pane/message/composer geometry tests.
+
+Reproduced clipping, turn/part spacing, narrow settings/path overflow, blank
+tool output, heading newlines, virtual paragraph gaps and history anchor shifts
+before their fixes. All 224 desktop tests pass, including the new actual GPUI
+geometry, disclosure and history-prepend regressions. Strict all-target desktop
+Clippy, native build and packaging, formatting, architecture and generated-theme
+checks pass. The packaged
+isolated app confirms wide and split conversation layout, visible expanded tool
+input/output, corrected heading gaps, text selection/replacement and multiline
+Unicode paste. Physical IME, VoiceOver and native light-theme appearance remain
+unverified. Updated design guidance after verification.
+
+# 2026-10-24 - group completed desktop tool activity
+
+Used the supplied Codex screenshot to replace consecutive completed tool rows
+with compact activity summaries and call counts. Groups span assistant provider
+messages, while prose, reasoning, user turns and unfinished/failed calls remain
+boundaries. Expanding a group reveals the original virtualized calls and their
+input, output and diffs. Category icons distinguish files, commands and browser
+activity. Long summaries truncate while retaining the full accessible label.
+
+Completion invalidates the projection even when markdown is unchanged. Open
+call details survive grouping, merged history groups remain usable, and domain
+anchors preserve reading position during automatic regrouping. Anchors that
+fall back to a short summary discard offsets into the original taller call.
+
+All 232 desktop tests pass, including failing-first disclosure, boundary,
+completion, history merge, narrow summary and real GPUI scroll regressions.
+Strict desktop Clippy, native build, formatting, architecture and generated-theme
+checks pass. Native QA confirms dark/light summary contrast, truncation in the
+split pane, expanded command input/output, visible running/failed calls and
+Space activation. The light-theme pass also exposed an existing dark syntax
+palette in code fences; that separate fix follows this commit. Physical IME and
+VoiceOver remain unverified.
+
+# 2026-10-24 - keep desktop code fences readable across themes
+
+Native light-mode QA exposed code fences retaining the generated dark syntax
+palette. The desktop now builds its highlighter from the selected theme's
+foreground and syntax tokens, sharing the existing scope mapping with theme
+codegen. Theme reload recolors cached code without reparsing or replacing the
+message source. Streaming cache updates lazily reuse one themed highlighter
+when code blocks need it. Generated theme outputs remain unchanged.
+
+Reproduced the stale light-mode string color in a failing GPUI regression before
+the fix. All 233 desktop tests and 43 markdown-stream unit/integration tests
+pass. Strict all-target Clippy for desktop, markdown-stream and TUI, an explicit
+native build, packaging, formatting, architecture and generated-theme checks
+pass. The rebuilt isolated app confirms readable light-mode code and live
+recoloring of the same conversation when returning to dark mode. A fresh review
+found no further palette/cache correctness issues. Physical IME and VoiceOver
+remain unverified.
+
+# 2026-10-24 - review the remaining active-chat UX gaps
+
+Compared the current native chat in split and wide layouts with the supplied
+Codex screenshots, supported by two independent visual/source assessments.
+Direct Codex inspection remains safety-denied. Reproduced an eight-line unsent
+draft painting through composer controls/footer, and inspected the two-stage
+group/call disclosure and raw input/output hierarchy. Cleared the QA draft and
+restored its pane layout afterward. No product source changed for this review.
+
+Appended the evidence, severity, source anchors and proposed order to the
+existing GPUI comparison notes. Editor scrolling, content selection/copy and
+markdown fidelity take priority; quieter singleton/progress rows and composer
+controls follow. The edited-files result handoff is recorded as a product
+opportunity. Clipboard focus routing and source-file link handling remain
+source-supported candidates requiring behavior tests. No HTML detector scan,
+new automated test run, native streaming or VoiceOver check is claimed.
+
+# 2026-10-24 - select and copy desktop chat content
+
+Code fences and tool input/output/diffs now share the transcript selection
+surface. Dedicated copy controls copy the complete fence or section, including
+virtual code chunks and output beyond the visible preview. Tool input copies
+the formatted JSON shown in its details. Selection preserves Unicode and
+source newline bytes across line and virtual-row boundaries.
+
+Selecting transcript content moves Copy focus out of the composer, fixing the
+reproduced case where Cmd-C copied a stale draft selection. Typed Copy actions
+also serve the native Edit menu. Interaction layouts register after prepaint so
+virtual-list measurement cannot expose an unpainted layout to pointer events.
+
+Six focused GPUI content tests pass, including actual drag, scroll and clipboard
+behavior. Native QA in the isolated packaged app confirms full code/result
+buttons, partial code/output selection after editing a draft, correct Cmd-C
+routing, and readable selection in dark and light modes. Physical IME and
+VoiceOver remain unverified. Markdown structure and activity hierarchy remain
+separate follow-up work.
+
+# 2026-10-24 - scroll long desktop drafts within the editor
+
+The composer now measures and shapes the complete draft inside its existing
+height cap. Text, selection and caret share a clipped scrolling viewport with
+pointer hit testing and native range geometry. Manual wheel scrolling holds
+until editing or a relevant caret/geometry change. Composer geometry remains
+available while another shell input owns native text focus.
+
+Up/Down and Shift-Up/Down navigate visual draft rows before prompt history,
+retain the horizontal position through short lines and respect soft-wrap
+affinity. Native composition and selection refresh candidate geometry before
+the next paint, including unchanged marked text with a moved selection.
+
+All 247 desktop tests pass, including 24 composer tests with failing-first
+coverage for scrolling, clipping, Unicode, width changes, pointer mapping,
+keyboard navigation and synchronous native geometry. Strict desktop Clippy,
+native build/packaging, formatting, architecture and generated-theme checks
+pass. The isolated native app confirms bounded eight-line drafts, wheel
+scrolling and Shift-arrow selection without toolbar overlap. Later wrapped-draft
+and pane-width visual checks were limited by stale computer-use captures;
+automated geometry coverage passed. Test drafts were cleared and owned QA
+processes stopped. Physical IME and VoiceOver remain unverified.
+
+# 2026-10-24 - keep virtual desktop code fences continuous
+
+Long code fences retain virtual rows while splitting only at physical newlines.
+Oversized individual lines remain intact for horizontal scrolling. Each fence
+has one header/copy control, top and bottom edges only at its ends, and ordinary
+20 px leading across internal row boundaries. Copy still uses the complete
+original source, including chunk delimiters.
+
+A retained horizontal scroll handle and common measured content width keep all
+chunks aligned. Appended source retains its scroll position; replacements reset
+it. Font or theme changes invalidate measured widths. Scroll state belongs to
+the current markdown cache and is discarded with obsolete content.
+
+Three source-splitting tests, two GPUI continuity/cache tests and six existing
+copy regressions pass. The combined desktop suite passes all 261 tests, plus
+strict Clippy, native build/packaging, formatting, architecture, generated-theme
+checks and hooks. Native QA confirms one continuous 32-line fence and complete
+copy in the isolated app, with readable syntax in dark and light themes.
+
+# 2026-10-24 - preserve desktop markdown lists and tables
+
+Lists retain ordered starts, sequential sibling numbers and nested marker depth
+instead of becoming a flat set of bullets. Wrapped items use hanging content
+columns; parent continuations keep their owning item. Existing inline styles
+and links survive parsing and virtualization.
+
+Tables now contain real cells and column alignment rather than pipe-delimited
+text rows. Cells wrap within equal columns, headers have a quiet surface, and
+wide tables scroll inside the conversation. Virtual chunks retain column
+metadata and share horizontal position; only the first logical row is a header.
+Escaped pipes, matched code spans, Unicode, empty cells and ragged rows are
+covered. Center/right content is positioned directly because pinned GPUI text
+hit testing omits text-alignment offsets.
+
+Selection uses stable block identities and byte offsets for list items and
+table cells. Copy reconstructs offscreen structured chunks in reading order,
+with tabs between table cells and newlines between rows. Pointer targeting also
+distinguishes cells on the same visual row.
+
+The combined desktop suite passes all 261 tests; the final four focused layout
+tests also pass after adding center-alignment coverage. Strict Clippy, native
+build/packaging, formatting, architecture and generated-theme checks pass.
+Native QA confirms nested/ordered markers, wrapping aligned tables, Unicode row
+selection/copy and split-to-wide layout in dark and light modes. Test drafts
+were cleared, theme/layout restored, and owned QA processes stopped. VoiceOver
+and physical IME remain unverified. Nested block-level content and interactive
+task checkboxes were not added in this pass.
+
+# 2026-10-24 - quiet completed desktop tools and retain working feedback
+
+Completed single tools now use one muted 20 px action row with the command or
+path on the same line and no completed badge. Visual summaries flatten explicit
+newlines while accessible labels retain the full command. Disclosure and complete
+input/output/diff copying remain available. Active calls retain their explicit
+state, and collapsed failures expose their first nonempty error line.
+
+Working is now a compact status line above the composer with a synchronized,
+12 FPS opacity pulse. It stays mounted through partial assistant replies, tool
+updates and running metadata arriving before history. Reduced motion keeps a
+visible static dot. Stop remains in the composer; required actions replace the
+working row, and failed/waiting turns retain retry cards.
+
+All 266 desktop tests pass. New failing-first tests cover one-line long/Unicode
+and multiline summaries, pointer/keyboard disclosure, complete output copy,
+active/error/completed transitions, stable working geometry through streaming,
+empty history, cancellation, required actions and retry after a partial reply.
+Strict all-target desktop Clippy, native build/packaging, formatting, architecture
+and generated-theme checks pass.
+
+Isolated native QA confirms dark/light and split/wide presentation, failure
+excerpts, expanded output copy, working through partial text and removal on
+completion. The real daemon's fake-provider turn was briefly paused after an
+actual text delta for inspection, then resumed. Test drafts were cleared,
+appearance/layout restored and owned QA processes stopped. Production provider
+latency, VoiceOver and physical IME remain unverified.
+
+# 2026-10-24 - sidebar inbox and consistent chat rows
+
+Inbox is a permanent sidebar entry for nonarchived requests and unread finished
+results, with a live count and an empty state. Its flat list puts requests first,
+then recency and stable session identity, independent of pins, workspace collapse
+and recent-chat limits. Search covers complete titles, working directories and
+workspace names/paths. Shared-client read acknowledgement removes opened results;
+requests remain until answered. Existing Running and Attention filters remain.
+
+Chat rows stay 30 px tall across working folders and activity states. Titles
+retain their complete normalized text and truncate to measured space. Age and
+pin/archive actions share a fixed trailing slot, preserving the title's width on
+hover. Read failures no longer add a second line or a persistent colored marker.
+The hover preview shows full title, workspace, working directory, age and status.
+Right-click and Shift-F10 expose the remaining chat actions; Escape and outside
+clicks dismiss the menu. Hover uses visibility changes because changing display
+between GPUI prepaint and paint reproduced a framework panic.
+
+The Archived entry now opens recoverable chats and exposes Unarchive. Starting a
+chat leaves Inbox or Archived so the workspace list can reveal the new task.
+Pin/archive controls preserve selection and disappear when writing resumes.
+
+All 275 desktop tests pass, including failing-first row geometry, action routing,
+hover/focus transitions, menu dismissal, inbox state/count/order/search, read
+updates, empty states, new-chat navigation and archive recovery. Actual GPUI
+timers verify preview appearance/removal and unchanged row geometry. Strict
+all-target desktop Clippy, native build/packaging, formatting, architecture and
+generated-theme checks pass. The final allocation-only cleanup also passes the
+18 sidebar regressions.
+
+Isolated native QA confirms dark/light and 264/344 px sidebar layouts, pin/unpin,
+archive/restore and context-menu dismissal. Two actual daemon/fake-provider
+background turns entered Inbox; opening them reduced its count from two to zero.
+Native hover could not be reliably sustained with the inspection tool; the
+preview is covered by the GPUI hover/timer test. Test drafts are empty, appearance
+and width restored, and owned QA processes stopped. VoiceOver and physical IME
+remain unverified.
+
+# 2026-10-24 - stabilize the desktop composer at narrow widths
+
+The composer settings now stay on one 28 px toolbar row. Labels and footer text
+use 11 px type; draft text stays at 15 px with its existing scrolling viewport.
+Tighter spacing and text-led persona/model controls leave more room for selected
+values. Unset choices use concise Model/Persona placeholders. Complete selected
+values remain in accessible labels, while long visual labels truncate inside
+bounded controls. Model/persona values use the identifiers the daemon supplies;
+the protocol does not currently carry separate friendly model names.
+
+Send and Stop keep their 28 px targets. All picker buttons retain 26 px height
+and their actual measured popup anchors. The model control keeps its natural
+width beside Send instead of stretching into unused space at wider pane sizes.
+
+A failing-first layout check reproduced Send moving 36 px beneath the other
+controls at the 420 px conversation minimum. Regression tests now cover long
+and short names, custom permission labels, Unicode, Send/Stop, picker activation
+and exact trigger anchors at four widths. A second native finding reproduced
+the oversized short-model button in a focused test before fixing its flex growth.
+
+All 276 desktop tests, strict all-target Clippy, native build/packaging,
+formatting, architecture and generated-theme checks pass. Isolated native QA
+confirms the 420 px split pane and wide conversation, dark/light appearance,
+all three dropdowns and a long scrolling Unicode draft. Test drafts were cleared,
+the initial theme/layout restored, and owned QA processes stopped. Physical IME
+and VoiceOver remain unverified.
+
+
+# 2026-10-24 - show catalog model names in the desktop composer
+
+The catalog now retains models.dev names and Umans/Codex display names. Optional
+`display_name` metadata travels through the existing daemon model list and shared
+client state. The TypeScript client type and generated distribution include it;
+older wire payloads and unnamed catalog entries still work without the field.
+
+The desktop composer resolves the selected provider/model pair to its catalog
+name. The model picker uses the same label, keeps the fully qualified ID in its
+secondary details and accessible label, and searches both names and identifiers.
+Switching, recent choices and saved policy retain their original routing IDs.
+Blank names fall back to the exact model ID, and catalog updates refresh labels.
+
+Failing-first checks reproduced dropped catalog/wire names, the long raw ID in
+the composer, name searches returning no rows, and names lost by the daemon
+lister. Verification passes: all 279 desktop tests, complete catalog/protocol/
+shared-client/UI-model suites, the isolated daemon lister regression, 12 related
+TUI tests and 31 TypeScript client tests. Strict all-target Clippy for affected
+crates, native build/packaging, formatting, architecture and generated-theme
+checks pass.
+
+Isolated native QA used a real daemon with a local catalog fixture and loopback
+provider endpoints. Dark/light and narrow/wide views show readable names;
+searching by name, pointer selection and keyboard selection of an unnamed model
+work. Saved policy confirms the original raw model identity. The QA app and its
+daemon are stopped. No provider turn was submitted. Physical IME and VoiceOver
+remain unverified.
+
+
+# 2026-10-24 - compare the compact composer with the Codex reference
+
+Completed a review-only comparison of commit `2bf41a2`. Two independent source
+assessments and live native mew checks at 420, 480 and 600 px confirm ordinary
+model/effort/persona values lose legibility only at the minimum width. A real
+long-named attachment also exceeds the pane and hides its remove action. An
+eight-line draft remains intact and follows the caret, but has no overflow cue.
+
+Source inspection found primary-button/submission disagreements for empty
+prompts and running AskUser answers. It also found that the model popup renders
+400 px wide while placement uses 300 px, and placement omits Recent/header rows
+from its height calculation. Native captures show the resulting menu occupying
+the composer area. The review records exact evidence, priorities and scoped
+heuristic scores in `notes/gpui-codex-ux-review-2026-10-24.md`.
+
+Codex evidence remains the user-supplied screenshot; direct inspection is denied
+by the computer-use safety policy. The HTML/JSX detector does not support native
+Rust. No product code or tests were changed. No provider prompt was submitted;
+the owned native QA app and daemon are stopped, draft cleared and width restored.
+
+
+# 2026-10-24 - composer interaction fixes and narrow settings
+
+Fixed attachment overflow and removal, model-picker geometry and primary-action
+state before adapting the settings row. Long Unicode filenames truncate inside
+wrapping chips while named 24 px remove buttons remain visible and tabbable.
+Removal preserves the draft and restores editor focus.
+
+The model picker shares its Recent/header inventory and exact size with its
+placement calculation. Search and effort retain their height while model rows
+scroll inside available window space. Model, persona and permission menus defer
+redraw after trigger measurement, fixing stale anchors during resizing. Empty
+and whitespace-only drafts and model switching disable Send. Pending questions
+show an answer action and share Enter's existing response path; other running
+turns retain Stop.
+
+At conversation widths below 480 px, persona becomes a compact icon using the
+existing picker. Effort remains a separate visible suffix while long model names
+truncate. Compact mode follows measured editor width through pane transitions;
+wider views retain persona text and naturally sized model controls.
+
+Twelve new actual-GPUI regressions cover geometry, pointer/keyboard interaction,
+Unicode attachments, question routing, disabled states, pane widths, transitions
+and popup resizing. All 291 desktop tests, strict all-target desktop Clippy,
+native build/packaging, formatting, architecture and generated-theme checks pass.
+Isolated native QA at 420 px in dark mode and 480 px in light mode confirmed
+legible model/effort, compact/expanded persona, attachment removal, popup fit
+and accessible disabled Send. No provider prompt was submitted. The QA app and
+owned daemon are stopped, draft cleared and fixture restored. Physical IME and
+VoiceOver remain unverified. Long-draft overflow cues remain a separate item.
+
+
+# 2026-10-24 - long-draft overflow cues and composer expansion
+
+Long drafts now show their visual-line count and a persistent draggable scrollbar
+in the existing right padding. A conditional Expand/Collapse control grows the
+editor upward without changing the settings row or draft typography. The expanded
+viewport uses at most half the conversation area and 360 px, with a measured
+budget for attachments, errors, controls and terminal fallback. Short drafts
+return to the original layout; short windows omit Expand when no growth fits.
+
+Toggling preserves text, selection, marked ranges and an offscreen reading
+position, and restores editor focus. A visible caret remains visible after
+collapse. Track clicks and dragging scroll without starting text selection,
+including release outside the editor. Accepted submission and actual draft-owner
+changes reset expansion and dragging; failed sends and same-chat reselection
+preserve expansion. The input hint now includes Shift+Enter and long-draft use.
+
+Six new actual-GPUI tests cover four/five visual-row boundaries, soft wrapping,
+Unicode, trailing newline, pointer/keyboard toggles, native range geometry,
+manual reading positions, track/drag behavior, submission/navigation ownership,
+short/tall windows, terminal fallback and eight wrapped attachments with an error.
+All 297 desktop tests and strict all-target desktop Clippy pass. Native build and
+packaging pass, as do formatting, architecture and generated-theme checks.
+
+Isolated native QA confirmed the 420 px dark composer shows overflow, preserves
+reading position on expansion and retains Collapse when all twelve lines fit.
+Dragging a forty-line draft reaches its first line. A 480 px-tall light window
+keeps the expanded editor and controls inside the pane with conversation space
+above. Clearing the draft removes the information row and scrollbar. No provider
+turn was submitted. The QA app and owned daemon are stopped and the fixture is
+restored. Physical IME and VoiceOver remain unverified.
+
+
+# 2026-10-24 - composer comparison after long-draft improvements
+
+Reviewed commit `91c617d` against the supplied Codex screenshot, with fresh native
+mew checks at 420, 480 and 600 px plus a short-window model menu. The default
+layout now holds up; remaining visual issues are model-menu density, an
+unexplained compact persona icon and permanent Yield. Direct Codex inspection
+was previously denied; this pass makes no claim about its live behavior.
+
+Two temporary actual-GPUI probes confirmed that multiline single-question
+answers send only their first line and clear the draft; top-level questions
+offer neither Stop nor close-question, and Escape leaves them running. Rendered
+request cards overlap the long-draft information row by 4–4.5 px at 420/480 px.
+Native mew checks also found Command-Z ineffective after Backspace and no
+Undo/Redo items in the Edit menu. Both temporary probes and their selectors were
+removed, leaving production code and the committed test suite unchanged.
+
+The appended review records source/evidence links, scope limits, priorities,
+heuristic scores and next actions. The HTML/JSX detector does not support native
+Rust. No provider prompt was submitted. The QA app and owned daemon are stopped,
+the draft is empty and the fixture is restored. Physical IME and VoiceOver were
+not exercised.
+
+
+# 2026-10-24 - peer-only collaboration presence
+
+ClientAttached announcements now exclude the joining connection in both daemon
+paths. This keeps presence limited to other clients after attach, disconnect and
+reconnect, so desktop collaboration controls can depend on the peer count.
+
+A real two-client Unix/WebSocket regression failed with a peer plus self before
+the fix and passes afterward. It covers both disconnect directions and reconnect
+with a fresh client identity. All 152 daemon tests pass, with the existing opt-in
+browser integration test left ignored. Strict all-target daemon Clippy passes.
+
+
+# 2026-10-24 - composer editing, questions and compact controls
+
+Added draft-owned Undo/Redo with native Edit menu actions and Command-Z /
+Command-Shift-Z. Text and Unicode selection restore together; typing and deletion
+group, paste and replacements remain separate, and IME updates form one step.
+Canceled compositions leave no empty undo step. History follows each chat,
+including empty drafts with redo, and clears only after accepted submission.
+Menu availability follows the active draft's history.
+
+Single-question responses now retain internal paragraphs. Multiple questions
+require exactly one nonempty line per answer, show inline validation and preserve
+invalid drafts. Main and child questions expose scoped cancellation without
+clearing text. Required actions measure the outer composer and keep an 8 px gap
+above short, overflowing and expanded drafts.
+
+The model picker uses retained variable-height rows, 24 px headers and 56 px
+model options. Recents do not repeat in Other models. Arrow navigation skips
+headers and reveals offscreen choices, Enter selects the highlighted identity,
+and marked search text retains IME ownership. Compact persona controls have a
+selected-value tooltip. Yield requires a peer; footer metadata wraps before
+squeezing out the workspace path.
+
+All 317 desktop tests and 152 daemon tests pass. Strict all-target desktop/daemon
+Clippy, native desktop/daemon build and packaging, formatting, architecture and
+generated-theme checks pass. Native isolated QA at a 420 px conversation width
+in 480/800 px-tall windows confirmed the default layout, all three fixture models
+fitting the short picker, arrow-key selection, Unicode Undo/Redo and native menu
+availability. No provider prompt was submitted. The QA app and owned daemon are
+stopped; the original fixture sizing, model and empty draft are restored.
+Physical IME candidates and VoiceOver remain unverified.
+
+## 2026-10-25: composer comparison and tiny-viewport crash
+
+Reviewed the composer against the supplied Codex screenshot with fresh native
+QA at 420/480/600 px conversation widths and 480/800 px window heights. The
+current default typography and toolbar hold up. Remaining priorities are native
+word/line editing, focus return after persona/permission choices, bounded
+attachment height, stable model-picker geometry and fit checks after saved pane
+restoration. Details and captures are in
+`notes/gpui-codex-ux-review-2026-10-24.md`. These findings remain review work,
+except for the crash below.
+
+Eight wrapped attachments and a long draft exposed an abort: the transcript
+scrollbar clamped a 28 px minimum into a 24 px viewport. Cap the minimum at the
+actual viewport height. Two real GPUI regressions failed before the fix and
+pass afterward. The crowded-shell test restores prior saved settings to avoid
+leaking its resize state into later tests. All 319 desktop tests, strict
+all-target desktop Clippy, native build/packaging, formatting, architecture and
+generated-theme checks pass. The rebuilt native app survives the same eight-file
+selection. Attachment height still pushes Send below a 480 px-tall window and
+requires a separate layout fix. No provider prompt was submitted. The isolated
+app/owned daemon are stopped and original fixture settings restored.
+
+## 2026-10-25: composer editing, focus, attachments and picker stability
+
+Added native word/visual-line/document movement, Shift selection and word/line
+deletion with Undo and native input notifications. Modified navigation cannot
+recall prompt history, and native composition owns its keys. Persona and
+permission selection return typing focus to the draft.
+
+Attachments now scroll within two rows with a measured overflow count/hint;
+keyboard focus reveals removal buttons. Short-window tests preserve four
+transcript lines and visible Send with eight files in expanded/collapsed drafts.
+The model picker keeps search/effort positions stable while filtering, aligns its
+measured effort controls through deferred redraw, marks the current model and
+targets it on open. Typed searches still start at their first match.
+
+All 325 desktop tests pass; final isolated picker rerun passes 3/3. Strict
+all-target desktop Clippy, native build/packaging, formatting, architecture and
+generated-theme checks pass. Native isolated QA confirmed editing/deletion,
+immediate typing after choices, attachment scrolling/removal, expansion and
+stable picker filtering at 480 px conversation width in a 480 px-tall window. No
+provider prompt was submitted. The QA app/owned daemon are stopped and original
+fixture settings restored. Details/captures are in the existing Codex UX review.
+Physical IME candidates and VoiceOver remain unverified; saved narrow work-pane
+fitting remains separate.
+
+## 2026-10-26: workspace canvas and familiar chat concepts
+
+Created an interactive design prototype outside the product source, using one
+sample mew workspace with movable topic areas, ongoing chats, artifacts and
+subagents grouped under their parent chat. Canvas and familiar chat views share
+the same organization and drafts. Topic areas and structured topic lanes provide
+two compositions to compare before selecting an implementation direction.
+
+The prototype exercises artifact previews, topic moves, stop-and-archive and
+explicit restoration. Archived chats retain their history; placed artifacts
+remain available, and restoring a chat leaves its subagents stopped. These are
+proposed interface behaviors, not changes to the application or daemon.
+
+Browser checks passed for view switching, draft preservation, grouped subagents,
+native drag-and-drop, topic selectors, previews, archive/restoration and local
+follow-ups. Both views fit 320, 360, 420, 768 and 1056 px browser widths without
+horizontal overflow. Light/dark and both compositions were visually inspected;
+narrow header overlap was corrected and rechecked. No provider calls were made.
+
+## 2026-10-26: familiar chat baseline and existing theme preview
+
+Revised the design direction to a straightforward Codex-style chat workspace,
+removing canvas and topic-lane controls from the proposed baseline. The new
+standalone prototype keeps recent/pinned chats, inbox, archive/restoration,
+grouped subagents, composer policy controls, attachments and the five workbench
+surfaces. Preserving built-in/custom themes and existing runtime capabilities
+remains a migration requirement; application implementation has not started.
+
+The appearance preview resolves all 23 built-in palettes from the existing
+manifest, including inheritance and token aliases. System appearance, explicit
+theme overrides, syntax colors and terminal colors use those same tokens.
+The manifest and generated theme outputs are unchanged.
+
+Browser verification passed for every built-in palette, per-chat drafts/policy,
+mentions, attachments, approvals/questions, search, rename/pin, new chats,
+stop/archive and idle restoration. Conversation/workbench layouts fit 320,
+360, 420, 768 and 1056 px browser widths. Long workbench content was corrected
+to grow the preview instead of clipping. Light/dark, a named theme and narrow
+views were inspected; final checks reported no JavaScript errors. No provider
+calls or application/daemon changes were made.
+
+## 2026-10-27: tabbed workbench beside the chat
+
+Updated the familiar chat prototype with a right workbench that stays beside the
+conversation. Its new-tab launcher opens changes, files, terminal, activity and
+side chats, with an address/search field and suggested artifacts/pages. Files
+open independently; grouped subagents open as side-chat tabs under their parent.
+Each chat retains its own tabs, active selection and pane width. Collapsing the
+pane keeps tabs available; closing its last tab returns to the chat. The pane
+can expand and restore the conversation alongside it.
+
+Browser checks passed for launcher/tool navigation, independent file tabs,
+duplicate-tool reuse, local terminal/URL previews, browser history and address
+validation, subagent follow-ups, draft retention, chat switching, keyboard tab
+navigation, pointer/keyboard resizing and close/collapse/expand behavior. Layouts
+fit 320, 360, 420, 620, 768, 920, 1056 and 1440 px browser widths; narrow layouts
+stack the pane below the conversation. Light and existing named themes were
+visually inspected, with no JavaScript errors. This remains a design prototype;
+no provider calls, application implementation or generated-theme changes were
+made.
+
+## 2026-10-27: chat UI migration plan
+
+Added `notes/cef-ui-migration-plan.md` with the proposed shared React/TypeScript
+presentation in the packaged CEF runtime, a thin Rust host and preserved daemon,
+provider/tool/session boundaries. The plan maps existing features to their owning
+layers, preserves native/browser preferences and custom theme resolution, and
+defines six delivery stages with acceptance conditions before switching defaults.
+
+Direct subagent messaging is a first-version requirement. Its runtime stage
+covers child-owned delivery, follow-up runs in the same conversation, receipts,
+policy persistence, parent collection races and descendant cancellation. The
+plan also identifies missing TS protocol operations, connection-owned PTY
+semantics and the difference between metadata archiving and stop-and-archive.
+
+Verified all 17 local source links, checked coverage of the requested features
+and delivery stages, and ran `just theme-codegen-check` successfully. No product
+code or generated assets changed; implementation remains a separate step.
+
+## 2026-10-27: shared chat UI baseline inventory
+
+Added `notes/chat-ui-baseline-checklist.md` with source and test ownership for
+the existing desktop baseline, pending replacement acceptance cases, and the
+bounded chat-plus-browser UI milestone. Direct subagent messaging remains a v1
+requirement in the later runtime stage. The native interface remains available
+until the complete baseline is accepted.
+
+Verified the checklist's repository links and desktop recipe dry runs. The
+inventory distinguishes inspected coverage from acceptance performed; unchecked
+items do not imply replacement parity.
+
+## 2026-10-27: embedded UI assets and trusted CEF application page
+
+Extracted the web bridge's embedded asset serving into its library so the
+desktop can serve the same compiled React assets from an ephemeral loopback
+listener. Added a CEF application-page binding restricted to its exact browser,
+main frame and local origin, with cancellable one-shot replies and a separate
+request context. External pages cannot use the binding or replace the app.
+Renderer handlers are retained across callbacks. Hidden-page updates preserve
+the active browser, and the native accessibility tree composes visible CEF roots
+with the host's existing children.
+
+Verified real TCP asset/bridge tests, 11 browser-host tests, 14 supervisor tests,
+19 CEF library tests plus the helper lifetime test, and the real hidden AppKit
+editing/accessibility harness. One existing opt-in CEF parser test remains
+ignored without its runtime environment. Strict workspace Clippy, formatting
+and architecture checks passed. The package opened the React app through the
+native binding and displayed a real external browser page; final native window
+acceptance is recorded separately from these component checks.
+
+## 2026-10-27: web streaming wire compatibility and browser receipts
+
+Corrected the TypeScript part model and store to use the daemon's flattened
+part identities. The native smoke exposed that synthetic fixtures had used a
+nested `base` shape, causing real streamed assistant text to fail before
+rendering. The regression now feeds canonical JSON events through the store and
+message component. Added scoped browser registration/revocation operations and
+matching acknowledgement promises for selecting retained native pages.
+
+Verified all 32 client tests, the client build and the complete 142-test React
+suite. Tracked client distribution files were regenerated. No Rust protocol
+format changed.
+
+## 2026-10-27: neutral Codex-style palettes
+
+Added `codex-dark` and `codex-light` to the shared theme manifest and browser
+inventory. These provide neutral surfaces for the closer Codex presentation;
+existing palettes and semantic aliases remain available. Generated the Rust and
+CSS outputs through theme codegen.
+
+Verified the palette regression, including unchanged original dark-theme
+colors, and `just theme-codegen-check`. The new desktop shell selects these
+palettes only when there is no saved light/dark preference.
+
+## 2026-10-27: packaged React desktop host
+
+Added the opt-in `--web-ui` shell using the shared CEF runtime and embedded web
+assets. The host bootstraps the local daemon URL and resolved installed themes,
+persists appearance choices, and positions retained external browser pages from
+validated chat/tab-scoped DOM bounds. Native menus forward navigation commands
+to React. Desktop recipes build the client and UI before embedding their assets.
+
+Moved the CEF pump outside the GPUI app borrow because native menu validation
+can re-enter GPUI. The application-page Edit menu routes Undo/Redo through the
+native responder chain. Existing native rendering remains the default.
+
+Verified all 334 desktop tests with isolated state and serial execution, the
+real AppKit editing/Undo/Redo/accessibility harness, and debug packaging. The
+actual package streamed a daemon reply beside an editable native browser page.
+Full IME, shortcut, resize, remote-profile and native accessibility acceptance
+remains tracked in the baseline checklist.
+
+## 2026-10-27: familiar chat UI and corner summary
+
+Matched the supplied Codex references with a compact notifications sidebar,
+system typography, neutral message bubbles, a centered composer and a flat
+tabbed-workbench launcher. The home composer creates an actual daemon chat.
+Drafts, attachments and workbench tabs retain their chat ownership. The desktop
+browser uses retained native CEF pages and scoped registration receipts rather
+than a preview iframe. Shared semantic theme variables also color cached code.
+
+The corner summary opens independently of the left sidebar and workbench. It
+shows selected-chat changes, subagent status, background processes and pinned
+sources, and selects their existing detail surfaces. Added the popover through
+the shadcn CLI. Corrected the shared sidebar active marker so inactive chats
+are not highlighted. Renamed the prototype header to ConversationHeader.
+
+Verified all 161 UI tests and the production build. Packaged smoke completed a
+real daemon/fake-provider turn while editing an external page, opened the
+summary and entered its subagent detail tab. Recorded screenshots and the
+remaining acceptance work in `notes/chat-ui-baseline-checklist.md`. The current
+milestone stops at the UI; direct subagent messaging and full migration parity
+remain required before replacement release. The build retains its existing
+large-chunk warning.
+
+## 2026-10-27: keep activity in the corner summary
+
+Removed Agents and Jobs from the new-tab launcher. Its remaining tools are
+Changes, Terminal, Files and Review; subagent and background-process details
+remain accessible through the summary. Kept the launcher inventory in display
+order so rendering no longer filters or sorts it.
+
+The regression failed before the change for both the empty workbench launcher
+and an explicit new tab. All 22 related launcher, summary and navigation tests
+passed afterward, along with the production UI build and debug packaging.
+
+
+## 2026-10-27: integrate the header and keep the summary inside chat
+
+Reclaimed the separate native titlebar row for the React pane headers. Trusted
+app CEF drag regions now drive native macOS window dragging, with no-drag
+controls, ordered region subtraction, resize/visibility handling and lifecycle
+invalidation. External browser pages receive no native drag overlay.
+
+The summary appears automatically inside the chat pane when that pane has room,
+before the tool/browser divider. A resize observer follows the actual chat
+width, so window width alone cannot pin it beside a narrow conversation. The
+compact summary stays in the chat header. Shared summary content retains real
+activity and opens the existing detail tabs. Improved sidebar search/disclosure
+and empty states, tab visibility, narrow split bounds, browser menu dismissal
+and native-page occlusion for portaled menus. Header controls reserve space for
+the macOS traffic lights in expanded and collapsed navigation.
+
+Verified the 190-test React suite and production build, 334 isolated serial
+desktop tests, 20 CEF library tests and the real AppKit editing/AX/drag harness.
+Generated themes and debug packaging pass. Packaged screenshots cover light and
+dark themes, browser editing and menus, split resizing, collapsed navigation,
+and automatic summary placement inside the chat pane. Full baseline acceptance
+remains open in `notes/chat-ui-baseline-checklist.md`.
+
+
+## 2026-10-27: polish the composer and message controls
+
+Model and persona pickers use the existing shadcn radio menus for keyboard
+navigation, viewport bounds and focus return. Model/thinking updates expose
+pending and retryable failure states and discard late results after navigating
+to another chat. Restored multiline drafts resize immediately. A successful
+pending send preserves newer text and attachments, while send errors remain
+scoped to their original chat. The compact composer retains accessible
+permission context while allowing long model/persona labels to truncate.
+
+Message actions share a quiet copy/details row. Tool cards use their available
+width, wrap metadata and filenames, preserve full input summaries and use the
+shared semantic status colors. Copy controls announce success and retryable
+failure. Verification includes regressions for delayed send results, restored
+drafts, picker keyboard/failure behavior, tool disclosure and clipboard errors.
+The full 193-test React suite and production build pass. Packaged photos cover
+the composer and model menu in narrow and wide light/dark windows.
+
+
+## 2026-10-27: retain browser visibility beside chat popovers
+
+The compact chat summary no longer blanks a browser in the neighboring pane.
+Native browser occlusion checks actual overlay bounds; non-overlapping menus
+and popovers leave it visible, while overlapping overlays and workspace-blocking
+modal dialogs still hide it. Three added regressions cover both non-modal
+roles, transitions into overlap and a modal outside the browser bounds.
+
+The regressions failed before the fix. All 193 React tests and the production
+build pass afterward. Rebuilt and packaged the desktop app, then photographed
+the compact summary beside a real retained browser and checked that browser
+tools still hide/restore native content. No runtime or baseline expansion.
+
+
+## 2026-10-27: animate chat summary transitions
+
+The pinned summary slides and fades over the existing 180ms motion token on
+entry and exit. Its retained shell becomes inert and hidden to accessibility
+immediately on close, while visibility settles after the exit transition.
+Chat columns move from their measured visual positions using transforms,
+including during a reversal, so the transcript is laid out once per change.
+Initial layout and divider interaction stay immediate. Reduced-motion mode
+skips movement and cancels running column animations when the preference changes.
+Focus follows the summary between its pinned card, compact trigger and open
+popover without dropping to the document body.
+
+Verified the 194-test React suite and production build, then rebuilt and
+packaged the desktop app. A slowed browser inspection confirmed intermediate
+column transforms and completed hidden/inert exit state; normal 180ms timing
+was restored. Packaged smoke covered summary entry/exit, direct divider resizing
+and retained browser input through pane close/reopen. Photos are
+`mew-motion-01-compact.jpg`, `mew-motion-02-expanded.jpg` and
+`mew-motion-03-summary-browser.jpg` in this task's visualization folder.
+
+
+## 2026-10-27: animate browser and tool pane transitions
+
+The workbench now opens and closes over the existing 260ms panel motion token.
+The outer resizable panels animate their actual flex sizes, so retained native
+browser bounds follow the same geometry. Closing retains visual contents until
+both panel transitions settle, while logical activity, DOM input, shortcuts and
+browser tool registration stop immediately. Native external pages use a
+transparent input shield, reject focus and leave the composed accessibility
+tree during exit; reopening restores the same page. The trusted app header's
+drag regions are unchanged.
+
+Quick reversals ignore stale completion callbacks. Reduced motion settles
+immediately, including a live preference change. Initial layout, StrictMode
+effect replay and direct divider interaction remain immediate. Regressions
+cover these paths, retained visibility, input/registration handoff and native
+focus/accessibility restoration.
+
+Verified all 201 React tests and the production build, 335 isolated serial
+desktop tests, 21 CEF library tests, 11 browser-host tests and the real AppKit
+editing/accessibility/input harness. Debug packaging passed. Browser inspection
+confirmed intermediate panel widths, reversal and direct pointer resizing.
+Packaged smoke used the isolated daemon and deterministic fake provider. It
+covered toolbar/header close and reopen, keyboard divider
+resizing, Files and browser tabs, retained chat drafts and browser form input,
+and native editing after reopening. Photos `mew-pane-01-closed.jpg` through
+`mew-pane-06-chat-browser.jpg` are in this task's visualization folder.
+
+QA follow-ups: native window dragging returned AXError.attributeUnsupported in
+the computer-use harness this pass, so that interaction was not reverified.
+Editing the host contract during Vite hot reload re-executed createRoot and
+invalidated the theme context; a full reload cleared that development-only
+failure. The packaged build does not use Vite hot reload. Files watching in the
+non-Git QA workspace also surfaced git-status errors; the real file listing
+and pane close/reopen still worked.
+
+### 2026-10-27: isolated browser composition comparison
+
+Added a shared React/shadcn composition harness under
+`mew-web-ui/prototypes/composition`, an independently packaged Electron 45 host
+under `prototypes/browser-composition`, and a standalone CEF OSR example under
+`native/cef-host/examples/composition.rs`. Production UI, daemon and generated
+themes are unchanged. The fixture is an actual browser document that refuses
+iframe embedding. CEF publishes BGRA frames to a DOM canvas and forwards input;
+Electron uses a DOM webview with native guest input.
+
+Packaged Electron smoke verified translucent app overlays, dropdown click
+isolation, resize/fade under an overlay, retained state through close/reopen,
+page/nested/workbench scrolling, editing and Unicode paste, native select,
+Escape focus return, guest keyboard traversal, browser-to-chat copy/paste and
+light/dark theme rendering. Photos `composition-01-windowed-live.jpg` through
+`composition-07-electron-light.jpg` are in this task's visualization folder.
+
+CEF startup now loads the app and fixture with HTTP 200 and produces native OSR
+frames. Fixed prototype lifecycle/pump handling and matched the existing host's
+mock-keychain policy after a native trace found profile initialization blocked
+in SecItemCopyMatching. The real CEF command-line regression passes for default
+and explicit system-keychain settings. Packaged CEF visual/input checks remain
+pending because the Mac locked. Native IME candidate geometry and canvas
+accessibility are explicitly unimplemented; there is no CEF performance verdict.
+
+Verification: 9 UI tests, 5 Electron tests including real package/signature
+verification, 7 ordinary CEF tests, the separate native keychain regression,
+TypeScript check and prototype production build pass. Both disposable app
+signatures verify. Reproduction steps, evidence boundaries and the provisional
+host assessment are in `prototypes/browser-composition/README.md`.
+
+### 2026-10-27: completed native browser composition pass
+
+Resumed packaged CEF checks after the Mac was unlocked. Verified a live browser
+under translucent app overlays and dropdowns, click isolation, resize/fade,
+retained browser/chat state through pane transitions, independent page/nested/
+workbench scrolling, the painted select popup and light/dark themes. Native
+window close now exits 0. Photos `composition-08-cef-overlay.jpg` through
+`composition-17-cef-composed.jpg` record the CEF checks.
+
+Added real HTTP regressions after macOS accepted sockets retained nonblocking
+mode and could close before Chrome sent its request. Accepted connections now
+use blocking reads on separate workers. Corrected OSR's close callback and
+forwarded Enter's required character event; final native textarea smoke confirms
+newlines and Unicode paste. Removed the failed attempt to reuse GPUI shortcut
+registration in the standalone window, including its AX regression. Temporary
+startup/resize tracing is gone.
+
+The comparison is complete with explicit input gaps: CEF canvas keyboard exit,
+reliable focus handoff, app editing shortcuts, guest accessibility and native IME
+geometry remain unimplemented. These are not claimed as passing. At a fixed
+691x758 frame, the CPU/HTTP path moved about 125.27 MB/s; paused native frame/body
+counters stayed unchanged. Spot CPU/RSS numbers are recorded with debug-build,
+copy/polling and shared-memory accounting caveats in the report. They do not
+establish a general CEF performance limit.
+
+Recommendation: use Electron for the desktop shell while retaining the Rust
+daemon, protocol and theme system. No production migration was performed.
+Verification: 10 CEF tests pass, alongside the unchanged 9 UI and 5 Electron
+tests. The final bundle signature verifies and both corrected native runs closed
+successfully. The native keychain regression remains an explicit runtime check.
+
+### 2026-10-27: opt-in Electron chat/browser UI milestone
+
+Added `apps/mew-electron` around the shared React UI and a headless
+`mew desktop-host` support process. Rust retains daemon supervision, sessions and
+theme resolution/storage. The app uses a stable private origin and isolated
+external browser Session, lazily creates visited guests, and retains them through
+pane/tab/chat navigation. New debug/release recipes package the pinned runtime,
+Rust binary and standalone agent-browser without CEF. The native app stays the
+default; full baseline acceptance remains pending.
+
+Extended the milestone at the user's request to fix browser automation. Exact
+CDP target pinning alone did not route Chromium keyboard input reliably between
+embedded guests. Fill/Press now require an acknowledged per-operation focus
+preflight for the live selected guest. The daemon advertises that capability;
+the client rejects older daemons before registration and waits for fresh session
+confirmation after reconnect. Hidden/stale/revoked pages cannot pass preflight.
+
+Verified real packaged chat turns with the fake provider beside two tabs,
+daemon-to-guest Unicode fills without changing the other guest or chat draft,
+overlays, retained input across pane transitions, keyboard resizing, scrolling,
+light/dark themes and persisted palette choices. App shutdown reaped its children
+and preserved the attached daemon. Photos 22-25 and resource spot sample 26 are
+in this task's visualization artifacts. Pointer dragging was unavailable through
+native automation; native IME and sustained resource acceptance are still open.
+
+Verification: 212 UI, 40 TS client, 29 Node host, nine packaging (including real
+signed builds), five Rust support-process, 126 protocol, 45 client-core, four
+client-local, 19 browser, four daemon browser and one daemon capability Ping
+tests passed. Existing opt-in Chrome tests were not run. Client/UI builds,
+affected all-targets and workspace clippy, formatting, architecture and
+generated-theme checks passed with commit hooks enabled. See
+`apps/mew-electron/README.md` and the updated migration/checklist
+notes for commands, evidence boundaries and the remaining first-release work.
+
+
+## 2026-11-17: Electron and shared web UI integration
+
+Merged the Electron desktop shell branch with current main, preserving the native
+GPUI desktop as the default while the migration checklist remains open. The
+Electron browser rejects daemon-control traffic across aliases and disables
+browsing when a daemon uses port 80 or 443. Scoped prompt receipts, session
+attachment handling, and guest ownership protect conversation and browser state
+across disconnects and rapid switches. The bridge builds without prebuilt web
+assets and release jobs build the production assets before embedding them.
+
+Resolved the terminal selection and light-theme merge conflicts, corrected
+ephemeral daemon probing and work-tab scrolling, and documented the temporary
+config directories required by desktop tests. Verified the isolated full Rust
+workspace suite, workspace clippy and formatting, architecture and theme checks,
+51 TypeScript client tests, 218 UI tests, 30 Electron host tests, production web
+and site builds, and three bridge subprocess tests. The Electron signed-package
+test is opt-in and was not rerun.

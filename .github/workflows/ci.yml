@@ -110,3 +110,9 @@ jobs:
 
       - name: Web-client tests
         run: pnpm --filter @mew/web-client test
+
+      - name: Web UI tests
+        run: pnpm --filter mew-web-ui test
+
+      - name: Electron host tests
+        run: pnpm --filter @mew/electron test:unit

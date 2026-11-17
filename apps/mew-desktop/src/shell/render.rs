@@ -25,7 +25,10 @@ impl Render for DesktopShell {
             }
         }
         self.sync_browser_visibility();
-        if self.browser_panel_open && self.browser_url_focus_requested {
+        if self.work_tabs.active().kind.is_browser()
+            && !self.layout.workbench_collapsed
+            && self.browser_url_focus_requested
+        {
             self.browser_url_focus_requested = false;
             let focus_handle = self.browser_url_focus_handle.clone();
             window.defer(cx, move |window, cx| {
@@ -34,7 +37,6 @@ impl Render for DesktopShell {
         }
         div()
             .flex()
-            .flex_col()
             .size_full()
             .bg(theme_rgb(&self.theme, "background"))
             .text_color(theme_rgb(&self.theme, "text.body"))
@@ -43,39 +45,57 @@ impl Render for DesktopShell {
                 cx.listener(|shell, _, _, _| shell.release_browser_focus()),
             )
             .on_key_down(cx.listener(Self::shell_key_down))
+            .on_mouse_move(cx.listener(Self::composer_scrollbar_mouse_move))
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(Self::composer_scrollbar_mouse_up),
+            )
+            .on_mouse_up_out(
+                gpui::MouseButton::Left,
+                cx.listener(Self::composer_scrollbar_mouse_up),
+            )
             .on_action(cx.listener(Self::action_new_conversation))
             .on_action(cx.listener(Self::action_close_conversation))
+            .on_action(cx.listener(Self::action_new_work_tab))
+            .on_action(cx.listener(Self::action_close_work_tab))
             .on_action(cx.listener(Self::action_toggle_sidebar))
             .on_action(cx.listener(Self::action_toggle_terminal))
             .on_action(cx.listener(Self::action_toggle_workbench))
             .on_action(cx.listener(Self::action_focus_sidebar_search))
             .on_action(cx.listener(Self::action_dismiss_popovers))
-            .child(self.render_topbar(cx))
+            .child(self.render_sidebar(window, cx))
             .child(if self.settings_open {
-                self.render_settings(window, cx)
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .child(self.render_conversation_header(cx))
+                    .child(self.render_settings(window, cx))
+                    .into_any_element()
             } else {
                 div()
                     .flex()
                     .flex_1()
                     .min_h_0()
                     .min_w_0()
-                    .gap(px(SHELL_GUTTER))
-                    .px(px(SHELL_GUTTER))
-                    .pb(px(SHELL_GUTTER))
-                    .child(self.render_sidebar(cx))
                     .child(
                         div()
+                            .id("conversation-pane")
+                            .debug_selector(|| "conversation-pane".into())
                             .flex()
+                            .flex_col()
                             .flex_1()
                             .min_h_0()
                             .min_w_0()
-                            .gap(px(SHELL_GUTTER))
-                            .child(self.render_center(window, cx))
-                            .when(!self.layout.workbench_collapsed, |element| {
-                                element.child(self.render_workbench_divider(cx))
-                            })
-                            .child(self.render_workbench(window, cx)),
+                            .child(self.render_conversation_header(cx))
+                            .child(self.render_center(window, cx)),
                     )
+                    .when(!self.layout.workbench_collapsed, |element| {
+                        element.child(self.render_workbench_divider(cx))
+                    })
+                    .child(self.render_workbench(window, cx))
                     .into_any_element()
             })
             .when_some(self.browser_pump.clone(), |element, pump| {

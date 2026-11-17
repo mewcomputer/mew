@@ -972,6 +972,11 @@ async fn translate_server_message(
         ServerMessage::BrowserPageRegistration { .. }
         | ServerMessage::PromptReceipt { .. }
         | ServerMessage::ModelList { .. }
+        | ServerMessage::AutomationSettings { .. }
+        | ServerMessage::DaemonSettings { .. }
+        | ServerMessage::DaemonSettingsFailed { .. }
+        | ServerMessage::SessionOperationFailed { .. }
+        | ServerMessage::AutoSummaryChanged { .. }
         | ServerMessage::ModelSwitched { .. }
         | ServerMessage::RequestResolved { .. }
         | ServerMessage::SessionCleared
@@ -1120,6 +1125,8 @@ mod tests {
         let pong = ServerMessage::Pong {
             version: "test".into(),
             protocol_version: mew_protocol::PROTOCOL_VERSION,
+            browser_focus_preflight: false,
+            scoped_session_failures: false,
         };
         ws.send(Message::Text(mew_protocol::encode_json(&pong).unwrap()))
             .await
@@ -1178,6 +1185,13 @@ mod tests {
 
             client.attach_session("missing").await.unwrap();
 
+            assert!(matches!(notifications.recv().await,
+                Some(ServerMessage::SessionOperationFailed {
+                    operation: mew_protocol::SessionOperation::Attach,
+                    session_id: Some(session_id),
+                    message,
+                }) if session_id == "missing" && message == "session not found"
+            ));
             assert!(matches!(notifications.recv().await,
                 Some(ServerMessage::Error { message }) if message == "session not found"
             ));

@@ -32,6 +32,7 @@ fn agent_clones_share_pending_browser_registration_and_revocation() {
             page_instance: "page-a".into(),
             cdp_endpoint: "http://127.0.0.1:9223".into(),
             target_id: "0123456789ABCDEF0123456789ABCDEF".into(),
+            focus_url: None,
         },
     );
     assert!(agent.clone().browser_access.revoke("desktop", "page-a"));

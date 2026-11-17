@@ -2,6 +2,19 @@ use ratatui::style::Style;
 
 use crate::inline::StyledRun;
 
+/// TextMate scopes and the shared theme tokens that color them.
+pub const SYNTAX_SCOPES: &[(&str, &str)] = &[
+    ("comment", "syntax.comment"),
+    ("string", "syntax.string"),
+    ("keyword", "syntax.keyword"),
+    ("entity.name.function, support.function", "syntax.function"),
+    ("constant.numeric", "syntax.number"),
+    ("entity.name.type, storage.type", "syntax.type"),
+    ("variable", "syntax.variable"),
+    ("keyword.operator", "syntax.operator"),
+    ("constant", "syntax.constant"),
+];
+
 /// Syntax highlighter for code fences.
 pub trait Highlighter {
     /// Return styled runs for one line of code.

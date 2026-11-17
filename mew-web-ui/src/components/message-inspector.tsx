@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { ChevronRight, ChevronDown } from "lucide-react";
+import { useState, type ReactNode } from "react";
+import { ChevronRight, ChevronDown, Ellipsis } from "lucide-react";
 import {
   Tooltip,
   TooltipContent,
@@ -37,7 +37,7 @@ function formatPct(fraction: number): string {
   return `${(fraction * 100).toFixed(0)}%`;
 }
 
-export function MessageInspector({ manifest }: { manifest: TurnManifest }) {
+export function MessageInspector({ manifest, actions }: { manifest: TurnManifest; actions?: ReactNode }) {
   const [open, setOpen] = useState(false);
 
   const inputTokens = manifest.input_tokens;
@@ -57,21 +57,20 @@ export function MessageInspector({ manifest }: { manifest: TurnManifest }) {
       : null;
 
   return (
-    <div>
-      <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+    <div className="w-full min-w-0">
+      <div role="group" aria-label="Message actions" className="flex min-h-7 flex-wrap items-center gap-1 text-xs text-muted-foreground">
+        {actions}
         <button
           onClick={() => setOpen(!open)}
-          className="flex items-center gap-1 hover:text-foreground transition-colors"
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
           aria-expanded={open}
+          aria-label="Message details"
+          title="Message details"
         >
-          {open ? (
-            <ChevronDown className="size-3" />
-          ) : (
-            <ChevronRight className="size-3" />
-          )}
+          <Ellipsis className="size-3.5" />
         </button>
 
-        {isError ? (
+        {open && (isError ? (
           <span className="text-destructive/70">error · structure below</span>
         ) : (
           <TooltipProvider>
@@ -98,7 +97,7 @@ export function MessageInspector({ manifest }: { manifest: TurnManifest }) {
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
-        )}
+        ))}
       </div>
 
       {open && (

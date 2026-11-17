@@ -1,7 +1,7 @@
 import { createFileRoute, useRouter } from "@tanstack/react-router";
 import { useState, useMemo } from "react";
 import { useSessionStore } from "@/stores/session";
-import { useTheme, THEMES, FONT_CHOICES, type ThemeDef, type FontChoiceId } from "@/lib/theme";
+import { useTheme, FONT_CHOICES, type ThemeDef, type FontChoiceId } from "@/lib/theme";
 import { getClient } from "@/lib/client";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -50,19 +50,19 @@ type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]["id"];
 function SettingsRouteComponent() {
   const router = useRouter();
   const sessionId = useSessionStore((s) => s.sessionId);
-  const { themeId, setThemeId, fontId, setFontId } = useTheme();
+  const { themeId, setThemeId, fontId, setFontId, themes, themeMode, setThemeMode } = useTheme();
   const [query, setQuery] = useState("");
   const [activeSection, setActiveSection] = useState<SettingsSectionId>("general");
 
   const categories = useMemo(() => {
     const map = new Map<string, ThemeDef[]>();
-    for (const t of THEMES) {
+    for (const t of themes) {
       const list = map.get(t.category) ?? [];
       list.push(t);
       map.set(t.category, list);
     }
     return map;
-  }, []);
+  }, [themes]);
 
   const filtered = useMemo(() => {
     const result = new Map<string, ThemeDef[]>();
@@ -84,7 +84,7 @@ function SettingsRouteComponent() {
 
   return (
     <>
-      <div className="flex items-center gap-2 px-3 py-1.5">
+      <div className="mew-conversation-header mew-drag-region flex h-9 shrink-0 items-center gap-2 px-3">
         <Button
           variant="ghost"
           size="icon"
@@ -213,6 +213,13 @@ function SettingsRouteComponent() {
                 No themes match &ldquo;{query}&rdquo;
               </div>
             )}
+
+            <label className="mb-4 flex items-center justify-between gap-4 text-sm">
+              Appearance
+              <select aria-label="Appearance mode" value={themeMode} onChange={(event) => setThemeMode(event.target.value as "system" | "light" | "dark")} className="rounded-md border border-border bg-background px-3 py-2 text-xs">
+                <option value="system">Follow system</option><option value="light">Light</option><option value="dark">Dark</option>
+              </select>
+            </label>
 
             {[...filtered.entries()].map(([category, themes]) => (
               <div key={category}>

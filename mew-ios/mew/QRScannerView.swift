@@ -127,10 +127,6 @@ final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputOb
         else { return }
 
         hasScanned = true
-        // Haptic feedback
-        let generator = UIImpactFeedbackGenerator(style: .medium)
-        generator.impactOccurred()
-
         onScan?(payload)
     }
 

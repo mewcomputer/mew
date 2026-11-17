@@ -8,69 +8,87 @@ mew has an iOS app that connects to daemons on your machines over iroh
 permissions, send prompts — all from your phone.
 
 The app is in early development. It pairs with any number of daemons,
-shows per-daemon session rails with needs-you ordering, attaches to
-sessions with full history replay + live streaming, and supports
+shows a combined chat list with machine filters ordered by recent activity, attaches to
+sessions with recent history replay + live streaming, and supports
 sending prompts, canceling turns, answering permission and ask-user
 requests, and switching models.
 
 ## Pairing with a daemon
 
-1. On your daemon machine, run:
+1. On your daemon machine, start remote access:
 
    ```sh
-   mew pair
+   mew daemon --remote
    ```
 
-   This prints the daemon's Node ID (and a QR code). The daemon waits
-   120 seconds for a phone to connect.
+   In another terminal, run `mew pair`. This prints a QR code containing a
+   single-use invite that expires after 120 seconds.
 
-2. On your phone, open the mew app and tap **+**.
+2. On your phone, open **Machines** from the Chats toolbar, then tap **+**.
 
-3. Paste the Node ID (or `mew001:` payload) into the text field. You
-   can also scan the QR code if your daemon machine displays one.
+3. Scan the QR code, or paste a complete pairing invite into the text field.
+   The invite includes the credential needed to authorize your phone.
 
 4. Name the daemon (e.g. "Homelab", "Work laptop").
 
-5. Tap **Add**. The app dials the daemon over iroh. `mew pair`
-   allowlists your phone's Node ID and closes with "pairing complete."
-   The app then reconnects — the second successful connection means
-   you're paired and live.
+5. Tap **Add**. The app connects over iroh and the daemon authorizes your
+   phone's identity. Later connections use that identity without another invite.
 
 ### Pairing formats
 
 The app accepts:
 
-- **Raw Node ID** — the z-base-32 string from `mew pair`
-- **`mew001:<node_id>`** — versioned payload (future-proof)
-- **`mew001:{"node_id":"…","name":"…"}`** — JSON payload with a
-  suggested name
+- **`computer.mew.mew://<node_id>?token=<token>`** — the invite in the
+  QR code from `mew pair`.
+- **`mew001:{"node_id":"…","name":"…","token":"…"}`** — a
+  versioned payload with an optional suggested name.
+- **Raw Node ID** or **`mew001:<node_id>`** — supported for previously
+  authorized devices and legacy daemons. A Node ID alone cannot authorize a
+  new device on a daemon running with `--remote`.
 
 Unknown version prefixes (e.g. `mew002:`) are rejected with a clear
 error message.
 
 ## What you see
 
-### Daemon list
+### Machines
 
-Each daemon shows a status dot (connected / connecting / unreachable),
-the daemon's version, and an aggregate needs-you badge summing pending
-permissions and questions across all sessions on that daemon.
+Open **Machines** in the Chats toolbar to manage saved connections. Each machine
+shows its connection state and an aggregate needs-you badge summing pending
+permissions and questions across its chats. Machine details include the daemon
+version, connection controls and daemon settings.
 
-### Session rail
+### Chats
 
-Per-daemon session list, sorted by attention:
+The home screen combines conversations from all saved machines. **All** shows
+one chronological timeline; the machine filters narrow it without opening a
+chat. Each row identifies its machine and workspace. The list keeps the chosen
+filter independently of the open chat, including after returning from it.
 
-1. **Needs attention** (amber) — sessions with pending permissions or
-   questions
-2. **Running** (blue) — sessions with an active turn
-3. **Active** (green) — sessions with recent activity
-4. **Idle** (gray) — sessions waiting for input
+Chats appear newest first, grouped into **Today**, **Yesterday**, **Previous 7
+days**, **Previous 30 days**, and **Older**. Message timestamps determine
+recency, with creation time as a fallback. New alerts move their chat up
+immediately. Pending permission/question badges remain visible without
+permanently placing older chats above newer ones. Pins mark chats without
+overriding chronological order.
 
-Swipe actions: pin, archive, delete (with confirmation). Tap **+** to
-create a new session — opens a project picker showing recent projects
-(derived from previous session cwds and `workspace.roots`) plus a
-free-text path input. The daemon validates the chosen cwd before
-creating the session, and rejects bad paths with an error.
+Pull down to refresh, including from an empty list. Returning from a chat also
+refreshes the visible machines' metadata, so newly created chats appear without
+a manual refresh. **Show archived** remains available when every chat is
+archived and follows the selected machine filter.
+
+Previously loaded chats remain visible when a machine disconnects, with explicit
+**Offline** labels. Its filter offers connection details and retry; mutations
+and new chats require a connection. The combined list can still show live chats
+from other machines.
+
+Swipe actions pin, archive, rename and delete (with confirmation) on the row's
+own machine. Tap **New chat** in the toolbar to create a conversation. From
+**All**, choose the machine first; a machine filter uses that machine directly.
+The project picker shows recent projects from that machine's previous chat
+workspaces and `workspace.roots`, plus a path input. The selected machine is
+visible above the picker, with an option to change it. The daemon validates the
+chosen workspace and rejects unavailable paths with an error.
 
 ### Chat view
 
@@ -79,6 +97,9 @@ creating the session, and rejects bad paths with an error.
   inline styles). Reasoning parts render as markdown too. Consecutive
   same-tool calls batch into a single row. Text streams incrementally
   with de-jittered autoscroll.
+- **Older messages**: tap **Load older messages** above the transcript to
+  fetch another page. Loading preserves the current reading position and
+  the live turn state; connection failures offer a retry without clearing chat.
 - **File browser**: tap the **+** button on the chatbar to browse the
   session's working directory. Folders navigate in, files append their
   path to the composer. Defaults to the session cwd (or daemon default).
@@ -98,11 +119,96 @@ creating the session, and rejects bad paths with an error.
 - **Ask-user sheet**: when the agent asks questions, a sheet appears
   with one text field per question. Also un-dismissable while pending.
 
+### Tools and workspace review
+
+Open the chat's **… → Tools** menu to browse tool calls from the loaded
+conversation history. Search by tool name, input, output, or error text.
+Expand a row to inspect its input and result; rows show the tool's state
+and duration when available.
+
+Tap the **Review changes** button in the chat toolbar to load changes from
+that session's workspace on its daemon. The file list includes added,
+modified, deleted, renamed, untracked, and binary files. Tap a text file to
+read line-numbered additions and deletions. Changes are compared with the
+latest commit, including staged and unstaged edits.
+
+Use **Refresh** to read the workspace again. Loading, connection failures,
+and repository errors have distinct states; a failed read does not appear
+as an empty diff. Refresh keeps the previous file list visible, with progress
+or a retry message alongside it. Review replies are scoped to their daemon, session, and
+request, so a late reply cannot replace a newer review.
+
+### Workers and background jobs
+
+Open **… → Workers & jobs** to see active workers and background commands.
+Workers show their current status and tool. Tap a worker to read its
+transcript without leaving the parent conversation, then use **Refresh**
+to fetch newer messages. Completed workers leave the active list; an open
+transcript remains available.
+Refreshing a transcript preserves its messages, including when the read fails.
+
+Worker history currently loads as a single transcript. Transcripts larger
+than 8 MiB return a size-limit error; they do not disconnect the conversation.
+
+Tap a background job to read its captured output. **Load more output**
+loads another chunk, and **Reload output** starts again from the beginning.
+Connection errors preserve output already read. If the daemon could not
+capture all output, the detail view says so. **End of output** marks a
+completed read, including jobs with no captured output.
+
 ### Settings
 
-- **Your Node ID** — copyable. This is what daemons need to allowlist.
-- **Daemon management** — rename or remove paired daemons.
-- **About** — app version.
+**App settings** contains the chat font, this phone's copyable connection
+identity, saved-machine links, and app information. Use the complete invite
+from `mew pair` when pairing, including its authorization credential.
+
+Appearance follows iOS by default, with light and dark overrides. Haptic
+feedback acknowledges accepted messages (including retries), completed turns,
+and requests or errors. Foreground alert preferences control completion,
+turn/delivery errors, and requests, with individual machine mutes. These affect
+banners and alert haptics on this phone while the app is open. Requests and
+conversation activity remain visible when alerts are muted; direct action
+errors still appear. Background events do not replay banners on reopening.
+
+Review readability controls line wrapping, line numbers, and diff text size,
+with a live preview. Diff text also follows iOS text size; these controls do
+not change conversation text. About contains a shareable connection diagnostic
+report with versions and connection states. The report excludes names, Node
+IDs, credentials, raw errors, paths, and conversation content.
+
+Tap the machine name in a chat to open the switcher.
+It shows connection state, the selected machine, and pending requests. Tap
+the information button for that machine's details:
+
+- **Nickname** changes the saved name on this phone.
+- **Connection** offers Retry connection or Pair again when needed.
+- **Auto-title** affects prompts sent through this phone's current connection.
+- **Auto-summary** affects every session and client on the daemon.
+- **New chat defaults** reads the daemon's saved model, provider, persona,
+  thinking and permission policy. Use the open chat's settings as defaults,
+  or reset to the daemon's startup configuration. This affects new chats from
+  every client; existing chats retain their own settings.
+- **Paired devices** lists authorized devices and their access level. Open a
+  device to revoke it, including this phone. Revocation disconnects the device
+  and requires a new pairing invite; conversations remain on the machine.
+- **Advanced** contains the daemon version and copyable Node ID.
+
+Automation controls display values confirmed by the daemon. Update the daemon
+to use these controls and scoped chat-opening errors; older versions show
+settings as unavailable rather than assuming they are off. New-chat defaults
+and paired-device controls require an updated daemon and full-control access.
+They show confirmed results, retain prior values on failure and expire requests
+when connections change. Some token-only remote endpoints cannot list devices;
+the app explicitly reports that limitation. Removing a saved
+connection disconnects this phone and removes its local entry. It keeps the
+daemon's conversations and does not revoke the phone's authorization.
+
+The app restores the last open chat and the list's machine filter separately.
+With no saved location it opens **All**. An offline chat remains selected while
+its machine reconnects. A missing chat returns to the filtered list; a removed
+filter falls back to **All**. Each chat retains its own draft while switching
+within the app. Choosing a machine in the chat's switcher restores that
+machine's remembered chat, with its filter selected behind it.
 
 ## Connection lifecycle
 

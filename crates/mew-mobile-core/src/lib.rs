@@ -4,16 +4,16 @@
 //! mew wire protocol, assembles session state, and emits typed events to
 //! the platform layer via `CoreListener`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
 use iroh::{Endpoint, SecretKey};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tokio_tungstenite::client_async_with_config;
 use tokio_tungstenite::tungstenite::{
     client::ClientRequestBuilder, protocol::WebSocketConfig, Message,
@@ -23,6 +23,7 @@ use tracing::{info, warn};
 use mew_message::{Part, ProviderEventWire};
 use mew_protocol::{ClientMessage, ServerMessage};
 
+pub mod activity;
 pub mod codec;
 pub mod events;
 pub mod registry;
@@ -31,7 +32,7 @@ pub mod state;
 pub use codec::decode_server_message_lenient;
 pub use events::{CoreEvent, CoreListener, DaemonStatus, Decision, TodoItem};
 pub use registry::{DaemonEntry, DaemonId, DaemonRegistry};
-pub use state::{DaemonSnapshot, SessionState};
+pub use state::{AutomationSettings, DaemonSnapshot, SessionState};
 
 /// The ALPN used by the mew daemon's iroh listener.
 pub const MEW_ALPN: &[u8] = b"mew/wire/0";
@@ -44,6 +45,7 @@ pub enum CoreError {
     InvalidSecretKey,
     EndpointBindFailed { reason: String },
     RegistryLoadFailed { reason: String },
+    RegistryUpdateFailed { reason: String },
     InvalidNodeId { reason: String },
     ParseFailed { reason: String },
 }
@@ -57,6 +59,9 @@ impl std::fmt::Display for CoreError {
             }
             CoreError::RegistryLoadFailed { reason } => {
                 write!(f, "failed to load daemon registry: {reason}")
+            }
+            CoreError::RegistryUpdateFailed { reason } => {
+                write!(f, "failed to update saved daemon: {reason}")
             }
             CoreError::InvalidNodeId { reason } => write!(f, "invalid NodeId: {reason}"),
             CoreError::ParseFailed { reason } => write!(f, "parse failed: {reason}"),
@@ -155,17 +160,28 @@ pub struct MobileCore {
     runtime: tokio::runtime::Handle,
 }
 
+struct SentSessionRequest {
+    operation: mew_protocol::SessionOperation,
+    session_id: Option<String>,
+    generation: u64,
+}
+
 /// Shared connection state, accessible from both the background task
 /// (for updates) and the foreground API (for snapshots).
 struct ConnState {
     /// Session requested by the user, retained across reconnects.
     requested_session: Mutex<Option<String>>,
+    session_requests: Mutex<VecDeque<SentSessionRequest>>,
+    legacy_session_error: Mutex<Option<String>>,
     /// Reject commands queued before a reconnect or attachment change.
     attachment_generation: AtomicU64,
+    /// Settings belong to one connection, independently of session attachments.
+    connection_generation: AtomicU64,
     /// SessionReady confirms this generation, even when reattaching the same ID.
     confirmed_generation: AtomicU64,
     /// Accepted prompts awaiting daemon running activity or rejection.
     pending_submissions: Mutex<HashMap<String, u64>>,
+    history_pending: AtomicBool,
     /// Framework-independent daemon/session state used by desktop and mobile
     /// adapters. The UniFFI projection remains alongside it during migration.
     client_state: Mutex<mew_client_core::ClientState>,
@@ -191,6 +207,7 @@ struct ConnState {
     current_persona: Mutex<Option<String>>,
     /// Available personas from last PersonaList.
     available_personas: Mutex<Vec<crate::events::PersonaInfo>>,
+    automation_settings: Mutex<Option<AutomationSettings>>,
     #[cfg(test)]
     shared_events: Mutex<Vec<mew_client_core::ClientEvent>>,
 }
@@ -199,9 +216,13 @@ impl ConnState {
     fn new() -> Self {
         Self {
             requested_session: Mutex::new(None),
+            session_requests: Mutex::new(VecDeque::new()),
+            legacy_session_error: Mutex::new(None),
             attachment_generation: AtomicU64::new(0),
+            connection_generation: AtomicU64::new(0),
             confirmed_generation: AtomicU64::new(u64::MAX),
             pending_submissions: Mutex::new(HashMap::new()),
+            history_pending: AtomicBool::new(false),
             client_state: Mutex::new(mew_client_core::ClientState::default()),
             session_state: Mutex::new(None),
             daemon_version: Mutex::new(None),
@@ -214,14 +235,35 @@ impl ConnState {
             thinking_variant: Mutex::new(None),
             current_persona: Mutex::new(None),
             available_personas: Mutex::new(Vec::new()),
+            automation_settings: Mutex::new(None),
             #[cfg(test)]
             shared_events: Mutex::new(Vec::new()),
         }
     }
 
+    fn record_session_request(&self, message: &ClientMessage, generation: u64) {
+        let (operation, session_id) = match message {
+            ClientMessage::NewSession { .. } => (mew_protocol::SessionOperation::Create, None),
+            ClientMessage::AttachSession { session_id, .. } => (
+                mew_protocol::SessionOperation::Attach,
+                Some(session_id.clone()),
+            ),
+            _ => return,
+        };
+        self.session_requests
+            .lock()
+            .unwrap()
+            .push_back(SentSessionRequest {
+                operation,
+                session_id,
+                generation,
+            });
+    }
+
     fn invalidate_session_commands(&self) {
         self.attachment_generation.fetch_add(1, Ordering::Relaxed);
         self.pending_submissions.lock().unwrap().clear();
+        self.history_pending.store(false, Ordering::Relaxed);
     }
 
     fn release_submission(&self, session_id: &str, generation: u64) {
@@ -259,6 +301,7 @@ struct DaemonConnection {
     tx: mpsc::UnboundedSender<QueuedCommand>,
     /// Shared state between the background task and the foreground API.
     state: Arc<ConnState>,
+    retry: Arc<Notify>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -266,10 +309,44 @@ struct QueuedCommand {
     message: ClientMessage,
     session_id: Option<String>,
     generation: Option<u64>,
+    connection_generation: Option<u64>,
 }
 
 impl QueuedCommand {
+    fn delivery_failure(&self, daemon: &str, title: &str, detail: &str) -> Option<CoreEvent> {
+        match &self.message {
+            ClientMessage::ReadDaemonSettings { request_id }
+            | ClientMessage::SaveSessionDefaults { request_id, .. }
+            | ClientMessage::ResetSessionDefaults { request_id }
+            | ClientMessage::RevokeDevice { request_id, .. } => {
+                Some(CoreEvent::DaemonManagementFailed {
+                    daemon: daemon.into(),
+                    request_id: request_id.clone(),
+                    message: detail.into(),
+                })
+            }
+            _ => self.session_id.as_ref().map(|session_id| CoreEvent::Alert {
+                daemon: daemon.into(),
+                session_id: session_id.clone(),
+                kind: "error".into(),
+                title: title.into(),
+                detail: Some(detail.into()),
+            }),
+        }
+    }
+
     fn ready(&self, state: &ConnState) -> bool {
+        if let Some(generation) = self.connection_generation {
+            let client = state.client_state.lock().unwrap();
+            let valid = client.connection == Some(mew_client_core::ConnectionStatus::Connected)
+                && state.connection_generation.load(Ordering::Relaxed) == generation
+                && (!matches!(self.message, ClientMessage::NewSession { .. })
+                    || self.generation
+                        == Some(state.attachment_generation.load(Ordering::Relaxed)));
+            if !valid {
+                return false;
+            }
+        }
         if let Some(session_id) = &self.session_id {
             let client = state.client_state.lock().unwrap();
             let generation = state.attachment_generation.load(Ordering::Relaxed);
@@ -283,7 +360,8 @@ impl QueuedCommand {
                 && state.requested_session.lock().unwrap().as_ref() == Some(session_id);
         }
         if let ClientMessage::AttachSession { session_id, .. } = &self.message {
-            return state.requested_session.lock().unwrap().as_ref() == Some(session_id);
+            return state.requested_session.lock().unwrap().as_ref() == Some(session_id)
+                && self.generation == Some(state.attachment_generation.load(Ordering::Relaxed));
         }
         true
     }
@@ -291,6 +369,25 @@ impl QueuedCommand {
 
 impl DaemonConnection {
     fn send(&self, message: ClientMessage) -> bool {
+        let connection_generation = if matches!(
+            &message,
+            ClientMessage::ReadAutomationSettings
+                | ClientMessage::SetAutoTitle { .. }
+                | ClientMessage::SetAutoSummary { .. }
+                | ClientMessage::ReadDaemonSettings { .. }
+                | ClientMessage::ResetSessionDefaults { .. }
+                | ClientMessage::RevokeDevice { .. }
+                | ClientMessage::SaveSessionDefaults { .. }
+                | ClientMessage::NewSession { .. }
+        ) {
+            let client = self.state.client_state.lock().unwrap();
+            if client.connection != Some(mew_client_core::ConnectionStatus::Connected) {
+                return false;
+            }
+            Some(self.state.connection_generation.load(Ordering::Relaxed))
+        } else {
+            None
+        };
         let session_scoped = matches!(
             &message,
             ClientMessage::Cancel
@@ -303,8 +400,11 @@ impl DaemonConnection {
                 | ClientMessage::SetThinkingVariant { .. }
                 | ClientMessage::ListPersonas
                 | ClientMessage::SwitchPersona { .. }
-                | ClientMessage::SetAutoTitle { .. }
-                | ClientMessage::SetAutoSummary { .. }
+                | ClientMessage::ReadSessionDiff { .. }
+                | ClientMessage::LoadSessionHistory { .. }
+                | ClientMessage::ReadSubagentHistory { .. }
+                | ClientMessage::ReadJobOutput { .. }
+                | ClientMessage::SaveSessionDefaults { .. }
         );
         let (session_id, generation) = if session_scoped {
             let client = self.state.client_state.lock().unwrap();
@@ -314,10 +414,24 @@ impl DaemonConnection {
                 || client.connection != Some(mew_client_core::ConnectionStatus::Connected)
                 || session_id.is_none()
                 || session_id != *self.state.requested_session.lock().unwrap()
+                || matches!(&message, ClientMessage::ReadSessionDiff { session_id: requested, .. }
+                    | ClientMessage::LoadSessionHistory { session_id: requested, .. }
+                    | ClientMessage::ReadSubagentHistory { session_id: requested, .. }
+                    | ClientMessage::ReadJobOutput { session_id: requested, .. }
+                    | ClientMessage::SaveSessionDefaults { session_id: requested, .. }
+                    if session_id.as_ref() != Some(requested))
             {
                 return false;
             }
             (session_id, Some(generation))
+        } else if matches!(
+            &message,
+            ClientMessage::NewSession { .. } | ClientMessage::AttachSession { .. }
+        ) {
+            (
+                None,
+                Some(self.state.attachment_generation.load(Ordering::Relaxed)),
+            )
         } else {
             (None, None)
         };
@@ -326,6 +440,7 @@ impl DaemonConnection {
                 message,
                 session_id,
                 generation,
+                connection_generation,
             })
             .is_ok()
     }
@@ -406,6 +521,38 @@ impl MobileCore {
         self.registry.lock().unwrap().list()
     }
 
+    /// Persist a local nickname without contacting or reconnecting the daemon.
+    pub fn rename_daemon(&self, id: DaemonId, name: String) -> Result<(), CoreError> {
+        self.registry
+            .lock()
+            .unwrap()
+            .rename(&id, name)
+            .map_err(|error| CoreError::RegistryUpdateFailed {
+                reason: format!("{error:#}"),
+            })
+    }
+
+    /// Retry a saved daemon immediately while retaining its requested session.
+    pub fn retry_connection(&self, id: DaemonId) -> bool {
+        if self.registry.lock().unwrap().get(&id).is_none() {
+            return false;
+        }
+        {
+            let connections = self.connections.lock().unwrap();
+            if let Some(connection) = connections.get(&id.node_id) {
+                if matches!(
+                    connection.state.client_state.lock().unwrap().connection,
+                    Some(mew_client_core::ConnectionStatus::Backoff { .. })
+                ) {
+                    connection.retry.notify_one();
+                }
+                return true;
+            }
+        }
+        self.connect(id);
+        true
+    }
+
     /// Connect to a daemon. Connection progress is reported via events.
     pub fn connect(&self, id: DaemonId) {
         let entry = match self.registry.lock().unwrap().get(&id) {
@@ -419,6 +566,7 @@ impl MobileCore {
         }
         let (tx, rx) = mpsc::unbounded_channel::<QueuedCommand>();
         let conn_state = Arc::new(ConnState::new());
+        let retry = Arc::new(Notify::new());
 
         let endpoint = self.endpoint.clone();
         let daemon_id = id.node_id.clone();
@@ -434,6 +582,7 @@ impl MobileCore {
 
         // Spawn the background connection task.
         let conn_state_for_task = conn_state.clone();
+        let retry_for_task = retry.clone();
         let task = self.runtime.spawn(async move {
             // Reconnect loop with exponential backoff (spec: 1s, 2s, 4s… cap 30s).
             let mut attempt: u32 = 0;
@@ -479,8 +628,10 @@ impl MobileCore {
                 }
 
                 info!(daemon = %daemon_id, attempt, delay_ms = delay.as_millis(), "reconnecting after backoff");
-                tokio::time::sleep(delay).await;
-                attempt += 1;
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => attempt += 1,
+                    _ = retry_for_task.notified() => attempt = 0,
+                }
             }
 
             conn_state_for_task.push_shared_event(
@@ -502,6 +653,7 @@ impl MobileCore {
             DaemonConnection {
                 tx,
                 state: conn_state,
+                retry,
                 task,
             },
         );
@@ -529,6 +681,12 @@ impl MobileCore {
     pub fn attach(&self, id: DaemonId, session_id: String) {
         let conns = self.connections.lock().unwrap();
         if let Some(conn) = conns.get(&id.node_id) {
+            if conn.state.client_state.lock().unwrap().connection
+                == Some(mew_client_core::ConnectionStatus::Connected)
+                && conn.state.requested_session.lock().unwrap().as_ref() == Some(&session_id)
+            {
+                return;
+            }
             conn.state.invalidate_session_commands();
             *conn.state.requested_session.lock().unwrap() = Some(session_id.clone());
             let _ = conn.send(ClientMessage::AttachSession {
@@ -572,6 +730,7 @@ impl MobileCore {
                 },
                 session_id: Some(session_id.clone()),
                 generation: Some(generation),
+                connection_generation: None,
             })
             .is_err()
         {
@@ -661,13 +820,27 @@ impl MobileCore {
     /// Create a new session on a daemon.
     pub fn new_session(&self, id: DaemonId, cwd: Option<String>) {
         let conns = self.connections.lock().unwrap();
-        if let Some(conn) = conns.get(&id.node_id) {
+        let accepted = if let Some(conn) = conns.get(&id.node_id).filter(|conn| {
+            conn.state.client_state.lock().unwrap().connection
+                == Some(mew_client_core::ConnectionStatus::Connected)
+        }) {
             conn.state.invalidate_session_commands();
             *conn.state.requested_session.lock().unwrap() = None;
-            let _ = conn.send(ClientMessage::NewSession {
+            conn.send(ClientMessage::NewSession {
                 cwd,
                 client_kind: mew_protocol::ClientKind::Mobile,
-            });
+            })
+        } else {
+            false
+        };
+        drop(conns);
+        if !accepted {
+            if let Some(listener) = self.listener.lock().unwrap().clone() {
+                listener.on_event(CoreEvent::SessionCreationFailed {
+                    daemon: id.node_id,
+                    message: "Connect to this machine before starting a conversation.".into(),
+                });
+            }
         }
     }
 
@@ -687,6 +860,51 @@ impl MobileCore {
         if let Some(conn) = conns.get(&id.node_id) {
             let _ = conn.send(ClientMessage::ListDir { session_id, path });
         }
+    }
+
+    /// Read changes from the confirmed session's daemon workspace.
+    /// Returns false when the attachment cannot accept the request.
+    pub fn read_session_diff(&self, id: DaemonId, session_id: String, request_id: String) -> bool {
+        self.connections
+            .lock()
+            .unwrap()
+            .get(&id.node_id)
+            .is_some_and(|conn| {
+                conn.send(ClientMessage::ReadSessionDiff {
+                    session_id,
+                    request_id,
+                })
+            })
+    }
+
+    /// Request one older page without redirecting an unconfirmed attachment.
+    pub fn load_older_history(&self, id: DaemonId, session_id: String) -> bool {
+        let conns = self.connections.lock().unwrap();
+        let Some(conn) = conns.get(&id.node_id) else {
+            return false;
+        };
+        let before = conn
+            .state
+            .client_state
+            .lock()
+            .unwrap()
+            .session(&session_id)
+            .and_then(|session| session.history_before);
+        let Some(before) = before.filter(|before| *before > 0) else {
+            return false;
+        };
+        if conn.state.history_pending.swap(true, Ordering::Relaxed) {
+            return false;
+        }
+        if !conn.send(ClientMessage::LoadSessionHistory {
+            session_id,
+            before,
+            limit: mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT,
+        }) {
+            conn.state.history_pending.store(false, Ordering::Relaxed);
+            return false;
+        }
+        true
     }
 
     /// List available models from the daemon.
@@ -748,20 +966,79 @@ impl MobileCore {
         }
     }
 
-    /// Enable or disable auto-generated session titles.
-    pub fn set_auto_title(&self, id: DaemonId, enabled: bool) {
-        let conns = self.connections.lock().unwrap();
-        if let Some(conn) = conns.get(&id.node_id) {
-            let _ = conn.send(ClientMessage::SetAutoTitle { enabled });
-        }
+    /// Read automation values without requiring an attached session.
+    pub fn read_automation_settings(&self, id: DaemonId) -> bool {
+        self.connections
+            .lock()
+            .unwrap()
+            .get(&id.node_id)
+            .is_some_and(|conn| conn.send(ClientMessage::ReadAutomationSettings))
     }
 
-    /// Enable or disable idle session summaries.
-    pub fn set_auto_summary(&self, id: DaemonId, enabled: bool) {
-        let conns = self.connections.lock().unwrap();
-        if let Some(conn) = conns.get(&id.node_id) {
-            let _ = conn.send(ClientMessage::SetAutoSummary { enabled });
-        }
+    /// Read daemon-owned defaults and authorized devices without attaching a chat.
+    pub fn read_daemon_settings(&self, id: DaemonId, request_id: String) -> bool {
+        self.connections
+            .lock()
+            .unwrap()
+            .get(&id.node_id)
+            .is_some_and(|conn| conn.send(ClientMessage::ReadDaemonSettings { request_id }))
+    }
+
+    pub fn save_session_defaults(
+        &self,
+        id: DaemonId,
+        session_id: String,
+        request_id: String,
+    ) -> bool {
+        self.connections
+            .lock()
+            .unwrap()
+            .get(&id.node_id)
+            .is_some_and(|conn| {
+                conn.send(ClientMessage::SaveSessionDefaults {
+                    session_id,
+                    request_id,
+                })
+            })
+    }
+
+    pub fn reset_session_defaults(&self, id: DaemonId, request_id: String) -> bool {
+        self.connections
+            .lock()
+            .unwrap()
+            .get(&id.node_id)
+            .is_some_and(|conn| conn.send(ClientMessage::ResetSessionDefaults { request_id }))
+    }
+
+    pub fn revoke_device(&self, id: DaemonId, device_id: String, request_id: String) -> bool {
+        self.connections
+            .lock()
+            .unwrap()
+            .get(&id.node_id)
+            .is_some_and(|conn| {
+                conn.send(ClientMessage::RevokeDevice {
+                    device_id,
+                    request_id,
+                })
+            })
+    }
+
+    /// Enable or disable titles for prompts from this connection.
+    pub fn set_auto_title(&self, id: DaemonId, enabled: bool) -> bool {
+        self.connections
+            .lock()
+            .unwrap()
+            .get(&id.node_id)
+            .is_some_and(|conn| conn.send(ClientMessage::SetAutoTitle { enabled }))
+    }
+
+    /// Enable or disable idle summaries across the daemon.
+    pub fn set_auto_summary(&self, id: DaemonId, enabled: bool) -> bool {
+        self.connections
+            .lock()
+            .unwrap()
+            .get(&id.node_id)
+            .is_some_and(|conn| conn.send(ClientMessage::SetAutoSummary { enabled }))
     }
 
     /// Rename a session.
@@ -843,6 +1120,7 @@ impl MobileCore {
             thinking_variant,
             current_persona,
             available_personas,
+            automation_settings: *conn.state.automation_settings.lock().unwrap(),
             ..Default::default()
         };
         if let Some(ss) = session_state.as_ref() {
@@ -858,6 +1136,9 @@ impl MobileCore {
                 output_tokens: ss.output_tokens,
                 turns: ss.turns,
                 todos: ss.todos.clone(),
+                history_before: ss.shared.history_before.map(|cursor| cursor as u64),
+                subagents: ss.shared.subagents.iter().map(Into::into).collect(),
+                jobs: ss.shared.jobs.iter().map(Into::into).collect(),
             });
             let client = conn.state.client_state.lock().unwrap();
             if let Some(session) = client.session(&ss.session_id) {
@@ -972,8 +1253,14 @@ fn set_shared_connection_status(
 ) {
     let mut client = conn_state.client_state.lock().unwrap();
     if status != mew_client_core::ConnectionStatus::Connected {
+        conn_state.session_requests.lock().unwrap().clear();
+        *conn_state.legacy_session_error.lock().unwrap() = None;
+        conn_state
+            .connection_generation
+            .fetch_add(1, Ordering::Relaxed);
         conn_state.invalidate_session_commands();
         client.attached_session = None;
+        *conn_state.automation_settings.lock().unwrap() = None;
     }
     let event = client.set_connection_status(status);
     drop(client);
@@ -1095,11 +1382,14 @@ async fn connect_and_run(
     // daemon replays the newest history page (spec: reconnect re-attach).
     let reattach = conn_state.requested_session.lock().unwrap().clone();
     if let Some(session_id) = reattach {
-        let attach_msg = mew_protocol::encode_json(&ClientMessage::AttachSession {
+        let command = ClientMessage::AttachSession {
             session_id,
             client_kind: mew_protocol::ClientKind::Mobile,
-        })?;
+        };
+        let generation = conn_state.attachment_generation.load(Ordering::Relaxed);
+        let attach_msg = mew_protocol::encode_json(&command)?;
         ws.send(Message::Text(attach_msg)).await?;
+        conn_state.record_session_request(&command, generation);
     }
 
     let mut last_sent_prompt: Option<String> = None;
@@ -1123,27 +1413,29 @@ async fn connect_and_run(
                             if let (Some(session_id), Some(generation)) = (&queued.session_id, queued.generation) {
                                 if matches!(queued.message, ClientMessage::Prompt { .. }) { conn_state.release_submission(session_id, generation); }
                             }
-                            if let Some(session_id) = queued.session_id {
-                                emit_event(CoreEvent::Alert { daemon: daemon_id.to_string(), session_id, kind: "error".into(), title: "Message was not sent".into(), detail: Some("The session connection changed. Reattach and retry.".into()) });
+                            if let Some(event) = queued.delivery_failure(daemon_id, "Message was not sent", "The session connection changed. Reattach and retry.") {
+                                emit_event(event);
                             }
                             continue;
                         }
-                        let client_msg = queued.message;
+                        let client_msg = &queued.message;
                         // Track last sent prompt for UserMessage dedup.
-                        if let ClientMessage::Prompt { text, .. } = &client_msg {
+                        if let ClientMessage::Prompt { text, .. } = client_msg {
                             last_sent_prompt = Some(text.clone());
                         }
-                        let json = mew_protocol::encode_json(&client_msg)?;
+                        let json = mew_protocol::encode_json(client_msg)?;
                         if ws.send(Message::Text(json)).await.is_err() {
                             if let (Some(session_id), Some(generation)) = (&queued.session_id, queued.generation) {
                                 if matches!(client_msg, ClientMessage::Prompt { .. }) { conn_state.release_submission(session_id, generation); }
                             }
-                            if let Some(session_id) = queued.session_id {
-                                emit_event(CoreEvent::Alert { daemon: daemon_id.to_string(), session_id, kind: "error".into(), title: "Message delivery interrupted".into(), detail: Some("Check the session history after reconnecting before retrying.".into()) });
+                            if let Some(event) = queued.delivery_failure(daemon_id, "Message delivery interrupted", "Check the session history after reconnecting before retrying.") {
+                                emit_event(event);
                             }
                             drop_reason = Some("failed to send message to daemon".to_string());
                             break;
                         }
+                        conn_state.record_session_request(client_msg,
+                            queued.generation.unwrap_or_else(|| conn_state.attachment_generation.load(Ordering::Relaxed)));
                     }
                     None => { user_disconnected = true; break; }, // Channel closed — daemon removed.
                 }
@@ -1167,6 +1459,8 @@ async fn connect_and_run(
                 let text = match ws_msg {
                     Message::Text(t) => t.to_string(),
                     Message::Close(_) => {
+                        // tungstenite queues the close reply while reading it.
+                        let _ = tokio::time::timeout(Duration::from_millis(100), ws.flush()).await;
                         info!(daemon = %daemon_id, "connection closed by daemon");
                         drop_reason = Some("closed by daemon".to_string());
                         break;
@@ -1241,6 +1535,147 @@ fn translate_message(
     use mew_protocol::ServerMessage;
     let d = daemon_id.to_string();
     let mut events = Vec::new();
+    if let ServerMessage::Error { message } = msg {
+        // Older daemons cannot correlate unknown management commands. Let the
+        // settings request expire without reducing their decoder error as a
+        // failure of the attached chat.
+        if message
+            .strip_prefix("invalid message: unknown variant `")
+            .and_then(|rest| rest.split_once('`'))
+            .is_some_and(|(command, _)| {
+                matches!(
+                    command,
+                    "read_daemon_settings"
+                        | "save_session_defaults"
+                        | "reset_session_defaults"
+                        | "revoke_device"
+                )
+            })
+        {
+            return events;
+        }
+        let mut legacy_error = conn_state.legacy_session_error.lock().unwrap();
+        if legacy_error.as_ref() == Some(message) {
+            *legacy_error = None;
+            return events;
+        }
+    }
+    if let ServerMessage::SessionOperationFailed {
+        operation,
+        session_id,
+        message,
+    } = msg
+    {
+        *conn_state.legacy_session_error.lock().unwrap() = Some(message.clone());
+        let mut requests = conn_state.session_requests.lock().unwrap();
+        let matches = requests.front().is_some_and(|request| {
+            request.operation == *operation && request.session_id == *session_id
+        });
+        if !matches {
+            return events;
+        }
+        let request = requests.pop_front().unwrap();
+        drop(requests);
+        if request.generation != conn_state.attachment_generation.load(Ordering::Relaxed) {
+            return events;
+        }
+        let attached = conn_state
+            .client_state
+            .lock()
+            .unwrap()
+            .attached_session
+            .clone();
+        *conn_state.requested_session.lock().unwrap() = attached.clone();
+        conn_state.confirmed_generation.store(
+            if attached.is_some() {
+                request.generation
+            } else {
+                u64::MAX
+            },
+            Ordering::Relaxed,
+        );
+        match (operation, session_id) {
+            (mew_protocol::SessionOperation::Create, None) => {
+                events.push(CoreEvent::SessionCreationFailed {
+                    daemon: d,
+                    message: message.clone(),
+                })
+            }
+            (mew_protocol::SessionOperation::Attach, Some(session_id)) => {
+                events.push(CoreEvent::SessionAttachmentFailed {
+                    daemon: d,
+                    session_id: session_id.clone(),
+                    message: message.clone(),
+                })
+            }
+            _ => {}
+        }
+        return events;
+    }
+    let mut created_session = false;
+    if let ServerMessage::SessionReady { session_id, .. } = msg {
+        let mut requests = conn_state.session_requests.lock().unwrap();
+        if let Some(request) = requests.front() {
+            if request.operation == mew_protocol::SessionOperation::Attach
+                && request.session_id.as_ref() != Some(session_id)
+            {
+                return events;
+            }
+            let request = requests.pop_front().unwrap();
+            if request.generation != conn_state.attachment_generation.load(Ordering::Relaxed) {
+                return events;
+            }
+            created_session = request.operation == mew_protocol::SessionOperation::Create;
+        } else if conn_state
+            .requested_session
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|requested| requested != session_id)
+        {
+            return events;
+        }
+    }
+    if let ServerMessage::SessionHistoryPage {
+        session_id,
+        next_cursor,
+        replace,
+        ..
+    } = msg
+    {
+        let client = conn_state.client_state.lock().unwrap();
+        let before = client
+            .session(session_id)
+            .and_then(|session| session.history_before);
+        if client.attached_session.as_ref() != Some(session_id)
+            || conn_state.requested_session.lock().unwrap().as_ref() != Some(session_id)
+            || conn_state.confirmed_generation.load(Ordering::Relaxed)
+                != conn_state.attachment_generation.load(Ordering::Relaxed)
+            || (!replace
+                && (before.is_none()
+                    || next_cursor.is_some_and(|next| before.is_some_and(|before| next >= before))
+                    || !conn_state.history_pending.swap(false, Ordering::Relaxed)))
+        {
+            return events;
+        }
+    }
+    if matches!(msg, ServerMessage::SessionHistory { .. }) {
+        let client = conn_state.client_state.lock().unwrap();
+        if client.attached_session != *conn_state.requested_session.lock().unwrap()
+            || conn_state.confirmed_generation.load(Ordering::Relaxed)
+                != conn_state.attachment_generation.load(Ordering::Relaxed)
+        {
+            return events;
+        }
+    }
+    if matches!(
+        msg,
+        ServerMessage::SessionReady { .. }
+            | ServerMessage::Error { .. }
+            | ServerMessage::ErrorEvent { .. }
+    ) {
+        conn_state.history_pending.store(false, Ordering::Relaxed);
+    }
     if matches!(msg, ServerMessage::SessionReady { .. }) {
         conn_state
             .confirmed_generation
@@ -1327,6 +1762,12 @@ fn translate_message(
                 if let Some(ss) = conn_state.session_state.lock().unwrap().as_mut() {
                     ss.permission_mode = Some(pm.clone());
                 }
+            }
+            if created_session {
+                events.push(CoreEvent::SessionCreated {
+                    daemon: d.clone(),
+                    session_id: session_id.clone(),
+                });
             }
             events.push(CoreEvent::SessionReady {
                 daemon: d.clone(),
@@ -1435,7 +1876,11 @@ fn translate_message(
             }
         }
 
-        ServerMessage::SessionHistoryPage { session_id, .. } => {
+        ServerMessage::SessionHistoryPage {
+            session_id,
+            replace,
+            ..
+        } => {
             let attached = conn_state
                 .client_state
                 .lock()
@@ -1443,9 +1888,16 @@ fn translate_message(
                 .attached_session
                 .clone();
             if attached.as_deref() == Some(session_id) {
-                events.push(CoreEvent::SessionReloaded {
-                    daemon: d,
-                    session_id: session_id.clone(),
+                events.push(if *replace {
+                    CoreEvent::SessionReloaded {
+                        daemon: d,
+                        session_id: session_id.clone(),
+                    }
+                } else {
+                    CoreEvent::HistoryExtended {
+                        daemon: d,
+                        session_id: session_id.clone(),
+                    }
                 });
             }
         }
@@ -1531,7 +1983,7 @@ fn translate_message(
                                 let (input_str, output, error, time_start, time_end) =
                                     state::tool_state_fields(&tcp.state);
                                 p.tool_name = Some(tcp.tool_name.clone());
-                                p.tool_state = Some(format!("{:?}", tcp.state).to_lowercase());
+                                p.tool_state = Some(state::tool_state_name(&tcp.state).into());
                                 p.tool_input = input_str;
                                 p.tool_output = output;
                                 p.tool_error = error;
@@ -1697,6 +2149,79 @@ fn translate_message(
             });
         }
 
+        ServerMessage::AutomationSettings {
+            auto_title_enabled,
+            auto_summary_enabled,
+        } => {
+            let settings = AutomationSettings {
+                auto_title_enabled: *auto_title_enabled,
+                auto_summary_enabled: *auto_summary_enabled,
+            };
+            *conn_state.automation_settings.lock().unwrap() = Some(settings);
+            events.push(CoreEvent::AutomationSettings {
+                daemon: d,
+                settings,
+            });
+        }
+        ServerMessage::AutoSummaryChanged { enabled } => {
+            if let Some(settings) = conn_state.automation_settings.lock().unwrap().as_mut() {
+                settings.auto_summary_enabled = *enabled;
+            }
+            events.push(CoreEvent::AutoSummaryChanged {
+                daemon: d,
+                enabled: *enabled,
+            });
+        }
+
+        ServerMessage::DaemonSettings {
+            request_id,
+            defaults,
+            devices,
+        } => {
+            events.push(CoreEvent::DaemonManagementSettings {
+                daemon: d,
+                request_id: request_id.clone(),
+                settings: events::DaemonManagementSettings {
+                    defaults: defaults.as_ref().map(|policy| events::NewChatDefaults {
+                        model: policy.model.clone(),
+                        provider: policy.provider.clone(),
+                        persona: policy.persona.clone(),
+                        thinking_variant: policy.thinking_variant.clone(),
+                        permission_mode: policy.permission_mode.clone(),
+                    }),
+                    devices: devices.as_ref().map(|devices| {
+                        devices
+                            .iter()
+                            .map(|device| events::PairedDevice {
+                                id: device.id.clone(),
+                                name: device.name.clone(),
+                                node_id: device.node_id.clone(),
+                                scope: device.scope.map(|scope| {
+                                    match scope {
+                                        mew_protocol::RemoteScope::Observe => "observe",
+                                        mew_protocol::RemoteScope::Collaborate => "collaborate",
+                                        mew_protocol::RemoteScope::Control => "control",
+                                    }
+                                    .to_owned()
+                                }),
+                                paired_at: device.paired_at,
+                            })
+                            .collect()
+                    }),
+                },
+            });
+        }
+        ServerMessage::DaemonSettingsFailed {
+            request_id,
+            message,
+        } => {
+            events.push(CoreEvent::DaemonManagementFailed {
+                daemon: d,
+                request_id: request_id.clone(),
+                message: message.clone(),
+            });
+        }
+
         ServerMessage::ModelList { models } => {
             let summaries = models
                 .iter()
@@ -1856,9 +2381,77 @@ fn translate_message(
             });
         }
 
+        ServerMessage::SessionDiff {
+            session_id,
+            request_id,
+            files,
+        } => {
+            use events::{ReviewFile, ReviewFileStatus, ReviewHunk, ReviewLine, ReviewLineKind};
+            let files = files
+                .iter()
+                .map(|file| ReviewFile {
+                    path: file.path.clone(),
+                    old_path: file.old_path.clone(),
+                    status: match file.status {
+                        mew_diff::FileStatus::Added => ReviewFileStatus::Added,
+                        mew_diff::FileStatus::Modified => ReviewFileStatus::Modified,
+                        mew_diff::FileStatus::Deleted => ReviewFileStatus::Deleted,
+                        mew_diff::FileStatus::Renamed => ReviewFileStatus::Renamed,
+                        mew_diff::FileStatus::Unchanged => ReviewFileStatus::Unchanged,
+                        mew_diff::FileStatus::Binary => ReviewFileStatus::Binary,
+                    },
+                    hunks: file
+                        .hunks
+                        .iter()
+                        .map(|hunk| ReviewHunk {
+                            old_start: hunk.old_start as u64,
+                            old_count: hunk.old_count as u64,
+                            new_start: hunk.new_start as u64,
+                            new_count: hunk.new_count as u64,
+                            lines: hunk
+                                .lines
+                                .iter()
+                                .map(|line| ReviewLine {
+                                    kind: match line.kind {
+                                        mew_diff::LineKind::Context => ReviewLineKind::Context,
+                                        mew_diff::LineKind::Addition => ReviewLineKind::Addition,
+                                        mew_diff::LineKind::Deletion => ReviewLineKind::Deletion,
+                                    },
+                                    old_line: line.old_line.map(|line| line as u64),
+                                    new_line: line.new_line.map(|line| line as u64),
+                                    text: line.text.clone(),
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                    added: file.added as u64,
+                    removed: file.removed as u64,
+                })
+                .collect();
+            events.push(CoreEvent::ReviewLoaded {
+                daemon: d,
+                session_id: session_id.clone(),
+                request_id: request_id.clone(),
+                files,
+            });
+        }
+        ServerMessage::SessionDiffError {
+            session_id,
+            request_id,
+            message,
+        } => {
+            events.push(CoreEvent::ReviewFailed {
+                daemon: d,
+                session_id: session_id.clone(),
+                request_id: request_id.clone(),
+                message: message.clone(),
+            });
+        }
+
         // Explicit arms for unhandled variants — no silent catch-all.
         // New ServerMessage variants will cause a compile error here,
         // forcing a decision about how to handle them.
+        ServerMessage::SessionOperationFailed { .. } => {}
         ServerMessage::Error { message } => {
             events.push(CoreEvent::Alert {
                 daemon: d.clone(),
@@ -1927,6 +2520,62 @@ fn translate_message(
             });
         }
 
+        ServerMessage::SubagentHistory {
+            session_id,
+            child_session_id,
+            request_id,
+            messages,
+            error,
+        } => {
+            events.push(CoreEvent::WorkerHistoryLoaded {
+                daemon: d,
+                session_id: session_id.clone(),
+                child_session_id: child_session_id.clone(),
+                request_id: request_id.clone(),
+                messages: messages
+                    .iter()
+                    .filter_map(state::to_mobile_message)
+                    .collect(),
+                error: error.clone(),
+            });
+        }
+        ServerMessage::JobOutput {
+            session_id,
+            job_id,
+            request_id,
+            offset,
+            next_offset,
+            output,
+            done,
+            incomplete,
+        } => {
+            events.push(CoreEvent::JobOutputLoaded {
+                daemon: d,
+                session_id: session_id.clone(),
+                job_id: job_id.clone(),
+                request_id: request_id.clone(),
+                offset: *offset,
+                next_offset: *next_offset,
+                output: output.clone(),
+                done: *done,
+                incomplete: *incomplete,
+            });
+        }
+        ServerMessage::JobOutputError {
+            session_id,
+            job_id,
+            request_id,
+            message,
+        } => {
+            events.push(CoreEvent::JobOutputFailed {
+                daemon: d,
+                session_id: session_id.clone(),
+                job_id: job_id.clone(),
+                request_id: request_id.clone(),
+                message: message.clone(),
+            });
+        }
+
         // These variants are not yet translated to CoreEvent — they are
         // intentionally no-ops for now. Adding a new ServerMessage variant
         // here forces a compile-time decision.
@@ -1971,11 +2620,6 @@ fn translate_message(
         | ServerMessage::FilePreview { .. }
         | ServerMessage::FilesystemDirListing { .. }
         | ServerMessage::GitStatusResult { .. }
-        | ServerMessage::SessionDiff { .. }
-        | ServerMessage::SessionDiffError { .. }
-        | ServerMessage::SubagentHistory { .. }
-        | ServerMessage::JobOutput { .. }
-        | ServerMessage::JobOutputError { .. }
         | ServerMessage::TodoUpdated { .. }
         | ServerMessage::TodoUpdateError { .. }
         | ServerMessage::BrowserPageRegistration { .. }
@@ -1996,6 +2640,30 @@ fn translate_message(
 
     if !matches!(msg, ServerMessage::Provider { .. }) {
         sync_mobile_session_from_client_state(conn_state);
+    }
+    let activity_session = match msg {
+        ServerMessage::SessionActivitySnapshot { session_id, .. } => Some(session_id.clone()),
+        ServerMessage::SubagentStart { .. }
+        | ServerMessage::SubagentStatus { .. }
+        | ServerMessage::SubagentEnd { .. }
+        | ServerMessage::JobUpdate { .. } => conn_state
+            .client_state
+            .lock()
+            .unwrap()
+            .attached_session
+            .clone(),
+        _ => None,
+    };
+    if let Some(session_id) = activity_session {
+        let client = conn_state.client_state.lock().unwrap();
+        if let Some(session) = client.session(&session_id) {
+            events.push(CoreEvent::ActivityUpdated {
+                daemon: daemon_id.into(),
+                session_id,
+                subagents: session.subagents.iter().map(Into::into).collect(),
+                jobs: session.jobs.iter().map(Into::into).collect(),
+            });
+        }
     }
     if matches!(msg, ServerMessage::SessionReady { .. }) {
         conn_state.confirmed_generation.store(
@@ -2094,6 +2762,851 @@ fn rand_jitter() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn daemon_management_is_connection_scoped_and_defaults_require_the_exact_chat() {
+        let (core, id, state, mut rx) = connected_core().await;
+        assert!(!core.save_session_defaults(id.clone(), "other".into(), "wrong".into()));
+        assert!(core.read_daemon_settings(id.clone(), "read".into()));
+        assert!(core.reset_session_defaults(id.clone(), "reset".into()));
+        assert!(core.revoke_device(id.clone(), "device".into(), "revoke".into()));
+        let queued = (0..3).map(|_| rx.try_recv().unwrap()).collect::<Vec<_>>();
+        assert!(queued.iter().all(|command| command.ready(&state)));
+        state.connection_generation.fetch_add(1, Ordering::Relaxed);
+        assert!(queued.iter().all(|command| !command.ready(&state)));
+        state.client_state.lock().unwrap().connection =
+            Some(mew_client_core::ConnectionStatus::Disconnected);
+        assert!(!core.read_daemon_settings(id.clone(), "offline".into()));
+        assert!(!core.reset_session_defaults(id.clone(), "offline".into()));
+        assert!(!core.revoke_device(id, "device".into(), "offline".into()));
+    }
+
+    #[tokio::test]
+    async fn defaults_commands_expire_when_the_attached_chat_changes() {
+        let (core, id, state, mut rx) = connected_core().await;
+        let session = state
+            .client_state
+            .lock()
+            .unwrap()
+            .attached_session
+            .clone()
+            .unwrap();
+        assert!(core.save_session_defaults(id, session, "save".into()));
+        let queued = rx.try_recv().unwrap();
+        assert!(queued.ready(&state));
+        state.attachment_generation.fetch_add(1, Ordering::Relaxed);
+        assert!(!queued.ready(&state));
+    }
+
+    #[tokio::test]
+    async fn defaults_commands_expire_when_the_connection_changes_even_if_the_chat_matches() {
+        let (core, id, state, mut rx) = connected_core().await;
+        let session = state
+            .client_state
+            .lock()
+            .unwrap()
+            .attached_session
+            .clone()
+            .unwrap();
+        assert!(core.save_session_defaults(id, session, "save".into()));
+        let queued = rx.try_recv().unwrap();
+        assert!(queued.ready(&state));
+        state.connection_generation.fetch_add(1, Ordering::Relaxed);
+        assert!(!queued.ready(&state));
+    }
+
+    #[test]
+    fn management_delivery_failures_never_become_chat_errors() {
+        for message in [
+            ClientMessage::ReadDaemonSettings {
+                request_id: "read".into(),
+            },
+            ClientMessage::SaveSessionDefaults {
+                session_id: "chat".into(),
+                request_id: "save".into(),
+            },
+            ClientMessage::ResetSessionDefaults {
+                request_id: "reset".into(),
+            },
+            ClientMessage::RevokeDevice {
+                device_id: "phone".into(),
+                request_id: "revoke".into(),
+            },
+        ] {
+            let queued = QueuedCommand {
+                message,
+                session_id: Some("chat".into()),
+                generation: None,
+                connection_generation: None,
+            };
+            assert!(
+                matches!(queued.delivery_failure("daemon", "Not sent", "Connection changed"),
+                Some(CoreEvent::DaemonManagementFailed { daemon, message, .. }) if daemon == "daemon" && message == "Connection changed")
+            );
+        }
+        let prompt = QueuedCommand {
+            message: ClientMessage::Cancel,
+            session_id: Some("chat".into()),
+            generation: None,
+            connection_generation: None,
+        };
+        assert!(
+            matches!(prompt.delivery_failure("daemon", "Not sent", "Connection changed"),
+            Some(CoreEvent::Alert { session_id, title, .. }) if session_id == "chat" && title == "Not sent")
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_daemon_management_preserves_the_attached_chat() {
+        let (core, id, state, mut outbound) = connected_core().await;
+        assert!(core.prompt(id.clone(), "still sending".into()));
+        let _prompt = outbound.recv().await.unwrap();
+        let session_id = state
+            .client_state
+            .lock()
+            .unwrap()
+            .attached_session
+            .clone()
+            .unwrap();
+        state.history_pending.store(true, Ordering::Relaxed);
+        state.take_shared_events();
+        for command in [
+            "read_daemon_settings",
+            "save_session_defaults",
+            "reset_session_defaults",
+            "revoke_device",
+        ] {
+            let message = format!("invalid message: unknown variant `{command}`, expected one of `ping`, `prompt` at line 1 column 30");
+            let events = translate_message(
+                &ServerMessage::Error { message },
+                &state,
+                &mut None,
+                &id.node_id,
+            );
+            assert!(
+                events.is_empty(),
+                "Unsupported management must use the settings timeout, not chat alerts"
+            );
+            assert!(state
+                .pending_submissions
+                .lock()
+                .unwrap()
+                .contains_key(&session_id));
+            assert!(state.history_pending.load(Ordering::Relaxed));
+            assert!(state.take_shared_events().is_empty());
+        }
+        let events = translate_message(
+            &ServerMessage::Error {
+                message: "invalid message: unknown variant `prompt`".into(),
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(matches!(events.as_slice(), [CoreEvent::Alert { kind, .. }] if kind == "error"));
+        assert!(!state
+            .pending_submissions
+            .lock()
+            .unwrap()
+            .contains_key(&session_id));
+        core.endpoint.close().await;
+    }
+
+    #[test]
+    fn daemon_settings_replies_retain_request_identity_and_unknown_values() {
+        let state = Arc::new(ConnState::new());
+        let events = translate_message(
+            &ServerMessage::DaemonSettings {
+                request_id: Some("read".into()),
+                defaults: None,
+                devices: None,
+            },
+            &state,
+            &mut None,
+            "remote",
+        );
+        assert!(
+            matches!(&events[..], [CoreEvent::DaemonManagementSettings { daemon, request_id: Some(id), settings }] if daemon == "remote" && id == "read" && settings.defaults.is_none() && settings.devices.is_none())
+        );
+        let events = translate_message(
+            &ServerMessage::DaemonSettingsFailed {
+                request_id: "save".into(),
+                message: "read only".into(),
+            },
+            &state,
+            &mut None,
+            "remote",
+        );
+        assert!(
+            matches!(&events[..], [CoreEvent::DaemonManagementFailed { daemon, request_id, message }] if daemon == "remote" && request_id == "save" && message == "read only")
+        );
+    }
+
+    #[test]
+    fn summary_updates_do_not_invent_connection_title_settings() {
+        let state = Arc::new(ConnState::new());
+        let events = translate_message(
+            &ServerMessage::AutoSummaryChanged { enabled: false },
+            &state,
+            &mut None,
+            "daemon",
+        );
+        assert!(state.automation_settings.lock().unwrap().is_none());
+        assert!(
+            matches!(events.as_slice(), [CoreEvent::AutoSummaryChanged { daemon, enabled: false }] if daemon == "daemon")
+        );
+    }
+
+    #[tokio::test]
+    async fn automation_settings_use_confirmed_daemon_values_without_requiring_a_session() {
+        let (core, id, state, mut rx) = connected_core().await;
+        *state.requested_session.lock().unwrap() = None;
+        state.client_state.lock().unwrap().attached_session = None;
+        *state.session_state.lock().unwrap() = None;
+        assert!(core
+            .snapshot(id.clone())
+            .unwrap()
+            .automation_settings
+            .is_none());
+        assert!(core.read_automation_settings(id.clone()));
+        assert!(core.set_auto_title(id.clone(), false));
+        assert!(core.set_auto_summary(id.clone(), false));
+        assert!(matches!(
+            rx.try_recv().unwrap().message,
+            ClientMessage::ReadAutomationSettings
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap().message,
+            ClientMessage::SetAutoTitle { enabled: false }
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap().message,
+            ClientMessage::SetAutoSummary { enabled: false }
+        ));
+        assert!(core
+            .snapshot(id.clone())
+            .unwrap()
+            .automation_settings
+            .is_none());
+
+        let events = translate_message(
+            &ServerMessage::AutomationSettings {
+                auto_title_enabled: false,
+                auto_summary_enabled: true,
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(
+            matches!(events.as_slice(), [CoreEvent::AutomationSettings { daemon, settings }]
+            if daemon == &id.node_id && !settings.auto_title_enabled && settings.auto_summary_enabled)
+        );
+        let events = translate_message(
+            &ServerMessage::AutoSummaryChanged { enabled: false },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(
+            matches!(events.as_slice(), [CoreEvent::AutoSummaryChanged { daemon, enabled: false }] if daemon == &id.node_id)
+        );
+        let settings = core
+            .snapshot(id.clone())
+            .unwrap()
+            .automation_settings
+            .unwrap();
+        assert!(!settings.auto_title_enabled);
+        assert!(!settings.auto_summary_enabled);
+
+        set_shared_connection_status(&state, mew_client_core::ConnectionStatus::Disconnected);
+        assert!(core
+            .snapshot(id.clone())
+            .unwrap()
+            .automation_settings
+            .is_none());
+        assert!(!core.read_automation_settings(id.clone()));
+        assert!(!core.set_auto_title(id.clone(), true));
+        assert!(!core.set_auto_summary(id, true));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn queued_automation_requests_expire_after_reconnect() {
+        let (core, id, state, mut rx) = connected_core().await;
+        assert!(core.read_automation_settings(id.clone()));
+        assert!(core.set_auto_title(id.clone(), false));
+        assert!(core.set_auto_summary(id.clone(), false));
+        let queued: Vec<_> = (0..3).map(|_| rx.try_recv().unwrap()).collect();
+        assert!(queued.iter().all(|command| command.ready(&state)));
+
+        set_shared_connection_status(
+            &state,
+            mew_client_core::ConnectionStatus::Backoff {
+                attempt: 0,
+                error: "connection dropped".into(),
+            },
+        );
+        set_shared_connection_status(&state, mew_client_core::ConnectionStatus::Connecting);
+        set_shared_connection_status(&state, mew_client_core::ConnectionStatus::Connected);
+
+        for command in queued {
+            assert!(
+                !command.ready(&state),
+                "a request accepted by the previous connection must not be replayed: {:?}",
+                command.message
+            );
+        }
+        assert!(core.read_automation_settings(id.clone()));
+        assert!(core.set_auto_title(id.clone(), true));
+        assert!(core.set_auto_summary(id, true));
+        for _ in 0..3 {
+            assert!(rx.try_recv().unwrap().ready(&state));
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_automation_requests_survive_session_attachment_changes() {
+        let (core, id, state, mut rx) = connected_core().await;
+        assert!(core.read_automation_settings(id.clone()));
+        assert!(core.set_auto_title(id.clone(), false));
+        assert!(core.set_auto_summary(id.clone(), false));
+        let queued: Vec<_> = (0..3).map(|_| rx.try_recv().unwrap()).collect();
+
+        core.attach(id, "next-session".into());
+
+        assert!(queued.iter().all(|command| command.ready(&state)));
+    }
+
+    #[tokio::test]
+    async fn tool_states_keep_stable_names_in_live_updates_and_history() {
+        let (core, id, state, _rx) = connected_core().await;
+        for status in ["pending", "running", "completed", "error"] {
+            let mut message = history_message(1);
+            message.role = mew_message::Role::Assistant;
+            let part = Part::ToolCall(mew_message::ToolCallPart {
+                base: mew_message::PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: message.id,
+                    session_id: message.session_id,
+                },
+                tool_name: "shell".into(),
+                call_id: "call".into(),
+                raw_input: String::new(),
+                state: serde_json::from_value(serde_json::json!({
+                    "status": status,
+                    "input": {"command": "private input"},
+                    "output": "private output",
+                    "error": "private error",
+                    "time": {"start": 1, "end": 2}
+                }))
+                .unwrap(),
+            });
+            message.parts = vec![part.clone()];
+            for wire in [
+                ServerMessage::SessionHistoryPage {
+                    session_id: "confirmed".into(),
+                    messages: vec![message],
+                    next_cursor: None,
+                    replace: true,
+                },
+                ServerMessage::Provider {
+                    event: ProviderEventWire::PartStart { part: part.clone() },
+                },
+                ServerMessage::PartUpdated {
+                    part_id: part.id(),
+                    part: part.clone(),
+                },
+            ] {
+                translate_message(&wire, &state, &mut None, &id.node_id);
+                let snapshot = core.snapshot(id.clone()).unwrap();
+                let projected = snapshot.sessions[0]
+                    .messages
+                    .last()
+                    .unwrap()
+                    .parts
+                    .last()
+                    .unwrap();
+                assert_eq!(projected.tool_state.as_deref(), Some(status));
+                assert!(projected
+                    .tool_input
+                    .as_ref()
+                    .unwrap()
+                    .contains("private input"));
+                if status == "completed" {
+                    assert_eq!(projected.tool_output.as_deref(), Some("private output"));
+                } else if status == "error" {
+                    assert_eq!(projected.tool_error.as_deref(), Some("private error"));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn activity_projection_recovers_workers_and_jobs_without_changing_the_chat() {
+        let (core, id, state, _rx) = connected_core().await;
+        let events = translate_message(
+            &ServerMessage::SessionActivitySnapshot {
+                session_id: "confirmed".into(),
+                subagents: vec![mew_protocol::SubagentActivity {
+                    task_id: "task".into(),
+                    child_session_id: Some("child".into()),
+                    name: "researcher".into(),
+                    display_name: Some("Curie".into()),
+                    status: "running".into(),
+                    tool_name: None,
+                }],
+                jobs: vec![mew_protocol::JobActivity {
+                    job_id: "job".into(),
+                    command: "cargo test".into(),
+                    state: "running".into(),
+                }],
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(
+            matches!(events.as_slice(), [CoreEvent::ActivityUpdated { daemon, session_id, subagents, jobs }]
+            if daemon == &id.node_id && session_id == "confirmed" && subagents[0].display_name.as_deref() == Some("Curie") && jobs[0].command == "cargo test")
+        );
+        translate_message(
+            &ServerMessage::SubagentStatus {
+                parent_call_id: "task".into(),
+                tool_name: "read".into(),
+                message: "checking files".into(),
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        let snapshot = core.snapshot(id.clone()).unwrap();
+        assert_eq!(snapshot.sessions[0].subagents[0].status, "checking files");
+        assert_eq!(
+            snapshot.sessions[0].subagents[0]
+                .child_session_id
+                .as_deref(),
+            Some("child")
+        );
+        assert_eq!(snapshot.sessions[0].jobs[0].job_id, "job");
+        translate_message(
+            &ServerMessage::SubagentEnd {
+                parent_call_id: "task".into(),
+                child_session_id: "child".into(),
+                outcome: mew_protocol::SubagentOutcome::Completed,
+                manifests: vec![],
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(core.snapshot(id.clone()).unwrap().sessions[0]
+            .subagents
+            .is_empty());
+        assert_eq!(
+            core.snapshot(id).unwrap().attached_session.as_deref(),
+            Some("confirmed")
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_history_and_job_output_preserve_origin_and_errors() {
+        let (core, id, state, _rx) = connected_core().await;
+        let events = translate_message(
+            &ServerMessage::SubagentHistory {
+                session_id: "confirmed".into(),
+                child_session_id: "child".into(),
+                request_id: "read".into(),
+                messages: vec![history_message(1)],
+                error: None,
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(
+            matches!(events.as_slice(), [CoreEvent::WorkerHistoryLoaded { daemon, session_id, child_session_id, request_id, messages, error: None }]
+            if daemon == &id.node_id && session_id == "confirmed" && child_session_id == "child" && request_id == "read" && messages[0].parts[0].text.as_deref() == Some("message 1"))
+        );
+        assert!(core.snapshot(id.clone()).unwrap().sessions[0]
+            .messages
+            .is_empty());
+        let events = translate_message(
+            &ServerMessage::JobOutput {
+                session_id: "confirmed".into(),
+                job_id: "job".into(),
+                request_id: "read".into(),
+                offset: 65_535,
+                next_offset: 65_538,
+                output: "猫".into(),
+                done: true,
+                incomplete: true,
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(
+            matches!(events.as_slice(), [CoreEvent::JobOutputLoaded { daemon, session_id, job_id, request_id, offset: 65_535, next_offset: 65_538, output, done: true, incomplete: true }]
+            if daemon == &id.node_id && session_id == "confirmed" && job_id == "job" && request_id == "read" && output == "猫")
+        );
+        let events = translate_message(
+            &ServerMessage::JobOutputError {
+                session_id: "confirmed".into(),
+                job_id: "job".into(),
+                request_id: "read".into(),
+                message: "unknown job".into(),
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(
+            matches!(events.as_slice(), [CoreEvent::JobOutputFailed { message, .. }] if message == "unknown job")
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_and_job_reads_require_the_confirmed_parent() {
+        let (core, id, state, mut rx) = connected_core().await;
+        assert!(!core.read_job_output(id.clone(), "other".into(), "job".into(), "wrong".into(), 0));
+        assert!(!core.read_subagent_history(
+            id.clone(),
+            "other".into(),
+            "child".into(),
+            "wrong".into()
+        ));
+        assert!(rx.try_recv().is_err());
+        assert!(core.read_job_output(
+            id.clone(),
+            "confirmed".into(),
+            "job".into(),
+            "output".into(),
+            42
+        ));
+        assert!(core.read_subagent_history(
+            id.clone(),
+            "confirmed".into(),
+            "child".into(),
+            "history".into()
+        ));
+        let job = rx.try_recv().unwrap();
+        let child = rx.try_recv().unwrap();
+        assert!(matches!(
+            job.message,
+            ClientMessage::ReadJobOutput { offset: 42, .. }
+        ));
+        core.attach(id, "next".into());
+        assert!(!job.ready(&state));
+        assert!(!child.ready(&state));
+    }
+
+    fn history_message(number: u128) -> mew_message::Message {
+        let message_id = ulid::Ulid::from(number + 100);
+        mew_message::Message {
+            id: message_id,
+            session_id: ulid::Ulid::from(1),
+            role: mew_message::Role::User,
+            parts: vec![Part::Text(mew_message::TextPart {
+                base: mew_message::PartBase {
+                    id: ulid::Ulid::from(number + 200),
+                    message_id,
+                    session_id: ulid::Ulid::from(1),
+                },
+                text: format!("message {number}"),
+                synthetic: false,
+            })],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn older_history_preserves_live_state_and_advances_the_cursor_once() {
+        let (core, id, state, mut rx) = connected_core().await;
+        translate_message(
+            &ServerMessage::SessionHistoryPage {
+                session_id: "confirmed".into(),
+                messages: vec![history_message(3)],
+                next_cursor: Some(2),
+                replace: true,
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert_eq!(
+            core.snapshot(id.clone()).unwrap().sessions[0].history_before,
+            Some(2)
+        );
+        translate_message(
+            &ServerMessage::SessionActivityChanged {
+                session_id: "confirmed".into(),
+                activity: mew_protocol::SessionState::Running,
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(core.load_older_history(id.clone(), "confirmed".into()));
+        assert!(!core.load_older_history(id.clone(), "confirmed".into()));
+        let command = rx.try_recv().unwrap();
+        assert!(
+            matches!(command.message, ClientMessage::LoadSessionHistory { before: 2, limit, .. }
+            if limit == mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT)
+        );
+        assert!(rx.try_recv().is_err());
+        let page = ServerMessage::SessionHistoryPage {
+            session_id: "confirmed".into(),
+            messages: vec![history_message(1), history_message(2)],
+            next_cursor: None,
+            replace: false,
+        };
+        let events = translate_message(&page, &state, &mut None, &id.node_id);
+        assert!(
+            matches!(events.as_slice(), [CoreEvent::HistoryExtended { daemon, session_id }]
+            if daemon == &id.node_id && session_id == "confirmed")
+        );
+        let snapshot = core.snapshot(id.clone()).unwrap();
+        let session = &snapshot.sessions[0];
+        assert_eq!(
+            session
+                .messages
+                .iter()
+                .map(|message| message.parts[0].text.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["message 1", "message 2", "message 3"]
+        );
+        assert_eq!(session.history_before, None);
+        assert!(session.running);
+        assert!(!core.load_older_history(id.clone(), "confirmed".into()));
+        assert!(translate_message(&page, &state, &mut None, &id.node_id).is_empty());
+        assert_eq!(core.snapshot(id).unwrap().sessions[0].messages.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn older_history_rejects_unconfirmed_origins_and_recovers_after_send_failure() {
+        let (core, id, state, mut rx) = connected_core().await;
+        translate_message(
+            &ServerMessage::SessionHistoryPage {
+                session_id: "confirmed".into(),
+                messages: vec![],
+                next_cursor: Some(24),
+                replace: true,
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(!core.load_older_history(id.clone(), "other".into()));
+        assert!(core.load_older_history(id.clone(), "confirmed".into()));
+        let queued = rx.try_recv().unwrap();
+        core.attach(id.clone(), "next".into());
+        assert!(!queued.ready(&state));
+        assert!(translate_message(
+            &ServerMessage::SessionHistoryPage {
+                session_id: "confirmed".into(),
+                messages: vec![history_message(1)],
+                next_cursor: None,
+                replace: false,
+            },
+            &state,
+            &mut None,
+            &id.node_id
+        )
+        .is_empty());
+        assert!(!core.load_older_history(id.clone(), "confirmed".into()));
+        drop(rx);
+        translate_message(
+            &ServerMessage::SessionReady {
+                session_id: "next".into(),
+                cwd: None,
+                model: None,
+                provider: None,
+                permission_mode: None,
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        translate_message(
+            &ServerMessage::SessionHistoryPage {
+                session_id: "next".into(),
+                messages: vec![],
+                next_cursor: Some(24),
+                replace: true,
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(!core.load_older_history(id, "next".into()));
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_history_page_cannot_complete_the_next_page_request() {
+        let (core, id, state, _rx) = connected_core().await;
+        translate_message(
+            &ServerMessage::SessionHistoryPage {
+                session_id: "confirmed".into(),
+                messages: vec![history_message(3)],
+                next_cursor: Some(48),
+                replace: true,
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(core.load_older_history(id.clone(), "confirmed".into()));
+        let page = ServerMessage::SessionHistoryPage {
+            session_id: "confirmed".into(),
+            messages: vec![history_message(2)],
+            next_cursor: Some(24),
+            replace: false,
+        };
+        translate_message(&page, &state, &mut None, &id.node_id);
+        assert!(core.load_older_history(id.clone(), "confirmed".into()));
+        assert!(translate_message(&page, &state, &mut None, &id.node_id).is_empty());
+        assert!(!core.load_older_history(id.clone(), "confirmed".into()));
+        translate_message(
+            &ServerMessage::SessionHistoryPage {
+                session_id: "confirmed".into(),
+                messages: vec![history_message(1)],
+                next_cursor: None,
+                replace: false,
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert_eq!(core.snapshot(id).unwrap().sessions[0].messages.len(), 3);
+    }
+
+    #[test]
+    fn workspace_review_preserves_origin_and_line_details() {
+        let message: ServerMessage = serde_json::from_value(serde_json::json!({
+            "type": "session_diff",
+            "session_id": "remote-session",
+            "request_id": "review-1",
+            "files": [{
+                "path": "src/猫.rs", "old_path": "src/old.rs", "status": "Renamed",
+                "added": 1, "removed": 1,
+                "hunks": [{
+                    "old_start": 7, "old_count": 2, "new_start": 7, "new_count": 2,
+                    "lines": [
+                        {"kind": "Context", "old_line": 7, "new_line": 7, "text": "context\n"},
+                        {"kind": "Deletion", "old_line": 8, "new_line": null, "text": "old\n"},
+                        {"kind": "Addition", "old_line": null, "new_line": 8, "text": "new\n"}
+                    ]
+                }]
+            }]
+        }))
+        .unwrap();
+        let events = translate_message(&message, &Arc::new(ConnState::new()), &mut None, "host");
+        let [CoreEvent::ReviewLoaded {
+            daemon,
+            session_id,
+            request_id,
+            files,
+        }] = events.as_slice()
+        else {
+            panic!("workspace review must reach the phone: {events:?}");
+        };
+        assert_eq!(
+            (daemon.as_str(), session_id.as_str(), request_id.as_str()),
+            ("host", "remote-session", "review-1")
+        );
+        let file = &files[0];
+        assert_eq!(file.path, "src/猫.rs");
+        assert_eq!(file.old_path.as_deref(), Some("src/old.rs"));
+        assert_eq!(file.status, events::ReviewFileStatus::Renamed);
+        assert_eq!((file.added, file.removed), (1, 1));
+        let hunk = &file.hunks[0];
+        assert_eq!(
+            (
+                hunk.old_start,
+                hunk.old_count,
+                hunk.new_start,
+                hunk.new_count
+            ),
+            (7, 2, 7, 2)
+        );
+        assert_eq!(hunk.lines[0].kind, events::ReviewLineKind::Context);
+        assert_eq!(hunk.lines[1].kind, events::ReviewLineKind::Deletion);
+        assert_eq!(
+            (hunk.lines[1].old_line, hunk.lines[1].new_line),
+            (Some(8), None)
+        );
+        assert_eq!(hunk.lines[2].kind, events::ReviewLineKind::Addition);
+        assert_eq!(
+            (hunk.lines[2].old_line, hunk.lines[2].new_line),
+            (None, Some(8))
+        );
+        assert_eq!(hunk.lines[2].text, "new\n");
+    }
+
+    #[test]
+    fn workspace_review_reports_empty_results_binary_files_and_failures() {
+        let conn = Arc::new(ConnState::new());
+        for (files, expected_count) in [
+            (serde_json::json!([]), 0),
+            (
+                serde_json::json!([{
+                    "path": "image.png", "old_path": null, "status": "Binary", "added": 0, "removed": 0, "hunks": []
+                }]),
+                1,
+            ),
+        ] {
+            let message: ServerMessage = serde_json::from_value(serde_json::json!({
+                "type": "session_diff", "session_id": "session", "request_id": "read", "files": files
+            })).unwrap();
+            let events = translate_message(&message, &conn, &mut None, "host");
+            let [CoreEvent::ReviewLoaded { files, .. }] = events.as_slice() else {
+                panic!("{events:?}");
+            };
+            assert_eq!(files.len(), expected_count);
+            if let Some(file) = files.first() {
+                assert_eq!(file.status, events::ReviewFileStatus::Binary);
+                assert!(file.hunks.is_empty());
+            }
+        }
+        let events = translate_message(
+            &ServerMessage::SessionDiffError {
+                session_id: "session".into(),
+                request_id: "read".into(),
+                message: "not a git repository".into(),
+            },
+            &conn,
+            &mut None,
+            "host",
+        );
+        assert!(
+            matches!(events.as_slice(), [CoreEvent::ReviewFailed { daemon, session_id, request_id, message }]
+            if daemon == "host" && session_id == "session" && request_id == "read" && message == "not a git repository")
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_review_requires_the_confirmed_origin_and_expires_on_switch() {
+        let (core, id, state, mut rx) = connected_core().await;
+        assert!(!core.read_session_diff(id.clone(), "other".into(), "wrong".into()));
+        assert!(rx.try_recv().is_err());
+        assert!(core.read_session_diff(id.clone(), "confirmed".into(), "current".into()));
+        let queued = rx.try_recv().unwrap();
+        assert!(
+            matches!(&queued.message, ClientMessage::ReadSessionDiff { session_id, request_id }
+            if session_id == "confirmed" && request_id == "current")
+        );
+        assert!(queued.ready(&state));
+        core.attach(id.clone(), "next".into());
+        assert!(!queued.ready(&state));
+        rx.try_recv().unwrap();
+        assert!(!core.read_session_diff(id, "confirmed".into(), "stale".into()));
+        assert!(rx.try_recv().is_err());
+    }
 
     #[test]
     fn pending_action_frames_leave_attention_counts_authoritative() {
@@ -2198,6 +3711,276 @@ mod tests {
         assert_eq!(session.pending_questions, 2);
     }
 
+    #[tokio::test]
+    async fn session_creation_ignores_an_older_attach_acknowledgment_and_its_history() {
+        let (core, id, state, mut outbound) = connected_core().await;
+        core.attach(id.clone(), "previous".into());
+        let attach = outbound.recv().await.unwrap();
+        state.record_session_request(
+            &attach.message,
+            state.attachment_generation.load(Ordering::Relaxed),
+        );
+        core.new_session(id.clone(), None);
+        let create = outbound.recv().await.unwrap();
+        state.record_session_request(
+            &create.message,
+            state.attachment_generation.load(Ordering::Relaxed),
+        );
+        let ready = |session: &str| ServerMessage::SessionReady {
+            session_id: session.into(),
+            cwd: None,
+            model: None,
+            provider: None,
+            permission_mode: None,
+        };
+
+        assert!(translate_message(&ready("previous"), &state, &mut None, &id.node_id).is_empty());
+        assert!(translate_message(
+            &ServerMessage::SessionHistoryPage {
+                session_id: "previous".into(),
+                messages: vec![history_message(1)],
+                next_cursor: None,
+                replace: true,
+            },
+            &state,
+            &mut None,
+            &id.node_id
+        )
+        .is_empty());
+        assert!(translate_message(
+            &ServerMessage::SessionHistory {
+                messages: vec![history_message(2)]
+            },
+            &state,
+            &mut None,
+            &id.node_id
+        )
+        .is_empty());
+        assert!(core.snapshot(id.clone()).unwrap().sessions[0]
+            .messages
+            .is_empty());
+
+        let events = translate_message(&ready("created"), &state, &mut None, &id.node_id);
+        assert!(
+            matches!(events.first(), Some(CoreEvent::SessionCreated { daemon, session_id })
+            if daemon == &id.node_id && session_id == "created")
+        );
+        assert_eq!(
+            core.snapshot(id.clone())
+                .unwrap()
+                .attached_session
+                .as_deref(),
+            Some("created")
+        );
+        let history = translate_message(
+            &ServerMessage::SessionHistoryPage {
+                session_id: "created".into(),
+                messages: vec![],
+                next_cursor: None,
+                replace: true,
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(matches!(
+            history.as_slice(),
+            [CoreEvent::SessionReloaded { .. }]
+        ));
+        core.endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn only_typed_session_failures_consume_the_matching_sent_request() {
+        let (core, id, state, mut outbound) = connected_core().await;
+        core.attach(id.clone(), "missing".into());
+        let attach = outbound.recv().await.unwrap();
+        state.record_session_request(
+            &attach.message,
+            state.attachment_generation.load(Ordering::Relaxed),
+        );
+        let unrelated = translate_message(
+            &ServerMessage::Error {
+                message: "unknown settings command".into(),
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(matches!(unrelated.as_slice(), [CoreEvent::Alert { .. }]));
+
+        let failure = translate_message(
+            &ServerMessage::SessionOperationFailed {
+                operation: mew_protocol::SessionOperation::Attach,
+                session_id: Some("missing".into()),
+                message: "session not found".into(),
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(
+            matches!(failure.as_slice(), [CoreEvent::SessionAttachmentFailed { daemon, session_id, message }]
+            if daemon == &id.node_id && session_id == "missing" && message == "session not found")
+        );
+        assert!(translate_message(
+            &ServerMessage::Error {
+                message: "session not found".into()
+            },
+            &state,
+            &mut None,
+            &id.node_id
+        )
+        .is_empty());
+        assert!(core.prompt(id.clone(), "the previous chat is still usable".into()));
+        assert!(matches!(
+            outbound.recv().await.unwrap().message,
+            ClientMessage::Prompt { .. }
+        ));
+
+        core.new_session(id.clone(), None);
+        let create = outbound.recv().await.unwrap();
+        state.record_session_request(
+            &create.message,
+            state.attachment_generation.load(Ordering::Relaxed),
+        );
+        let failed_create = translate_message(
+            &ServerMessage::SessionOperationFailed {
+                operation: mew_protocol::SessionOperation::Create,
+                session_id: None,
+                message: "workspace is unavailable".into(),
+            },
+            &state,
+            &mut None,
+            &id.node_id,
+        );
+        assert!(
+            matches!(failed_create.as_slice(), [CoreEvent::SessionCreationFailed { daemon, message }]
+            if daemon == &id.node_id && message == "workspace is unavailable")
+        );
+        core.endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn an_old_attachment_failure_cannot_fail_a_newer_requested_chat() {
+        let (core, id, state, mut outbound) = connected_core().await;
+        core.attach(id.clone(), "old".into());
+        let old = outbound.recv().await.unwrap();
+        state.record_session_request(
+            &old.message,
+            state.attachment_generation.load(Ordering::Relaxed),
+        );
+        core.attach(id.clone(), "new".into());
+        let new = outbound.recv().await.unwrap();
+        state.record_session_request(
+            &new.message,
+            state.attachment_generation.load(Ordering::Relaxed),
+        );
+        let failure = |session: &str| ServerMessage::SessionOperationFailed {
+            operation: mew_protocol::SessionOperation::Attach,
+            session_id: Some(session.into()),
+            message: "session not found".into(),
+        };
+        assert!(translate_message(&failure("old"), &state, &mut None, &id.node_id).is_empty());
+        assert!(
+            matches!(translate_message(&failure("new"), &state, &mut None, &id.node_id).as_slice(),
+            [CoreEvent::SessionAttachmentFailed { session_id, .. }] if session_id == "new")
+        );
+        core.endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn reselecting_the_confirmed_attachment_does_not_wait_for_an_ack_the_daemon_will_not_send(
+    ) {
+        let (core, id, _state, mut outbound) = connected_core().await;
+        core.attach(id.clone(), "confirmed".into());
+        assert!(outbound.try_recv().is_err());
+        assert!(core.prompt(id, "still ready".into()));
+        core.endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_queued_creation_expires_when_the_user_selects_another_chat() {
+        let (core, id, state, mut outbound) = connected_core().await;
+        core.new_session(id.clone(), None);
+        let creation = outbound.recv().await.unwrap();
+        assert!(creation.ready(&state));
+        core.attach(id, "chosen".into());
+        assert!(!creation.ready(&state));
+        core.endpoint.close().await;
+    }
+
+    #[test]
+    fn attachment_failure_has_scope_even_before_any_session_is_attached() {
+        let state = Arc::new(ConnState::new());
+        set_shared_connection_status(&state, mew_client_core::ConnectionStatus::Connected);
+        *state.requested_session.lock().unwrap() = Some("missing".into());
+        state.record_session_request(
+            &ClientMessage::AttachSession {
+                session_id: "missing".into(),
+                client_kind: mew_protocol::ClientKind::Mobile,
+            },
+            state.attachment_generation.load(Ordering::Relaxed),
+        );
+
+        let events = translate_message(
+            &ServerMessage::SessionOperationFailed {
+                operation: mew_protocol::SessionOperation::Attach,
+                session_id: Some("missing".into()),
+                message: "could not resume session".into(),
+            },
+            &state,
+            &mut None,
+            "daemon",
+        );
+
+        assert!(
+            matches!(events.as_slice(), [CoreEvent::SessionAttachmentFailed { daemon, session_id, message }]
+            if daemon == "daemon" && session_id == "missing" && message == "could not resume session")
+        );
+        assert!(state
+            .client_state
+            .lock()
+            .unwrap()
+            .attached_session
+            .is_none());
+        assert!(state.requested_session.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn offline_creation_reports_failure_and_a_queued_creation_expires_on_reconnect() {
+        struct Listener(mpsc::UnboundedSender<CoreEvent>);
+        impl CoreListener for Listener {
+            fn on_event(&self, event: CoreEvent) {
+                let _ = self.0.send(event);
+            }
+        }
+        let (core, id, state, mut outbound) = connected_core().await;
+        let (sender, mut events) = mpsc::unbounded_channel();
+        core.set_listener(Arc::new(Listener(sender)));
+        set_shared_connection_status(
+            &state,
+            mew_client_core::ConnectionStatus::Backoff {
+                attempt: 0,
+                error: "offline".into(),
+            },
+        );
+        core.new_session(id.clone(), None);
+        assert!(
+            matches!(events.try_recv().unwrap(), CoreEvent::SessionCreationFailed { daemon, .. } if daemon == id.node_id)
+        );
+        assert!(outbound.try_recv().is_err());
+
+        set_shared_connection_status(&state, mew_client_core::ConnectionStatus::Connected);
+        core.new_session(id.clone(), None);
+        let creation = outbound.try_recv().unwrap();
+        assert!(creation.ready(&state));
+        set_shared_connection_status(&state, mew_client_core::ConnectionStatus::Connecting);
+        set_shared_connection_status(&state, mew_client_core::ConnectionStatus::Connected);
+        assert!(!creation.ready(&state));
+        core.endpoint.close().await;
+    }
+
     async fn connected_core() -> (
         MobileCore,
         DaemonId,
@@ -2223,6 +4006,7 @@ mod tests {
             DaemonConnection {
                 tx,
                 state: state.clone(),
+                retry: Arc::new(Notify::new()),
                 task: tokio::spawn(std::future::pending()),
             },
         );
@@ -2239,6 +4023,111 @@ mod tests {
             &id.node_id,
         );
         (core, id, state, rx)
+    }
+
+    #[tokio::test]
+    async fn daemon_rename_reports_persistence_failures_through_the_mobile_api() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = MobileCore::new(vec![7; 32], dir.path().to_str().unwrap().into())
+            .await
+            .unwrap();
+        let id = core.add_daemon("saved-node".into(), "Original".into());
+        core.rename_daemon(id.clone(), "Renamed".into()).unwrap();
+        assert_eq!(core.list_daemons()[0].name, "Renamed");
+        std::fs::create_dir(dir.path().join("daemons.json.tmp")).unwrap();
+
+        let error = core.rename_daemon(id, "Unsaved".into()).unwrap_err();
+
+        assert!(error.to_string().contains("could not save daemon nickname"));
+        assert!(matches!(error, CoreError::RegistryUpdateFailed { .. }));
+        assert_eq!(core.list_daemons()[0].name, "Renamed");
+        core.endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn retry_now_interrupts_backoff_without_discarding_the_requested_session() {
+        struct StatusListener(mpsc::UnboundedSender<DaemonStatus>);
+        impl CoreListener for StatusListener {
+            fn on_event(&self, event: CoreEvent) {
+                if let CoreEvent::DaemonStatusChanged { status, .. } = event {
+                    let _ = self.0.send(status);
+                }
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let core = MobileCore::new(vec![7; 32], dir.path().to_str().unwrap().into())
+            .await
+            .unwrap();
+        let (tx, mut statuses) = mpsc::unbounded_channel();
+        core.set_listener(Arc::new(StatusListener(tx)));
+        let id = core.add_daemon("invalid-node".into(), "Offline".into());
+        assert!(core.retry_connection(id.clone()));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let status = statuses.recv().await.expect("connection listener closed");
+                if matches!(status, DaemonStatus::Backoff { .. }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("a retry must start a disconnected saved daemon");
+        core.attach(id.clone(), "keep-this-session".into());
+
+        assert!(core.retry_connection(id.clone()));
+        tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                let status = statuses.recv().await.expect("connection listener closed");
+                if matches!(status, DaemonStatus::Connecting) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("manual retry must interrupt the existing one-second backoff");
+        assert_eq!(
+            core.connections.lock().unwrap()[&id.node_id]
+                .state
+                .requested_session
+                .lock()
+                .unwrap()
+                .as_deref(),
+            Some("keep-this-session")
+        );
+
+        core.disconnect(id);
+        core.endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn retry_now_preserves_a_connected_daemon_and_rejects_unknown_daemons() {
+        let (core, id, state, mut outbound) = connected_core().await;
+        let dir = tempfile::tempdir().unwrap();
+        *core.registry.lock().unwrap() =
+            DaemonRegistry::load(dir.path().join("daemons.json")).unwrap();
+        core.add_daemon(id.node_id.clone(), "Connected".into());
+
+        assert!(core.retry_connection(id.clone()));
+        assert!(!core.retry_connection(DaemonId {
+            node_id: "unknown".into()
+        }));
+
+        assert_eq!(core.connections.lock().unwrap().len(), 1);
+        assert!(Arc::ptr_eq(
+            &state,
+            &core.connections.lock().unwrap()[&id.node_id].state
+        ));
+        assert_eq!(
+            core.snapshot(id.clone())
+                .unwrap()
+                .attached_session
+                .as_deref(),
+            Some("confirmed")
+        );
+        assert!(outbound.try_recv().is_err());
+        core.disconnect(id);
+        core.endpoint.close().await;
     }
 
     #[tokio::test]
@@ -2507,6 +4396,7 @@ mod tests {
             DaemonConnection {
                 tx,
                 state: conn.clone(),
+                retry: Arc::new(Notify::new()),
                 task: tokio::spawn(std::future::pending()),
             },
         );
@@ -2807,6 +4697,8 @@ mod tests {
         let current = mew_protocol::encode_json(&ServerMessage::Pong {
             version: "test".into(),
             protocol_version: mew_protocol::PROTOCOL_VERSION,
+            browser_focus_preflight: false,
+            scoped_session_failures: false,
         })
         .unwrap();
         let pong = protocol_handshake_result(&current).await.unwrap();
@@ -2821,6 +4713,8 @@ mod tests {
             mew_protocol::encode_json(&ServerMessage::Pong {
                 version: "future".into(),
                 protocol_version: mew_protocol::PROTOCOL_VERSION + 1,
+                browser_focus_preflight: false,
+                scoped_session_failures: false,
             })
             .unwrap(),
         ] {

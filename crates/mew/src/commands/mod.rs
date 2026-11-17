@@ -2,6 +2,7 @@ pub mod auth;
 pub mod config;
 pub mod daemon;
 pub mod debug;
+pub mod desktop_host;
 pub mod ext;
 pub mod funfact;
 pub mod run;

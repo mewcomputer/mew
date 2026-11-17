@@ -36,9 +36,9 @@ pub struct Config {
     /// Set to "none" or "default" to start without a persona.
     #[serde(default = "default_persona")]
     pub default_persona: String,
-    /// Where the planner persona writes its plan and the builder reads it.
-    /// Defaults to "PLAN.md" in the workspace root. Can be a relative path
-    /// (".mew/plans/current.md") or absolute.
+    /// Where the planner writes plans and the builder reads them. By default,
+    /// each write creates a new pronounceable filename in `plans/`.
+    /// Other relative or absolute paths name a fixed file.
     #[serde(default = "default_plan_path")]
     pub plan_path: String,
     /// TUI configuration (theme, etc.).
@@ -137,8 +137,10 @@ fn default_persona() -> String {
 }
 
 fn default_plan_path() -> String {
-    "PLAN.md".into()
+    DEFAULT_PLAN_PATH.into()
 }
+
+pub const DEFAULT_PLAN_PATH: &str = "plans/";
 
 impl Default for Config {
     fn default() -> Self {
@@ -616,8 +618,10 @@ pub struct DesktopSessionViewState {
     pub activity_expanded: bool,
     #[serde(default = "default_auxiliary_view")]
     pub auxiliary_view: String,
-    #[serde(default = "default_workbench_width")]
-    pub workbench_width: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_tabs: Option<DesktopWorkTabs>,
+    #[serde(default = "default_conversation_width")]
+    pub conversation_width: f32,
     #[serde(default)]
     pub expanded_chat_parts: Vec<String>,
     #[serde(default)]
@@ -630,6 +634,28 @@ pub struct DesktopSessionViewState {
     pub transcript_scroll_anchor: Option<DesktopTranscriptScrollAnchor>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DesktopWorkTabs {
+    #[serde(default)]
+    pub tabs: Vec<DesktopWorkTab>,
+    #[serde(default)]
+    pub active_tab_id: String,
+    #[serde(default)]
+    pub browser_tab_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DesktopWorkTab {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub title: String,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -638,8 +664,8 @@ fn default_auxiliary_view() -> String {
     "changes".into()
 }
 
-fn default_workbench_width() -> f32 {
-    360.
+fn default_conversation_width() -> f32 {
+    480.
 }
 
 /// Reads state from the standard location.
@@ -1060,6 +1086,25 @@ values = ["sk_test_deadbeef"]
     #[cfg(target_os = "macos")]
     #[test]
     fn test_macos_config_dir_uses_xdg_style_location() {
+        if std::env::var_os("MEW_CONFIG_DIR").is_some()
+            || std::env::var_os("XDG_CONFIG_HOME").is_some()
+        {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::test_macos_config_dir_uses_xdg_style_location",
+                ])
+                .env_remove("MEW_CONFIG_DIR")
+                .env_remove("XDG_CONFIG_HOME")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            return;
+        }
         let home = std::env::var_os("HOME").expect("HOME should be set on macOS");
         assert_eq!(config_dir(), PathBuf::from(home).join(".config/mew"));
     }
@@ -1109,6 +1154,23 @@ values = ["sk_test_deadbeef"]
     }
 
     #[test]
+    fn desktop_pane_layout_uses_a_conversation_width_for_legacy_sessions() {
+        let legacy: DesktopSessionViewState = toml::from_str("workbench_width = 360.0").unwrap();
+        let serialized = serde_json::to_value(legacy).unwrap();
+        assert_eq!(serialized["conversation_width"], 480.);
+        assert!(serialized.get("workbench_width").is_none());
+
+        let resized: DesktopSessionViewState =
+            toml::from_str("conversation_width = 612.0").unwrap();
+        let serialized = toml::to_string(&resized).unwrap();
+        let restored: DesktopSessionViewState = toml::from_str(&serialized).unwrap();
+        assert_eq!(
+            serde_json::to_value(restored).unwrap()["conversation_width"],
+            612.
+        );
+    }
+
+    #[test]
     fn test_state_desktop_window_roundtrip() {
         let mut session_views = HashMap::new();
         session_views.insert(
@@ -1121,7 +1183,25 @@ values = ["sk_test_deadbeef"]
                 local_expanded: false,
                 activity_expanded: true,
                 auxiliary_view: "activity".into(),
-                workbench_width: 420.,
+                work_tabs: Some(DesktopWorkTabs {
+                    tabs: vec![
+                        DesktopWorkTab {
+                            id: "browser-a".into(),
+                            kind: "browser".into(),
+                            url: "https://example.com/é?q=one&next=two".into(),
+                            title: "例 • Example".into(),
+                        },
+                        DesktopWorkTab {
+                            id: "terminal-a".into(),
+                            kind: "terminal".into(),
+                            url: String::new(),
+                            title: String::new(),
+                        },
+                    ],
+                    active_tab_id: "terminal-a".into(),
+                    browser_tab_id: Some("browser-a".into()),
+                }),
+                conversation_width: 420.,
                 expanded_chat_parts: vec!["chat-part-1-0".into()],
                 browser_panel_open: false,
                 browser_url: "https://example.com".into(),
@@ -1391,17 +1471,7 @@ values = ["sk_test_deadbeef"]
     #[test]
     fn backup_state_file_creates_timestamped_sibling() {
         let tmp = tempfile::tempdir().unwrap();
-        // We can't override the path; use the real one but clean up after.
-        let real = state_file_path();
         let backup_dir = tmp.path().to_path_buf();
-        // Write a sentinel to the real state path so backup_state_file has
-        // something to copy.
-        let original = real.with_file_name("state.toml.test-original");
-        std::fs::write(&original, "last_provider = \"x\"\n").unwrap();
-        // Instead of exercising the real state_path (which would clobber
-        // the user's file), verify the backup naming + copy semantics by
-        // using save_state_to + std::fs::copy analogously. This keeps the
-        // user's state untouched in tests.
         let state_path = backup_dir.join("state.toml");
         save_state_to(&state_path, &state_with("", "x", vec![])).unwrap();
         let ts = std::time::SystemTime::now()
@@ -1413,7 +1483,5 @@ values = ["sk_test_deadbeef"]
         assert!(backup.exists());
         let content = std::fs::read_to_string(&backup).unwrap();
         assert!(content.contains("x"));
-        // Clean up the test artifact.
-        let _ = original; // unused; silence the warning
     }
 }

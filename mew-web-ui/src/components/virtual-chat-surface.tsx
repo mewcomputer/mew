@@ -45,7 +45,7 @@ export function VirtualChatSurface() {
   return (
     <div
       ref={parentRef}
-      className="chat-scroll-container min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-3 pb-32 pt-4 sm:px-4 sm:pb-28"
+      className="chat-scroll-container min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-4 pb-6 pt-6 sm:px-6"
     >
       <div
         className="min-w-0 max-w-full"
@@ -71,7 +71,7 @@ export function VirtualChatSurface() {
                 transform: `translateY(${virtualItem.start}px)`,
               }}
             >
-              <div className="mx-auto min-w-0 max-w-3xl pb-4">
+              <div className="mew-conversation-width mx-auto min-w-0 pb-6">
                 <ErrorBoundary
                   title="Message failed to render"
                   fallback={

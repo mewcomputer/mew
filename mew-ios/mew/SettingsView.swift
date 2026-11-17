@@ -3,59 +3,126 @@ import MewMobileCore
 
 // MARK: - SettingsView
 
-/// Settings screen reachable from the daemon list's gear button.
-/// Shows this phone's NodeId, the list of paired daemons, and app about info.
+/// Preferences and saved connections on this phone.
 struct SettingsView: View {
     @EnvironmentObject var store: AppStore
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var copiedNodeId = false
-    @State private var daemonToRemove: DaemonEntry?
-    @State private var renameTarget: DaemonEntry?
-    @State private var renameText = ""
 
     var body: some View {
         Form {
-            fontSection
-            phoneSection
+            appearanceSection
+            feedbackSection
+            reviewSection
+            Section("This phone") {
+                NavigationLink("Connection identity") {
+                    Form { phoneSection }
+                        .navigationTitle("Connection identity")
+                        .navigationBarTitleDisplayMode(.inline)
+                }
+            }
             daemonsSection
             aboutSection
         }
-        .navigationTitle("Settings")
+        .navigationTitle("App settings")
         .navigationBarTitleDisplayMode(.inline)
-        .confirmationDialog(
-            "Remove \(daemonToRemove?.name ?? "Daemon")?",
-            isPresented: Binding(
-                get: { daemonToRemove != nil },
-                set: { if !$0 { daemonToRemove = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button("Remove", role: .destructive) {
-                if let daemon = daemonToRemove {
-                    store.removeDaemon(daemon)
-                    daemonToRemove = nil
-                }
-            }
-            Button("Cancel", role: .cancel) { daemonToRemove = nil }
-        } message: {
-            Text("This will unpair the daemon and disconnect from it. It can be re-paired with `mew pair`.")
-        }
-        .alert("Rename Daemon", isPresented: Binding(
-            get: { renameTarget != nil },
-            set: { if !$0 { renameTarget = nil } }
-        )) {
-            TextField("Name", text: $renameText)
-            Button("Save") {
-                if let daemon = renameTarget {
-                    renameDaemon(daemon, to: renameText)
-                }
-                renameTarget = nil
-            }
-            Button("Cancel", role: .cancel) { renameTarget = nil }
-        }
     }
 
     // MARK: - Font
+
+    private var appearanceSection: some View {
+        Section("Appearance") {
+            Picker("Theme", selection: $store.phoneSettings.appearance) {
+                ForEach(PhoneAppearance.allCases, id: \.self) { choice in
+                    Text(choice.label).tag(choice)
+                }
+            }
+            NavigationLink {
+                Form { fontSection }
+                    .navigationTitle("Chat font")
+                    .navigationBarTitleDisplayMode(.inline)
+            } label: {
+                LabeledContent("Chat font", value: store.fontChoice.displayName)
+            }
+        }
+    }
+
+    private var feedbackSection: some View {
+        Section {
+            Toggle("Haptic feedback", isOn: $store.phoneSettings.haptics)
+            NavigationLink("Foreground alerts") {
+                Form {
+                    Section {
+                        Toggle("Completed turns", isOn: $store.phoneSettings.completionAlerts)
+                        Toggle("Turn and delivery errors", isOn: $store.phoneSettings.errorAlerts)
+                        Toggle("Requests needing attention", isOn: $store.phoneSettings.requestAlerts)
+                    } footer: {
+                        Text("Banners and alert haptics appear while the app is open. Pending requests and conversation activity stay visible when alerts are off. Errors from actions you take are always shown.")
+                    }
+                    if !store.daemons.isEmpty {
+                        Section {
+                            ForEach(store.daemons, id: \.nodeId) { daemon in
+                                Toggle(daemon.name, isOn: Binding(
+                                    get: { !store.phoneSettings.mutedMachines.contains(daemon.nodeId) },
+                                    set: { enabled in
+                                        if enabled { store.phoneSettings.mutedMachines.remove(daemon.nodeId) }
+                                        else { store.phoneSettings.mutedMachines.insert(daemon.nodeId) }
+                                    }
+                                ))
+                            }
+                        } header: {
+                            Text("Alerts from machines")
+                        } footer: {
+                            Text("These preferences affect only this phone.")
+                        }
+                    }
+                }
+                .navigationTitle("Foreground alerts")
+                .navigationBarTitleDisplayMode(.inline)
+            }
+        } header: {
+            Text("Feedback")
+        } footer: {
+            Text("Haptics acknowledge sent messages, completed turns, errors, and requests needing attention.")
+        }
+    }
+
+    private var reviewSection: some View {
+        Section {
+            NavigationLink("Review readability") {
+                Form {
+                    Section {
+                        Toggle("Wrap long lines", isOn: $store.phoneSettings.reviewWrapLines)
+                        Toggle("Line numbers", isOn: $store.phoneSettings.reviewLineNumbers)
+                        Picker("Text size", selection: $store.phoneSettings.reviewTextSize) {
+                            ForEach(ReviewTextSize.allCases, id: \.self) { size in
+                                Text(size.label).tag(size)
+                            }
+                        }
+                    } footer: {
+                        Text("Applies to file diffs on this phone. Text also follows your iOS text size. Conversation text keeps its current size.")
+                    }
+                    Section("Preview") {
+                        ReviewDiffView(file: Self.previewFile, settings: store.phoneSettings)
+                            .frame(height: 170)
+                            .listRowInsets(EdgeInsets())
+                    }
+                }
+                .navigationTitle("Review readability")
+                .navigationBarTitleDisplayMode(.inline)
+            }
+        } header: {
+            Text("Review")
+        }
+    }
+
+    private static let previewFile = ReviewFile(path: "src/main.rs", oldPath: nil, status: .modified,
+        hunks: [ReviewHunk(oldStart: 12, oldCount: 2, newStart: 12, newCount: 2, lines: [
+            ReviewLine(kind: .context, oldLine: 12, newLine: 12, text: "fn greeting(name: &str) -> String {"),
+            ReviewLine(kind: .deletion, oldLine: 13, newLine: nil, text: "    format!(\"Hello, {}\", name)"),
+            ReviewLine(kind: .addition, oldLine: nil, newLine: 13, text: "    format!(\"Hello, {name}. Your workspace is ready.\")")
+        ])], added: 1, removed: 1)
 
     @ViewBuilder
     private var fontSection: some View {
@@ -79,13 +146,14 @@ struct SettingsView: View {
                                 .foregroundStyle(.tint)
                         }
                     }
+                    .frame(minHeight: 44)
                 }
                 .buttonStyle(.plain)
             }
         } header: {
-            Text("Font")
+            Text("Chat font")
         } footer: {
-            Text("Choose the body font for the app. Changes apply immediately.")
+            Text("Choose the font for conversation text on this phone. Changes apply immediately.").font(.footnote)
         }
     }
 
@@ -104,11 +172,15 @@ struct SettingsView: View {
 
                 Button {
                     UIPasteboard.general.string = store.phoneNodeId
-                    withAnimation { copiedNodeId = true }
+                    withAnimation(Theme.Motion.value(Theme.Motion.surface, reduced: reduceMotion)) {
+                        copiedNodeId = true
+                    }
                     Task {
                         try? await Task.sleep(nanoseconds: 1_500_000_000)
                         await MainActor.run {
-                            withAnimation { copiedNodeId = false }
+                            withAnimation(Theme.Motion.value(Theme.Motion.surface, reduced: reduceMotion)) {
+                                copiedNodeId = false
+                            }
                         }
                     }
                 } label: {
@@ -116,14 +188,14 @@ struct SettingsView: View {
                         .font(.subheadline)
                 }
                 .buttonStyle(.bordered)
-                .controlSize(.small)
+                .controlSize(.large)
                 .disabled(store.phoneNodeId.isEmpty)
             }
             .padding(.vertical, 2)
         } header: {
             Text("This Phone")
         } footer: {
-            Text("This Node ID is what daemons need to allowlist before they'll accept your connection. Share it via `mew pair` or paste it directly.")
+            Text("This is your phone's connection identity. To pair a new machine, scan or paste the complete invite from `mew pair`.").font(.footnote)
         }
     }
 
@@ -131,73 +203,26 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var daemonsSection: some View {
-        Section("Daemons") {
+        Section("Saved machines") {
             if store.daemons.isEmpty {
-                Text("No daemons paired yet")
+                Text("No saved machines")
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(store.daemons, id: \.nodeId) { daemon in
-                    daemonRow(daemon)
-                        .swipeActions(edge: .trailing) {
-                            Button(role: .destructive) {
-                                daemonToRemove = daemon
-                            } label: {
-                                Label("Remove", systemImage: "trash")
-                            }
+                    NavigationLink {
+                        DaemonDetailsView(daemonNodeId: daemon.nodeId)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(daemon.name)
+                                .foregroundStyle(.primary)
+                            DaemonConnectionStatusView(status: store.daemonStatuses[daemon.nodeId] ?? .disconnected)
+                                .font(.caption)
                         }
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            renameText = daemon.name
-                            renameTarget = daemon
-                        }
+                        .frame(minHeight: 44, alignment: .leading)
+                    }
                 }
             }
         }
-    }
-
-    @ViewBuilder
-    private func daemonRow(_ daemon: DaemonEntry) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: "server.rack")
-                .foregroundStyle(.secondary)
-                .font(.title3)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(daemon.name)
-                    .font(.headline)
-                Text(truncatedNodeId(daemon.nodeId))
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-                if let version = store.daemonVersions[daemon.nodeId] ?? daemon.lastKnownVersion {
-                    Text("v\(version)")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
-            }
-
-            Spacer()
-
-            Image(systemName: "pencil")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-        }
-        .padding(.vertical, 2)
-    }
-
-    /// Truncates a long Node ID to the first 16 chars + ellipsis, matching the
-    /// style used in DaemonListView.
-    private func truncatedNodeId(_ nodeId: String) -> String {
-        let prefix = nodeId.prefix(16)
-        return nodeId.count > 16 ? "\(prefix)…" : String(prefix)
-    }
-
-    /// Renames a daemon. The current AppStore/core has no rename-daemon API,
-    /// so this is a no-op stub — it keeps the UI flow intact for when a rename
-    /// RPC lands. Wire it up by calling the core method here once available.
-    private func renameDaemon(_ daemon: DaemonEntry, to newName: String) {
-        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed != daemon.name else { return }
-        // TODO: once the core exposes a rename-daemon RPC, call it here.
     }
 
     // MARK: - About
@@ -205,6 +230,22 @@ struct SettingsView: View {
     @ViewBuilder
     private var aboutSection: some View {
         Section("About") {
+            NavigationLink("Connection diagnostics") {
+                Form {
+                    Section {
+                        Text(store.connectionDiagnostics)
+                            .font(.callout.monospaced())
+                            .textSelection(.enabled)
+                        ShareLink(item: store.connectionDiagnostics) {
+                            Label("Share diagnostics", systemImage: "square.and.arrow.up")
+                        }
+                    } footer: {
+                        Text("Includes app, iOS, and daemon versions and connection states. Excludes names, identities, credentials, error details, paths, and conversation content.")
+                    }
+                }
+                .navigationTitle("Diagnostics")
+                .navigationBarTitleDisplayMode(.inline)
+            }
             LabeledContent {
                 Text(appVersionString)
                     .foregroundStyle(.secondary)
@@ -216,7 +257,7 @@ struct SettingsView: View {
                 Text(store.daemons.count, format: .number)
                     .foregroundStyle(.secondary)
             } label: {
-                Label("Paired Daemons", systemImage: "server.rack")
+                Label("Saved machines", systemImage: "server.rack")
             }
 
             Link(destination: URL(string: "https://github.com/polytoken/mew")!) {

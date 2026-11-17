@@ -7,6 +7,33 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		B67F88A1A1044574B031AE64 /* DaemonManagementView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE63 /* DaemonManagementView.swift */; };
+		B67F88A1A1044574B031AE65 /* DaemonManagementView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE63 /* DaemonManagementView.swift */; };
+		B67F88A1A1044574B031AE54 /* PhoneSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE53 /* PhoneSettings.swift */; };
+		B67F88A1A1044574B031AE55 /* PhoneSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE53 /* PhoneSettings.swift */; };
+		B67F88A1A1044574B031AE52 /* PhoneSettingsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE51 /* PhoneSettingsTests.swift */; };
+		4CFE382411B9F5B29F73BC98 /* AppNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDD7B0882730ED265818ED48 /* AppNavigation.swift */; };
+		131D41ACE02C395317398AAE /* AppNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDD7B0882730ED265818ED48 /* AppNavigation.swift */; };
+
+		B67F88A1A1044574B031AE42 /* AppNavigationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE41 /* AppNavigationTests.swift */; };
+		5C7D24B1EBAC33F8B2279C2E /* DaemonSwitcherView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A44A9BFA7CFE8448B21F957E /* DaemonSwitcherView.swift */; };
+		27199C28F262F5ED6AE56F91 /* DaemonSwitcherView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A44A9BFA7CFE8448B21F957E /* DaemonSwitcherView.swift */; };
+
+		6B87AA3C0D94EE9A1983E487 /* DaemonDetailsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2ED23958F3FFAEDE3D1467D /* DaemonDetailsView.swift */; };
+		F787F3C1C2446A4795E64361 /* DaemonDetailsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2ED23958F3FFAEDE3D1467D /* DaemonDetailsView.swift */; };
+
+		B67F88A1A1044574B031AE34 /* SessionTimeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE33 /* SessionTimeline.swift */; };
+		B67F88A1A1044574B031AE35 /* SessionTimeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE33 /* SessionTimeline.swift */; };
+		B67F88A1A1044574B031AE32 /* SessionTimelineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE31 /* SessionTimelineTests.swift */; };
+		B67F88A1A1044574B031AE22 /* ConversationActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE21 /* ConversationActivity.swift */; };
+		B67F88A1A1044574B031AE23 /* ConversationActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE21 /* ConversationActivity.swift */; };
+		B67F88A1A1044574B031AE25 /* ConversationActivityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE24 /* ConversationActivityTests.swift */; };
+		B67F88A1A1044574B031AE12 /* RefreshStatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE11 /* RefreshStatusView.swift */; };
+		B67F88A1A1044574B031AE13 /* RefreshStatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE11 /* RefreshStatusView.swift */; };
+		B67F88A1A1044574B031AE02 /* ActivityView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE01 /* ActivityView.swift */; };
+		B67F88A1A1044574B031AE03 /* ActivityView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE01 /* ActivityView.swift */; };
+		AB83A9F1D619452A8E38F813 /* ReviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB83A9F1D619452A8E38F812 /* ReviewView.swift */; };
+		AB83A9F1D619452A8E38F814 /* ReviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB83A9F1D619452A8E38F812 /* ReviewView.swift */; };
 		02A0EBFC07ECB4A8B8E33F65 /* JunicodeVF-Italic.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 5710FFECFB944E351E490A12 /* JunicodeVF-Italic.ttf */; };
 		0BAEB661227D370ACEAB5007 /* AppStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 545CECE3392D12E734D9A133 /* AppStore.swift */; };
 		0DD408C829CFAE400C464C3A /* SessionRailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB7E2A7290847C1C578F63BE /* SessionRailView.swift */; };
@@ -70,6 +97,20 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		B67F88A1A1044574B031AE63 /* DaemonManagementView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonManagementView.swift; sourceTree = "<group>"; };
+		B67F88A1A1044574B031AE53 /* PhoneSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneSettings.swift; sourceTree = "<group>"; };
+		B67F88A1A1044574B031AE51 /* PhoneSettingsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneSettingsTests.swift; sourceTree = "<group>"; };
+		BDD7B0882730ED265818ED48 /* AppNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppNavigation.swift; sourceTree = "<group>"; };
+		B67F88A1A1044574B031AE41 /* AppNavigationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppNavigationTests.swift; sourceTree = "<group>"; };
+		A44A9BFA7CFE8448B21F957E /* DaemonSwitcherView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonSwitcherView.swift; sourceTree = "<group>"; };
+		E2ED23958F3FFAEDE3D1467D /* DaemonDetailsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonDetailsView.swift; sourceTree = "<group>"; };
+		B67F88A1A1044574B031AE33 /* SessionTimeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionTimeline.swift; sourceTree = "<group>"; };
+		B67F88A1A1044574B031AE31 /* SessionTimelineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionTimelineTests.swift; sourceTree = "<group>"; };
+		B67F88A1A1044574B031AE21 /* ConversationActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationActivity.swift; sourceTree = "<group>"; };
+		B67F88A1A1044574B031AE24 /* ConversationActivityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationActivityTests.swift; sourceTree = "<group>"; };
+		B67F88A1A1044574B031AE11 /* RefreshStatusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RefreshStatusView.swift; sourceTree = "<group>"; };
+		B67F88A1A1044574B031AE01 /* ActivityView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityView.swift; sourceTree = "<group>"; };
+		AB83A9F1D619452A8E38F812 /* ReviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewView.swift; sourceTree = "<group>"; };
 		060BFA4C32C363DFB0A5DC2A /* Banga-VF.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Banga-VF.ttf"; sourceTree = "<group>"; };
 		0A1ADE8FFE4EDE33968D7384 /* MewApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MewApp.swift; sourceTree = "<group>"; };
 		1DF104663A4B9CEC1F06E91E /* MockMobileCore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MockMobileCore.swift; sourceTree = "<group>"; };
@@ -176,6 +217,10 @@
 			children = (
 				1DF104663A4B9CEC1F06E91E /* MockMobileCore.swift */,
 				3FD7A599A73C712D62E6DF76 /* AppStoreEventHandlingTests.swift */,
+				B67F88A1A1044574B031AE24 /* ConversationActivityTests.swift */,
+				B67F88A1A1044574B031AE31 /* SessionTimelineTests.swift */,
+				B67F88A1A1044574B031AE41 /* AppNavigationTests.swift */,
+				B67F88A1A1044574B031AE51 /* PhoneSettingsTests.swift */,
 			);
 			path = mewTests;
 			sourceTree = "<group>";
@@ -192,7 +237,14 @@
 			isa = PBXGroup;
 			children = (
 				545CECE3392D12E734D9A133 /* AppStore.swift */,
+				B67F88A1A1044574B031AE53 /* PhoneSettings.swift */,
+				B67F88A1A1044574B031AE63 /* DaemonManagementView.swift */,
 				B88D5B96B52F24E2D3C0DD85 /* ChatView.swift */,
+				B67F88A1A1044574B031AE21 /* ConversationActivity.swift */,
+				B67F88A1A1044574B031AE33 /* SessionTimeline.swift */,
+				B67F88A1A1044574B031AE01 /* ActivityView.swift */,
+				AB83A9F1D619452A8E38F812 /* ReviewView.swift */,
+				B67F88A1A1044574B031AE11 /* RefreshStatusView.swift */,
 				679C2551108B9BA54C017BBF /* DaemonListView.swift */,
 				BDC069E4C5076818999AC23D /* FormatHelper.swift */,
 				761A142B716D6FADBAEDEE67 /* Info.plist */,
@@ -206,6 +258,9 @@
 				85285983639DD6D24B4F80F5 /* RootView.swift */,
 				DB7E2A7290847C1C578F63BE /* SessionRailView.swift */,
 				1F9000A5647A1E452404A0D2 /* SettingsView.swift */,
+				BDD7B0882730ED265818ED48 /* AppNavigation.swift */,
+				A44A9BFA7CFE8448B21F957E /* DaemonSwitcherView.swift */,
+				E2ED23958F3FFAEDE3D1467D /* DaemonDetailsView.swift */,
 				7648D55347F186781EF8A218 /* Theme.swift */,
 				FB769C03A8D2DF7E375E9D64 /* Fonts */,
 				23A7B897CE17092834C10641 /* TodoPanelView.swift */,
@@ -338,7 +393,14 @@
 			buildActionMask = 2147483647;
 			files = (
 				36E2687C83C9A15519FBB164 /* AppStore.swift in Sources */,
+				B67F88A1A1044574B031AE54 /* PhoneSettings.swift in Sources */,
+				B67F88A1A1044574B031AE64 /* DaemonManagementView.swift in Sources */,
 				64FF009410027CFE96073711 /* ChatView.swift in Sources */,
+				B67F88A1A1044574B031AE23 /* ConversationActivity.swift in Sources */,
+				B67F88A1A1044574B031AE35 /* SessionTimeline.swift in Sources */,
+				B67F88A1A1044574B031AE03 /* ActivityView.swift in Sources */,
+				AB83A9F1D619452A8E38F814 /* ReviewView.swift in Sources */,
+				B67F88A1A1044574B031AE13 /* RefreshStatusView.swift in Sources */,
 				D7A06EE1B80E7200F99DF01E /* DaemonListView.swift in Sources */,
 				1ECD909EFDFC6A663DCF0B51 /* FormatHelper.swift in Sources */,
 				E36840126D8EB50B8F3063E8 /* KeychainHelper.swift in Sources */,
@@ -351,9 +413,16 @@
 				9D5BA18F06248ABAE6792CEC /* RootView.swift in Sources */,
 				30F3E4E8667773758FDF1426 /* SessionRailView.swift in Sources */,
 				42F4BD23A9EEF6038F6DEDEB /* SettingsView.swift in Sources */,
+				131D41ACE02C395317398AAE /* AppNavigation.swift in Sources */,
+				27199C28F262F5ED6AE56F91 /* DaemonSwitcherView.swift in Sources */,
+				F787F3C1C2446A4795E64361 /* DaemonDetailsView.swift in Sources */,
 				B25B0163985FCF517BEB359E /* Theme.swift in Sources */,
 				CF7A311BE95F8E5D561A24A6 /* MockMobileCore.swift in Sources */,
 				8C656AA687DF734C8FC3B3FC /* AppStoreEventHandlingTests.swift in Sources */,
+				B67F88A1A1044574B031AE25 /* ConversationActivityTests.swift in Sources */,
+				B67F88A1A1044574B031AE32 /* SessionTimelineTests.swift in Sources */,
+				B67F88A1A1044574B031AE42 /* AppNavigationTests.swift in Sources */,
+				B67F88A1A1044574B031AE52 /* PhoneSettingsTests.swift in Sources */,
 				9D4F7BBD61F807B2EF078A4B /* TodoPanelView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -363,7 +432,14 @@
 			buildActionMask = 2147483647;
 			files = (
 				0BAEB661227D370ACEAB5007 /* AppStore.swift in Sources */,
+				B67F88A1A1044574B031AE55 /* PhoneSettings.swift in Sources */,
+				B67F88A1A1044574B031AE65 /* DaemonManagementView.swift in Sources */,
 				FDEC179FCD1D0B1F5CA253E1 /* ChatView.swift in Sources */,
+				B67F88A1A1044574B031AE22 /* ConversationActivity.swift in Sources */,
+				B67F88A1A1044574B031AE34 /* SessionTimeline.swift in Sources */,
+				B67F88A1A1044574B031AE02 /* ActivityView.swift in Sources */,
+				AB83A9F1D619452A8E38F813 /* ReviewView.swift in Sources */,
+				B67F88A1A1044574B031AE12 /* RefreshStatusView.swift in Sources */,
 				D3216BADB70A3EE813135568 /* DaemonListView.swift in Sources */,
 				C88D34820C3694AA611C616D /* FormatHelper.swift in Sources */,
 				3ECB5C0A4A6549A019628638 /* KeychainHelper.swift in Sources */,
@@ -376,6 +452,9 @@
 				16BC594BD342DCA17509E2CF /* RootView.swift in Sources */,
 				0DD408C829CFAE400C464C3A /* SessionRailView.swift in Sources */,
 				F9D40665D15C1FD5BE9B29A6 /* SettingsView.swift in Sources */,
+				4CFE382411B9F5B29F73BC98 /* AppNavigation.swift in Sources */,
+				5C7D24B1EBAC33F8B2279C2E /* DaemonSwitcherView.swift in Sources */,
+				6B87AA3C0D94EE9A1983E487 /* DaemonDetailsView.swift in Sources */,
 				F92E765C3BD2C9CFF5239DDE /* Theme.swift in Sources */,
 				41E46AF0BE5C2433FF568197 /* TodoPanelView.swift in Sources */,
 			);
@@ -415,6 +494,8 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_IDENTITY = "-";
+				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "Apple Development";
+				DEVELOPMENT_TEAM = P2B3GABB6H;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -439,6 +520,8 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_IDENTITY = "-";
+				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "Apple Development";
+				DEVELOPMENT_TEAM = P2B3GABB6H;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;

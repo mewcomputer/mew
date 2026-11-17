@@ -138,11 +138,83 @@ impl DesktopShell {
             self.model_picker_selection = 0..0;
             self.model_picker_selection_reversed = false;
             self.model_picker_marked_range = None;
+            self.reset_model_picker_navigation();
             window.focus(&self.model_picker_focus_handle, cx);
         } else {
             window.focus(&self.composer_focus_handle, cx);
         }
         cx.notify();
+    }
+
+    fn reset_model_picker_navigation(&mut self) {
+        self.model_picker_highlighted_index = None;
+        self.model_picker_list.scroll_to(gpui::ListOffset {
+            item_ix: 0,
+            offset_in_item: Pixels::ZERO,
+        });
+    }
+
+    pub(super) fn refresh_model_picker_rows(&mut self) {
+        let (indices, rows) = build_model_picker_rows(
+            &self.model.ui.models,
+            &self.recent_models,
+            &self.model_picker_query,
+        );
+        if self.model_picker_rows != rows {
+            self.model_picker_list.reset(rows.len());
+            self.model_picker_rows = rows;
+        }
+        self.model_picker_filtered_indices = indices;
+        if !self
+            .model_picker_highlighted_index
+            .is_some_and(|index| self.model_picker_filtered_indices.contains(&index))
+        {
+            self.model_picker_highlighted_index = self
+                .model_picker_filtered_indices
+                .iter()
+                .copied()
+                .find(|index| {
+                    let model = &self.model.ui.models[*index];
+                    self.model_picker_query.trim().is_empty()
+                        && self.model.ui.current_provider.as_deref()
+                            == Some(model.provider.as_str())
+                        && self.model.ui.model.as_deref() == Some(model.model.as_str())
+                })
+                .or_else(|| self.model_picker_filtered_indices.first().copied());
+            if let Some(index) = self.model_picker_highlighted_index {
+                if let Some(row) = self.model_picker_rows.iter().position(|row| {
+                    matches!(row, ModelPickerRow::Model { index: candidate, .. } if *candidate == index)
+                }) {
+                    self.model_picker_list.scroll_to_reveal_item(row);
+                }
+            }
+        }
+    }
+
+    pub(super) fn model_picker_inventory_height(&self, effort_option_count: usize) -> Pixels {
+        let model_count = self.model.ui.models.len();
+        if model_count == 0 {
+            return model_picker_height(&[], effort_option_count);
+        }
+        let recent_count = self
+            .model
+            .ui
+            .models
+            .iter()
+            .filter(|model| self.recent_models.contains(&model.id))
+            .count()
+            .min(RECENT_MODEL_LIMIT);
+        let section_count = usize::from(recent_count > 0)
+            + usize::from(recent_count > 0 && recent_count < model_count);
+        let list_height = (ModelPickerRow::Model {
+            index: 0,
+            recent: false,
+        }
+        .height()
+            * model_count as f32
+            + ModelPickerRow::Header("Recent").height() * section_count as f32)
+            .min(px(320.));
+        model_picker_popup_height(list_height, effort_option_count)
     }
 
     pub(super) fn model_picker_search_key_down(
@@ -151,15 +223,13 @@ impl DesktopShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.model_picker_marked_range.is_some() {
+            return;
+        }
         let key = event.keystroke.key.as_str();
         if key == "escape" {
             self.close_shell_popovers();
             window.focus(&self.composer_focus_handle, cx);
-            cx.notify();
-            cx.stop_propagation();
-        } else if key == "a" && event.keystroke.modifiers.platform {
-            self.model_picker_selection = 0..self.model_picker_query.len();
-            self.model_picker_selection_reversed = false;
             cx.notify();
             cx.stop_propagation();
         } else if key == "backspace" {
@@ -174,17 +244,34 @@ impl DesktopShell {
         } else if key == "right" {
             self.model_picker_query_move_right(cx);
             cx.stop_propagation();
-        } else if key == "enter" {
-            if let Some(index) = self.model_picker_filtered_indices.first().copied() {
-                if let Some(model) = self.model.ui.models.get(index) {
-                    self.choose_model(model.provider.clone(), model.model.clone(), window, cx);
+        } else if matches!(key, "up" | "down") {
+            self.refresh_model_picker_rows();
+            if !self.model_picker_filtered_indices.is_empty() {
+                let current = self
+                    .model_picker_filtered_indices
+                    .iter()
+                    .position(|index| Some(*index) == self.model_picker_highlighted_index)
+                    .unwrap_or(0);
+                let next = if key == "up" {
+                    current.saturating_sub(1)
+                } else {
+                    (current + 1).min(self.model_picker_filtered_indices.len() - 1)
+                };
+                let index = self.model_picker_filtered_indices[next];
+                self.model_picker_highlighted_index = Some(index);
+                if let Some(row) = self.model_picker_rows.iter().position(|row| {
+                    matches!(row, ModelPickerRow::Model { index: candidate, .. } if *candidate == index)
+                }) {
+                    self.model_picker_list.scroll_to_reveal_item(row);
                 }
+                cx.notify();
             }
             cx.stop_propagation();
-        } else if key == "v" && event.keystroke.modifiers.platform {
-            if let Some(item) = cx.read_from_clipboard() {
-                if let Some(text) = item.text() {
-                    self.replace_model_picker_query_text(None, &text, cx);
+        } else if key == "enter" {
+            self.refresh_model_picker_rows();
+            if let Some(index) = self.model_picker_highlighted_index {
+                if let Some(model) = self.model.ui.models.get(index) {
+                    self.choose_model(model.provider.clone(), model.model.clone(), window, cx);
                 }
             }
             cx.stop_propagation();
@@ -294,6 +381,7 @@ impl DesktopShell {
         self.model_picker_selection_reversed = false;
         self.model_picker_marked_range = None;
         self.model_picker_query = updated;
+        self.reset_model_picker_navigation();
         cx.notify();
     }
 
@@ -327,12 +415,19 @@ impl DesktopShell {
             .unwrap_or(replacement_end..replacement_end);
         self.model_picker_selection_reversed = false;
         self.model_picker_query = updated;
+        self.reset_model_picker_navigation();
         cx.notify();
     }
 
-    pub(super) fn choose_persona(&mut self, name: String, cx: &mut Context<Self>) {
+    pub(super) fn choose_persona(
+        &mut self,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.persona_picker_open = false;
         self.terminal_font_picker_open = false;
+        window.focus(&self.composer_focus_handle, cx);
         if self.model.session_is_ready() {
             self.send_command(ClientMessage::SwitchPersona { name });
         }
@@ -355,8 +450,14 @@ impl DesktopShell {
         cx.notify();
     }
 
-    pub(super) fn choose_permission_mode(&mut self, mode: String, cx: &mut Context<Self>) {
+    pub(super) fn choose_permission_mode(
+        &mut self,
+        mode: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.permission_picker_open = false;
+        window.focus(&self.composer_focus_handle, cx);
         if self.model.session_is_ready() {
             self.send_command(ClientMessage::SetPermissionMode { mode });
         }
@@ -475,18 +576,28 @@ impl DesktopShell {
         let model_id = model.model.clone();
         let selected = self.model.ui.current_provider.as_deref() == Some(model.provider.as_str())
             && self.model.ui.model.as_deref() == Some(model.model.as_str());
-        let label = SharedString::from(model.id.clone());
-        let description = model.description.clone();
+        let highlighted = self.model_picker_highlighted_index == Some(index);
+        let label = SharedString::from(model_display_name(model).to_owned());
+        let accessible_label = format!("{label} ({})", model.id);
+        let description = match model
+            .description
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+        {
+            Some(description) => format!("{} · {description}", model.id),
+            None => model.id.clone(),
+        };
         let section = if recent { "recent" } else { "all" };
         Some(
             div()
                 .id(format!("model-option-{section}-{}", model.id))
+                .debug_selector(move || format!("model-option-{section}-{index}"))
                 .flex()
                 .flex_col()
                 .justify_center()
                 .gap(px(3.))
-                .h_auto()
-                .min_h(px(54.))
+                .h(ModelPickerRow::Model { index, recent }.height())
+                .line_height(px(16.))
                 .w_full()
                 .min_w_0()
                 .p(px(10.))
@@ -494,10 +605,13 @@ impl DesktopShell {
                 .cursor_pointer()
                 .role(Role::MenuItem)
                 .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                .aria_label(label.clone())
+                .aria_label(accessible_label)
                 .aria_selected(selected)
                 .when(selected, |element| {
                     element.bg(theme_rgb(&self.theme, "accent"))
+                })
+                .when(highlighted && !selected, |element| {
+                    element.bg(theme_rgb(&self.theme, "muted"))
                 })
                 .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
                 .on_click(cx.listener(move |shell, _, window, cx| {
@@ -505,48 +619,57 @@ impl DesktopShell {
                 }))
                 .child(
                     div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
                         .min_w_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .text_xs()
-                        .child(label),
-                )
-                .when_some(
-                    description.map(SharedString::from),
-                    |element, description| {
-                        element.child(
+                        .child(
                             div()
+                                .flex_1()
                                 .min_w_0()
                                 .overflow_hidden()
                                 .whitespace_nowrap()
                                 .text_ellipsis()
                                 .text_xs()
-                                .text_color(theme_rgb(&self.theme, "text.muted"))
-                                .child(description),
+                                .child(label),
                         )
-                    },
+                        .when(selected, |element| {
+                            element.child(
+                                div()
+                                    .flex_none()
+                                    .text_xs()
+                                    .text_color(theme_rgb(&self.theme, "text.accent"))
+                                    .child("✓"),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_xs()
+                        .text_color(theme_rgb(&self.theme, "text.muted"))
+                        .child(description),
                 )
                 .into_any_element(),
         )
     }
 
-    fn render_model_option_rows(
+    fn render_model_picker_row(
         &mut self,
-        range: Range<usize>,
+        row_index: usize,
         _window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Vec<gpui::AnyElement> {
-        range
-            .filter_map(
-                |row_index| match self.model_picker_rows.get(row_index).cloned()? {
-                    ModelPickerRow::Header(label) => Some(self.render_model_picker_header(label)),
-                    ModelPickerRow::Model { index, recent } => {
-                        self.render_model_option(index, recent, cx)
-                    }
-                },
-            )
-            .collect()
+    ) -> gpui::AnyElement {
+        match self.model_picker_rows.get(row_index).cloned() {
+            Some(ModelPickerRow::Header(label)) => self.render_model_picker_header(label),
+            Some(ModelPickerRow::Model { index, recent }) => self
+                .render_model_option(index, recent, cx)
+                .unwrap_or_else(|| div().into_any_element()),
+            None => div().into_any_element(),
+        }
     }
 
     fn render_model_picker_header(&self, label: &'static str) -> gpui::AnyElement {
@@ -557,46 +680,52 @@ impl DesktopShell {
             ))
             .flex()
             .items_end()
-            .h(px(64.))
+            .h(ModelPickerRow::Header(label).height())
             .w_full()
             .px(px(10.))
-            .pb(px(8.))
+            .pb(px(4.))
             .text_xs()
+            .line_height(px(16.))
             .text_color(theme_rgb(&self.theme, "text.muted"))
             .child(label)
             .into_any_element()
     }
 
-    pub(super) fn render_model_picker(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let query = self.model_picker_query.clone();
-        let (filtered_indices, rows) =
-            build_model_picker_rows(&self.model.ui.models, &self.recent_models, &query);
-        self.model_picker_filtered_indices = filtered_indices;
-        self.model_picker_rows = rows;
+    pub(super) fn render_model_picker(
+        &mut self,
+        popup_size: gpui::Size<Pixels>,
+        thinking_variants: Vec<String>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let option_count = self.model_picker_rows.len();
-        let thinking_variants = thinking_variants_for_model(
-            &self.model.ui.models,
-            self.model.ui.current_provider.as_deref(),
-            self.model.ui.model.as_deref(),
-        );
         let current_thinking_variant = self.model.ui.thinking_variant.clone();
         let options = if option_count > 0 {
-            gpui::uniform_list(
-                "model-picker-list",
-                option_count,
-                cx.processor(Self::render_model_option_rows),
-            )
-            .flex_1()
-            .min_h_0()
-            .into_any_element()
+            div()
+                .id("model-picker-list")
+                .debug_selector(|| "model-picker-list".into())
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .child(
+                    gpui::list(
+                        self.model_picker_list.clone(),
+                        cx.processor(Self::render_model_picker_row),
+                    )
+                    .with_sizing_behavior(gpui::ListSizingBehavior::Auto)
+                    .flex_1()
+                    .min_h_0(),
+                )
+                .into_any_element()
         } else {
-            let message = if query.trim().is_empty() {
+            let message = if self.model_picker_query.trim().is_empty() {
                 "No models reported by the daemon"
             } else {
                 "No models match your search"
             };
             div()
                 .flex_1()
+                .min_h_0()
                 .p(px(8.))
                 .text_sm()
                 .text_color(theme_rgb(&self.theme, "text.muted"))
@@ -644,6 +773,7 @@ impl DesktopShell {
                 let selected = selected_effort_index == index;
                 div()
                     .id(thinking_effort_option_id(index))
+                    .debug_selector(move || format!("model-picker-effort-option-{index}"))
                     .absolute()
                     .left(px(stop_offset))
                     .ml(px(-12.))
@@ -689,6 +819,7 @@ impl DesktopShell {
                         effort_stop_offset(index, effort_track_width, effort_values.len())
                             .unwrap_or(0.);
                     div()
+                        .debug_selector(move || format!("model-picker-effort-label-{index}"))
                         .absolute()
                         .left(px(stop_offset))
                         .ml(px(-effort_label_slot_width / 2.))
@@ -747,6 +878,7 @@ impl DesktopShell {
                 _ => effort_track.into_any_element(),
             };
             let effort_thumb = div()
+                .debug_selector(|| "model-picker-effort-thumb".into())
                 .absolute()
                 .top_0()
                 .left(relative(display_effort_position))
@@ -786,7 +918,9 @@ impl DesktopShell {
             Some(
                 div()
                     .id("model-picker-effort")
+                    .debug_selector(|| "model-picker-effort".into())
                     .flex()
+                    .flex_none()
                     .flex_col()
                     .gap(px(4.))
                     .pt(px(8.))
@@ -888,11 +1022,11 @@ impl DesktopShell {
                             .child(effort_thumb)
                             .child(
                                 canvas(
-                                    move |bounds, _, cx| {
+                                    move |bounds, window, cx| {
                                         track_bounds_shell.update(cx, |shell, cx| {
                                             if shell.thinking_effort_track_bounds != Some(bounds) {
                                                 shell.thinking_effort_track_bounds = Some(bounds);
-                                                cx.notify();
+                                                cx.defer_in(window, |_, _, cx| cx.notify());
                                             }
                                         });
                                     },
@@ -929,6 +1063,7 @@ impl DesktopShell {
                     shell.model_picker_selection = 0..0;
                     shell.model_picker_selection_reversed = false;
                     shell.model_picker_marked_range = None;
+                    shell.reset_model_picker_navigation();
                     cx.notify();
                 }))
                 .child(tabler_icon(
@@ -939,10 +1074,11 @@ impl DesktopShell {
         });
         div()
             .id("model-picker")
-            .w(px(400.))
+            .debug_selector(|| "model-picker".into())
+            .w(popup_size.width)
             .flex()
             .flex_col()
-            .h(model_picker_height(option_count, effort_option_count))
+            .h(popup_size.height)
             .p(px(8.))
             .border_1()
             .border_color(theme_rgb(&self.theme, "divider"))
@@ -956,7 +1092,9 @@ impl DesktopShell {
             .child(
                 div()
                     .id("model-picker-search-frame")
+                    .debug_selector(|| "model-picker-search-frame".into())
                     .flex()
+                    .flex_none()
                     .items_center()
                     .gap(px(4.))
                     .h(px(28.))
@@ -982,6 +1120,10 @@ impl DesktopShell {
                             .h_full()
                             .track_focus(&search_focus_handle)
                             .key_context("ModelPickerSearch")
+                            .on_action(cx.listener(Self::text_copy))
+                            .on_action(cx.listener(Self::text_cut))
+                            .on_action(cx.listener(Self::text_paste))
+                            .on_action(cx.listener(Self::text_select_all))
                             .role(Role::TextInput)
                             .aria_label("Filter models")
                             .cursor(gpui::CursorStyle::IBeam)
@@ -1043,8 +1185,8 @@ impl DesktopShell {
                     element.bg(theme_rgb(&self.theme, "accent"))
                 })
                 .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
-                .on_click(cx.listener(move |shell, _, _, cx| {
-                    shell.choose_persona(persona_name.clone(), cx);
+                .on_click(cx.listener(move |shell, _, window, cx| {
+                    shell.choose_persona(persona_name.clone(), window, cx);
                 }))
                 .child(
                     div()
@@ -1078,6 +1220,7 @@ impl DesktopShell {
         let has_options = !options.is_empty();
         div()
             .id("persona-picker")
+            .debug_selector(|| "persona-picker".into())
             .w(px(280.))
             .flex()
             .flex_col()
@@ -1133,8 +1276,8 @@ impl DesktopShell {
                         element.bg(theme_rgb(&self.theme, "accent"))
                     })
                     .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
-                    .on_click(cx.listener(move |shell, _, _, cx| {
-                        shell.choose_permission_mode(mode.clone(), cx);
+                    .on_click(cx.listener(move |shell, _, window, cx| {
+                        shell.choose_permission_mode(mode.clone(), window, cx);
                     }))
                     .child(
                         div()
@@ -1157,6 +1300,7 @@ impl DesktopShell {
 
         div()
             .id("permission-picker")
+            .debug_selector(|| "permission-picker".into())
             .w(px(300.))
             .flex()
             .flex_col()
@@ -1343,5 +1487,129 @@ impl DesktopShell {
             .on_key_down(cx.listener(Self::shell_key_down))
             .track_focus(&self.popover_focus_handle)
             .children(options)
+    }
+}
+
+#[cfg(test)]
+mod composer_picker_stability_regressions {
+    use super::*;
+
+    fn prepare(shell: &mut DesktopShell) {
+        shell.layout.sidebar_collapsed = true;
+        shell.layout.workbench_collapsed = true;
+        shell.model.ui.models = serde_json::from_value(serde_json::json!([
+            {"id":"a/alpha", "provider":"a", "model":"alpha", "display_name":"Alpha"},
+            {"id":"b/beta", "provider":"b", "model":"beta", "display_name":"Beta"},
+            {"id":"c/gamma", "provider":"c", "model":"gamma", "display_name":"Gamma"}
+        ]))
+        .unwrap();
+        shell.model.ui.current_provider = Some("c".into());
+        shell.model.ui.model = Some("gamma".into());
+        shell.recent_models = vec!["a/alpha".into()];
+    }
+
+    #[gpui::test]
+    fn secondary_choices_return_keyboard_input_to_the_draft(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.run_until_parked();
+        for persona in [true, false] {
+            cx.update(|window, cx| {
+                shell.update(cx, |shell, cx| {
+                    window.focus(&shell.popover_focus_handle, cx);
+                    if persona {
+                        shell.choose_persona("builder".into(), window, cx);
+                    } else {
+                        shell.choose_permission_mode("standard".into(), window, cx);
+                    }
+                    assert!(shell.composer_focus_handle.is_focused(window));
+                });
+            });
+        }
+        shell.update(cx, |shell, _| shell.quitting = true);
+    }
+
+    #[gpui::test]
+    fn effort_labels_and_thumb_align_after_open_without_another_input(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let persisted_state = mew_config::load_state().unwrap();
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        shell.update(cx, |shell, cx| {
+            prepare(shell);
+            shell.model.ui.models[2].thinking_variants = vec![
+                mew_protocol::ThinkingVariantInfo { name: "low".into() },
+                mew_protocol::ThinkingVariantInfo {
+                    name: "high".into(),
+                },
+            ];
+            shell.model.ui.thinking_variant = Some("high".into());
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(420.), px(760.)));
+        cx.run_until_parked();
+        cx.update(|window, cx| shell.update(cx, |shell, cx| shell.toggle_model_picker(window, cx)));
+        cx.run_until_parked();
+        for width in [420., 600.] {
+            if width != 420. {
+                cx.simulate_resize(gpui::size(px(width), px(760.)));
+                cx.run_until_parked();
+            }
+            let thumb = cx.debug_bounds("model-picker-effort-thumb").unwrap();
+            let label = cx.debug_bounds("model-picker-effort-label-2").unwrap();
+            let dot = cx.debug_bounds("model-picker-effort-option-2").unwrap();
+            assert!((thumb.center().x - label.center().x).abs() < px(1.));
+            assert!((thumb.center().x - dot.center().x).abs() < px(1.));
+        }
+        shell.update(cx, |shell, _| shell.quitting = true);
+        mew_config::save_state(&persisted_state).unwrap();
+    }
+
+    #[gpui::test]
+    fn opening_targets_the_current_identity_and_search_stays_in_place(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let persisted_state = mew_config::load_state().unwrap();
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        shell.update(cx, |shell, cx| {
+            prepare(shell);
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(420.), px(760.)));
+        cx.run_until_parked();
+        cx.update(|window, cx| shell.update(cx, |shell, cx| shell.toggle_model_picker(window, cx)));
+        cx.run_until_parked();
+        shell.update(cx, |shell, _| {
+            assert_eq!(shell.model_picker_highlighted_index, Some(2))
+        });
+        let popup = cx.debug_bounds("model-picker").unwrap();
+        let search = cx.debug_bounds("model-picker-search-frame").unwrap();
+        for query in ["a", "beta", "no matches", ""] {
+            shell.update(cx, |shell, cx| {
+                shell.model_picker_selection = 0..shell.model_picker_query.len();
+                shell.replace_model_picker_query_text(None, query, cx);
+            });
+            cx.run_until_parked();
+            assert_eq!(cx.debug_bounds("model-picker").unwrap(), popup);
+            assert_eq!(
+                cx.debug_bounds("model-picker-search-frame").unwrap(),
+                search
+            );
+            shell.update(cx, |shell, _| {
+                assert_eq!(
+                    shell.model_picker_highlighted_index,
+                    match query {
+                        "a" => Some(0),
+                        "beta" => Some(1),
+                        "" => Some(2),
+                        _ => None,
+                    }
+                );
+            });
+        }
+        shell.update(cx, |shell, _| shell.quitting = true);
+        mew_config::save_state(&persisted_state).unwrap();
     }
 }

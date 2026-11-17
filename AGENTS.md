@@ -6,6 +6,7 @@ Project guidance for coding agents working in this repository.
 
 - Preserve unrelated edits in the worktree. Inspect `git status` before editing and keep changes scoped to the request.
 - Follow the surrounding Rust or TypeScript style. Prefer small, reviewable changes and existing helpers over new abstractions.
+- For native GPUI desktop work, read `.mew/skills/gpui-desktop/SKILL.md` and the relevant guides in `notes/gpui-reference` before changing views.
 - Write behavior tests with implementation changes. Run the narrowest relevant tests first, then the broader gate when practical.
 - Update `CURRENT.md` with an append-only dated entry after each meaningful chunk of work. Do this after verification, not as a substitute for it.
 - Do not manually edit generated theme outputs. Change the manifest and run the theme codegen command.
@@ -13,7 +14,12 @@ Project guidance for coding agents working in this repository.
 
 ## Commands
 
-Rust and repository checks:
+Rust and repository checks: build the web assets with `just build-ui` before
+running the full Rust suite on a fresh checkout. The bridge asset tests exercise
+the production bundle. Before running the full suite or GPUI tests, point
+`MEW_CONFIG_DIR`, `MEW_DATA_DIR`, `MEW_CACHE_DIR`, and `MEW_SESSION_DIR` at
+temporary directories: desktop tests can persist layout and session state.
+Provider tests can also depend on credentials present in the local keychain.
 
 ```bash
 cargo build -p mew
@@ -38,12 +44,15 @@ Web, capture, docs, and mobile workflows:
 just install-js                 # first checkout or lockfile changes
 just test-js
 just build-js
+just build-ui                   # client and React production assets
 just build-web
 just lint-all                   # Rust clippy + web-client TypeScript check
 just dev-web                    # Vite UI + bridge; accepts --open and bridge flags
 just dev-ui                     # Vite UI only
-just desktop-dev                # native GPUI app + debug daemon
-just desktop-build              # native GPUI release bundle + daemon
+just desktop-dev                # native GPUI app with a debug daemon and CEF runtime
+just desktop-build              # release native GPUI app, daemon, and CEF runtime
+just desktop-electron-dev       # Electron shell with the shared React UI
+just desktop-electron-build     # package the Electron shell for macOS
 just site-dev
 just e2e                        # builds web assets and runs subprocess bridge tests
 just ios-core
@@ -149,10 +158,13 @@ packaging is handled by `scripts/package-desktop-native.sh`; the native browser
 portal uses `native/cef-host` behind `mew-browser-host` and does not share the
 web client’s host bridge.
 
-Each confirmed local desktop conversation owns a retained CEF page. Page callbacks
-carry the connection profile, session and page generation; hidden pages keep the
-app's main-thread pump. The daemon receives the ready loopback CDP endpoint and
-exact target before browser tools become available. Native packaging bundles the
+Each browser or new-tab view in a confirmed local desktop conversation owns a
+retained CEF page. Page callbacks carry the connection profile, session, tab and
+page generation; hidden pages keep the app's main-thread pump. The daemon's
+browser tool target follows the last selected browser tab for that conversation.
+Registration and revocation replies are drained before reusing a page identity.
+The daemon receives the ready loopback CDP endpoint and exact target before
+browser tools become available. Native packaging bundles the
 standalone `agent-browser` executable, version 0.34 or newer, beside the daemon.
 Remote profiles do not register native browser pages.
 

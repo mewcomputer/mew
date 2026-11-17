@@ -40,6 +40,8 @@ async fn accept_peer(
         mew_protocol::encode_json(&ServerMessage::Pong {
             version: "test".into(),
             protocol_version: mew_protocol::PROTOCOL_VERSION,
+            browser_focus_preflight: false,
+            scoped_session_failures: false,
         })
         .unwrap(),
     ))

@@ -7,38 +7,38 @@ import {
 } from "@/lib/workspace-surfaces";
 
 describe("workspace surfaces", () => {
-  it("starts with the pinned summary visible and workbench hidden", () => {
+  it("starts with the pinned sidebar visible and workbench hidden", () => {
     expect(DEFAULT_WORKSPACE_SURFACES).toEqual({
-      summaryOpen: true,
+      sidebarOpen: true,
       workbenchOpen: false,
       workbenchTabs: {
         tabs: [],
         activeTabId: "",
       },
-      workbenchSize: 28,
+      workbenchSize: 42,
     });
   });
 
-  it("toggles the summary and workbench independently", () => {
+  it("toggles the sidebar and workbench independently", () => {
     let state: WorkspaceSurfacesState = DEFAULT_WORKSPACE_SURFACES;
 
-    state = workspaceSurfacesReducer(state, { type: "toggle-summary" });
-    expect(state).toMatchObject({ summaryOpen: false, workbenchOpen: false });
+    state = workspaceSurfacesReducer(state, { type: "toggle-sidebar" });
+    expect(state).toMatchObject({ sidebarOpen: false, workbenchOpen: false });
 
     state = workspaceSurfacesReducer(state, { type: "toggle-workbench" });
-    expect(state).toMatchObject({ summaryOpen: false, workbenchOpen: true });
+    expect(state).toMatchObject({ sidebarOpen: false, workbenchOpen: true });
 
-    state = workspaceSurfacesReducer(state, { type: "toggle-summary" });
-    expect(state).toMatchObject({ summaryOpen: true, workbenchOpen: true });
+    state = workspaceSurfacesReducer(state, { type: "toggle-sidebar" });
+    expect(state).toMatchObject({ sidebarOpen: true, workbenchOpen: true });
   });
 
-  it("accepts an explicit summary visibility update from the sidebar provider", () => {
+  it("accepts an explicit sidebar visibility update from the sidebar provider", () => {
     const state = workspaceSurfacesReducer(DEFAULT_WORKSPACE_SURFACES, {
-      type: "set-summary-open",
+      type: "set-sidebar-open",
       open: false,
     });
 
-    expect(state.summaryOpen).toBe(false);
+    expect(state.sidebarOpen).toBe(false);
     expect(state.workbenchOpen).toBe(false);
   });
 
@@ -55,7 +55,7 @@ describe("workspace surfaces", () => {
       },
     };
 
-    state = workspaceSurfacesReducer(state, { type: "toggle-summary" });
+    state = workspaceSurfacesReducer(state, { type: "toggle-sidebar" });
     state = workspaceSurfacesReducer(state, { type: "toggle-workbench" });
 
     expect(state.workbenchTabs.activeTabId).toBe("browser-1");
@@ -75,10 +75,10 @@ describe("workspace surfaces", () => {
     });
 
     expect(state).toEqual({
-      summaryOpen: true,
+      sidebarOpen: true,
       workbenchOpen: false,
       workbenchTabs: tabs,
-      workbenchSize: 28,
+      workbenchSize: 42,
     });
   });
 
@@ -107,13 +107,13 @@ describe("workspace surfaces", () => {
   it("loads valid surface preferences and ignores malformed values", () => {
     expect(loadWorkspaceSurfaces({
       getItem: () => JSON.stringify({
-        summaryOpen: false,
+        sidebarOpen: false,
         workbenchOpen: true,
         workbenchTab: "changes",
         workbenchSize: 36,
       }),
     })).toEqual({
-      summaryOpen: false,
+      sidebarOpen: false,
       workbenchOpen: true,
       workbenchTabs: {
         tabs: [
@@ -129,12 +129,41 @@ describe("workspace surfaces", () => {
     );
   });
 
+  it("restores workbench tabs for each chat without moving a page to another chat", () => {
+    let state = workspaceSurfacesReducer(DEFAULT_WORKSPACE_SURFACES, { type: "select-session", sessionId: "chat-a" });
+    state = workspaceSurfacesReducer(state, { type: "workbench-tabs-action", action: { type: "add", tab: { id: "page-a", sessionId: "chat-a", kind: "browser", title: "A", closable: true } } });
+    state = workspaceSurfacesReducer(state, { type: "select-session", sessionId: "chat-b" });
+    expect(state.workbenchTabs.tabs).toEqual([]);
+    state = workspaceSurfacesReducer(state, { type: "workbench-tabs-action", action: { type: "add", tab: { id: "file-b", sessionId: "chat-b", kind: "file", title: "B", closable: true } } });
+    state = workspaceSurfacesReducer(state, { type: "select-session", sessionId: "chat-a" });
+    expect(state.workbenchTabs.activeTabId).toBe("page-a");
+    expect(loadWorkspaceSurfaces({ getItem: () => JSON.stringify(state) }).sessionTabs?.["chat-b"]?.activeTabId).toBe("file-b");
+  });
+
+  it("keeps browser metadata with its background chat and ignores owners that have no saved tabs", () => {
+    const state: WorkspaceSurfacesState = {
+      ...DEFAULT_WORKSPACE_SURFACES,
+      sessionId: "chat-b",
+      workbenchTabs: { tabs: [{ id: "same-id", kind: "browser", title: "B", closable: true }], activeTabId: "same-id" },
+      sessionTabs: { "chat-a": { tabs: [{ id: "same-id", kind: "browser", title: "A", closable: true }], activeTabId: "same-id" } },
+    };
+    const next = workspaceSurfacesReducer(state, { type: "workbench-tabs-action", sessionId: "chat-a", action: { type: "update", id: "same-id", patch: { title: "A changed", payload: { url: "https://a.example" } } } });
+    expect(next.workbenchTabs).toBe(state.workbenchTabs);
+    expect(next.sessionTabs?.["chat-a"]?.tabs[0]).toMatchObject({ title: "A changed", payload: { url: "https://a.example" } });
+    expect(workspaceSurfacesReducer(next, { type: "workbench-tabs-action", sessionId: "missing-chat", action: { type: "update", id: "same-id", patch: { title: "Wrong" } } })).toBe(next);
+  });
+
+  it("imports the previous sidebar visibility without treating it as the activity summary", () => {
+    expect(loadWorkspaceSurfaces({ getItem: () => JSON.stringify({ summaryOpen: false }) }).sidebarOpen).toBe(false);
+    expect(loadWorkspaceSurfaces({ getItem: () => JSON.stringify({ summaryOpen: false, sidebarOpen: true }) }).sidebarOpen).toBe(true);
+  });
+
   it("clamps the persisted workbench width", () => {
     let state = workspaceSurfacesReducer(DEFAULT_WORKSPACE_SURFACES, {
       type: "set-workbench-size",
-      size: 62,
+      size: 82,
     });
-    expect(state.workbenchSize).toBe(50);
+    expect(state.workbenchSize).toBe(65);
 
     state = workspaceSurfacesReducer(state, {
       type: "set-workbench-size",

@@ -632,6 +632,7 @@ mod tests {
                 id: "fake/model".into(),
                 provider: "fake".into(),
                 model: "model".into(),
+                display_name: Some("Local Model".into()),
                 description: Some("Test model".into()),
                 thinking_variants: Vec::new(),
                 thinking_budget: None,
@@ -674,6 +675,7 @@ mod tests {
         assert_eq!(model.transcript[0].text, "hello");
         assert_eq!(model.connection, Some(ConnectionStatus::Connected));
         assert_eq!(model.models[0].id, "fake/model");
+        assert_eq!(model.models[0].display_name.as_deref(), Some("Local Model"));
         assert_eq!(model.current_provider.as_deref(), Some("fake"));
         assert_eq!(model.model.as_deref(), Some("model"));
         assert_eq!(model.current_persona.as_deref(), Some("reviewer"));

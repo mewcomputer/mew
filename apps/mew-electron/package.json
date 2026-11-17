@@ -1,0 +1,15 @@
+{
+  "name": "@mew/electron",
+  "version": "0.1.0",
+  "private": true,
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test *.test.cjs",
+    "test:unit": "node --test policy.test.cjs support.test.cjs package.test.cjs",
+    "package": "node package.cjs"
+  },
+  "devDependencies": {
+    "electron": "45.0.0"
+  }
+}

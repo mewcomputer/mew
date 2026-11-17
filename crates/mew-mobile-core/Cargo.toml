@@ -11,6 +11,7 @@ name = "mew_mobile_core"
 
 [dependencies]
 mew-client-core = { workspace = true }
+mew-diff = { workspace = true }
 mew-protocol = { workspace = true }
 mew-message = { workspace = true }
 iroh = { workspace = true }
@@ -26,6 +27,7 @@ ulid = { workspace = true }
 uniffi = { workspace = true, features = ["tokio", "cli"] }
 
 [dev-dependencies]
+mew-session = { workspace = true }
 tempfile = "3"
 ulid = { workspace = true }
 mew-daemon = { workspace = true, features = ["iroh"] }

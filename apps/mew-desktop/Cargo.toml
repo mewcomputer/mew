@@ -14,24 +14,27 @@ path = "src/main.rs"
 anyhow = { workspace = true }
 futures = { workspace = true }
 libghostty-vt = { workspace = true }
-gpui = { git = "https://github.com/zed-industries/zed.git", rev = "ae394f3d474f4996d2cdef6ee97551fdb6748acd" }
-gpui_platform = { git = "https://github.com/zed-industries/zed.git", rev = "ae394f3d474f4996d2cdef6ee97551fdb6748acd", features = ["font-kit"] }
+gpui = { git = "https://github.com/zed-industries/zed.git", rev = "322cd509dcccaee1f6bc44725d270598ae8171ad", features = ["profiler"] }
+gpui_platform = { git = "https://github.com/zed-industries/zed.git", rev = "322cd509dcccaee1f6bc44725d270598ae8171ad", features = ["font-kit"] }
 iroh = { workspace = true }
 mdstream = { workspace = true }
 mew-client-core = { workspace = true }
 mew-client-iroh = { workspace = true }
 mew-client-local = { workspace = true }
 mew-browser-host = { workspace = true }
+mew-cef-host = { path = "../../native/cef-host" }
 mew-config = { workspace = true }
 mew-diff = { workspace = true }
 mew-desktop-supervisor = { workspace = true }
 mew-protocol = { workspace = true }
 mew-tui = { workspace = true }
 mew-ui-model = { workspace = true }
+mew-web-bridge = { workspace = true }
 ratatui = { workspace = true }
 ratatui-mdstream = { workspace = true }
 raw-window-handle = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 unicode-segmentation = { workspace = true }
@@ -39,5 +42,6 @@ ulid = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
+gpui = { git = "https://github.com/zed-industries/zed.git", rev = "322cd509dcccaee1f6bc44725d270598ae8171ad", features = ["test-support"] }
 mew-message = { workspace = true }
 tokio-tungstenite = { workspace = true }

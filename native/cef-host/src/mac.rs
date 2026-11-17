@@ -2,15 +2,420 @@ use cef::application_mac::{CefAppProtocol, CrAppControlProtocol, CrAppProtocol};
 use objc2::{
     ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, extern_methods,
     msg_send,
-    rc::Retained,
+    rc::{Retained, Weak},
     runtime::{AnyObject, Bool, Imp, NSObject, NSObjectProtocol, ProtocolObject, Sel},
     sel,
 };
 use objc2_app_kit::{
-    NSApp, NSApplication, NSApplicationDelegate, NSApplicationTerminateReply, NSEvent,
+    NSApp, NSApplication, NSApplicationDelegate, NSApplicationTerminateReply,
+    NSAutoresizingMaskOptions, NSBackspaceCharacter, NSDeleteCharacter, NSDeleteFunctionKey,
+    NSDownArrowFunctionKey, NSEvent, NSEventModifierFlags, NSLeftArrowFunctionKey,
+    NSRightArrowFunctionKey, NSUpArrowFunctionKey, NSView, NSWindow,
 };
-use std::cell::Cell;
+use objc2_foundation::{NSArray, NSMutableArray, NSPoint, NSString};
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+#[derive(Default)]
+struct NativeKeyEquivalents {
+    original_handlers: BTreeMap<usize, Imp>,
+    browser_views: Vec<Weak<NSView>>,
+    accessibility_handlers: BTreeMap<usize, Imp>,
+}
+
+thread_local! {
+    static NATIVE_KEY_EQUIVALENTS: RefCell<NativeKeyEquivalents> = RefCell::default();
+}
+
+#[derive(Default)]
+pub struct AppDragViewState {
+    regions: RefCell<Vec<cef::DraggableRegion>>,
+}
+
+define_class! {
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = AppDragViewState]
+    pub struct AppDragView;
+
+    unsafe impl NSObjectProtocol for AppDragView {}
+
+    impl AppDragView {
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool { true }
+
+        #[unsafe(method(hitTest:))]
+        fn hit_test(&self, point: NSPoint) -> Option<&NSView> {
+            if self.isHiddenOrHasHiddenAncestor() { return None; }
+            let parent = unsafe { self.superview() }?;
+            let point = self.convertPoint_fromView(point, Some(&parent));
+            let bounds = self.bounds();
+            if point.x < bounds.origin.x || point.y < bounds.origin.y
+                || point.x >= bounds.origin.x + bounds.size.width
+                || point.y >= bounds.origin.y + bounds.size.height
+            { return None; }
+            let draggable = self.ivars().regions.borrow().iter().fold(false, |draggable, region| {
+                let rect = &region.bounds;
+                if rect.width > 0 && rect.height > 0
+                    && point.x >= f64::from(rect.x) && point.x < f64::from(rect.x) + f64::from(rect.width)
+                    && point.y >= f64::from(rect.y) && point.y < f64::from(rect.y) + f64::from(rect.height)
+                { region.draggable != 0 } else { draggable }
+            });
+            draggable.then_some(self.as_ref())
+        }
+
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool { true }
+
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &NSEvent) {
+            if let Some(window) = self.window() {
+                window.performWindowDragWithEvent(event);
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl AppDragView {
+    pub fn attach(parent: &NSView) -> Retained<Self> {
+        let mtm = MainThreadMarker::new().expect("native drag regions require the main thread");
+        let view = Self::alloc(mtm).set_ivars(AppDragViewState::default());
+        let view: Retained<Self> =
+            unsafe { msg_send![super(view), initWithFrame: parent.bounds()] };
+        view.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        parent.addSubview(&view);
+        view
+    }
+
+    pub fn set_regions(&self, regions: &[cef::DraggableRegion]) {
+        {
+            let mut current = self.ivars().regions.borrow_mut();
+            current.clear();
+            current.extend_from_slice(regions);
+        }
+        if !regions.is_empty()
+            && let Some(parent) = unsafe { self.superview() }
+        {
+            parent.addSubview(self);
+        }
+    }
+}
+
+define_class! {
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    pub struct BrowserInputShield;
+
+    unsafe impl NSObjectProtocol for BrowserInputShield {}
+
+    impl BrowserInputShield {
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool { true }
+
+        #[unsafe(method(mouseDownCanMoveWindow))]
+        fn mouse_down_can_move_window(&self) -> bool { false }
+
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, _event: &NSEvent) {}
+        #[unsafe(method(mouseUp:))]
+        fn mouse_up(&self, _event: &NSEvent) {}
+        #[unsafe(method(mouseDragged:))]
+        fn mouse_dragged(&self, _event: &NSEvent) {}
+        #[unsafe(method(rightMouseDown:))]
+        fn right_mouse_down(&self, _event: &NSEvent) {}
+        #[unsafe(method(rightMouseUp:))]
+        fn right_mouse_up(&self, _event: &NSEvent) {}
+        #[unsafe(method(rightMouseDragged:))]
+        fn right_mouse_dragged(&self, _event: &NSEvent) {}
+        #[unsafe(method(otherMouseDown:))]
+        fn other_mouse_down(&self, _event: &NSEvent) {}
+        #[unsafe(method(otherMouseUp:))]
+        fn other_mouse_up(&self, _event: &NSEvent) {}
+        #[unsafe(method(otherMouseDragged:))]
+        fn other_mouse_dragged(&self, _event: &NSEvent) {}
+        #[unsafe(method(scrollWheel:))]
+        fn scroll_wheel(&self, _event: &NSEvent) {}
+    }
+}
+
+#[allow(dead_code)]
+impl BrowserInputShield {
+    pub fn attach(parent: &NSView) -> Retained<Self> {
+        let mtm = MainThreadMarker::new().expect("native browser input requires the main thread");
+        let view = Self::alloc(mtm).set_ivars(());
+        let view: Retained<Self> =
+            unsafe { msg_send![super(view), initWithFrame: parent.bounds()] };
+        view.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        view.setHidden(true);
+        parent.addSubview(&view);
+        view
+    }
+
+    pub fn set_interactive(&self, interactive: bool) {
+        self.setHidden(interactive);
+        let Some(parent) = (unsafe { self.superview() }) else {
+            return;
+        };
+        unsafe {
+            let _: () = msg_send![&*parent, setAccessibilityHidden: !interactive];
+        }
+        if !interactive {
+            self.setFrame(parent.bounds());
+            parent.addSubview(self);
+            if let Some(window) = parent.window()
+                && window
+                    .firstResponder()
+                    .as_ref()
+                    .and_then(|responder| responder.downcast_ref::<NSView>())
+                    .is_some_and(|focused| focused.isDescendantOf(&parent))
+            {
+                window.makeFirstResponder(None::<&objc2_app_kit::NSResponder>);
+            }
+        }
+    }
+}
+
+fn native_key_equivalent_imp() -> Imp {
+    unsafe {
+        std::mem::transmute(native_key_equivalent as unsafe extern "C-unwind" fn(_, _, _) -> _)
+    }
+}
+
+/// The web app owns editing; let AppKit validate against its native responder.
+/// Legacy GPUI menus keep their action handlers unless this is called.
+#[allow(dead_code)]
+pub fn configure_app_edit_menu() {
+    let mtm = MainThreadMarker::new().expect("native menus require the main thread");
+    let app = NSApp(mtm);
+    let Some(main): Option<Retained<NSObject>> = (unsafe { msg_send![&*app, mainMenu] }) else {
+        return;
+    };
+    let items: Retained<NSArray<NSObject>> = unsafe { msg_send![&*main, itemArray] };
+    for item in &items {
+        let title: Retained<NSString> = unsafe { msg_send![&*item, title] };
+        if title.to_string() != "Edit" {
+            continue;
+        }
+        let Some(edit): Option<Retained<NSObject>> = (unsafe { msg_send![&*item, submenu] }) else {
+            continue;
+        };
+        let entries: Retained<NSArray<NSObject>> = unsafe { msg_send![&*edit, itemArray] };
+        for entry in &entries {
+            let title: Retained<NSString> = unsafe { msg_send![&*entry, title] };
+            let action = match title.to_string().as_str() {
+                "Undo" => sel!(undo:),
+                "Redo" => sel!(redo:),
+                _ => continue,
+            };
+            unsafe {
+                let _: () = msg_send![&*entry, setTarget: None::<&AnyObject>];
+                let _: () = msg_send![&*entry, setAction: action];
+            }
+        }
+    }
+}
+
+/// Give a focused CEF child its editing shortcuts before the host view.
+#[allow(dead_code)]
+pub fn register_browser_view(view: &NSView) {
+    let Some(window) = view.window() else { return };
+    let class = window.class();
+    let selector = sel!(performKeyEquivalent:);
+    let method = class.instance_method(selector).unwrap();
+    let original = method.implementation();
+    let replacement = native_key_equivalent_imp();
+    NATIVE_KEY_EQUIVALENTS.with_borrow_mut(|state| {
+        if !std::ptr::fn_addr_eq(original, replacement) {
+            state
+                .original_handlers
+                .insert(class as *const _ as usize, original);
+            unsafe {
+                objc2::ffi::class_replaceMethod(
+                    class as *const _ as *mut _,
+                    selector,
+                    replacement,
+                    objc2::ffi::method_getTypeEncoding(method),
+                );
+            }
+        }
+        state.browser_views.retain(|view| view.load().is_some());
+        if !state
+            .browser_views
+            .iter()
+            .filter_map(Weak::load)
+            .any(|known| std::ptr::eq(&*known, view))
+        {
+            state.browser_views.push(Weak::new(view));
+        }
+    });
+    if let Some(content) = window.contentView() {
+        register_accessibility_children(&content);
+    }
+}
+
+fn register_accessibility_children(view: &NSView) {
+    let class = view.class();
+    let children = class.instance_method(sel!(accessibilityChildren)).unwrap();
+    let children_imp: Imp = unsafe {
+        std::mem::transmute(native_accessibility_children as unsafe extern "C-unwind" fn(_, _) -> _)
+    };
+    if std::ptr::fn_addr_eq(children.implementation(), children_imp) {
+        return;
+    }
+    NATIVE_KEY_EQUIVALENTS.with_borrow_mut(|state| {
+        state
+            .accessibility_handlers
+            .insert(class as *const _ as usize, children.implementation());
+        // AccessKit owns the content view's AX children. Preserve its tree and
+        // compose the native CEF children that sit outside that tree.
+        unsafe {
+            objc2::ffi::class_replaceMethod(
+                class as *const _ as *mut _,
+                sel!(accessibilityChildren),
+                children_imp,
+                objc2::ffi::method_getTypeEncoding(children),
+            );
+        }
+    });
+}
+
+fn original_accessibility_children(view: &NSView) -> Imp {
+    NATIVE_KEY_EQUIVALENTS.with_borrow(|state| {
+        let mut class = Some(view.class());
+        while let Some(current) = class {
+            if let Some(handlers) = state
+                .accessibility_handlers
+                .get(&(current as *const _ as usize))
+            {
+                return *handlers;
+            }
+            class = current.superclass();
+        }
+        unreachable!("native accessibility bridge must retain its original handlers")
+    })
+}
+
+fn accessible_browser_views(parent: &NSView) -> Vec<Retained<NSView>> {
+    NATIVE_KEY_EQUIVALENTS.with_borrow(|state| {
+        state
+            .browser_views
+            .iter()
+            .filter_map(Weak::load)
+            .filter(|view| {
+                let accessibility_hidden: bool =
+                    unsafe { msg_send![&**view, isAccessibilityHidden] };
+                !std::ptr::eq(&**view, parent)
+                    && !view.isHiddenOrHasHiddenAncestor()
+                    && !accessibility_hidden
+                    && view.isDescendantOf(parent)
+            })
+            .collect()
+    })
+}
+
+#[link(name = "AppKit", kind = "framework")]
+unsafe extern "C" {
+    fn NSAccessibilityUnignoredChildrenForOnlyChild(
+        child: *mut std::ffi::c_void,
+    ) -> *mut NSArray<NSObject>;
+}
+
+unsafe extern "C-unwind" fn native_accessibility_children(
+    view: &NSView,
+    selector: Sel,
+) -> *mut NSArray<NSObject> {
+    let original: unsafe extern "C-unwind" fn(&NSView, Sel) -> *mut NSArray<NSObject> =
+        unsafe { std::mem::transmute(original_accessibility_children(view)) };
+    let children = unsafe { original(view, selector) };
+    let browsers = accessible_browser_views(view);
+    if browsers.is_empty() {
+        return children;
+    }
+    let combined = NSMutableArray::<NSObject>::new();
+    if let Some(children) = unsafe { children.as_ref() } {
+        combined.addObjectsFromArray(children);
+    }
+    for browser in browsers {
+        let children = unsafe {
+            NSAccessibilityUnignoredChildrenForOnlyChild(Retained::as_ptr(&browser) as *mut _)
+        };
+        if let Some(children) = unsafe { children.as_ref() } {
+            for child in children {
+                if !combined.containsObject(&child) {
+                    combined.addObject(&child);
+                }
+            }
+        }
+    }
+    Retained::autorelease_return(combined).cast()
+}
+
+unsafe extern "C-unwind" fn native_key_equivalent(
+    window: &NSWindow,
+    selector: Sel,
+    event: &NSEvent,
+) -> Bool {
+    let flags = event.modifierFlags();
+    let editing = flags.contains(NSEventModifierFlags::Command)
+        && !flags.contains(NSEventModifierFlags::Control)
+        && event.charactersIgnoringModifiers().is_some_and(|text| {
+            if text.length() != 1 {
+                return false;
+            }
+            let key = text.characterAtIndex(0);
+            [
+                NSUpArrowFunctionKey,
+                NSDownArrowFunctionKey,
+                NSLeftArrowFunctionKey,
+                NSRightArrowFunctionKey,
+                NSBackspaceCharacter,
+                NSDeleteCharacter,
+                NSDeleteFunctionKey,
+            ]
+            .contains(&u32::from(key))
+                || (!flags.contains(NSEventModifierFlags::Function)
+                    && u8::try_from(key).is_ok_and(|key| {
+                        matches!(key.to_ascii_lowercase(), b'a' | b'c' | b'v' | b'x' | b'z')
+                    }))
+        });
+    if editing
+        && let Some(responder) = window.firstResponder()
+        && let Some(view) = responder.downcast_ref::<NSView>()
+        && !view.isHiddenOrHasHiddenAncestor()
+        && NATIVE_KEY_EQUIVALENTS.with_borrow(|state| {
+            state
+                .browser_views
+                .iter()
+                .filter_map(Weak::load)
+                .any(|browser| view.isDescendantOf(&browser))
+        })
+        && responder.performKeyEquivalent(event)
+    {
+        return Bool::YES;
+    }
+
+    let original = NATIVE_KEY_EQUIVALENTS.with_borrow(|state| {
+        let mut class = Some(window.class());
+        while let Some(current) = class {
+            if let Some(handler) = state.original_handlers.get(&(current as *const _ as usize)) {
+                return *handler;
+            }
+            class = current.superclass();
+        }
+        unreachable!("native window handler must retain its original implementation")
+    });
+    let original: unsafe extern "C-unwind" fn(&NSWindow, Sel, &NSEvent) -> Bool =
+        unsafe { std::mem::transmute(original) };
+    unsafe { original(window, selector, event) }
+}
 
 static EXISTING_APPLICATION_HANDLING_SEND_EVENT: AtomicBool = AtomicBool::new(false);
 

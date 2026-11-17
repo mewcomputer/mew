@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Live composition fixture</title>
+<style>
+body{margin:0;font:16px/1.5 system-ui,sans-serif;color:#202227;background:#f5f6f8}header{position:sticky;top:0;z-index:1;padding:12px 20px;background:#e1eaf3;border-bottom:1px solid #aabccd}main{padding:20px}h1{font-size:24px;line-height:1.2;margin:0 0 18px}input,textarea,select,button{font:inherit;padding:6px 10px;border:1px solid #98a2ad;border-radius:5px;background:white;color:inherit}input,textarea{display:block;margin:5px 0 12px;width:min(90%,360px)}textarea{height:70px}button{cursor:pointer;margin:0 6px 8px 0}.live{display:inline-block;width:32px;height:8px;border-radius:3px;background:#3e6c9c;animation:slide 1.3s ease-in-out infinite alternate}@keyframes slide{to{transform:translateX(80px);background:#8a4f83}}.nested{height:160px;overflow:auto;border:1px solid #9ba6b2;border-radius:8px;background:white;margin:16px 0;padding:0 12px}.nested p{padding:12px 0;border-bottom:1px solid #dfe3e7}.section{height:260px;border-top:1px solid #cad2db;margin-top:24px;padding-top:16px}.status{font:12px/1.5 ui-monospace,monospace}.paused .live{animation-play-state:paused}a{color:#174b84}
+</style></head><body>
+<header><strong>Live browser page</strong><div class="status"><span id="clock">tick 0</span> · <span id="scroll">page scroll: 0</span> · <span id="focus">focus: page</span></div><span class="live"></span></header>
+<main><h1>Content stays behind the menu</h1>
+<label>Browser notes<input id="notes" placeholder="Type, select, copy and paste here"></label>
+<label>Multiline browser notes<textarea id="details" placeholder="Check Enter, arrows, Backspace and Unicode"></textarea></label>
+<button id="counter">Counter: 0</button><button id="pause">Pause animation</button>
+<label>Native select <select id="select"><option>First option</option><option>Second option</option><option>Third option</option></select></label>
+<p><a href="#bottom">Scroll to the bottom</a></p>
+<div class="nested" aria-label="Nested page scroller"><p>Nested row 1</p><p>Nested row 2</p><p>Nested row 3</p><p>Nested row 4</p><p>Nested row 5</p><p>Nested row 6</p><p>Nested row 7</p><p>Nested row 8</p></div>
+<div class="section">Section 2. Scroll the page independently of the workbench.</div><div class="section">Section 3. Reopen the pane and check the notes and counter.</div><div class="section" id="bottom">Bottom of the real browser document. <a href="#notes">Back to notes</a></div></main>
+<script>
+let tick=0,count=0,paused=false;
+setInterval(()=>{if(!paused)document.getElementById('clock').textContent='tick '+(++tick)},100);
+document.getElementById('counter').onclick=event=>{event.target.textContent='Counter: '+(++count)};
+document.getElementById('pause').onclick=event=>{paused=!paused;document.body.classList.toggle('paused',paused);event.target.textContent=paused?'Resume animation':'Pause animation'};
+document.addEventListener('scroll',()=>{document.getElementById('scroll').textContent='page scroll: '+Math.round(scrollY)});
+document.addEventListener('focusin',event=>{document.getElementById('focus').textContent='focus: '+(event.target.id||event.target.tagName.toLowerCase())});
+document.getElementById('select').onchange=event=>{document.getElementById('focus').textContent='select: '+event.target.value};
+</script></body></html>

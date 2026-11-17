@@ -1,0 +1,14 @@
+{
+  "name": "mew-browser-composition",
+  "version": "0.0.0",
+  "private": true,
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test main.test.cjs",
+    "package": "node main.cjs --package"
+  },
+  "devDependencies": {
+    "electron": "45.0.0"
+  }
+}

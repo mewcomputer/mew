@@ -4,7 +4,7 @@ use std::process::Command;
 
 /// Pinned ghostty commit. Update this to pull a newer version.
 const GHOSTTY_REPO: &str = "https://github.com/ghostty-org/ghostty.git";
-const GHOSTTY_COMMIT: &str = "bebca84668947bfc92b9a30ed58712e1c34eee1d";
+const GHOSTTY_COMMIT: &str = "a887df42c56f6de86c0fe6da9c4eeca37931e083";
 
 fn main() {
     // docs.rs has no Zig toolchain. The checked-in bindings in src/bindings.rs
@@ -51,6 +51,8 @@ fn main() {
     build
         .arg("build")
         .arg("-Demit-lib-vt")
+        .arg("-Demit-xcframework=false")
+        .arg("-Dcpu=baseline")
         .arg("--cache-dir")
         .arg(&zig_cache)
         .arg("--prefix")
@@ -80,25 +82,8 @@ fn main() {
         include_dir.join("ghostty").join("vt.h").display()
     );
 
-    // simdutf, highway, and utfcpp are built as separate static libs in the zig
-    // cache under content-addressed paths. Find and copy them into the install
-    // lib dir so there's a single, stable search path.
-    let zig_objects = zig_cache.join("o");
-    for dep in &["libsimdutf.a", "libhighway.a", "libutfcpp.a"] {
-        let dest = lib_dir.join(dep);
-        if !dest.exists() {
-            let found = find_in_dir(&zig_objects, dep)
-                .unwrap_or_else(|| panic!("could not find {dep} in zig cache"));
-            std::fs::copy(&found, &dest).unwrap_or_else(|e| panic!("failed to copy {dep}: {e}"));
-        }
-    }
-
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     println!("cargo:rustc-link-lib=static=ghostty-vt");
-    println!("cargo:rustc-link-lib=static=simdutf");
-    println!("cargo:rustc-link-lib=static=highway");
-    println!("cargo:rustc-link-lib=static=utfcpp");
-    println!("cargo:rustc-link-lib=c++");
     println!("cargo:include={}", include_dir.display());
 }
 
@@ -150,22 +135,6 @@ fn run(mut command: Command, context: &str) {
         .status()
         .unwrap_or_else(|error| panic!("failed to execute {context}: {error}"));
     assert!(status.success(), "{context} failed with status {status}");
-}
-
-/// Search `dir` recursively for a file named `name`. Returns the first match.
-fn find_in_dir(dir: &Path, name: &str) -> Option<PathBuf> {
-    let entries = std::fs::read_dir(dir).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if let Some(found) = find_in_dir(&path, name) {
-                return Some(found);
-            }
-        } else if path.file_name().and_then(|n| n.to_str()) == Some(name) {
-            return Some(path);
-        }
-    }
-    None
 }
 
 fn zig_target(target: &str) -> String {

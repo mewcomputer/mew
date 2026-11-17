@@ -1,6 +1,7 @@
 # GPUI Rendering Model
 
-> **Source note:** This guide was originally written for [tanlethanh/zedra](https://github.com/tanlethanh/zedra) and references zedra-specific code paths. The GPUI concepts generalize, but keep the original project context in mind when reading.
+Verified against the [pinned GPUI source](README.md#source-policy), especially
+`view.rs`, `window.rs` and `app/context.rs`. This guide describes mew's desktop.
 
 A practical reference for GPUI's rendering model, based on the GPUI implementation in Zed's `crates/gpui/src` and how Zed itself uses `Window`, `AnyView`, `deferred(...)`, and `cached(...)`.
 
@@ -119,23 +120,34 @@ It marks the window for another frame and disables cached-view reuse for that fr
 
 Use it when the whole window needs redraw behavior that should bypass normal subtree reuse.
 
-## How Zed Uses Cache (as a pattern reference)
+## Mew's current boundaries
 
-Zed uses `AnyView::cached(...)` very sparingly. In the workspace code, the main usage sites are pane views and dock panels.
+`DesktopShell` is the root view. Its terminal is a child entity, and its browser
+pump retains native CEF work. Mew currently uses ordinary child views without
+GPUI `.cached(...)` boundaries. A terminal notification can therefore revisit
+the shell and transcript as well as the terminal.
 
-That pattern is intentional:
+The streaming event classifier avoids unnecessary explicit shell notifications;
+that alone does not prove that the shell never renders. Measure root and
+transcript counts with the frame probe before changing entity boundaries.
 
-- cache is applied at large, heavy subtree boundaries,
-- not spread across small leaf widgets,
-- and the cached wrapper is given an explicit layout contract such as `v_flex().size_full()`.
+Both `Entity<T>::cached(style)` and `AnyView::cached(style)` exist at this pin.
+If a measured hot subtree needs reuse, provide its real layout contract and
+test dependencies, theme changes, resize, focus and input registration. Do not
+introduce caching merely to make an entity look isolated.
+
+The terminal also has an application-owned row cache. VT cells, local selection
+and theme defaults all feed that projection. A visible local mutation must
+invalidate the row projection as well as notify GPUI; a redraw cannot fix stale
+cached row colors or cell-to-text mappings.
 
 ## Practical Rules
 
-- Treat one workspace as one window.
+- Mew displays sessions from multiple workspaces in one GPUI window.
 - Keep drawers, overlays, modals, and panels inside that window.
 - Do not expect `deferred(...)` or a separate entity alone to stop rerenders.
 - If a heavy subtree must avoid rerender during unrelated animation, it needs a reuse boundary.
-- Today, the built-in reuse boundary in GPUI is `AnyView::cached(...)`.
+- The explicit view reuse boundaries are `Entity<T>::cached(...)` and `AnyView::cached(...)`.
 
 If you choose not to use cache, that is valid, but the expected behavior changes:
 

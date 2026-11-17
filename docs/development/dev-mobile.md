@@ -63,12 +63,41 @@ xcodebuild -scheme MewMobileCore \
 
 ```sh
 cd mew-ios
-xcodegen generate    # creates mew.xcodeproj from project.yml
 xcodebuild -project mew.xcodeproj -scheme mew \
-  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
+  -destination 'platform=iOS Simulator,name=iPhone 17' build
 ```
 
 Or open `mew.xcodeproj` in Xcode and build/run from the GUI.
+
+Use the checked-in Xcode project for builds and tests. `project.yml` does
+not yet describe its test target or current package pin; regenerating the
+project would discard those settings.
+
+### Navigation and daemon settings
+
+The root navigation path owns the selected daemon and chat. Appearance
+callbacks fetch catalogs; they do not select another connection. Working
+locations persist in phone preferences, while drafts remain in memory keyed
+by daemon and session. Session lists validate restored chat identities before
+falling back to the corresponding machine's list.
+
+`ReadAutomationSettings` and setter acknowledgments return confirmed values.
+Auto-title is connection-local; auto-summary uses one shared watch value and
+notifies authenticated websocket clients, including clients without an
+attached chat. Mobile caches are cleared on disconnect. Queued settings
+mutations expire with the originating connection.
+
+The mobile core tracks actually sent create/attach operations so delayed
+history does not complete a new-chat request. Typed `SessionOperationFailed`
+replies retain operation and target identity before attachment; legacy error
+replies remain available to older clients. Swift handles distinct creation
+and attachment events and offers a scoped retry after an opening failure.
+Reliable typed failure recovery requires an updated daemon.
+
+`AppNavigationTests` and `AppStoreEventHandlingTests` cover restoration,
+cross-daemon ownership, drafts, confirmed settings, invite credentials and
+recovery races. Their phone preferences use isolated suites. Simulator
+capture fixtures are temporary and are removed after visual verification.
 
 ## Crate structure
 
@@ -197,7 +226,80 @@ job fails, run `just ios-core` and commit the regenerated files.
    from the matching `ServerMessage` arm.
 3. Regenerate Swift bindings: `just ios-core` (or `cargo run -p mew-mobile-core --bin uniffi-bindgen -- generate ...`).
 4. Handle the new event in `AppStore.handleEvent()` in `mew-ios/mew/AppStore.swift`.
-5. Rebuild the app: `cd mew-ios && xcodegen generate && xcodebuild ...`.
+5. Rebuild and test the checked-in Xcode project: `just ios-test`.
+
+## Chat, tools, and review verification
+
+Run the mobile/shared client suites and actual daemon transport tests:
+
+```sh
+cargo test -p mew-client-core -p mew-mobile-core -p mew-protocol \
+  -p mew-diff -p mew-session --all-targets --features mew-mobile-core/test-harness
+cargo test -p mew-daemon --features iroh
+cargo clippy -p mew-mobile-core --all-targets --features test-harness -- -D warnings
+cargo clippy -p mew-daemon --all-targets --features iroh -- -D warnings
+just ios-core
+just ios-test
+```
+
+These cover attachment and reconnect identities, ordered history pages,
+tool-state projection, worker transcript authorization and size limits,
+UTF-8 output chunks, and workspace review freshness/errors. The iOS suite
+also checks stale reply rejection, output recovery and streaming while
+loading older messages, consecutive tool summaries, invisible turn boundaries,
+and expanded tool details surviving history-page merges.
+Timeline tests cover millisecond timestamps, chronological ordering, calendar
+boundaries including daylight saving, daemon-scoped alert promotion, unknown
+chat discovery, combined multi-daemon ordering and identity, cached offline
+chats, and refreshes that preserve the active conversation. Navigation tests
+cover independent filter/chat restoration, explicit machine ownership for row
+mutations and project reads, creation from All, and refreshing metadata when
+returning from a newly created chat. Row actions never infer a machine from
+the active conversation.
+
+Daemon management uses correlated `read_daemon_settings`,
+`save_session_defaults`, `reset_session_defaults` and `revoke_device` commands.
+Only full-control connections may use them. Defaults persist in
+`new-chat-defaults.json` under the session directory; reset restores startup
+configuration, and resumed chats keep their own policy. Device snapshots
+support legacy trusted nodes and scoped remote pairings. An unavailable device
+manager is distinct from an empty device list.
+
+Management replies retain daemon/request identity; unsolicited snapshots do not
+complete another pending mutation. The app expires unanswered requests after
+five seconds and invalidates them on disconnect. Older-daemon unknown-command
+errors and unsent management commands must never clear a chat's pending send
+or mark its turn failed. Revocation persists before confirmation, rechecks
+control during asynchronous operations and closes active connections with a
+bounded WebSocket handshake. The real iroh M0 test covers read/save/reset,
+self-revocation confirmation and clean closure.
+
+Physical-phone checks remain necessary before release:
+
+- Pair a fresh identity with an invite, including an expired invite and
+  an already consumed invite. Connect to two daemons, filter the combined
+  timeline, and switch chats. Check that Back retains the filter, offline chats
+  stay labeled, and creating from All targets the chosen machine.
+- Save and reset new-chat defaults, create chats from two clients and verify
+  resumed chats keep their policy. Revoke another device and then this phone;
+  check confirmation, disconnection and re-pairing. Check older daemons and
+  read-only connections without disrupting an active chat.
+- Send and cancel a reply, load older messages during streaming, then
+  leave the app and return. Check reading position, keyboard behavior,
+  pending permission/question sheets, and reconnect after a network change.
+- Search and expand completed, running and failed tools. Check VoiceOver
+  labels, large text and reduced motion. Check mixed summaries such as
+  "Edited 1 file and ran 2 commands", expand the individual calls, then load
+  older history and confirm the open group and output remain visible.
+- Open a worker transcript while it runs and keep it open as the worker
+  finishes. Read multiple job-output chunks, refresh, and reconnect after
+  reading part of the output.
+- Review staged, unstaged, renamed, untracked and binary files. Refresh
+  after a same-line-count edit and check light/dark and narrow layouts.
+
+For long sessions, measure scrolling, streaming latency and memory on the
+phone. Chat retains loaded pages and uses an eager stack to preserve parsed
+markdown; simulator renders alone do not establish its performance limit.
 
 ## Known issues
 

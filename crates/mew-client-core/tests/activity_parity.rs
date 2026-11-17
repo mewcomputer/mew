@@ -378,6 +378,8 @@ async fn failed_prompt_send_does_not_add_an_optimistic_message() {
     transport.push_server_message(ServerMessage::Pong {
         version: "test".into(),
         protocol_version: mew_protocol::PROTOCOL_VERSION,
+        browser_focus_preflight: false,
+        scoped_session_failures: false,
     });
     let mut engine = mew_client_core::ClientEngine::connect(&transport)
         .await
@@ -500,6 +502,8 @@ async fn session_refreshes_coalesce_until_exact_list_reply_and_follow_up_once() 
     transport.push_server_message(ServerMessage::Pong {
         version: "test".into(),
         protocol_version: mew_protocol::PROTOCOL_VERSION,
+        browser_focus_preflight: false,
+        scoped_session_failures: false,
     });
     let mut engine = ClientEngine::connect(&transport).await.unwrap();
     transport.push_server_message(ServerMessage::SessionReady {

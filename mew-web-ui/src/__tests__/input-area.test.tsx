@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { render, screen, fireEvent, waitFor, act, cleanup } from "@testing-library/react";
 import { InputArea } from "../components/input-area";
 import { useSessionStore } from "../stores/session";
 import type { PersonaInfo } from "@mew/web-client";
@@ -37,8 +37,11 @@ function renderInputArea(overrides: Partial<{ onSend: ReturnType<typeof vi.fn>; 
 }
 
 describe("InputArea", () => {
+  let chatIndex = 0;
+  afterEach(cleanup);
   beforeEach(() => {
     useSessionStore.setState({
+      sessionId: `composer-test-${++chatIndex}`,
       availablePersonas: [],
       currentPersona: null,
       streamingPartId: null,
@@ -47,13 +50,100 @@ describe("InputArea", () => {
     switchPersonaMock.mockClear();
   });
 
+  it("keeps the home draft visible if creating a session succeeds but submission fails", async () => {
+    useSessionStore.setState({ sessionId: null });
+    const onSend = async () => {
+      act(() => useSessionStore.setState({ sessionId: "created-home-session" }));
+      throw new Error("submission rejected");
+    };
+    render(<InputArea draftId="new" onSend={onSend} onCancel={() => {}} connected />);
+    fireEvent.change(screen.getByRole("textbox", { name: "Message prompt" }), { target: { value: "keep this request" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send prompt" }));
+    await waitFor(() => expect(screen.getByText("submission rejected")).toBeTruthy());
+    expect((screen.getByRole("textbox", { name: "Message prompt" }) as HTMLTextAreaElement).value).toBe("keep this request");
+  });
+
   it("keeps composer controls inside the primary composer surface", () => {
     renderInputArea();
 
+    expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Message prompt" }));
     const surface = screen.getByTestId("composer-surface");
     expect(surface.contains(screen.getByTitle("Persona"))).toBe(true);
     expect(surface.contains(screen.getByTitle("Switch model"))).toBe(true);
     expect(surface.contains(screen.getByTitle("Send"))).toBe(true);
+  });
+
+  it("keeps unsent text and attachments owned by their chat across navigation", () => {
+    useSessionStore.setState({ sessionId: "draft-a" });
+    const { container } = renderInputArea();
+    fireEvent.change(container.querySelector("textarea")!, { target: { value: "keep this draft" } });
+    fireEvent.change(container.querySelector('input[type="file"]')!, { target: { files: [new File(["hello"], "draft.txt", { type: "text/plain" })] } });
+    act(() => useSessionStore.setState({ sessionId: "draft-b" }));
+    fireEvent.change(container.querySelector("textarea")!, { target: { value: "another chat" } });
+    act(() => useSessionStore.setState({ sessionId: "draft-a" }));
+    expect((container.querySelector("textarea") as HTMLTextAreaElement).value).toBe("keep this draft");
+    expect(screen.getByText("draft.txt")).toBeTruthy();
+  });
+
+  it("sends with Enter, keeps Shift+Enter for a newline, and ignores composing Enter", () => {
+    const { container, onSend } = renderInputArea();
+    const input = container.querySelector("textarea")!;
+    fireEvent.change(input, { target: { value: "hello" } });
+    fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
+    expect(onSend).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+    expect(onSend).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onSend).toHaveBeenCalledWith("hello", undefined);
+  });
+
+  it("retains the draft until an asynchronous send succeeds and displays a failed send", async () => {
+    let rejectSend!: (error: Error) => void;
+    const onSend = vi.fn(() => new Promise<void>((_, reject) => { rejectSend = reject; }));
+    const { container } = renderInputArea({ onSend });
+    const input = container.querySelector("textarea")!;
+    fireEvent.change(input, { target: { value: "keep my prompt" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(input.value).toBe("keep my prompt");
+    await act(async () => rejectSend(new Error("Could not create the chat")));
+    expect(input.value).toBe("keep my prompt");
+    expect(screen.getByRole("alert").textContent).toContain("Could not create the chat");
+  });
+
+  it("shows send progress and keeps text edited while the previous prompt is pending", async () => {
+    let finish!: () => void;
+    const onSend = vi.fn(() => new Promise<void>((resolve) => { finish = resolve; }));
+    renderInputArea({ onSend });
+    const input = screen.getByRole("textbox", { name: "Message prompt" }) as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "first prompt" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send prompt" }));
+    expect(screen.getByRole("button", { name: "Send prompt" }).getAttribute("aria-busy")).toBe("true");
+    fireEvent.change(input, { target: { value: "my next prompt" } });
+    await act(async () => finish());
+    expect(input.value).toBe("my next prompt");
+    expect(screen.getByRole("button", { name: "Send prompt" }).getAttribute("aria-busy")).toBe("false");
+  });
+
+  it("resizes a restored multiline draft to its content", () => {
+    const { container } = renderInputArea();
+    const input = screen.getByRole("textbox", { name: "Message prompt" }) as HTMLTextAreaElement;
+    Object.defineProperty(input, "scrollHeight", { get: () => input.value.split("\n").length * 20 });
+    const source = useSessionStore.getState().sessionId;
+    fireEvent.change(input, { target: { value: "one\ntwo\nthree" } });
+    act(() => useSessionStore.setState({ sessionId: "resize-other" }));
+    fireEvent.change(input, { target: { value: "short" } });
+    act(() => useSessionStore.setState({ sessionId: source }));
+    expect((container.querySelector("textarea") as HTMLTextAreaElement).style.height).toBe("60px");
+  });
+
+  it("does not show a previous chat's send error after navigation", async () => {
+    let fail!: (reason: Error) => void;
+    renderInputArea({ onSend: vi.fn(() => new Promise<void>((_, reject) => { fail = reject; })) });
+    fireEvent.change(screen.getByRole("textbox", { name: "Message prompt" }), { target: { value: "send here" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send prompt" }));
+    act(() => useSessionStore.setState({ sessionId: "other-send-chat" }));
+    await act(async () => fail(new Error("old chat failed")));
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("shows store personas in @ menu", () => {
@@ -122,6 +212,21 @@ describe("InputArea", () => {
     expect(attachments!.length).toBe(1);
     expect(attachments![0]!.path).toMatch(/^data:image\/png;base64,/);
     expect(attachments![0]!.mime).toBe("image/png");
+  });
+
+  it("preserves the source draft if navigation happens while an attachment is read", async () => {
+    useSessionStore.setState({ sessionId: "reading-source" });
+    const { container, onSend } = renderInputArea();
+    fireEvent.change(container.querySelector("textarea")!, { target: { value: "source prompt" } });
+    fireEvent.change(container.querySelector('input[type="file"]')!, { target: { files: [new File(["data"], "reading.txt", { type: "text/plain" })] } });
+    fireEvent.click(screen.getByRole("button", { name: "Send prompt" }));
+    act(() => useSessionStore.setState({ sessionId: "reading-destination" }));
+    fireEvent.change(container.querySelector("textarea")!, { target: { value: "destination draft" } });
+    await waitFor(() => expect((screen.getByRole("button", { name: "Send prompt" }) as HTMLButtonElement).disabled).toBe(false));
+    expect(onSend).not.toHaveBeenCalled();
+    act(() => useSessionStore.setState({ sessionId: "reading-source" }));
+    expect((container.querySelector("textarea") as HTMLTextAreaElement).value).toBe("source prompt");
+    expect(screen.getByText("reading.txt")).toBeTruthy();
   });
 
   it("prevents double-submit while sending", async () => {

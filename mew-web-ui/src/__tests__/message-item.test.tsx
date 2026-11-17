@@ -1,5 +1,6 @@
+import type { ProviderEventWire } from "@mew/web-client";
 import type { ReactNode } from "react";
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MessageItem } from "../components/message-item";
 import { useSessionStore } from "../stores/session";
@@ -24,6 +25,38 @@ describe("MessageItem streaming subscriptions", () => {
       streamingReasoningId: null,
       streamingReasoningText: "",
     });
+  });
+
+  it("keeps copy and message details in one compact action row", () => {
+    render(<MessageItem message={{
+      id: "with-details", role: "assistant", timestamp: 1,
+      parts: [{ type: "text", text: "A reply" }],
+      assistantMeta: {
+        provider_id: "test", model_id: "test", cost: 0,
+        tokens: { input: 10, output: 2, reasoning: 0, cache_read: 0, cache_write: 0 },
+        manifest: { model: "test", context_window: 1000, input_tokens: 10, output_tokens: 2, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0, segments: [] },
+      },
+    }} />);
+    const actions = screen.getByRole("group", { name: "Message actions" });
+    expect(within(actions).getByRole("button", { name: "Copy" })).toBeTruthy();
+    expect(within(actions).getByRole("button", { name: "Message details" })).toBeTruthy();
+  });
+
+  it("renders the canonical flattened daemon text stream through completion", () => {
+    function Conversation() {
+      const messages = useSessionStore((state) => state.messages);
+      return messages.map((message) => <MessageItem key={message.id} message={message} />);
+    }
+    render(<Conversation />);
+    const events: ProviderEventWire[] = JSON.parse(`[
+      {"type":"part_start","part":{"type":"text","id":"part-1","message_id":"message-1","session_id":"session-1","text":""}},
+      {"type":"part_delta","part_id":"part-1","field":"text","delta":"hello from fake provider"},
+      {"type":"part_end","part_id":"part-1"},
+      {"type":"message_end","finish":"stop","usage":{"input":0,"output":0,"reasoning":0,"cache_read":0,"cache_write":0},"cost":0}
+    ]`);
+    act(() => events.forEach((event) => useSessionStore.getState().onProviderEvent(event)));
+    expect(screen.getByText("hello from fake provider")).toBeTruthy();
+    expect(useSessionStore.getState().streamingPartId).toBeNull();
   });
 
   it("does not rerender completed messages for streaming deltas", () => {
@@ -111,7 +144,7 @@ describe("MessageItem streaming subscriptions", () => {
         type: "part_start",
         part: {
           type: "text",
-          base: { id: "text-1", message_id: "message-3", session_id: "session-1" },
+          id: "text-1", message_id: "message-3", session_id: "session-1",
           text: "",
           synthetic: false,
         },

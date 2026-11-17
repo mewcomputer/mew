@@ -218,6 +218,78 @@ async fn mobile_core_ping_pong_round_trip() -> Result<()> {
     assert!(has_part_start, "should have received PartStart");
     println!("✓ Prompt → streaming response (PartStart + MessageEnd)");
 
+    send(
+        &mut ws,
+        ClientMessage::ReadDaemonSettings {
+            request_id: "read".into(),
+        },
+    )
+    .await;
+    let settings = recv_until(&mut ws, |message| matches!(message, ServerMessage::DaemonSettings { request_id: Some(id), .. } if id == "read")).await;
+    let device_id = settings
+        .iter()
+        .find_map(|message| match message {
+            ServerMessage::DaemonSettings {
+                request_id: Some(id),
+                defaults: None,
+                devices: Some(devices),
+            } if id == "read" => {
+                assert_eq!(devices.len(), 1);
+                assert_eq!(devices[0].node_id, client_endpoint.id().to_string());
+                Some(devices[0].id.clone())
+            }
+            _ => None,
+        })
+        .expect("real iroh handler must expose its legacy device manager");
+    send(
+        &mut ws,
+        ClientMessage::SaveSessionDefaults {
+            session_id,
+            request_id: "save".into(),
+        },
+    )
+    .await;
+    let saved = recv_until(&mut ws, |message| matches!(message, ServerMessage::DaemonSettings { request_id: Some(id), .. } if id == "save")).await;
+    assert!(saved.iter().any(|message| matches!(message, ServerMessage::DaemonSettings { defaults: Some(defaults), .. } if defaults.model.as_deref() == Some("fake"))));
+    send(
+        &mut ws,
+        ClientMessage::ResetSessionDefaults {
+            request_id: "reset".into(),
+        },
+    )
+    .await;
+    let reset = recv_until(&mut ws, |message| matches!(message, ServerMessage::DaemonSettings { request_id: Some(id), .. } if id == "reset")).await;
+    assert!(reset.iter().any(|message| matches!(message, ServerMessage::DaemonSettings { request_id: Some(id), defaults: None, .. } if id == "reset")));
+    send(
+        &mut ws,
+        ClientMessage::RevokeDevice {
+            device_id,
+            request_id: "revoke".into(),
+        },
+    )
+    .await;
+    let revoked = recv_until(&mut ws, |message| matches!(message, ServerMessage::DaemonSettings { request_id: Some(id), .. } if id == "revoke")).await;
+    assert!(revoked.iter().any(|message| matches!(message, ServerMessage::DaemonSettings { request_id: Some(id), devices: Some(devices), .. } if id == "revoke" && devices.is_empty())));
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match ws.next().await {
+                None => break,
+                Some(Ok(Message::Close(_))) => {
+                    ws.flush()
+                        .await
+                        .expect("acknowledge the daemon close frame");
+                    break;
+                }
+                Some(Ok(_)) => {}
+                Some(Err(error)) => {
+                    panic!("revocation should close the websocket cleanly: {error}")
+                }
+            }
+        }
+    })
+    .await
+    .expect("revoked iroh connection must close");
+
     println!("\n✓✓✓ M0 round-trip complete: Ping/Pong + NewSession(Mobile) + Prompt/stream");
 
     let _ = router.shutdown().await;

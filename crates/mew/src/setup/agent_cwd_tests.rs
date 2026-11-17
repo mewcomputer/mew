@@ -212,6 +212,54 @@ async fn relative_tools_and_plan_files_stay_in_each_session_project() {
 }
 
 #[tokio::test]
+async fn default_write_plan_creates_multiple_plans_in_one_session() {
+    let (_dir, root) = project("plans");
+    let agent = build(
+        &root,
+        ProjectProvider::new(
+            [
+                tool_turn(
+                    "write_plan",
+                    "first",
+                    serde_json::json!({"content":"# first plan"}),
+                ),
+                tool_turn(
+                    "write_plan",
+                    "second",
+                    serde_json::json!({"content":"# second plan"}),
+                ),
+            ]
+            .concat(),
+        ),
+        &Config::default(),
+        None,
+        Some(SessionId::new()),
+    );
+    assert!(agent.resolved_plan_path().is_none());
+    run(&agent).await;
+    run(&agent).await;
+    let plans: Vec<_> = std::fs::read_dir(root.join("plans"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(plans.len(), 2);
+    let contents: Vec<_> = plans
+        .iter()
+        .map(|path| std::fs::read_to_string(path).unwrap())
+        .collect();
+    assert!(contents.contains(&"# first plan".to_string()));
+    assert!(contents.contains(&"# second plan".to_string()));
+    let flagged = agent.flagged_files.lock().await;
+    assert_eq!(flagged.len(), 2);
+    assert!(flagged.iter().all(|file| {
+        plans.contains(&file.path)
+            && file.mode == mew_tools::tools::flag_important::FlagMode::Referenced
+    }));
+    assert!(agent.system.contains("plans/"));
+    assert!(!root.join("PLAN.md").exists());
+}
+
+#[tokio::test]
 async fn explicit_workspace_roots_still_restrict_session_relative_tools() {
     let (_first, first) = project("restricted");
     let (_second, second) = project("allowed");

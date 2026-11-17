@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub use mew_protocol::RemoteScope;
@@ -128,6 +128,7 @@ impl RemoteAccessStore {
     /// so the short-lived CLI command does not need to reach into the daemon.
     fn refresh_from_disk(&self) -> Result<()> {
         if !self.path.exists() {
+            *self.state.lock().expect("remote state mutex poisoned") = RemoteAccessState::default();
             return Ok(());
         }
         let bytes = std::fs::read(&self.path)
@@ -143,6 +144,12 @@ impl RemoteAccessStore {
             .lock()
             .expect("remote state mutex poisoned")
             .clone()
+    }
+
+    pub fn read_state(&self) -> Result<RemoteAccessState> {
+        let _lock = self.acquire_file_lock()?;
+        self.refresh_from_disk()?;
+        Ok(self.snapshot())
     }
 
     pub fn set_hosting(
@@ -161,12 +168,28 @@ impl RemoteAccessStore {
     }
 
     pub fn revoke(&self, device_id: &str, now: u64) -> Result<bool> {
+        self.revoke_as(device_id, now, None)
+    }
+
+    pub(crate) fn revoke_as(&self, device_id: &str, now: u64, actor: Option<&str>) -> Result<bool> {
         let _lock = self.acquire_file_lock()?;
         self.refresh_from_disk()?;
         let mut state = self.state.lock().expect("remote state mutex poisoned");
-        let changed = state.revoke(device_id, now);
+        if let Some(actor) = actor {
+            anyhow::ensure!(
+                state.enabled
+                    && state
+                        .active_devices(now)
+                        .any(|device| device.node_id == actor
+                            && device.scope == RemoteScope::Control),
+                "this device no longer has full control"
+            );
+        }
+        let mut next = state.clone();
+        let changed = next.revoke(device_id, now);
         if changed {
-            self.save_locked(&state)?;
+            self.save_locked(&next)?;
+            *state = next;
         }
         Ok(changed)
     }
@@ -264,29 +287,110 @@ impl RemoteAccessStore {
     }
 
     fn acquire_file_lock(&self) -> Result<RemoteFileLock> {
-        let lock_path = self.path.with_extension("json.lock");
-        if let Some(parent) = lock_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        for _ in 0..100 {
-            match std::fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&lock_path)
-            {
-                Ok(_) => return Ok(RemoteFileLock { path: lock_path }),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(error) => return Err(error.into()),
-            }
-        }
-        anyhow::bail!("timed out waiting for remote access state lock")
+        acquire_file_lock(&self.path)
     }
 }
 
-struct RemoteFileLock {
+pub(crate) fn acquire_file_lock(path: &Path) -> Result<RemoteFileLock> {
+    let lock_path = path.with_extension("json.lock");
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    for _ in 0..100 {
+        match std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&lock_path)
+        {
+            Ok(_) => return Ok(RemoteFileLock { path: lock_path }),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    anyhow::bail!("timed out waiting for remote access state lock")
+}
+
+pub(crate) struct RemoteFileLock {
     path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub enum RemoteDeviceManager {
+    Scoped(Arc<RemoteAccessStore>),
+    #[cfg(feature = "iroh")]
+    Legacy(Arc<crate::iroh_transport::NodeIdAllowlist>),
+}
+
+impl RemoteDeviceManager {
+    pub fn devices(&self, now: u64) -> Result<Vec<mew_protocol::PairedDeviceInfo>> {
+        match self {
+            Self::Scoped(store) => Ok(store
+                .read_state()?
+                .active_devices(now)
+                .map(|device| mew_protocol::PairedDeviceInfo {
+                    id: device.id.clone(),
+                    name: device.name.clone(),
+                    node_id: device.node_id.clone(),
+                    scope: Some(device.scope),
+                    paired_at: Some(device.paired_at),
+                })
+                .collect()),
+            #[cfg(feature = "iroh")]
+            Self::Legacy(store) => Ok(store
+                .read_nodes()?
+                .into_iter()
+                .map(|id| mew_protocol::PairedDeviceInfo {
+                    id: id.clone(),
+                    name: String::new(),
+                    node_id: id,
+                    scope: None,
+                    paired_at: None,
+                })
+                .collect()),
+        }
+    }
+
+    pub fn revoke(&self, id: &str, now: u64) -> Result<()> {
+        self.revoke_as(id, now, None)
+    }
+
+    pub(crate) fn revoke_as(&self, id: &str, now: u64, actor: Option<&str>) -> Result<()> {
+        match self {
+            Self::Scoped(store) => {
+                anyhow::ensure!(
+                    store.revoke_as(id, now, actor)?,
+                    "device is no longer paired"
+                );
+            }
+            #[cfg(feature = "iroh")]
+            Self::Legacy(store) => store.remove_as(id, actor)?,
+        }
+        Ok(())
+    }
+
+    pub fn authorized_scope(&self, node_id: &str, now: u64) -> Result<Option<RemoteScope>> {
+        match self {
+            Self::Scoped(store) => {
+                let state = store.read_state()?;
+                if !state.enabled {
+                    return Ok(None);
+                }
+                let scope = state
+                    .active_devices(now)
+                    .find(|device| device.node_id == node_id)
+                    .map(|device| device.scope);
+                Ok(scope)
+            }
+            #[cfg(feature = "iroh")]
+            Self::Legacy(store) => Ok(store
+                .read_nodes()?
+                .iter()
+                .any(|id| id == node_id)
+                .then_some(RemoteScope::Control)),
+        }
+    }
 }
 
 impl Drop for RemoteFileLock {
@@ -441,5 +545,61 @@ mod tests {
                 .unwrap(),
             Some(RemoteScope::Control)
         );
+    }
+
+    #[test]
+    fn device_management_reads_external_pairings_and_revokes_persistently_without_exposing_invites()
+    {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("remote.json");
+        let daemon_store = Arc::new(RemoteAccessStore::load(path.clone()).unwrap());
+        let cli = RemoteAccessStore::new(path);
+        cli.set_hosting(true, RemoteMode::Daemon, None).unwrap();
+        let token = cli.create_pairing(RemoteScope::Control, 100, 60).unwrap();
+        cli.authorize_token(&token, "phone", "My phone", 101)
+            .unwrap();
+        let manager = RemoteDeviceManager::Scoped(daemon_store);
+        let devices = manager.devices(102).unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].name, "My phone");
+        assert!(!serde_json::to_string(&devices).unwrap().contains(&token));
+        assert_eq!(
+            manager.authorized_scope("phone", 102).unwrap(),
+            Some(RemoteScope::Control)
+        );
+        manager.revoke(&devices[0].id, 103).unwrap();
+        assert_eq!(cli.authorize_device("phone", 104).unwrap(), None);
+        assert!(manager.devices(104).unwrap().is_empty());
+        assert_eq!(manager.authorized_scope("phone", 104).unwrap(), None);
+    }
+
+    #[test]
+    fn failed_device_revocation_keeps_the_authorized_device() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("remote.json");
+        let store = RemoteAccessStore::new(path);
+        let token = store.create_pairing(RemoteScope::Control, 100, 60).unwrap();
+        store
+            .authorize_token(&token, "phone", "My phone", 101)
+            .unwrap();
+        let device = store.snapshot().devices[0].id.clone();
+        std::fs::create_dir(root.path().join("remote.json.tmp")).unwrap();
+        assert!(store.revoke(&device, 102).is_err());
+        assert_eq!(store.snapshot().active_devices(103).count(), 1);
+    }
+
+    #[test]
+    fn removing_the_remote_state_file_invalidates_cached_authorization() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("remote.json");
+        let store = Arc::new(RemoteAccessStore::new(path.clone()));
+        store.set_hosting(true, RemoteMode::Daemon, None).unwrap();
+        let token = store.create_pairing(RemoteScope::Control, 100, 60).unwrap();
+        store
+            .authorize_token(&token, "phone", "Phone", 101)
+            .unwrap();
+        std::fs::remove_file(path).unwrap();
+        let manager = RemoteDeviceManager::Scoped(store);
+        assert_eq!(manager.authorized_scope("phone", 102).unwrap(), None);
     }
 }

@@ -186,6 +186,14 @@ async fn mobile_core_emits_events_through_listener() -> Result<()> {
         matches!(e, CoreEvent::SessionReloaded { .. })
     });
     println!("✓ Received SessionReloaded (SessionReady)");
+    assert!(
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event, CoreEvent::SessionCreated { .. })),
+        "a real NewSession acknowledgment must identify creation independently of history reloads"
+    );
 
     // Send a prompt.
     core.prompt(daemon_id.clone(), "hello from M1 test".into());
@@ -371,6 +379,300 @@ impl Harness {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn worker_history_and_chunked_job_output_read_from_the_parent_daemon() -> Result<()> {
+    let h = Harness::new().await?;
+    let parent = h.server.session_manager.create(None).await?;
+    let root = h._dir.path().join("sessions");
+    let child_id = ulid::Ulid::new();
+    let mut parent_meta = mew_session::Meta::read(&root, &parent.id).await?.unwrap();
+    parent_meta.children_session_ids.push(child_id.to_string());
+    parent_meta.write(&root).await?;
+    let mut child_meta = mew_session::Meta::new(child_id.to_string());
+    child_meta.parent_session_id = Some(parent.id.clone());
+    child_meta.depth = 1;
+    let mut writer = mew_session::Writer::open_at_with_meta(
+        &root.join(&parent.id).join("subagents"),
+        &child_id.to_string(),
+        child_meta,
+    )
+    .await?;
+    let message_id = ulid::Ulid::new();
+    writer
+        .write_message(&mew_message::Message {
+            id: message_id,
+            session_id: child_id,
+            role: mew_message::Role::Assistant,
+            parts: vec![mew_message::Part::Text(mew_message::TextPart {
+                base: mew_message::PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id,
+                    session_id: child_id,
+                },
+                text: "worker findings".into(),
+                synthetic: false,
+            })],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        })
+        .await?;
+    writer.flush().await?;
+    let job = {
+        let agent = parent.agent.lock().await;
+        let job = agent
+            .start_shell_job("printf '%065535d猫\\n' 0", h._dir.path())
+            .await;
+        agent
+            .shell_job_block(&job, 10)
+            .await
+            .expect("real shell job must finish");
+        job
+    };
+    h.events.lock().unwrap().clear();
+    h.core.attach(h.daemon_id.clone(), parent.id.clone());
+    wait_for_event(&h.events, 10, |event| {
+        matches!(event, CoreEvent::SessionReloaded { session_id, .. }
+        if session_id == &parent.id)
+    });
+    assert!(h.core.read_subagent_history(
+        h.daemon_id.clone(),
+        parent.id.clone(),
+        child_id.to_string(),
+        "child-read".into()
+    ));
+    wait_for_event(&h.events, 10, |event| {
+        matches!(event, CoreEvent::WorkerHistoryLoaded { session_id, request_id, messages, error: None, .. }
+        if session_id == &parent.id && request_id == "child-read" && messages[0].parts[0].text.as_deref() == Some("worker findings"))
+    });
+    assert_eq!(
+        h.core
+            .snapshot(h.daemon_id.clone())
+            .unwrap()
+            .attached_session
+            .as_deref(),
+        Some(parent.id.as_str())
+    );
+    for (request, offset, expected_next, expected_output, done) in [
+        ("chunk-1", 0, 65_535, "0".repeat(65_535), false),
+        ("chunk-2", 65_535, 65_539, "猫\n".into(), true),
+    ] {
+        assert!(h.core.read_job_output(
+            h.daemon_id.clone(),
+            parent.id.clone(),
+            job.clone(),
+            request.into(),
+            offset
+        ));
+        wait_for_event(&h.events, 10, |event| {
+            matches!(event, CoreEvent::JobOutputLoaded { session_id, request_id, next_offset, output, done: actual_done, .. }
+            if session_id == &parent.id && request_id == request && *next_offset == expected_next && *output == expected_output && *actual_done == done)
+        });
+    }
+    assert!(h.core.read_job_output(
+        h.daemon_id.clone(),
+        parent.id.clone(),
+        "missing".into(),
+        "bad-job".into(),
+        0
+    ));
+    wait_for_event(&h.events, 10, |event| {
+        matches!(event, CoreEvent::JobOutputFailed { request_id, message, .. }
+        if request_id == "bad-job" && message.contains("unknown job"))
+    });
+    assert!(h.core.read_subagent_history(
+        h.daemon_id.clone(),
+        parent.id.clone(),
+        ulid::Ulid::new().to_string(),
+        "bad-child".into()
+    ));
+    wait_for_event(
+        &h.events,
+        10,
+        |event| matches!(event, CoreEvent::WorkerHistoryLoaded { request_id, error: Some(_), .. } if request_id == "bad-child"),
+    );
+    h.router.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn older_history_loads_every_remote_message_in_order() -> Result<()> {
+    let h = Harness::new().await?;
+    let session = h.server.session_manager.create(None).await?;
+    let session_id = session.id.clone();
+    let canonical_session = session_id
+        .trim_start_matches("sess_")
+        .parse::<ulid::Ulid>()?;
+    let messages = (0..61)
+        .map(|number| {
+            let message_id = ulid::Ulid::from(number + 100);
+            mew_message::Message {
+                id: message_id,
+                session_id: canonical_session,
+                role: mew_message::Role::User,
+                parts: vec![mew_message::Part::Text(mew_message::TextPart {
+                    base: mew_message::PartBase {
+                        id: ulid::Ulid::from(number + 200),
+                        message_id,
+                        session_id: canonical_session,
+                    },
+                    text: format!("message {number}"),
+                    synthetic: false,
+                })],
+                time: mew_message::Time {
+                    created: 0,
+                    completed: None,
+                },
+                assistant: None,
+            }
+        })
+        .collect();
+    session.agent.lock().await.load_messages(messages).await;
+    h.events.lock().unwrap().clear();
+    h.core.attach(h.daemon_id.clone(), session_id.clone());
+    wait_for_event(&h.events, 10, |event| {
+        matches!(event, CoreEvent::SessionReloaded { .. })
+            && h.core
+                .snapshot(h.daemon_id.clone())
+                .is_some_and(|snapshot| snapshot.sessions[0].history_before == Some(37))
+    });
+    for expected_count in [48, 61] {
+        h.events.lock().unwrap().clear();
+        assert!(h
+            .core
+            .load_older_history(h.daemon_id.clone(), session_id.clone()));
+        wait_for_event(&h.events, 10, |event| {
+            matches!(event, CoreEvent::HistoryExtended { daemon, session_id: id }
+            if daemon == &h.daemon_id.node_id && id == &session_id)
+        });
+        assert_eq!(
+            h.core.snapshot(h.daemon_id.clone()).unwrap().sessions[0]
+                .messages
+                .len(),
+            expected_count
+        );
+    }
+    let snapshot = h.core.snapshot(h.daemon_id.clone()).unwrap();
+    assert_eq!(
+        snapshot.sessions[0]
+            .messages
+            .iter()
+            .map(|message| message.parts[0].text.clone().unwrap())
+            .collect::<Vec<_>>(),
+        (0..61)
+            .map(|number| format!("message {number}"))
+            .collect::<Vec<_>>()
+    );
+    assert!(snapshot.sessions[0].history_before.is_none());
+    assert!(!h.core.load_older_history(h.daemon_id.clone(), session_id));
+    h.router.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workspace_review_reads_fresh_remote_files_and_reports_non_repository_errors() -> Result<()>
+{
+    let h = Harness::new().await?;
+    let workspace = h._dir.path().join("review-workspace");
+    std::fs::create_dir(&workspace)?;
+    let init = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&workspace)
+        .output()?;
+    assert!(
+        init.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    std::fs::write(workspace.join("new.txt"), "first version\n")?;
+    let previous = h
+        .core
+        .snapshot(h.daemon_id.clone())
+        .unwrap()
+        .attached_session
+        .unwrap();
+    h.core.new_session(
+        h.daemon_id.clone(),
+        Some(workspace.to_str().unwrap().into()),
+    );
+    wait_for_event(&h.events, 10, |event| {
+        matches!(event,
+        CoreEvent::SessionReloaded { session_id, .. } if session_id != &previous)
+    });
+    let session = h
+        .core
+        .snapshot(h.daemon_id.clone())
+        .unwrap()
+        .attached_session
+        .unwrap();
+
+    for (request, content) in [("first", "first version\n"), ("second", "fresh version\n")] {
+        std::fs::write(workspace.join("new.txt"), content)?;
+        assert!(h
+            .core
+            .read_session_diff(h.daemon_id.clone(), session.clone(), request.into()));
+        wait_for_event(&h.events, 10, |event| {
+            matches!(event,
+            CoreEvent::ReviewLoaded { request_id, .. } if request_id == request)
+        });
+        let events = h.events.lock().unwrap();
+        let files = events
+            .iter()
+            .find_map(|event| match event {
+                CoreEvent::ReviewLoaded {
+                    daemon,
+                    session_id,
+                    request_id,
+                    files,
+                } if daemon == &h.daemon_id.node_id
+                    && session_id == &session
+                    && request_id == request =>
+                {
+                    Some(files)
+                }
+                _ => None,
+            })
+            .expect("review must retain its daemon and session identities");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "new.txt");
+        assert_eq!(
+            files[0].hunks[0].lines[0].text,
+            content.trim_end_matches('\n')
+        );
+    }
+
+    let non_repository = h._dir.path().join("not-a-repository");
+    std::fs::create_dir(&non_repository)?;
+    h.core.new_session(
+        h.daemon_id.clone(),
+        Some(non_repository.to_str().unwrap().into()),
+    );
+    wait_for_event(&h.events, 10, |event| {
+        matches!(event,
+        CoreEvent::SessionReloaded { session_id, .. } if session_id != &previous && session_id != &session)
+    });
+    let non_repo_session = h
+        .core
+        .snapshot(h.daemon_id.clone())
+        .unwrap()
+        .attached_session
+        .unwrap();
+    assert!(h.core.read_session_diff(
+        h.daemon_id.clone(),
+        non_repo_session.clone(),
+        "failure".into()
+    ));
+    wait_for_event(&h.events, 10, |event| {
+        matches!(event,
+        CoreEvent::ReviewFailed { daemon, session_id, request_id, message }
+            if daemon == &h.daemon_id.node_id && session_id == &non_repo_session && request_id == "failure" && message.contains("not a git repository"))
+    });
+    h.router.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn b1_b6_feature_parity_tests() -> Result<()> {
     let h = Harness::new().await?;
 
@@ -476,7 +778,7 @@ async fn b1_b6_feature_parity_tests() -> Result<()> {
             .snapshot(h.daemon_id.clone())
             .expect("snapshot should exist");
         assert!(
-            snapshot.sessions.first().is_some(),
+            !snapshot.sessions.is_empty(),
             "session should still exist after set_thinking_variant"
         );
     }
@@ -492,7 +794,7 @@ async fn b1_b6_feature_parity_tests() -> Result<()> {
             .snapshot(h.daemon_id.clone())
             .expect("snapshot should exist");
         assert!(
-            snapshot.sessions.first().is_some(),
+            !snapshot.sessions.is_empty(),
             "session should still exist after unknown slash command"
         );
     }

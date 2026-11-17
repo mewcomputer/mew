@@ -20,6 +20,27 @@ pub enum CoreEvent {
         status: DaemonStatus,
     },
 
+    AutomationSettings {
+        daemon: String,
+        settings: crate::state::AutomationSettings,
+    },
+
+    AutoSummaryChanged {
+        daemon: String,
+        enabled: bool,
+    },
+
+    DaemonManagementSettings {
+        daemon: String,
+        request_id: Option<String>,
+        settings: DaemonManagementSettings,
+    },
+    DaemonManagementFailed {
+        daemon: String,
+        request_id: String,
+        message: String,
+    },
+
     /// Full or updated session list for a daemon.
     SessionList {
         daemon: String,
@@ -40,11 +61,91 @@ pub enum CoreEvent {
         entries: Vec<DirEntry>,
     },
 
+    /// Fresh workspace changes, scoped to the originating review request.
+    ReviewLoaded {
+        daemon: String,
+        session_id: String,
+        request_id: String,
+        files: Vec<ReviewFile>,
+    },
+
+    ReviewFailed {
+        daemon: String,
+        session_id: String,
+        request_id: String,
+        message: String,
+    },
+
+    /// The daemon acknowledged a new-session command from this client.
+    SessionCreated {
+        daemon: String,
+        session_id: String,
+    },
+
+    SessionCreationFailed {
+        daemon: String,
+        message: String,
+    },
+
+    SessionAttachmentFailed {
+        daemon: String,
+        session_id: String,
+        message: String,
+    },
+
     /// An attachment was acknowledged; discard cached required actions before replay.
-    SessionReady { daemon: String, session_id: String },
+    SessionReady {
+        daemon: String,
+        session_id: String,
+    },
 
     /// Session history was loaded. Swift should pull `snapshot()`.
-    SessionReloaded { daemon: String, session_id: String },
+    SessionReloaded {
+        daemon: String,
+        session_id: String,
+    },
+
+    /// Older messages were prepended without restarting session attachment.
+    HistoryExtended {
+        daemon: String,
+        session_id: String,
+    },
+
+    ActivityUpdated {
+        daemon: String,
+        session_id: String,
+        subagents: Vec<crate::activity::WorkerInfo>,
+        jobs: Vec<crate::activity::BackgroundJob>,
+    },
+
+    WorkerHistoryLoaded {
+        daemon: String,
+        session_id: String,
+        child_session_id: String,
+        request_id: String,
+        messages: Vec<crate::state::ChatMessage>,
+        error: Option<String>,
+    },
+
+    JobOutputLoaded {
+        daemon: String,
+        session_id: String,
+        job_id: String,
+        request_id: String,
+        offset: u64,
+        next_offset: u64,
+        output: String,
+        done: bool,
+        incomplete: bool,
+    },
+
+    JobOutputFailed {
+        daemon: String,
+        session_id: String,
+        job_id: String,
+        request_id: String,
+        message: String,
+    },
 
     /// Streaming text delta for a part. Coalesced in Rust before FFI.
     TextDelta {
@@ -121,7 +222,10 @@ pub enum CoreEvent {
     },
 
     /// A request was resolved (by this device or another). Dismiss the sheet.
-    RequestResolved { daemon: String, request_id: String },
+    RequestResolved {
+        daemon: String,
+        request_id: String,
+    },
 
     /// Cross-session alert from the daemon.
     Alert {
@@ -148,7 +252,10 @@ pub enum CoreEvent {
     },
 
     /// Permission mode changed (via cross-device or local action).
-    PermissionModeChanged { daemon: String, mode: String },
+    PermissionModeChanged {
+        daemon: String,
+        mode: String,
+    },
 
     /// Model was switched (via cross-device or local action).
     ModelSwitched {
@@ -177,7 +284,10 @@ pub enum CoreEvent {
     },
 
     /// Daemon version from Pong.
-    DaemonVersion { daemon: String, version: String },
+    DaemonVersion {
+        daemon: String,
+        version: String,
+    },
 
     /// Available personas from the daemon.
     PersonaList {
@@ -186,7 +296,78 @@ pub enum CoreEvent {
     },
 
     /// Persona was switched (via user action, cross-device, or tool call).
-    PersonaSwitched { daemon: String, name: String },
+    PersonaSwitched {
+        daemon: String,
+        name: String,
+    },
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ReviewFile {
+    pub path: String,
+    pub old_path: Option<String>,
+    pub status: ReviewFileStatus,
+    pub hunks: Vec<ReviewHunk>,
+    pub added: u64,
+    pub removed: u64,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct DaemonManagementSettings {
+    pub defaults: Option<NewChatDefaults>,
+    pub devices: Option<Vec<PairedDevice>>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct NewChatDefaults {
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub persona: Option<String>,
+    pub thinking_variant: Option<String>,
+    pub permission_mode: String,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct PairedDevice {
+    pub id: String,
+    pub name: String,
+    pub node_id: String,
+    pub scope: Option<String>,
+    pub paired_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ReviewFileStatus {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Unchanged,
+    Binary,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ReviewHunk {
+    pub old_start: u64,
+    pub old_count: u64,
+    pub new_start: u64,
+    pub new_count: u64,
+    pub lines: Vec<ReviewLine>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ReviewLine {
+    pub kind: ReviewLineKind,
+    pub old_line: Option<u64>,
+    pub new_line: Option<u64>,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ReviewLineKind {
+    Context,
+    Addition,
+    Deletion,
 }
 
 /// Connection status for a daemon.

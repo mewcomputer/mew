@@ -5,7 +5,7 @@ import { CalendarDays, FolderOpen, Layers, Plus, Search, Settings, Square, Sun, 
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandShortcut } from "../components/ui/command";
 import { Dialog, DialogContent } from "../components/ui/dialog";
 import { useSessionStore } from "../stores/session";
-import { useTheme, THEMES } from "../lib/theme";
+import { useTheme } from "../lib/theme";
 import { cn } from "../lib/utils";
 import { filterProjects, filterSessions, formatSessionDate, getSessionSearchText, projectName } from "../lib/session-search";
 
@@ -31,7 +31,7 @@ export function CommandPalette({ client, open, onOpenChange }: CommandPalettePro
   const sessionSummaries = useSessionStore((s) => s.sessionSummaries);
   const messages = useSessionStore((s) => s.messages);
   const currentSessionId = useSessionStore((s) => s.sessionId);
-  const { themeId, setThemeId } = useTheme();
+  const { themeId, setThemeId, themes } = useTheme();
   const [query, setQuery] = useState("");
 
   useEffect(() => {
@@ -87,8 +87,8 @@ export function CommandPalette({ client, open, onOpenChange }: CommandPalettePro
         label: "Toggle theme",
         icon: <Sun />,
         action: () => {
-          const index = THEMES.findIndex((theme) => theme.id === themeId);
-          const next = THEMES[(index + 1) % THEMES.length];
+          const index = themes.findIndex((theme) => theme.id === themeId);
+          const next = themes[(index + 1) % themes.length];
           if (next) setThemeId(next.id);
           onOpenChange(false);
         },
@@ -100,7 +100,7 @@ export function CommandPalette({ client, open, onOpenChange }: CommandPalettePro
       items.push({ id: "archive-session", label: "Archive current session", icon: <Archive />, action: () => { client?.archiveSession(currentSessionId, true); onOpenChange(false); } });
     }
     return items;
-  }, [client, currentSessionId, onOpenChange, router, setThemeId, themeId]);
+  }, [client, currentSessionId, onOpenChange, router, setThemeId, themeId, themes]);
 
   const normalizedQuery = query.trim().toLowerCase();
   const filteredActions = useMemo(

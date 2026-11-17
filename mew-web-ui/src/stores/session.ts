@@ -427,7 +427,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       case "part_start": {
         if (ev.part.type === "text") {
           // Start a new streaming text part.
-          const partId = ev.part.base.id;
+          const partId = ev.part.id;
           set({
             streamingPartId: partId,
             streamingText: "",
@@ -475,7 +475,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           });
         } else if (ev.part.type === "reasoning") {
           // Start streaming reasoning text
-          const partId = ev.part.base.id;
+          const partId = ev.part.id;
           set({
             streamingReasoningId: partId,
             streamingReasoningText: ev.part.text || "",
@@ -1247,13 +1247,7 @@ export function bridgeClientToStore(client: MewClient) {
   client.on("provider", (ev) => store.getState().onProviderEvent(ev));
 
   client.on("user-message", (data) => {
-    const store = useSessionStore.getState();
-    // Deduplicate: the sending client already added the message locally.
-    const last = store.messages[store.messages.length - 1];
-    if (last && last.role === "user" && last.parts.some((p) => p.type === "text" && p.text === data.text)) {
-      return;
-    }
-    store.addUserMessage(data.text);
+    useSessionStore.getState().addUserMessage(data.text);
   });
 
   client.on("tool-start", (data) => store.getState().onToolStart(data.call_id));

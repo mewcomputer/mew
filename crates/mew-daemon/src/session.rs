@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use tokio::io::AsyncReadExt;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio_util::sync::CancellationToken;
 
@@ -138,9 +139,20 @@ impl Session {
             meta.id == child_session_id && meta.parent_session_id.as_deref() == Some(&parent),
             "child metadata does not match the attached parent"
         );
-        let data = tokio::fs::read(children.join(child_session_id).join("session.jsonl"))
+        let mut transcript =
+            tokio::fs::File::open(children.join(child_session_id).join("session.jsonl"))
+                .await
+                .context("read child transcript")?
+                .take((crate::HISTORY_PAGE_MAX_BYTES + 1) as u64);
+        let mut data = Vec::new();
+        transcript
+            .read_to_end(&mut data)
             .await
             .context("read child transcript")?;
+        anyhow::ensure!(
+            data.len() <= crate::HISTORY_PAGE_MAX_BYTES,
+            "worker history exceeds the response size limit (8 MiB)"
+        );
         // A live writer can expose an incomplete final append before its newline.
         let last_record = data
             .iter()
@@ -370,6 +382,23 @@ impl Session {
             .collect()
     }
 
+    /// Notify the other attached clients that a connection joined.
+    pub(crate) async fn notify_client_attached(
+        &self,
+        client_id: u64,
+        client_kind: mew_protocol::ClientKind,
+    ) {
+        self.clients.lock().await.retain(|(id, sender, _)| {
+            *id == client_id
+                || sender
+                    .send(ServerMessage::ClientAttached {
+                        client_id,
+                        client_kind,
+                    })
+                    .is_ok()
+        });
+    }
+
     /// Broadcast a message to all attached clients. Removes any sender that fails.
     pub async fn broadcast(&self, mut msg: ServerMessage) {
         let mut activity = if matches!(
@@ -451,6 +480,13 @@ pub struct SessionManager {
     pub(crate) project_pins: Arc<ProjectPinsStore>,
     pub(crate) active: Mutex<HashMap<String, Arc<Session>>>,
     loading: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    pub(crate) defaults_lock: Mutex<()>,
+    pub remote_devices: std::sync::OnceLock<crate::remote::RemoteDeviceManager>,
+    pub(crate) settings_changed: tokio::sync::watch::Sender<()>,
+    #[cfg(test)]
+    pub(crate) settings_operation_started: tokio::sync::Notify,
+    #[cfg(test)]
+    pub(crate) revocation_commit_hook: std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl SessionManager {
@@ -469,11 +505,19 @@ impl SessionManager {
             project_pins,
             active: Mutex::new(HashMap::new()),
             loading: Mutex::new(HashMap::new()),
+            defaults_lock: Mutex::new(()),
+            remote_devices: std::sync::OnceLock::new(),
+            settings_changed: tokio::sync::watch::channel(()).0,
+            #[cfg(test)]
+            settings_operation_started: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            revocation_commit_hook: std::sync::Mutex::new(None),
         }
     }
 
     /// Create a brand-new session.
     pub async fn create(&self, cwd: Option<PathBuf>) -> Result<Arc<Session>> {
+        let policy = self.read_session_defaults().await?;
         let session_id = format!("sess_{}", ulid::Ulid::new());
         let writer = mew_session::Writer::open_at(&self.session_dir, &session_id)
             .await
@@ -482,7 +526,7 @@ impl SessionManager {
             session_id: session_id.clone(),
             writer,
             cwd,
-            policy: None,
+            policy,
         })?;
         load_todos(&agent).await?;
         let session = Arc::new(Session::new(
@@ -497,6 +541,60 @@ impl SessionManager {
             .await?;
         self.active.lock().await.insert(session_id, session.clone());
         Ok(session)
+    }
+
+    /// Persisted defaults apply only when creating a chat, never when resuming one.
+    pub async fn read_session_defaults(&self) -> Result<Option<mew_session::SessionPolicy>> {
+        let _guard = self.defaults_lock.lock().await;
+        match tokio::fs::read(self.session_dir.join("new-chat-defaults.json")).await {
+            Ok(bytes) => Ok(Some(
+                serde_json::from_slice(&bytes).context("decode new-chat defaults")?,
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error).context("read new-chat defaults"),
+        }
+    }
+
+    pub async fn set_session_defaults(
+        &self,
+        policy: Option<mew_session::SessionPolicy>,
+    ) -> Result<()> {
+        self.set_session_defaults_authorized(policy, None).await
+    }
+
+    pub(crate) async fn set_session_defaults_authorized(
+        &self,
+        policy: Option<mew_session::SessionPolicy>,
+        authorization: Option<crate::RemoteAuthorization>,
+    ) -> Result<()> {
+        let _guard = self.defaults_lock.lock().await;
+        let path = self.session_dir.join("new-chat-defaults.json");
+        let settings_changed = self.settings_changed.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let _file_lock = crate::remote::acquire_file_lock(&path)?;
+            if let Some(authorization) = authorization {
+                authorization.require_control()?;
+            }
+            if let Some(policy) = policy {
+                anyhow::ensure!(
+                    mew_hooks::PermissionMode::from_id(&policy.permission_mode).is_some(),
+                    "invalid default permission mode"
+                );
+                let temporary = path.with_extension("json.tmp");
+                std::fs::write(&temporary, serde_json::to_vec_pretty(&policy)?)?;
+                std::fs::rename(temporary, path)?;
+            } else {
+                match std::fs::remove_file(path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            settings_changed.send_replace(());
+            Ok(())
+        })
+        .await??;
+        Ok(())
     }
 
     /// Attach to an active session, or resume an idle session from disk.

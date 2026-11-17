@@ -1,5 +1,33 @@
 [
   {
+    "id": "codex-dark",
+    "name": "Codex dark",
+    "description": "Neutral charcoal workspace",
+    "category": "mew",
+    "baseText": "#eeeeee",
+    "preview": [
+      "#181818",
+      "#eeeeee",
+      "#999999",
+      "#333333",
+      "#222222"
+    ]
+  },
+  {
+    "id": "codex-light",
+    "name": "Codex light",
+    "description": "Neutral light workspace",
+    "category": "mew",
+    "baseText": "#202020",
+    "preview": [
+      "#ffffff",
+      "#202020",
+      "#777777",
+      "#f4f4f4",
+      "#f5f5f5"
+    ]
+  },
+  {
     "id": "catppuccin-latte",
     "name": "Latte",
     "description": "Warm light flavour",

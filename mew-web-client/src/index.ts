@@ -32,6 +32,28 @@ export interface Attachment {
 
 export type PermissionDecision = "allow_once" | "allow_session" | "deny";
 
+export interface NewChatDefaults {
+  model: string | null;
+  provider: string | null;
+  persona: string | null;
+  thinking_variant: string | null;
+  permission_mode: string;
+}
+
+export interface PairedDevice {
+  id: string;
+  name: string;
+  node_id: string;
+  scope: "observe" | "collaborate" | "control" | null;
+  paired_at: number | null;
+}
+
+export interface DaemonSettings {
+  request_id: string | null;
+  defaults: NewChatDefaults | null;
+  devices: PairedDevice[] | null;
+}
+
 export type ClientMessage =
   | { type: "remote_hello"; token?: string; device_name: string }
   | { type: "new_session"; cwd: string | null; client_kind: string }
@@ -43,8 +65,14 @@ export type ClientMessage =
   | { type: "delete_session"; session_id: string }
   | { type: "rename_session"; session_id: string; title: string }
   | { type: "set_auto_title"; enabled: boolean }
+  | { type: "read_daemon_settings"; request_id: string }
+  | { type: "save_session_defaults"; session_id: string; request_id: string }
+  | { type: "reset_session_defaults"; request_id: string }
+  | { type: "revoke_device"; device_id: string; request_id: string }
   | { type: "set_auto_summary"; enabled: boolean }
   | { type: "prompt"; text: string; attachments: Attachment[] }
+  | { type: "submit_prompt"; session_id: string; request_id: string; text: string; attachments: Attachment[] }
+  | { type: "read_prompt_receipt"; session_id: string; request_id: string }
   | { type: "cancel" }
   | { type: "guide"; text: string }
   | {
@@ -95,6 +123,8 @@ export type ClientMessage =
   | { type: "ping" }
   | { type: "list_projects" }
   | { type: "list_filesystem_dir"; path?: string }
+  | { type: "register_browser_page"; session_id: string; page_instance: string; cdp_endpoint: string; target_id: string; focus_url?: string }
+  | { type: "unregister_browser_page"; session_id: string; page_instance: string }
   | { type: "browser_open"; url: string; tab_id?: string }
   | { type: "browser_snapshot"; tab_id?: string }
   | { type: "browser_screenshot"; annotate: boolean; tab_id?: string }
@@ -130,32 +160,29 @@ export type ProviderEventWire =
     }
   | { type: "error"; error: MessageError };
 
-export type Part =
-  | { type: "text"; base: PartBase; text: string; synthetic: boolean }
-  | { type: "reasoning"; base: PartBase; text: string; signature?: string }
+export type Part = PartBase & (
+  | { type: "text"; text: string; synthetic?: boolean }
+  | { type: "reasoning"; text: string; signature?: string }
   | {
       type: "tool_call";
-      base: PartBase;
       tool_name: string;
       call_id: string;
       state: ToolState;
     }
-  | { type: "tool_result"; base: PartBase; call_id: string; output?: string }
+  | { type: "tool_result"; call_id: string; output?: string }
   | {
       type: "file";
-      base: PartBase;
       mime: string;
       filename?: string;
       url: string;
     }
   | {
       type: "compaction";
-      base: PartBase;
       auto: boolean;
       overflow: boolean;
       summary?: string;
       removed_count?: number;
-    };
+    });
 
 export interface PartBase {
   id: string;
@@ -291,6 +318,8 @@ export interface ModelInfo {
   provider: string;
   /** Model ID within the provider (e.g. "deepseek-v4-flash"). */
   model: string;
+  /** Catalog-provided display name; absent for unnamed models and older daemons. */
+  display_name?: string;
   /** Human-readable description for the picker UI. */
   description?: string;
   /** Available thinking/reasoning variants for this model. */
@@ -486,6 +515,10 @@ export interface Segment {
 }
 
 export type ServerMessage =
+  | { type: "prompt_receipt"; session_id: string; request_id: string; status: "accepted" | "rejected" | "unknown"; message?: string }
+  | { type: "session_operation_failed"; operation: "create" | "attach"; session_id: string | null; message: string }
+  | ({ type: "daemon_settings" } & DaemonSettings)
+  | { type: "daemon_settings_failed"; request_id: string; message: string }
   | { type: "remote_ready"; scope: "observe" | "collaborate" | "control" }
   | { type: "session_ready"; session_id: string; cwd?: string; model?: string; provider?: string; permission_mode?: string }
   | { type: "error"; message: string }
@@ -617,8 +650,9 @@ export type ServerMessage =
       pending_permissions: number;
       pending_questions: number;
     }
-  | { type: "pong"; version: string; protocol_version?: number }
+  | { type: "pong"; version: string; protocol_version?: number; browser_focus_preflight?: boolean; scoped_session_failures?: boolean }
   | { type: "project_list"; projects: ProjectInfo[] }
+  | { type: "browser_page_registration"; session_id: string; page_instance: string; error: string | null }
   | { type: "browser_snapshot"; snapshot: string; url: string; title: string; tab_id?: string }
   | { type: "browser_screenshot"; data: string; url: string; tab_id?: string }
   | { type: "browser_state"; open: boolean; url?: string; title?: string; tab_id?: string }
@@ -664,6 +698,8 @@ const defaultSocketFactory: SocketFactory = (url) => {
 // ---------------------------------------------------------------------------
 
 export interface MewClientEvents {
+  "daemon-settings": (data: DaemonSettings) => void;
+  "daemon-settings-failed": (data: { request_id: string; message: string }) => void;
   open: () => void;
   close: (code: number, reason: string) => void;
   error: (err: unknown) => void;
@@ -675,6 +711,8 @@ export interface MewClientEvents {
     provider?: string;
     permission_mode?: string;
   }) => void;
+  "prompt-receipt": (data: { session_id: string; request_id: string; status: "accepted" | "rejected" | "unknown"; message?: string }) => void;
+  "session-operation-failed": (data: { operation: "create" | "attach"; session_id: string | null; message: string }) => void;
   provider: (ev: ProviderEventWire) => void;
   "user-message": (data: { text: string }) => void;
   "tool-start": (data: { call_id: string }) => void;
@@ -792,8 +830,9 @@ export interface MewClientEvents {
 
   errorMessage: (data: { message: string }) => void;
   errorEvent: (data: { message: string }) => void;
-  pong: (data: { version: string; protocol_version: number }) => void;
+  pong: (data: { version: string; protocol_version: number; browser_focus_preflight: boolean }) => void;
   "project-list": (data: { projects: ProjectInfo[] }) => void;
+  "browser-page-registration": (data: { session_id: string; page_instance: string; error: string | null }) => void;
   "browser-snapshot": (data: { snapshot: string; url: string; title: string; tabId?: string }) => void;
   "browser-screenshot": (data: { data: string; url: string; tabId?: string }) => void;
   "browser-state": (data: { open: boolean; url?: string; title?: string; tabId?: string }) => void;
@@ -838,10 +877,14 @@ export class MewClient {
   private openPromise: Promise<void> | null = null;
   /** Session id returned by `newSession`. */
   private sessionId: string | null = null;
+  private confirmedSessions = new Set<string>();
+  private browserFocusPreflight: Promise<boolean> | null = null;
   /** Messages currently projected from the most recent history pages. */
   private sessionHistoryMessages: Message[] = [];
   /** Session lifecycle requests share uncorrelated daemon errors. */
   private sessionCommandTail: Promise<void> = Promise.resolve();
+  private scopedSessionFailures = false;
+  private pendingSessionCommands = 0;
 
   constructor(url: string, opts: MewClientOptions = {}) {
     this.url = url;
@@ -854,6 +897,9 @@ export class MewClient {
   /** Open the WebSocket connection. Idempotent. */
   connect(): Promise<void> {
     if (this.openPromise) return this.openPromise;
+    this.confirmedSessions.clear();
+    this.browserFocusPreflight = null;
+    this.scopedSessionFailures = false;
     this.openPromise = new Promise<void>((resolve, reject) => {
       let settled = false;
       const ws = this.socketFactory(this.url);
@@ -887,6 +933,7 @@ export class MewClient {
         });
       }
       ws.addEventListener("message", (ev) => {
+        if (this.ws !== ws) return;
         try {
           const msg = JSON.parse(ev.data) as ServerMessage;
           if (this.debug) console.debug("[mew] <-", msg);
@@ -898,6 +945,8 @@ export class MewClient {
       ws.addEventListener("close", (ev) => {
         if (this.debug) console.debug("[mew] close", ev);
         if (this.ws === ws) {
+          this.confirmedSessions.clear();
+          this.browserFocusPreflight = null;
           this.ws = null;
           this.openPromise = null;
         }
@@ -910,6 +959,8 @@ export class MewClient {
       ws.addEventListener("error", (ev) => {
         if (this.debug) console.debug("[mew] error", ev);
         if (this.ws === ws) {
+          this.confirmedSessions.clear();
+          this.browserFocusPreflight = null;
           this.ws = null;
           this.openPromise = null;
         }
@@ -925,6 +976,8 @@ export class MewClient {
 
   /** Close the WebSocket. After calling this, the client cannot be reused. */
   disconnect(code = 1000, reason = "client disconnect") {
+    this.confirmedSessions.clear();
+    this.browserFocusPreflight = null;
     this.ws?.close(code, reason);
     this.ws = null;
     this.openPromise = null;
@@ -934,9 +987,18 @@ export class MewClient {
     return this.ws !== null;
   }
 
+  hasConfirmedSession(sessionId: string): boolean {
+    return this.confirmedSessions.has(sessionId);
+  }
+
+  isSessionStable(sessionId: string): boolean {
+    return this.pendingSessionCommands === 0 && this.sessionId === sessionId && this.confirmedSessions.has(sessionId);
+  }
+
   /** Serialize lifecycle requests because daemon errors have no request id. */
   private enqueueSessionCommand<T>(command: () => Promise<T>): Promise<T> {
-    const run = this.sessionCommandTail.then(command, command);
+    this.pendingSessionCommands++;
+    const run = this.sessionCommandTail.then(command, command).finally(() => { this.pendingSessionCommands--; });
     this.sessionCommandTail = run.then(
       () => undefined,
       () => undefined,
@@ -944,32 +1006,93 @@ export class MewClient {
     return run;
   }
 
+  private requestSession(message: ClientMessage, expectedSession?: string): Promise<string> {
+    const socket = this.ws;
+    if (!socket) return Promise.reject(new Error("The daemon connection is closed."));
+    return new Promise<string>((resolve, reject) => {
+      const cleanup = () => {
+        this.off("session-ready", onReady);
+        this.off("errorMessage", onError);
+        this.off("session-operation-failed", onFailure);
+        socket.removeEventListener("close", onClose);
+        socket.removeEventListener("error", onClose);
+      };
+      const onReady = (data: { session_id: string }) => {
+        if (this.ws !== socket || (expectedSession && data.session_id !== expectedSession)) return;
+        cleanup();
+        this.sessionId = data.session_id;
+        this.sessionHistoryMessages = [];
+        resolve(data.session_id);
+      };
+      const onError = (message: { message: string }) => {
+        if (this.scopedSessionFailures) return;
+        cleanup();
+        reject(new Error(message.message));
+      };
+      const onFailure: MewClientEvents["session-operation-failed"] = (failure) => {
+        if (failure.operation !== (expectedSession ? "attach" : "create")
+          || failure.session_id !== (expectedSession ?? null)) return;
+        cleanup();
+        reject(new Error(failure.message));
+      };
+      const onClose = () => {
+        cleanup();
+        reject(new Error("The daemon connection closed before the session was ready."));
+      };
+      this.on("session-ready", onReady);
+      this.on("errorMessage", onError);
+      this.on("session-operation-failed", onFailure);
+      socket.addEventListener("close", onClose);
+      socket.addEventListener("error", onClose);
+      try { this.send(message); }
+      catch (error) { cleanup(); reject(error); }
+    });
+  }
+
   /** Send `new_session`. Resolves with the daemon-assigned session id. */
   newSession(cwd: string | null = null): Promise<string> {
     return this.enqueueSessionCommand(async () => {
       await this.connect();
-      return new Promise<string>((resolve, reject) => {
-        const onReady = (data: { session_id: string }) => {
-          this.sessionId = data.session_id;
-          this.sessionHistoryMessages = [];
-          this.off("session-ready", onReady);
-          resolve(data.session_id);
-        };
-        const onError = (msg: { message: string }) => {
-          this.off("session-ready", onReady);
-          this.off("errorMessage", onError);
-          reject(new Error(msg.message));
-        };
-        this.on("session-ready", onReady);
-        this.on("errorMessage", onError);
-        this.send({ type: "new_session", cwd, client_kind: this.clientKind });
-      });
+      return this.requestSession({ type: "new_session", cwd, client_kind: this.clientKind });
     });
   }
 
   /** Send `prompt`. Streaming events are emitted via the registered handlers. */
   prompt(text: string, attachments: Attachment[] = []): void {
     this.send({ type: "prompt", text, attachments });
+  }
+
+  /** Submit to the confirmed conversation and retain the draft until receipt. */
+  submitPrompt(sessionId: string, text: string, attachments: Attachment[] = []): Promise<void> {
+    const socket = this.ws;
+    if (!socket || this.sessionId !== sessionId || !this.confirmedSessions.has(sessionId)) {
+      return Promise.reject(new Error("This conversation is not attached to the daemon."));
+    }
+    const requestId = crypto.randomUUID();
+    return new Promise<void>((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timer);
+        this.off("prompt-receipt", onReceipt);
+        socket.removeEventListener("close", onUncertain);
+        socket.removeEventListener("error", onUncertain);
+      };
+      const onReceipt: MewClientEvents["prompt-receipt"] = (receipt) => {
+        if (receipt.session_id !== sessionId || receipt.request_id !== requestId) return;
+        cleanup();
+        if (receipt.status === "accepted") resolve();
+        else reject(new Error(receipt.message || "The prompt was not accepted."));
+      };
+      const onUncertain = () => {
+        cleanup();
+        reject(new Error("Could not confirm whether the prompt was sent. Check the conversation before retrying."));
+      };
+      const timer = setTimeout(onUncertain, 15000);
+      this.on("prompt-receipt", onReceipt);
+      socket.addEventListener("close", onUncertain);
+      socket.addEventListener("error", onUncertain);
+      try { this.send({ type: "submit_prompt", session_id: sessionId, request_id: requestId, text, attachments }); }
+      catch (error) { cleanup(); reject(error); }
+    });
   }
 
   /** Compare and save one todo; resolve only after the daemon confirms it. */
@@ -1071,23 +1194,8 @@ export class MewClient {
   attachSession(session_id: string): Promise<string> {
     return this.enqueueSessionCommand(async () => {
       await this.connect();
-      return new Promise<string>((resolve, reject) => {
-        const onReady = (data: { session_id: string }) => {
-          this.sessionId = data.session_id;
-          this.sessionHistoryMessages = [];
-          this.off("session-ready", onReady);
-          this.off("errorMessage", onError);
-          resolve(data.session_id);
-        };
-        const onError = (msg: { message: string }) => {
-          this.off("session-ready", onReady);
-          this.off("errorMessage", onError);
-          reject(new Error(msg.message));
-        };
-        this.on("session-ready", onReady);
-        this.on("errorMessage", onError);
-        this.send({ type: "attach_session", session_id, client_kind: this.clientKind });
-      });
+      if (this.sessionId === session_id && this.confirmedSessions.has(session_id)) return session_id;
+      return this.requestSession({ type: "attach_session", session_id, client_kind: this.clientKind }, session_id);
     });
   }
 
@@ -1133,6 +1241,22 @@ export class MewClient {
   /** Enable or disable auto-generated session titles. */
   setAutoTitle(enabled: boolean): void {
     this.send({ type: "set_auto_title", enabled });
+  }
+
+  readDaemonSettings(requestId: string): void {
+    this.send({ type: "read_daemon_settings", request_id: requestId });
+  }
+
+  saveSessionDefaults(sessionId: string, requestId: string): void {
+    this.send({ type: "save_session_defaults", session_id: sessionId, request_id: requestId });
+  }
+
+  resetSessionDefaults(requestId: string): void {
+    this.send({ type: "reset_session_defaults", request_id: requestId });
+  }
+
+  revokeDevice(deviceId: string, requestId: string): void {
+    this.send({ type: "revoke_device", device_id: deviceId, request_id: requestId });
   }
 
   setAutoSummary(enabled: boolean): void {
@@ -1307,6 +1431,67 @@ export class MewClient {
     this.send({ type: "list_projects" });
   }
 
+  async registerBrowserPage(sessionId: string, pageInstance: string, cdpEndpoint: string, targetId: string, focusUrl?: string): Promise<void> {
+    if (focusUrl !== undefined) {
+      const socket = this.ws;
+      if (!socket || !this.hasConfirmedSession(sessionId)) throw new Error("Browser input requires a confirmed session on this connection.");
+      if (!this.browserFocusPreflight) {
+        const check = new Promise<boolean>((resolve, reject) => {
+          const cleanup = () => {
+            clearTimeout(timeout);
+            this.off("pong", onPong);
+            this.off("close", onConnectionChanged);
+            this.off("error", onConnectionChanged);
+          };
+          const onPong = (data: { browser_focus_preflight: boolean }) => { cleanup(); resolve(data.browser_focus_preflight); };
+          const onConnectionChanged = () => {
+            if (this.ws === socket) return;
+            cleanup();
+            reject(new Error("The daemon disconnected before confirming browser focus support."));
+          };
+          const timeout = setTimeout(() => { cleanup(); reject(new Error("The daemon did not confirm browser focus support.")); }, 3000);
+          this.on("pong", onPong);
+          this.on("close", onConnectionChanged);
+          this.on("error", onConnectionChanged);
+          try { this.send({ type: "ping" }); }
+          catch (error) { cleanup(); reject(error); }
+        });
+        this.browserFocusPreflight = check;
+        void check.catch(() => { if (this.browserFocusPreflight === check) this.browserFocusPreflight = null; });
+      }
+      const supported = await this.browserFocusPreflight;
+      if (this.ws !== socket || !this.hasConfirmedSession(sessionId)) throw new Error("The daemon connection changed before browser page registration.");
+      if (!supported) throw new Error("Update the daemon to enable safe browser input.");
+    }
+    return this.browserPageRequest({ type: "register_browser_page", session_id: sessionId, page_instance: pageInstance, cdp_endpoint: cdpEndpoint, target_id: targetId, focus_url: focusUrl });
+  }
+
+  unregisterBrowserPage(sessionId: string, pageInstance: string): Promise<void> {
+    return this.browserPageRequest({ type: "unregister_browser_page", session_id: sessionId, page_instance: pageInstance });
+  }
+
+  private browserPageRequest(message: Extract<ClientMessage, { type: "register_browser_page" | "unregister_browser_page" }>): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timeout);
+        this.off("browser-page-registration", onReply);
+        this.off("close", onClose);
+      };
+      const onReply = (reply: { session_id: string; page_instance: string; error: string | null }) => {
+        if (reply.session_id !== message.session_id || reply.page_instance !== message.page_instance) return;
+        cleanup();
+        if (reply.error) reject(new Error(reply.error));
+        else resolve();
+      };
+      const onClose = () => { cleanup(); reject(new Error("The daemon disconnected while updating the browser page.")); };
+      const timeout = setTimeout(() => { cleanup(); reject(new Error("The daemon did not acknowledge the browser page.")); }, 10000);
+      this.on("browser-page-registration", onReply);
+      this.on("close", onClose);
+      try { this.send(message); }
+      catch (error) { cleanup(); reject(error); }
+    });
+  }
+
   browserOpen(url: string, tabId?: string): void { this.send({ type: "browser_open", url, tab_id: tabId }); }
   browserSnapshot(tabId?: string): void { this.send({ type: "browser_snapshot", tab_id: tabId }); }
   browserScreenshot(annotate = false, tabId?: string): void { this.send({ type: "browser_screenshot", annotate, tab_id: tabId }); }
@@ -1354,8 +1539,22 @@ export class MewClient {
 
   private dispatch(msg: ServerMessage): void {
     switch (msg.type) {
+      case "prompt_receipt":
+        this.emit("prompt-receipt", msg);
+        break;
+      case "session_operation_failed":
+        this.scopedSessionFailures = true;
+        this.emit("session-operation-failed", msg);
+        break;
+      case "daemon_settings":
+        this.emit("daemon-settings", { request_id: msg.request_id, defaults: msg.defaults, devices: msg.devices });
+        break;
+      case "daemon_settings_failed":
+        this.emit("daemon-settings-failed", { request_id: msg.request_id, message: msg.message });
+        break;
       case "session_ready":
         this.sessionId = msg.session_id;
+        this.confirmedSessions.add(msg.session_id);
         this.emit("session-ready", {
           session_id: msg.session_id,
           cwd: msg.cwd,
@@ -1641,10 +1840,14 @@ export class MewClient {
         this.emit("errorEvent", { message: msg.message });
         break;
       case "pong":
-        this.emit("pong", { version: msg.version, protocol_version: msg.protocol_version ?? 0 });
+        this.scopedSessionFailures ||= msg.scoped_session_failures ?? false;
+        this.emit("pong", { version: msg.version, protocol_version: msg.protocol_version ?? 0, browser_focus_preflight: msg.browser_focus_preflight ?? false });
         break;
       case "project_list":
         this.emit("project-list", { projects: msg.projects });
+        break;
+      case "browser_page_registration":
+        this.emit("browser-page-registration", { session_id: msg.session_id, page_instance: msg.page_instance, error: msg.error });
         break;
       case "browser_snapshot":
         this.emit("browser-snapshot", { snapshot: msg.snapshot, url: msg.url, title: msg.title, tabId: msg.tab_id });
@@ -1668,6 +1871,12 @@ export class MewClient {
   }
 
   private send(msg: ClientMessage): void {
+    if (this.pendingSessionCommands > 0 && [
+      "prompt", "cancel", "guide", "slash_command", "switch_model", "switch_persona",
+      "set_thinking_variant", "set_permission_mode", "yield_control", "set_auto_title", "set_auto_summary",
+    ].includes(msg.type)) {
+      throw new Error("Wait until switching conversations finishes.");
+    }
     if (!this.ws) throw new Error("not connected");
     if (this.debug) console.debug("[mew] ->", msg);
     this.ws.send(JSON.stringify(msg));

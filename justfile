@@ -24,9 +24,11 @@ test-v:
 install-js:
     pnpm install
 
-# Run TypeScript tests for mew-web-client via the pnpm workspace.
+# Run the client, React UI and headless Electron tests.
 test-js:
     pnpm --filter @mew/web-client test
+    pnpm --filter mew-web-ui test
+    pnpm --filter @mew/electron test:unit
 
 # Run tests for both Rust and the TypeScript client.
 test-all: test-rs test-js
@@ -35,16 +37,20 @@ test-all: test-rs test-js
 build-js:
     pnpm --filter @mew/web-client build
 
+# Build the assets embedded by the web bridge and exercised by its tests.
+build-ui: build-js
+    pnpm --filter mew-web-ui build
+
 # Build everything needed for the web harness: the bridge binary
 # (mew-web), the daemon binary (spawned by the bridge at runtime),
 # the mew-web-client TypeScript library, and the React UI (mew-web-ui).
 # Idempotent — incremental cargo builds are cheap. `pnpm install` only
 # re-runs if lockfile or package.json changed.
 build-web:
-    cargo build -p mew-web-bridge -p mew
     pnpm install
     pnpm --filter @mew/web-client build
     pnpm --filter mew-web-ui build
+    cargo build -p mew-web-bridge -p mew
 
 # Run the web harness in the foreground. The bridge auto-spawns
 # `mew daemon` on the default Unix socket if it isn't already running.
@@ -161,19 +167,34 @@ _open-url url:
 dev-ui:
     pnpm --filter mew-web-ui dev
 
-# Run the native GPUI desktop client with a debug daemon beside it.
-desktop-dev:
+# Run the packaged desktop client; --web-ui selects the React UI.
+desktop-dev *args: build-js
+    pnpm --filter mew-web-ui build
     cargo build -p mew
     cargo build -p mew-desktop
     cargo build -p mew-cef-host --bin mew-cef-host-helper --no-default-features
     MEW_DESKTOP_PROFILE=debug {{justfile_directory()}}/scripts/package-desktop-native.sh
-    MEW_DESKTOP_DAEMON_BINARY="{{justfile_directory()}}/target/debug/mew" "{{justfile_directory()}}/target/debug/bundle/macos/mew.app/Contents/MacOS/mew-desktop"
+    MEW_DESKTOP_DAEMON_BINARY="{{justfile_directory()}}/target/debug/mew" "{{justfile_directory()}}/target/debug/bundle/macos/mew.app/Contents/MacOS/mew-desktop" "$@"
 
-# Build the native GPUI desktop binary and its daemon.
-desktop-build:
+# Build the packaged desktop binary, embedded UI and daemon.
+desktop-build: build-js
+    pnpm --filter mew-web-ui build
     cargo build --release -p mew -p mew-desktop
     cargo build --release -p mew-cef-host --bin mew-cef-host-helper --no-default-features
     {{justfile_directory()}}/scripts/package-desktop-native.sh
+
+# Run the opt-in Electron client with the shared embedded UI and Rust host.
+desktop-electron-dev *args: build-js
+    pnpm --filter mew-web-ui build
+    cargo build -p mew
+    MEW_DESKTOP_PROFILE=debug node "{{justfile_directory()}}/apps/mew-electron/package.cjs"
+    "{{justfile_directory()}}/target/debug/bundle/macos/mew-electron.app/Contents/MacOS/mew-electron" "$@"
+
+# Build the opt-in Electron app with the shared embedded UI and Rust host.
+desktop-electron-build: build-js
+    pnpm --filter mew-web-ui build
+    cargo build --release -p mew
+    MEW_DESKTOP_PROFILE=release node "{{justfile_directory()}}/apps/mew-electron/package.cjs"
 
 # Build macOS desktop release assets; CLI/TUI use the independent workflow.
 desktop-package: desktop-build
@@ -312,7 +333,7 @@ theme-codegen-check:
 # CI-ready check: format, clippy, unit/integration tests (Rust + JS), site build,
 # and the subprocess e2e test. The e2e test needs the binaries built;
 # `build-web` depends on the right set.
-ci: fmt clippy arch-check theme-codegen-check test-all e2e
+ci: build-ui fmt clippy arch-check theme-codegen-check test-all e2e
     pnpm --filter site build
 
 # End-to-end check: build binaries and run subprocess e2e tests.

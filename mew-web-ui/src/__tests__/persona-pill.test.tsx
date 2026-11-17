@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, fireEvent } from "@testing-library/react";
+import { render, fireEvent, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { PersonaPill } from "../components/persona-pill";
 import { useSessionStore } from "../stores/session";
 import type { PersonaInfo } from "@mew/web-client";
@@ -22,10 +23,10 @@ const mockPersonas: PersonaInfo[] = [
 function renderPill() {
   const { container } = render(<PersonaPill />);
   const getPillButton = () => container.querySelector('button[title="Persona"]') as HTMLButtonElement;
-  const openDropdown = () => fireEvent.click(getPillButton());
-  const getDropdown = () => container.querySelector("div.absolute") as HTMLElement;
+  const openDropdown = () => fireEvent.keyDown(getPillButton(), { key: "Enter" });
+  const getDropdown = () => screen.getByRole("menu");
   const getOption = (name: string) =>
-    Array.from(getDropdown().querySelectorAll("button")).find(
+    Array.from(getDropdown().querySelectorAll('[role="menuitemradio"]')).find(
       (b) => b.textContent?.includes(name),
     ) as HTMLButtonElement;
   return { container, getPillButton, openDropdown, getDropdown, getOption };
@@ -38,6 +39,19 @@ describe("PersonaPill", () => {
       currentPersona: null,
     });
     switchPersonaMock.mockClear();
+  });
+
+  it("supports keyboard selection and returns focus after Escape", async () => {
+    const user = userEvent.setup();
+    useSessionStore.setState({ availablePersonas: mockPersonas });
+    render(<PersonaPill />);
+    const trigger = screen.getByTitle("Persona");
+    trigger.focus();
+    await user.keyboard("{Enter}");
+    expect(screen.getByRole("menuitemradio", { name: /code-reviewer/i })).toBeTruthy();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(document.activeElement).toBe(trigger);
   });
 
   it("renders 'default' when no persona is selected", () => {
@@ -56,7 +70,7 @@ describe("PersonaPill", () => {
   it("falls back to just 'default' when availablePersonas is empty", () => {
     const { openDropdown, getDropdown } = renderPill();
     openDropdown();
-    const optionButtons = getDropdown().querySelectorAll("button");
+    const optionButtons = getDropdown().querySelectorAll('[role="menuitemradio"]');
     expect(optionButtons.length).toBe(1);
     expect(optionButtons[0]!.textContent).toContain("default");
   });

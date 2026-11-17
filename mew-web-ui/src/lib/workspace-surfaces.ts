@@ -8,42 +8,51 @@ import {
 } from "./workbench-tabs";
 
 export interface WorkspaceSurfacesState {
-  summaryOpen: boolean;
+  sessionId?: string;
+  sessionTabs?: Record<string, WorkbenchTabsState>;
+  sidebarOpen: boolean;
   workbenchOpen: boolean;
   workbenchTabs: WorkbenchTabsState;
   workbenchSize: number;
 }
 
 export type WorkspaceSurfacesAction =
-  | { type: "set-summary-open"; open: boolean }
-  | { type: "toggle-summary" }
+  | { type: "select-session"; sessionId: string }
+  | { type: "set-sidebar-open"; open: boolean }
+  | { type: "toggle-sidebar" }
   | { type: "toggle-workbench" }
   | { type: "set-workbench-open"; open: boolean }
   | { type: "set-workbench-size"; size: number }
   | { type: "set-workbench-tabs"; tabs: WorkbenchTabsState }
-  | { type: "workbench-tabs-action"; action: WorkbenchTabsAction };
+  | { type: "workbench-tabs-action"; sessionId?: string; action: WorkbenchTabsAction };
 
 export const WORKSPACE_SURFACES_STORAGE_KEY = "mew.workspaceSurfaces";
 
 export const DEFAULT_WORKSPACE_SURFACES: WorkspaceSurfacesState = {
-  summaryOpen: true,
+  sidebarOpen: true,
   workbenchOpen: false,
   workbenchTabs: DEFAULT_WORKBENCH_TABS,
-  workbenchSize: 28,
+  workbenchSize: 42,
 };
 
 const MIN_WORKBENCH_SIZE = 18;
-const MAX_WORKBENCH_SIZE = 50;
+const MAX_WORKBENCH_SIZE = 65;
 
 export function workspaceSurfacesReducer(
   state: WorkspaceSurfacesState,
   action: WorkspaceSurfacesAction,
 ): WorkspaceSurfacesState {
   switch (action.type) {
-    case "set-summary-open":
-      return { ...state, summaryOpen: action.open };
-    case "toggle-summary":
-      return { ...state, summaryOpen: !state.summaryOpen };
+    case "select-session": {
+      if (state.sessionId === action.sessionId) return state;
+      const sessionTabs = { ...state.sessionTabs };
+      if (state.sessionId) sessionTabs[state.sessionId] = state.workbenchTabs;
+      return { ...state, sessionId: action.sessionId, sessionTabs, workbenchTabs: sessionTabs[action.sessionId] ?? DEFAULT_WORKBENCH_TABS };
+    }
+    case "set-sidebar-open":
+      return { ...state, sidebarOpen: action.open };
+    case "toggle-sidebar":
+      return { ...state, sidebarOpen: !state.sidebarOpen };
     case "toggle-workbench":
       return { ...state, workbenchOpen: !state.workbenchOpen };
     case "set-workbench-open":
@@ -52,11 +61,17 @@ export function workspaceSurfacesReducer(
       return { ...state, workbenchSize: clampWorkbenchSize(action.size) };
     case "set-workbench-tabs":
       return { ...state, workbenchTabs: action.tabs };
-    case "workbench-tabs-action":
+    case "workbench-tabs-action": {
+      if (action.sessionId && action.sessionId !== state.sessionId) {
+        const tabs = state.sessionTabs?.[action.sessionId];
+        if (!tabs) return state;
+        return { ...state, sessionTabs: { ...state.sessionTabs, [action.sessionId]: workbenchTabsReducer(tabs, action.action) } };
+      }
       return {
         ...state,
         workbenchTabs: workbenchTabsReducer(state.workbenchTabs, action.action),
       };
+    }
   }
 }
 
@@ -75,10 +90,15 @@ export function loadWorkspaceSurfaces(
       ? normalizeWorkbenchTabs(value.workbenchTabs)
       : workbenchTabsFromLegacyKind(value.workbenchTab);
 
+    const sessionTabs = isRecord(value.sessionTabs) ? Object.fromEntries(Object.entries(value.sessionTabs).map(([id, tabs]) => [id, normalizeWorkbenchTabs(tabs)])) : undefined;
     return {
-      summaryOpen: typeof value.summaryOpen === "boolean"
-        ? value.summaryOpen
-        : DEFAULT_WORKSPACE_SURFACES.summaryOpen,
+      ...(typeof value.sessionId === "string" ? { sessionId: value.sessionId } : {}),
+      ...(sessionTabs ? { sessionTabs } : {}),
+      sidebarOpen: typeof value.sidebarOpen === "boolean"
+        ? value.sidebarOpen
+        : typeof value.summaryOpen === "boolean"
+          ? value.summaryOpen
+          : DEFAULT_WORKSPACE_SURFACES.sidebarOpen,
       workbenchOpen: typeof value.workbenchOpen === "boolean"
         ? value.workbenchOpen
         : DEFAULT_WORKSPACE_SURFACES.workbenchOpen,

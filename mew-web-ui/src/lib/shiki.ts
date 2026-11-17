@@ -1,10 +1,6 @@
-import { createHighlighterCore } from "shiki/core";
+import { createHighlighterCore, createCssVariablesTheme } from "shiki/core";
 import { createOnigurumaEngine } from "shiki/engine/oniguruma";
 import type { HighlighterCore } from "shiki/core";
-import type { ResolvedMode } from "./theme";
-
-const DARK_THEME = "github-dark";
-const LIGHT_THEME = "github-light";
 
 let highlighter: HighlighterCore | null = null;
 let initPromise: Promise<void> | null = null;
@@ -32,8 +28,6 @@ async function initHighlighter() {
       go,
       tsx,
       jsx,
-      githubDark,
-      githubLight,
     ] = await Promise.all([
       import("@shikijs/langs/rust"),
       import("@shikijs/langs/typescript"),
@@ -49,12 +43,10 @@ async function initHighlighter() {
       import("@shikijs/langs/go"),
       import("@shikijs/langs/tsx"),
       import("@shikijs/langs/jsx"),
-      import("shiki/themes/github-dark.mjs"),
-      import("shiki/themes/github-light.mjs"),
     ]);
 
     highlighter = await createHighlighterCore({
-      themes: [githubDark.default, githubLight.default],
+      themes: [createCssVariablesTheme({ name: "mew", variablePrefix: "--mew-code-", fontStyle: true })],
       langs: [
         rust.default,
         ts.default,
@@ -82,10 +74,8 @@ async function initHighlighter() {
 export async function highlightCode(
   code: string,
   lang: string,
-  theme: ResolvedMode = "dark",
 ): Promise<string> {
   const h = await initHighlighter();
   const resolvedLang = h.getLoadedLanguages().includes(lang) ? lang : "text";
-  const themeName = theme === "dark" ? DARK_THEME : LIGHT_THEME;
-  return h.codeToHtml(code, { lang: resolvedLang, theme: themeName });
+  return h.codeToHtml(code, { lang: resolvedLang, theme: "mew" });
 }

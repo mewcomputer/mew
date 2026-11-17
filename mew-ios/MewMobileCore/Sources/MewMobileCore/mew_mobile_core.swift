@@ -913,6 +913,11 @@ public protocol MobileCoreProtocol: AnyObject, Sendable {
     func listSessions(id: DaemonId) 
     
     /**
+     * Request one older page without redirecting an unconfirmed attachment.
+     */
+    func loadOlderHistory(id: DaemonId, sessionId: String)  -> Bool
+    
+    /**
      * Create a new session on a daemon.
      */
     func newSession(id: DaemonId, cwd: String?) 
@@ -934,14 +939,37 @@ public protocol MobileCoreProtocol: AnyObject, Sendable {
     func prompt(id: DaemonId, text: String)  -> Bool
     
     /**
+     * Read automation values without requiring an attached session.
+     */
+    func readAutomationSettings(id: DaemonId)  -> Bool
+    
+    /**
+     * Read daemon-owned defaults and authorized devices without attaching a chat.
+     */
+    func readDaemonSettings(id: DaemonId, requestId: String)  -> Bool
+    
+    /**
+     * Read changes from the confirmed session's daemon workspace.
+     * Returns false when the attachment cannot accept the request.
+     */
+    func readSessionDiff(id: DaemonId, sessionId: String, requestId: String)  -> Bool
+    
+    /**
      * Remove a daemon from the registry and disconnect.
      */
     func removeDaemon(id: DaemonId) 
     
     /**
+     * Persist a local nickname without contacting or reconnecting the daemon.
+     */
+    func renameDaemon(id: DaemonId, name: String) throws 
+    
+    /**
      * Rename a session.
      */
     func renameSession(id: DaemonId, sessionId: String, title: String) 
+    
+    func resetSessionDefaults(id: DaemonId, requestId: String)  -> Bool
     
     /**
      * Respond to an ask-user request.
@@ -959,14 +987,23 @@ public protocol MobileCoreProtocol: AnyObject, Sendable {
     func respondToGoal(id: DaemonId, requestId: String, accepted: Bool) 
     
     /**
-     * Enable or disable idle session summaries.
+     * Retry a saved daemon immediately while retaining its requested session.
      */
-    func setAutoSummary(id: DaemonId, enabled: Bool) 
+    func retryConnection(id: DaemonId)  -> Bool
+    
+    func revokeDevice(id: DaemonId, deviceId: String, requestId: String)  -> Bool
+    
+    func saveSessionDefaults(id: DaemonId, sessionId: String, requestId: String)  -> Bool
     
     /**
-     * Enable or disable auto-generated session titles.
+     * Enable or disable idle summaries across the daemon.
      */
-    func setAutoTitle(id: DaemonId, enabled: Bool) 
+    func setAutoSummary(id: DaemonId, enabled: Bool)  -> Bool
+    
+    /**
+     * Enable or disable titles for prompts from this connection.
+     */
+    func setAutoTitle(id: DaemonId, enabled: Bool)  -> Bool
     
     /**
      * Set the event listener. Events are delivered on the tokio runtime.
@@ -1004,6 +1041,10 @@ public protocol MobileCoreProtocol: AnyObject, Sendable {
      * Confirmation arrives as `PersonaSwitched` event.
      */
     func switchPersona(id: DaemonId, name: String) 
+    
+    func readJobOutput(id: DaemonId, sessionId: String, jobId: String, requestId: String, offset: UInt64)  -> Bool
+    
+    func readSubagentHistory(id: DaemonId, sessionId: String, childSessionId: String, requestId: String)  -> Bool
     
 }
 /**
@@ -1281,6 +1322,20 @@ open func listSessions(id: DaemonId)  {try! rustCall() {
 }
     
     /**
+     * Request one older page without redirecting an unconfirmed attachment.
+     */
+open func loadOlderHistory(id: DaemonId, sessionId: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_mew_mobile_core_fn_method_mobilecore_load_older_history(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeDaemonId_lower(id),
+        FfiConverterString.lower(sessionId),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Create a new session on a daemon.
      */
 open func newSession(id: DaemonId, cwd: String?)  {try! rustCall() {
@@ -1335,6 +1390,49 @@ open func prompt(id: DaemonId, text: String) -> Bool  {
 }
     
     /**
+     * Read automation values without requiring an attached session.
+     */
+open func readAutomationSettings(id: DaemonId) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_mew_mobile_core_fn_method_mobilecore_read_automation_settings(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeDaemonId_lower(id),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Read daemon-owned defaults and authorized devices without attaching a chat.
+     */
+open func readDaemonSettings(id: DaemonId, requestId: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_mew_mobile_core_fn_method_mobilecore_read_daemon_settings(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeDaemonId_lower(id),
+        FfiConverterString.lower(requestId),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Read changes from the confirmed session's daemon workspace.
+     * Returns false when the attachment cannot accept the request.
+     */
+open func readSessionDiff(id: DaemonId, sessionId: String, requestId: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_mew_mobile_core_fn_method_mobilecore_read_session_diff(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeDaemonId_lower(id),
+        FfiConverterString.lower(sessionId),
+        FfiConverterString.lower(requestId),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Remove a daemon from the registry and disconnect.
      */
 open func removeDaemon(id: DaemonId)  {try! rustCall() {
@@ -1342,6 +1440,19 @@ open func removeDaemon(id: DaemonId)  {try! rustCall() {
     uniffi_mew_mobile_core_fn_method_mobilecore_remove_daemon(
             self.uniffiCloneHandle(),
         FfiConverterTypeDaemonId_lower(id),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Persist a local nickname without contacting or reconnecting the daemon.
+     */
+open func renameDaemon(id: DaemonId, name: String)throws   {try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_mew_mobile_core_fn_method_mobilecore_rename_daemon(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeDaemonId_lower(id),
+        FfiConverterString.lower(name),uniffiCallStatus
     )
 }
 }
@@ -1358,6 +1469,17 @@ open func renameSession(id: DaemonId, sessionId: String, title: String)  {try! r
         FfiConverterString.lower(title),uniffiCallStatus
     )
 }
+}
+    
+open func resetSessionDefaults(id: DaemonId, requestId: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_mew_mobile_core_fn_method_mobilecore_reset_session_defaults(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeDaemonId_lower(id),
+        FfiConverterString.lower(requestId),uniffiCallStatus
+    )
+})
 }
     
     /**
@@ -1403,29 +1525,68 @@ open func respondToGoal(id: DaemonId, requestId: String, accepted: Bool)  {try! 
 }
     
     /**
-     * Enable or disable idle session summaries.
+     * Retry a saved daemon immediately while retaining its requested session.
      */
-open func setAutoSummary(id: DaemonId, enabled: Bool)  {try! rustCall() {
+open func retryConnection(id: DaemonId) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_mew_mobile_core_fn_method_mobilecore_retry_connection(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeDaemonId_lower(id),uniffiCallStatus
+    )
+})
+}
+    
+open func revokeDevice(id: DaemonId, deviceId: String, requestId: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_mew_mobile_core_fn_method_mobilecore_revoke_device(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeDaemonId_lower(id),
+        FfiConverterString.lower(deviceId),
+        FfiConverterString.lower(requestId),uniffiCallStatus
+    )
+})
+}
+    
+open func saveSessionDefaults(id: DaemonId, sessionId: String, requestId: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_mew_mobile_core_fn_method_mobilecore_save_session_defaults(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeDaemonId_lower(id),
+        FfiConverterString.lower(sessionId),
+        FfiConverterString.lower(requestId),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Enable or disable idle summaries across the daemon.
+     */
+open func setAutoSummary(id: DaemonId, enabled: Bool) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
         uniffiCallStatus in
     uniffi_mew_mobile_core_fn_method_mobilecore_set_auto_summary(
             self.uniffiCloneHandle(),
         FfiConverterTypeDaemonId_lower(id),
         FfiConverterBool.lower(enabled),uniffiCallStatus
     )
-}
+})
 }
     
     /**
-     * Enable or disable auto-generated session titles.
+     * Enable or disable titles for prompts from this connection.
      */
-open func setAutoTitle(id: DaemonId, enabled: Bool)  {try! rustCall() {
+open func setAutoTitle(id: DaemonId, enabled: Bool) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
         uniffiCallStatus in
     uniffi_mew_mobile_core_fn_method_mobilecore_set_auto_title(
             self.uniffiCloneHandle(),
         FfiConverterTypeDaemonId_lower(id),
         FfiConverterBool.lower(enabled),uniffiCallStatus
     )
-}
+})
 }
     
     /**
@@ -1522,6 +1683,33 @@ open func switchPersona(id: DaemonId, name: String)  {try! rustCall() {
 }
 }
     
+open func readJobOutput(id: DaemonId, sessionId: String, jobId: String, requestId: String, offset: UInt64) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_mew_mobile_core_fn_method_mobilecore_read_job_output(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeDaemonId_lower(id),
+        FfiConverterString.lower(sessionId),
+        FfiConverterString.lower(jobId),
+        FfiConverterString.lower(requestId),
+        FfiConverterUInt64.lower(offset),uniffiCallStatus
+    )
+})
+}
+    
+open func readSubagentHistory(id: DaemonId, sessionId: String, childSessionId: String, requestId: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_mew_mobile_core_fn_method_mobilecore_read_subagent_history(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeDaemonId_lower(id),
+        FfiConverterString.lower(sessionId),
+        FfiConverterString.lower(childSessionId),
+        FfiConverterString.lower(requestId),uniffiCallStatus
+    )
+})
+}
+    
 
     
 }
@@ -1568,6 +1756,130 @@ public func FfiConverterTypeMobileCore_lower(_ value: MobileCore) -> UInt64 {
 }
 
 
+
+
+public struct AutomationSettings: Equatable, Hashable {
+    /**
+     * Generates titles for prompts submitted through this connection.
+     */
+    public var autoTitleEnabled: Bool
+    /**
+     * Enables idle summaries for every session on the daemon.
+     */
+    public var autoSummaryEnabled: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Generates titles for prompts submitted through this connection.
+         */autoTitleEnabled: Bool, 
+        /**
+         * Enables idle summaries for every session on the daemon.
+         */autoSummaryEnabled: Bool) {
+        self.autoTitleEnabled = autoTitleEnabled
+        self.autoSummaryEnabled = autoSummaryEnabled
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension AutomationSettings: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAutomationSettings: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AutomationSettings {
+        return
+            try AutomationSettings(
+                autoTitleEnabled: FfiConverterBool.read(from: &buf), 
+                autoSummaryEnabled: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AutomationSettings, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.autoTitleEnabled, into: &buf)
+        FfiConverterBool.write(value.autoSummaryEnabled, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationSettings_lift(_ buf: RustBuffer) throws -> AutomationSettings {
+    return try FfiConverterTypeAutomationSettings.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutomationSettings_lower(_ value: AutomationSettings) -> RustBuffer {
+    return FfiConverterTypeAutomationSettings.lower(value)
+}
+
+
+public struct BackgroundJob: Equatable, Hashable {
+    public var jobId: String
+    public var command: String
+    public var state: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(jobId: String, command: String, state: String) {
+        self.jobId = jobId
+        self.command = command
+        self.state = state
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension BackgroundJob: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeBackgroundJob: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> BackgroundJob {
+        return
+            try BackgroundJob(
+                jobId: FfiConverterString.read(from: &buf), 
+                command: FfiConverterString.read(from: &buf), 
+                state: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: BackgroundJob, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.jobId, into: &buf)
+        FfiConverterString.write(value.command, into: &buf)
+        FfiConverterString.write(value.state, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBackgroundJob_lift(_ buf: RustBuffer) throws -> BackgroundJob {
+    return try FfiConverterTypeBackgroundJob.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBackgroundJob_lower(_ value: BackgroundJob) -> RustBuffer {
+    return FfiConverterTypeBackgroundJob.lower(value)
+}
 
 
 /**
@@ -1807,6 +2119,60 @@ public func FfiConverterTypeDaemonId_lower(_ value: DaemonId) -> RustBuffer {
 }
 
 
+public struct DaemonManagementSettings: Equatable, Hashable {
+    public var defaults: NewChatDefaults?
+    public var devices: [PairedDevice]?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(defaults: NewChatDefaults?, devices: [PairedDevice]?) {
+        self.defaults = defaults
+        self.devices = devices
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension DaemonManagementSettings: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDaemonManagementSettings: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DaemonManagementSettings {
+        return
+            try DaemonManagementSettings(
+                defaults: FfiConverterOptionTypeNewChatDefaults.read(from: &buf), 
+                devices: FfiConverterOptionSequenceTypePairedDevice.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DaemonManagementSettings, into buf: inout [UInt8]) {
+        FfiConverterOptionTypeNewChatDefaults.write(value.defaults, into: &buf)
+        FfiConverterOptionSequenceTypePairedDevice.write(value.devices, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDaemonManagementSettings_lift(_ buf: RustBuffer) throws -> DaemonManagementSettings {
+    return try FfiConverterTypeDaemonManagementSettings.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDaemonManagementSettings_lower(_ value: DaemonManagementSettings) -> RustBuffer {
+    return FfiConverterTypeDaemonManagementSettings.lower(value)
+}
+
+
 /**
  * A snapshot of a daemon's state — the full mirror that Swift pulls
  * after reconnect or attach instead of replaying deltas.
@@ -1824,10 +2190,11 @@ public struct DaemonSnapshot: Equatable, Hashable {
     public var thinkingVariant: String?
     public var currentPersona: String?
     public var availablePersonas: [PersonaInfo]
+    public var automationSettings: AutomationSettings?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(sessions: [SessionInfo], attachedSession: String?, pendingPermissions: [PendingPermission], pendingAskUser: [PendingAskUser], models: [ModelInfo], daemonVersion: String?, permissionMode: String?, currentModel: String?, currentProvider: String?, thinkingVariant: String?, currentPersona: String?, availablePersonas: [PersonaInfo]) {
+    public init(sessions: [SessionInfo], attachedSession: String?, pendingPermissions: [PendingPermission], pendingAskUser: [PendingAskUser], models: [ModelInfo], daemonVersion: String?, permissionMode: String?, currentModel: String?, currentProvider: String?, thinkingVariant: String?, currentPersona: String?, availablePersonas: [PersonaInfo], automationSettings: AutomationSettings?) {
         self.sessions = sessions
         self.attachedSession = attachedSession
         self.pendingPermissions = pendingPermissions
@@ -1840,6 +2207,7 @@ public struct DaemonSnapshot: Equatable, Hashable {
         self.thinkingVariant = thinkingVariant
         self.currentPersona = currentPersona
         self.availablePersonas = availablePersonas
+        self.automationSettings = automationSettings
     }
 
     
@@ -1869,7 +2237,8 @@ public struct FfiConverterTypeDaemonSnapshot: FfiConverterRustBuffer {
                 currentProvider: FfiConverterOptionString.read(from: &buf), 
                 thinkingVariant: FfiConverterOptionString.read(from: &buf), 
                 currentPersona: FfiConverterOptionString.read(from: &buf), 
-                availablePersonas: FfiConverterSequenceTypePersonaInfo.read(from: &buf)
+                availablePersonas: FfiConverterSequenceTypePersonaInfo.read(from: &buf), 
+                automationSettings: FfiConverterOptionTypeAutomationSettings.read(from: &buf)
         )
     }
 
@@ -1886,6 +2255,7 @@ public struct FfiConverterTypeDaemonSnapshot: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.thinkingVariant, into: &buf)
         FfiConverterOptionString.write(value.currentPersona, into: &buf)
         FfiConverterSequenceTypePersonaInfo.write(value.availablePersonas, into: &buf)
+        FfiConverterOptionTypeAutomationSettings.write(value.automationSettings, into: &buf)
     }
 }
 
@@ -2499,6 +2869,138 @@ public func FfiConverterTypeModelSummary_lower(_ value: ModelSummary) -> RustBuf
 }
 
 
+public struct NewChatDefaults: Equatable, Hashable {
+    public var model: String?
+    public var provider: String?
+    public var persona: String?
+    public var thinkingVariant: String?
+    public var permissionMode: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(model: String?, provider: String?, persona: String?, thinkingVariant: String?, permissionMode: String) {
+        self.model = model
+        self.provider = provider
+        self.persona = persona
+        self.thinkingVariant = thinkingVariant
+        self.permissionMode = permissionMode
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NewChatDefaults: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNewChatDefaults: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NewChatDefaults {
+        return
+            try NewChatDefaults(
+                model: FfiConverterOptionString.read(from: &buf), 
+                provider: FfiConverterOptionString.read(from: &buf), 
+                persona: FfiConverterOptionString.read(from: &buf), 
+                thinkingVariant: FfiConverterOptionString.read(from: &buf), 
+                permissionMode: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NewChatDefaults, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.model, into: &buf)
+        FfiConverterOptionString.write(value.provider, into: &buf)
+        FfiConverterOptionString.write(value.persona, into: &buf)
+        FfiConverterOptionString.write(value.thinkingVariant, into: &buf)
+        FfiConverterString.write(value.permissionMode, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNewChatDefaults_lift(_ buf: RustBuffer) throws -> NewChatDefaults {
+    return try FfiConverterTypeNewChatDefaults.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNewChatDefaults_lower(_ value: NewChatDefaults) -> RustBuffer {
+    return FfiConverterTypeNewChatDefaults.lower(value)
+}
+
+
+public struct PairedDevice: Equatable, Hashable {
+    public var id: String
+    public var name: String
+    public var nodeId: String
+    public var scope: String?
+    public var pairedAt: UInt64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, name: String, nodeId: String, scope: String?, pairedAt: UInt64?) {
+        self.id = id
+        self.name = name
+        self.nodeId = nodeId
+        self.scope = scope
+        self.pairedAt = pairedAt
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PairedDevice: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePairedDevice: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PairedDevice {
+        return
+            try PairedDevice(
+                id: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                nodeId: FfiConverterString.read(from: &buf), 
+                scope: FfiConverterOptionString.read(from: &buf), 
+                pairedAt: FfiConverterOptionUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PairedDevice, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.nodeId, into: &buf)
+        FfiConverterOptionString.write(value.scope, into: &buf)
+        FfiConverterOptionUInt64.write(value.pairedAt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePairedDevice_lift(_ buf: RustBuffer) throws -> PairedDevice {
+    return try FfiConverterTypePairedDevice.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePairedDevice_lower(_ value: PairedDevice) -> RustBuffer {
+    return FfiConverterTypePairedDevice.lower(value)
+}
+
+
 /**
  * A pending ask-user request.
  */
@@ -2771,6 +3273,204 @@ public func FfiConverterTypeProjectInfo_lower(_ value: ProjectInfo) -> RustBuffe
 }
 
 
+public struct ReviewFile: Equatable, Hashable {
+    public var path: String
+    public var oldPath: String?
+    public var status: ReviewFileStatus
+    public var hunks: [ReviewHunk]
+    public var added: UInt64
+    public var removed: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(path: String, oldPath: String?, status: ReviewFileStatus, hunks: [ReviewHunk], added: UInt64, removed: UInt64) {
+        self.path = path
+        self.oldPath = oldPath
+        self.status = status
+        self.hunks = hunks
+        self.added = added
+        self.removed = removed
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ReviewFile: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeReviewFile: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ReviewFile {
+        return
+            try ReviewFile(
+                path: FfiConverterString.read(from: &buf), 
+                oldPath: FfiConverterOptionString.read(from: &buf), 
+                status: FfiConverterTypeReviewFileStatus.read(from: &buf), 
+                hunks: FfiConverterSequenceTypeReviewHunk.read(from: &buf), 
+                added: FfiConverterUInt64.read(from: &buf), 
+                removed: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ReviewFile, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.path, into: &buf)
+        FfiConverterOptionString.write(value.oldPath, into: &buf)
+        FfiConverterTypeReviewFileStatus.write(value.status, into: &buf)
+        FfiConverterSequenceTypeReviewHunk.write(value.hunks, into: &buf)
+        FfiConverterUInt64.write(value.added, into: &buf)
+        FfiConverterUInt64.write(value.removed, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeReviewFile_lift(_ buf: RustBuffer) throws -> ReviewFile {
+    return try FfiConverterTypeReviewFile.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeReviewFile_lower(_ value: ReviewFile) -> RustBuffer {
+    return FfiConverterTypeReviewFile.lower(value)
+}
+
+
+public struct ReviewHunk: Equatable, Hashable {
+    public var oldStart: UInt64
+    public var oldCount: UInt64
+    public var newStart: UInt64
+    public var newCount: UInt64
+    public var lines: [ReviewLine]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(oldStart: UInt64, oldCount: UInt64, newStart: UInt64, newCount: UInt64, lines: [ReviewLine]) {
+        self.oldStart = oldStart
+        self.oldCount = oldCount
+        self.newStart = newStart
+        self.newCount = newCount
+        self.lines = lines
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ReviewHunk: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeReviewHunk: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ReviewHunk {
+        return
+            try ReviewHunk(
+                oldStart: FfiConverterUInt64.read(from: &buf), 
+                oldCount: FfiConverterUInt64.read(from: &buf), 
+                newStart: FfiConverterUInt64.read(from: &buf), 
+                newCount: FfiConverterUInt64.read(from: &buf), 
+                lines: FfiConverterSequenceTypeReviewLine.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ReviewHunk, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.oldStart, into: &buf)
+        FfiConverterUInt64.write(value.oldCount, into: &buf)
+        FfiConverterUInt64.write(value.newStart, into: &buf)
+        FfiConverterUInt64.write(value.newCount, into: &buf)
+        FfiConverterSequenceTypeReviewLine.write(value.lines, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeReviewHunk_lift(_ buf: RustBuffer) throws -> ReviewHunk {
+    return try FfiConverterTypeReviewHunk.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeReviewHunk_lower(_ value: ReviewHunk) -> RustBuffer {
+    return FfiConverterTypeReviewHunk.lower(value)
+}
+
+
+public struct ReviewLine: Equatable, Hashable {
+    public var kind: ReviewLineKind
+    public var oldLine: UInt64?
+    public var newLine: UInt64?
+    public var text: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(kind: ReviewLineKind, oldLine: UInt64?, newLine: UInt64?, text: String) {
+        self.kind = kind
+        self.oldLine = oldLine
+        self.newLine = newLine
+        self.text = text
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ReviewLine: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeReviewLine: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ReviewLine {
+        return
+            try ReviewLine(
+                kind: FfiConverterTypeReviewLineKind.read(from: &buf), 
+                oldLine: FfiConverterOptionUInt64.read(from: &buf), 
+                newLine: FfiConverterOptionUInt64.read(from: &buf), 
+                text: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ReviewLine, into buf: inout [UInt8]) {
+        FfiConverterTypeReviewLineKind.write(value.kind, into: &buf)
+        FfiConverterOptionUInt64.write(value.oldLine, into: &buf)
+        FfiConverterOptionUInt64.write(value.newLine, into: &buf)
+        FfiConverterString.write(value.text, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeReviewLine_lift(_ buf: RustBuffer) throws -> ReviewLine {
+    return try FfiConverterTypeReviewLine.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeReviewLine_lower(_ value: ReviewLine) -> RustBuffer {
+    return FfiConverterTypeReviewLine.lower(value)
+}
+
+
 /**
  * A session in the snapshot.
  */
@@ -2786,10 +3486,13 @@ public struct SessionInfo: Equatable, Hashable {
     public var outputTokens: UInt64
     public var turns: UInt32
     public var todos: [TodoItem]
+    public var historyBefore: UInt64?
+    public var subagents: [WorkerInfo]
+    public var jobs: [BackgroundJob]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(sessionId: String, title: String, messages: [ChatMessage], running: Bool, usageCost: Double, pendingPermissions: UInt32, pendingQuestions: UInt32, inputTokens: UInt64, outputTokens: UInt64, turns: UInt32, todos: [TodoItem]) {
+    public init(sessionId: String, title: String, messages: [ChatMessage], running: Bool, usageCost: Double, pendingPermissions: UInt32, pendingQuestions: UInt32, inputTokens: UInt64, outputTokens: UInt64, turns: UInt32, todos: [TodoItem], historyBefore: UInt64?, subagents: [WorkerInfo], jobs: [BackgroundJob]) {
         self.sessionId = sessionId
         self.title = title
         self.messages = messages
@@ -2801,6 +3504,9 @@ public struct SessionInfo: Equatable, Hashable {
         self.outputTokens = outputTokens
         self.turns = turns
         self.todos = todos
+        self.historyBefore = historyBefore
+        self.subagents = subagents
+        self.jobs = jobs
     }
 
     
@@ -2829,7 +3535,10 @@ public struct FfiConverterTypeSessionInfo: FfiConverterRustBuffer {
                 inputTokens: FfiConverterUInt64.read(from: &buf), 
                 outputTokens: FfiConverterUInt64.read(from: &buf), 
                 turns: FfiConverterUInt32.read(from: &buf), 
-                todos: FfiConverterSequenceTypeTodoItem.read(from: &buf)
+                todos: FfiConverterSequenceTypeTodoItem.read(from: &buf), 
+                historyBefore: FfiConverterOptionUInt64.read(from: &buf), 
+                subagents: FfiConverterSequenceTypeWorkerInfo.read(from: &buf), 
+                jobs: FfiConverterSequenceTypeBackgroundJob.read(from: &buf)
         )
     }
 
@@ -2845,6 +3554,9 @@ public struct FfiConverterTypeSessionInfo: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.outputTokens, into: &buf)
         FfiConverterUInt32.write(value.turns, into: &buf)
         FfiConverterSequenceTypeTodoItem.write(value.todos, into: &buf)
+        FfiConverterOptionUInt64.write(value.historyBefore, into: &buf)
+        FfiConverterSequenceTypeWorkerInfo.write(value.subagents, into: &buf)
+        FfiConverterSequenceTypeBackgroundJob.write(value.jobs, into: &buf)
     }
 }
 
@@ -3123,6 +3835,76 @@ public func FfiConverterTypeTodoItem_lower(_ value: TodoItem) -> RustBuffer {
 }
 
 
+public struct WorkerInfo: Equatable, Hashable {
+    public var taskId: String
+    public var childSessionId: String?
+    public var name: String
+    public var displayName: String?
+    public var status: String
+    public var toolName: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(taskId: String, childSessionId: String?, name: String, displayName: String?, status: String, toolName: String?) {
+        self.taskId = taskId
+        self.childSessionId = childSessionId
+        self.name = name
+        self.displayName = displayName
+        self.status = status
+        self.toolName = toolName
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension WorkerInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWorkerInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WorkerInfo {
+        return
+            try WorkerInfo(
+                taskId: FfiConverterString.read(from: &buf), 
+                childSessionId: FfiConverterOptionString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                displayName: FfiConverterOptionString.read(from: &buf), 
+                status: FfiConverterString.read(from: &buf), 
+                toolName: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WorkerInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.taskId, into: &buf)
+        FfiConverterOptionString.write(value.childSessionId, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterOptionString.write(value.displayName, into: &buf)
+        FfiConverterString.write(value.status, into: &buf)
+        FfiConverterOptionString.write(value.toolName, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWorkerInfo_lift(_ buf: RustBuffer) throws -> WorkerInfo {
+    return try FfiConverterTypeWorkerInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWorkerInfo_lower(_ value: WorkerInfo) -> RustBuffer {
+    return FfiConverterTypeWorkerInfo.lower(value)
+}
+
+
 /**
  * Error type for the mobile core.
  */
@@ -3135,6 +3917,8 @@ enum CoreError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
     case EndpointBindFailed(reason: String
     )
     case RegistryLoadFailed(reason: String
+    )
+    case RegistryUpdateFailed(reason: String
     )
     case InvalidNodeId(reason: String
     )
@@ -3176,10 +3960,13 @@ public struct FfiConverterTypeCoreError: FfiConverterRustBuffer {
         case 3: return .RegistryLoadFailed(
             reason: try FfiConverterString.read(from: &buf)
             )
-        case 4: return .InvalidNodeId(
+        case 4: return .RegistryUpdateFailed(
             reason: try FfiConverterString.read(from: &buf)
             )
-        case 5: return .ParseFailed(
+        case 5: return .InvalidNodeId(
+            reason: try FfiConverterString.read(from: &buf)
+            )
+        case 6: return .ParseFailed(
             reason: try FfiConverterString.read(from: &buf)
             )
 
@@ -3208,13 +3995,18 @@ public struct FfiConverterTypeCoreError: FfiConverterRustBuffer {
             FfiConverterString.write(reason, into: &buf)
             
         
-        case let .InvalidNodeId(reason):
+        case let .RegistryUpdateFailed(reason):
             writeInt(&buf, Int32(4))
             FfiConverterString.write(reason, into: &buf)
             
         
-        case let .ParseFailed(reason):
+        case let .InvalidNodeId(reason):
             writeInt(&buf, Int32(5))
+            FfiConverterString.write(reason, into: &buf)
+            
+        
+        case let .ParseFailed(reason):
+            writeInt(&buf, Int32(6))
             FfiConverterString.write(reason, into: &buf)
             
         }
@@ -3248,6 +4040,14 @@ public enum CoreEvent: Equatable, Hashable {
      */
     case daemonStatusChanged(daemon: String, status: DaemonStatus
     )
+    case automationSettings(daemon: String, settings: AutomationSettings
+    )
+    case autoSummaryChanged(daemon: String, enabled: Bool
+    )
+    case daemonManagementSettings(daemon: String, requestId: String?, settings: DaemonManagementSettings
+    )
+    case daemonManagementFailed(daemon: String, requestId: String, message: String
+    )
     /**
      * Full or updated session list for a daemon.
      */
@@ -3264,6 +4064,22 @@ public enum CoreEvent: Equatable, Hashable {
     case dirListing(daemon: String, sessionId: String, path: String, entries: [DirEntry]
     )
     /**
+     * Fresh workspace changes, scoped to the originating review request.
+     */
+    case reviewLoaded(daemon: String, sessionId: String, requestId: String, files: [ReviewFile]
+    )
+    case reviewFailed(daemon: String, sessionId: String, requestId: String, message: String
+    )
+    /**
+     * The daemon acknowledged a new-session command from this client.
+     */
+    case sessionCreated(daemon: String, sessionId: String
+    )
+    case sessionCreationFailed(daemon: String, message: String
+    )
+    case sessionAttachmentFailed(daemon: String, sessionId: String, message: String
+    )
+    /**
      * An attachment was acknowledged; discard cached required actions before replay.
      */
     case sessionReady(daemon: String, sessionId: String
@@ -3272,6 +4088,19 @@ public enum CoreEvent: Equatable, Hashable {
      * Session history was loaded. Swift should pull `snapshot()`.
      */
     case sessionReloaded(daemon: String, sessionId: String
+    )
+    /**
+     * Older messages were prepended without restarting session attachment.
+     */
+    case historyExtended(daemon: String, sessionId: String
+    )
+    case activityUpdated(daemon: String, sessionId: String, subagents: [WorkerInfo], jobs: [BackgroundJob]
+    )
+    case workerHistoryLoaded(daemon: String, sessionId: String, childSessionId: String, requestId: String, messages: [ChatMessage], error: String?
+    )
+    case jobOutputLoaded(daemon: String, sessionId: String, jobId: String, requestId: String, offset: UInt64, nextOffset: UInt64, output: String, done: Bool, incomplete: Bool
+    )
+    case jobOutputFailed(daemon: String, sessionId: String, jobId: String, requestId: String, message: String
     )
     /**
      * Streaming text delta for a part. Coalesced in Rust before FFI.
@@ -3399,79 +4228,121 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
         case 1: return .daemonStatusChanged(daemon: try FfiConverterString.read(from: &buf), status: try FfiConverterTypeDaemonStatus.read(from: &buf)
         )
         
-        case 2: return .sessionList(daemon: try FfiConverterString.read(from: &buf), sessions: try FfiConverterSequenceTypeSessionSummary.read(from: &buf)
+        case 2: return .automationSettings(daemon: try FfiConverterString.read(from: &buf), settings: try FfiConverterTypeAutomationSettings.read(from: &buf)
         )
         
-        case 3: return .projectList(daemon: try FfiConverterString.read(from: &buf), projects: try FfiConverterSequenceTypeProjectInfo.read(from: &buf)
+        case 3: return .autoSummaryChanged(daemon: try FfiConverterString.read(from: &buf), enabled: try FfiConverterBool.read(from: &buf)
         )
         
-        case 4: return .dirListing(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), path: try FfiConverterString.read(from: &buf), entries: try FfiConverterSequenceTypeDirEntry.read(from: &buf)
+        case 4: return .daemonManagementSettings(daemon: try FfiConverterString.read(from: &buf), requestId: try FfiConverterOptionString.read(from: &buf), settings: try FfiConverterTypeDaemonManagementSettings.read(from: &buf)
         )
         
-        case 5: return .sessionReady(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf)
+        case 5: return .daemonManagementFailed(daemon: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), message: try FfiConverterString.read(from: &buf)
         )
         
-        case 6: return .sessionReloaded(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf)
+        case 6: return .sessionList(daemon: try FfiConverterString.read(from: &buf), sessions: try FfiConverterSequenceTypeSessionSummary.read(from: &buf)
         )
         
-        case 7: return .textDelta(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), partId: try FfiConverterString.read(from: &buf), delta: try FfiConverterString.read(from: &buf)
+        case 7: return .projectList(daemon: try FfiConverterString.read(from: &buf), projects: try FfiConverterSequenceTypeProjectInfo.read(from: &buf)
         )
         
-        case 8: return .partUpdated(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), partId: try FfiConverterString.read(from: &buf), partKind: try FfiConverterString.read(from: &buf), state: try FfiConverterOptionString.read(from: &buf)
+        case 8: return .dirListing(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), path: try FfiConverterString.read(from: &buf), entries: try FfiConverterSequenceTypeDirEntry.read(from: &buf)
         )
         
-        case 9: return .sessionActivityChanged(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), running: try FfiConverterBool.read(from: &buf)
+        case 9: return .reviewLoaded(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), files: try FfiConverterSequenceTypeReviewFile.read(from: &buf)
         )
         
-        case 10: return .providerMessageEnded(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), inputTokens: try FfiConverterUInt64.read(from: &buf), outputTokens: try FfiConverterUInt64.read(from: &buf), cost: try FfiConverterDouble.read(from: &buf), failed: try FfiConverterBool.read(from: &buf), manifest: try FfiConverterOptionTypeMobileTurnManifest.read(from: &buf)
+        case 10: return .reviewFailed(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), message: try FfiConverterString.read(from: &buf)
         )
         
-        case 11: return .subagentEnd(daemon: try FfiConverterString.read(from: &buf), parentCallId: try FfiConverterString.read(from: &buf), childSessionId: try FfiConverterString.read(from: &buf), outcome: try FfiConverterString.read(from: &buf), manifests: try FfiConverterSequenceTypeMobileTurnManifest.read(from: &buf)
+        case 11: return .sessionCreated(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf)
         )
         
-        case 12: return .permissionRequested(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), toolName: try FfiConverterString.read(from: &buf), input: try FfiConverterString.read(from: &buf)
+        case 12: return .sessionCreationFailed(daemon: try FfiConverterString.read(from: &buf), message: try FfiConverterString.read(from: &buf)
         )
         
-        case 13: return .askUserRequested(subagent: try FfiConverterOptionTypeSubagentQuestionSource.read(from: &buf), daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), callId: try FfiConverterString.read(from: &buf), questions: try FfiConverterSequenceString.read(from: &buf)
+        case 13: return .sessionAttachmentFailed(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), message: try FfiConverterString.read(from: &buf)
         )
         
-        case 14: return .goalProposed(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), callId: try FfiConverterString.read(from: &buf), objective: try FfiConverterString.read(from: &buf)
+        case 14: return .sessionReady(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf)
         )
         
-        case 15: return .requestResolved(daemon: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf)
+        case 15: return .sessionReloaded(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf)
         )
         
-        case 16: return .alert(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), kind: try FfiConverterString.read(from: &buf), title: try FfiConverterString.read(from: &buf), detail: try FfiConverterOptionString.read(from: &buf)
+        case 16: return .historyExtended(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf)
         )
         
-        case 17: return .attentionChanged(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), pendingPermissions: try FfiConverterUInt32.read(from: &buf), pendingQuestions: try FfiConverterUInt32.read(from: &buf)
+        case 17: return .activityUpdated(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), subagents: try FfiConverterSequenceTypeWorkerInfo.read(from: &buf), jobs: try FfiConverterSequenceTypeBackgroundJob.read(from: &buf)
         )
         
-        case 18: return .todosUpdated(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), todos: try FfiConverterSequenceTypeTodoItem.read(from: &buf)
+        case 18: return .workerHistoryLoaded(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), childSessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), messages: try FfiConverterSequenceTypeChatMessage.read(from: &buf), error: try FfiConverterOptionString.read(from: &buf)
         )
         
-        case 19: return .permissionModeChanged(daemon: try FfiConverterString.read(from: &buf), mode: try FfiConverterString.read(from: &buf)
+        case 19: return .jobOutputLoaded(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), jobId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), offset: try FfiConverterUInt64.read(from: &buf), nextOffset: try FfiConverterUInt64.read(from: &buf), output: try FfiConverterString.read(from: &buf), done: try FfiConverterBool.read(from: &buf), incomplete: try FfiConverterBool.read(from: &buf)
         )
         
-        case 20: return .modelSwitched(daemon: try FfiConverterString.read(from: &buf), provider: try FfiConverterString.read(from: &buf), model: try FfiConverterString.read(from: &buf)
+        case 20: return .jobOutputFailed(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), jobId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), message: try FfiConverterString.read(from: &buf)
         )
         
-        case 21: return .thinkingVariantChanged(daemon: try FfiConverterString.read(from: &buf), variant: try FfiConverterOptionString.read(from: &buf)
+        case 21: return .textDelta(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), partId: try FfiConverterString.read(from: &buf), delta: try FfiConverterString.read(from: &buf)
         )
         
-        case 22: return .modelList(daemon: try FfiConverterString.read(from: &buf), models: try FfiConverterSequenceTypeModelSummary.read(from: &buf)
+        case 22: return .partUpdated(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), partId: try FfiConverterString.read(from: &buf), partKind: try FfiConverterString.read(from: &buf), state: try FfiConverterOptionString.read(from: &buf)
         )
         
-        case 23: return .slashResult(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), text: try FfiConverterString.read(from: &buf)
+        case 23: return .sessionActivityChanged(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), running: try FfiConverterBool.read(from: &buf)
         )
         
-        case 24: return .daemonVersion(daemon: try FfiConverterString.read(from: &buf), version: try FfiConverterString.read(from: &buf)
+        case 24: return .providerMessageEnded(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), inputTokens: try FfiConverterUInt64.read(from: &buf), outputTokens: try FfiConverterUInt64.read(from: &buf), cost: try FfiConverterDouble.read(from: &buf), failed: try FfiConverterBool.read(from: &buf), manifest: try FfiConverterOptionTypeMobileTurnManifest.read(from: &buf)
         )
         
-        case 25: return .personaList(daemon: try FfiConverterString.read(from: &buf), personas: try FfiConverterSequenceTypePersonaInfo.read(from: &buf)
+        case 25: return .subagentEnd(daemon: try FfiConverterString.read(from: &buf), parentCallId: try FfiConverterString.read(from: &buf), childSessionId: try FfiConverterString.read(from: &buf), outcome: try FfiConverterString.read(from: &buf), manifests: try FfiConverterSequenceTypeMobileTurnManifest.read(from: &buf)
         )
         
-        case 26: return .personaSwitched(daemon: try FfiConverterString.read(from: &buf), name: try FfiConverterString.read(from: &buf)
+        case 26: return .permissionRequested(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), toolName: try FfiConverterString.read(from: &buf), input: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 27: return .askUserRequested(subagent: try FfiConverterOptionTypeSubagentQuestionSource.read(from: &buf), daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), callId: try FfiConverterString.read(from: &buf), questions: try FfiConverterSequenceString.read(from: &buf)
+        )
+        
+        case 28: return .goalProposed(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), callId: try FfiConverterString.read(from: &buf), objective: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 29: return .requestResolved(daemon: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 30: return .alert(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), kind: try FfiConverterString.read(from: &buf), title: try FfiConverterString.read(from: &buf), detail: try FfiConverterOptionString.read(from: &buf)
+        )
+        
+        case 31: return .attentionChanged(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), pendingPermissions: try FfiConverterUInt32.read(from: &buf), pendingQuestions: try FfiConverterUInt32.read(from: &buf)
+        )
+        
+        case 32: return .todosUpdated(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), todos: try FfiConverterSequenceTypeTodoItem.read(from: &buf)
+        )
+        
+        case 33: return .permissionModeChanged(daemon: try FfiConverterString.read(from: &buf), mode: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 34: return .modelSwitched(daemon: try FfiConverterString.read(from: &buf), provider: try FfiConverterString.read(from: &buf), model: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 35: return .thinkingVariantChanged(daemon: try FfiConverterString.read(from: &buf), variant: try FfiConverterOptionString.read(from: &buf)
+        )
+        
+        case 36: return .modelList(daemon: try FfiConverterString.read(from: &buf), models: try FfiConverterSequenceTypeModelSummary.read(from: &buf)
+        )
+        
+        case 37: return .slashResult(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), text: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 38: return .daemonVersion(daemon: try FfiConverterString.read(from: &buf), version: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 39: return .personaList(daemon: try FfiConverterString.read(from: &buf), personas: try FfiConverterSequenceTypePersonaInfo.read(from: &buf)
+        )
+        
+        case 40: return .personaSwitched(daemon: try FfiConverterString.read(from: &buf), name: try FfiConverterString.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -3488,40 +4359,147 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             FfiConverterTypeDaemonStatus.write(status, into: &buf)
             
         
-        case let .sessionList(daemon,sessions):
+        case let .automationSettings(daemon,settings):
             writeInt(&buf, Int32(2))
+            FfiConverterString.write(daemon, into: &buf)
+            FfiConverterTypeAutomationSettings.write(settings, into: &buf)
+            
+        
+        case let .autoSummaryChanged(daemon,enabled):
+            writeInt(&buf, Int32(3))
+            FfiConverterString.write(daemon, into: &buf)
+            FfiConverterBool.write(enabled, into: &buf)
+            
+        
+        case let .daemonManagementSettings(daemon,requestId,settings):
+            writeInt(&buf, Int32(4))
+            FfiConverterString.write(daemon, into: &buf)
+            FfiConverterOptionString.write(requestId, into: &buf)
+            FfiConverterTypeDaemonManagementSettings.write(settings, into: &buf)
+            
+        
+        case let .daemonManagementFailed(daemon,requestId,message):
+            writeInt(&buf, Int32(5))
+            FfiConverterString.write(daemon, into: &buf)
+            FfiConverterString.write(requestId, into: &buf)
+            FfiConverterString.write(message, into: &buf)
+            
+        
+        case let .sessionList(daemon,sessions):
+            writeInt(&buf, Int32(6))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterSequenceTypeSessionSummary.write(sessions, into: &buf)
             
         
         case let .projectList(daemon,projects):
-            writeInt(&buf, Int32(3))
+            writeInt(&buf, Int32(7))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterSequenceTypeProjectInfo.write(projects, into: &buf)
             
         
         case let .dirListing(daemon,sessionId,path,entries):
-            writeInt(&buf, Int32(4))
+            writeInt(&buf, Int32(8))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterString.write(path, into: &buf)
             FfiConverterSequenceTypeDirEntry.write(entries, into: &buf)
             
         
+        case let .reviewLoaded(daemon,sessionId,requestId,files):
+            writeInt(&buf, Int32(9))
+            FfiConverterString.write(daemon, into: &buf)
+            FfiConverterString.write(sessionId, into: &buf)
+            FfiConverterString.write(requestId, into: &buf)
+            FfiConverterSequenceTypeReviewFile.write(files, into: &buf)
+            
+        
+        case let .reviewFailed(daemon,sessionId,requestId,message):
+            writeInt(&buf, Int32(10))
+            FfiConverterString.write(daemon, into: &buf)
+            FfiConverterString.write(sessionId, into: &buf)
+            FfiConverterString.write(requestId, into: &buf)
+            FfiConverterString.write(message, into: &buf)
+            
+        
+        case let .sessionCreated(daemon,sessionId):
+            writeInt(&buf, Int32(11))
+            FfiConverterString.write(daemon, into: &buf)
+            FfiConverterString.write(sessionId, into: &buf)
+            
+        
+        case let .sessionCreationFailed(daemon,message):
+            writeInt(&buf, Int32(12))
+            FfiConverterString.write(daemon, into: &buf)
+            FfiConverterString.write(message, into: &buf)
+            
+        
+        case let .sessionAttachmentFailed(daemon,sessionId,message):
+            writeInt(&buf, Int32(13))
+            FfiConverterString.write(daemon, into: &buf)
+            FfiConverterString.write(sessionId, into: &buf)
+            FfiConverterString.write(message, into: &buf)
+            
+        
         case let .sessionReady(daemon,sessionId):
-            writeInt(&buf, Int32(5))
+            writeInt(&buf, Int32(14))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             
         
         case let .sessionReloaded(daemon,sessionId):
-            writeInt(&buf, Int32(6))
+            writeInt(&buf, Int32(15))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             
         
+        case let .historyExtended(daemon,sessionId):
+            writeInt(&buf, Int32(16))
+            FfiConverterString.write(daemon, into: &buf)
+            FfiConverterString.write(sessionId, into: &buf)
+            
+        
+        case let .activityUpdated(daemon,sessionId,subagents,jobs):
+            writeInt(&buf, Int32(17))
+            FfiConverterString.write(daemon, into: &buf)
+            FfiConverterString.write(sessionId, into: &buf)
+            FfiConverterSequenceTypeWorkerInfo.write(subagents, into: &buf)
+            FfiConverterSequenceTypeBackgroundJob.write(jobs, into: &buf)
+            
+        
+        case let .workerHistoryLoaded(daemon,sessionId,childSessionId,requestId,messages,error):
+            writeInt(&buf, Int32(18))
+            FfiConverterString.write(daemon, into: &buf)
+            FfiConverterString.write(sessionId, into: &buf)
+            FfiConverterString.write(childSessionId, into: &buf)
+            FfiConverterString.write(requestId, into: &buf)
+            FfiConverterSequenceTypeChatMessage.write(messages, into: &buf)
+            FfiConverterOptionString.write(error, into: &buf)
+            
+        
+        case let .jobOutputLoaded(daemon,sessionId,jobId,requestId,offset,nextOffset,output,done,incomplete):
+            writeInt(&buf, Int32(19))
+            FfiConverterString.write(daemon, into: &buf)
+            FfiConverterString.write(sessionId, into: &buf)
+            FfiConverterString.write(jobId, into: &buf)
+            FfiConverterString.write(requestId, into: &buf)
+            FfiConverterUInt64.write(offset, into: &buf)
+            FfiConverterUInt64.write(nextOffset, into: &buf)
+            FfiConverterString.write(output, into: &buf)
+            FfiConverterBool.write(done, into: &buf)
+            FfiConverterBool.write(incomplete, into: &buf)
+            
+        
+        case let .jobOutputFailed(daemon,sessionId,jobId,requestId,message):
+            writeInt(&buf, Int32(20))
+            FfiConverterString.write(daemon, into: &buf)
+            FfiConverterString.write(sessionId, into: &buf)
+            FfiConverterString.write(jobId, into: &buf)
+            FfiConverterString.write(requestId, into: &buf)
+            FfiConverterString.write(message, into: &buf)
+            
+        
         case let .textDelta(daemon,sessionId,partId,delta):
-            writeInt(&buf, Int32(7))
+            writeInt(&buf, Int32(21))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterString.write(partId, into: &buf)
@@ -3529,7 +4507,7 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             
         
         case let .partUpdated(daemon,sessionId,partId,partKind,state):
-            writeInt(&buf, Int32(8))
+            writeInt(&buf, Int32(22))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterString.write(partId, into: &buf)
@@ -3538,14 +4516,14 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             
         
         case let .sessionActivityChanged(daemon,sessionId,running):
-            writeInt(&buf, Int32(9))
+            writeInt(&buf, Int32(23))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterBool.write(running, into: &buf)
             
         
         case let .providerMessageEnded(daemon,sessionId,inputTokens,outputTokens,cost,failed,manifest):
-            writeInt(&buf, Int32(10))
+            writeInt(&buf, Int32(24))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterUInt64.write(inputTokens, into: &buf)
@@ -3556,7 +4534,7 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             
         
         case let .subagentEnd(daemon,parentCallId,childSessionId,outcome,manifests):
-            writeInt(&buf, Int32(11))
+            writeInt(&buf, Int32(25))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(parentCallId, into: &buf)
             FfiConverterString.write(childSessionId, into: &buf)
@@ -3565,7 +4543,7 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             
         
         case let .permissionRequested(daemon,sessionId,requestId,toolName,input):
-            writeInt(&buf, Int32(12))
+            writeInt(&buf, Int32(26))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterString.write(requestId, into: &buf)
@@ -3574,7 +4552,7 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             
         
         case let .askUserRequested(subagent,daemon,sessionId,requestId,callId,questions):
-            writeInt(&buf, Int32(13))
+            writeInt(&buf, Int32(27))
             FfiConverterOptionTypeSubagentQuestionSource.write(subagent, into: &buf)
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
@@ -3584,7 +4562,7 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             
         
         case let .goalProposed(daemon,sessionId,requestId,callId,objective):
-            writeInt(&buf, Int32(14))
+            writeInt(&buf, Int32(28))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterString.write(requestId, into: &buf)
@@ -3593,13 +4571,13 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             
         
         case let .requestResolved(daemon,requestId):
-            writeInt(&buf, Int32(15))
+            writeInt(&buf, Int32(29))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(requestId, into: &buf)
             
         
         case let .alert(daemon,sessionId,kind,title,detail):
-            writeInt(&buf, Int32(16))
+            writeInt(&buf, Int32(30))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterString.write(kind, into: &buf)
@@ -3608,7 +4586,7 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             
         
         case let .attentionChanged(daemon,sessionId,pendingPermissions,pendingQuestions):
-            writeInt(&buf, Int32(17))
+            writeInt(&buf, Int32(31))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterUInt32.write(pendingPermissions, into: &buf)
@@ -3616,58 +4594,58 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             
         
         case let .todosUpdated(daemon,sessionId,todos):
-            writeInt(&buf, Int32(18))
+            writeInt(&buf, Int32(32))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterSequenceTypeTodoItem.write(todos, into: &buf)
             
         
         case let .permissionModeChanged(daemon,mode):
-            writeInt(&buf, Int32(19))
+            writeInt(&buf, Int32(33))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(mode, into: &buf)
             
         
         case let .modelSwitched(daemon,provider,model):
-            writeInt(&buf, Int32(20))
+            writeInt(&buf, Int32(34))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(provider, into: &buf)
             FfiConverterString.write(model, into: &buf)
             
         
         case let .thinkingVariantChanged(daemon,variant):
-            writeInt(&buf, Int32(21))
+            writeInt(&buf, Int32(35))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterOptionString.write(variant, into: &buf)
             
         
         case let .modelList(daemon,models):
-            writeInt(&buf, Int32(22))
+            writeInt(&buf, Int32(36))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterSequenceTypeModelSummary.write(models, into: &buf)
             
         
         case let .slashResult(daemon,sessionId,text):
-            writeInt(&buf, Int32(23))
+            writeInt(&buf, Int32(37))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterString.write(text, into: &buf)
             
         
         case let .daemonVersion(daemon,version):
-            writeInt(&buf, Int32(24))
+            writeInt(&buf, Int32(38))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(version, into: &buf)
             
         
         case let .personaList(daemon,personas):
-            writeInt(&buf, Int32(25))
+            writeInt(&buf, Int32(39))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterSequenceTypePersonaInfo.write(personas, into: &buf)
             
         
         case let .personaSwitched(daemon,name):
-            writeInt(&buf, Int32(26))
+            writeInt(&buf, Int32(40))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(name, into: &buf)
             
@@ -4058,6 +5036,173 @@ public func FfiConverterTypePartKind_lower(_ value: PartKind) -> RustBuffer {
 }
 
 
+
+
+public enum ReviewFileStatus: Equatable, Hashable {
+    
+    case added
+    case modified
+    case deleted
+    case renamed
+    case unchanged
+    case binary
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ReviewFileStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeReviewFileStatus: FfiConverterRustBuffer {
+    typealias SwiftType = ReviewFileStatus
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ReviewFileStatus {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .added
+        
+        case 2: return .modified
+        
+        case 3: return .deleted
+        
+        case 4: return .renamed
+        
+        case 5: return .unchanged
+        
+        case 6: return .binary
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ReviewFileStatus, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .added:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .modified:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .deleted:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .renamed:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .unchanged:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .binary:
+            writeInt(&buf, Int32(6))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeReviewFileStatus_lift(_ buf: RustBuffer) throws -> ReviewFileStatus {
+    return try FfiConverterTypeReviewFileStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeReviewFileStatus_lower(_ value: ReviewFileStatus) -> RustBuffer {
+    return FfiConverterTypeReviewFileStatus.lower(value)
+}
+
+
+
+
+public enum ReviewLineKind: Equatable, Hashable {
+    
+    case context
+    case addition
+    case deletion
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ReviewLineKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeReviewLineKind: FfiConverterRustBuffer {
+    typealias SwiftType = ReviewLineKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ReviewLineKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .context
+        
+        case 2: return .addition
+        
+        case 3: return .deletion
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ReviewLineKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .context:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .addition:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .deletion:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeReviewLineKind_lift(_ buf: RustBuffer) throws -> ReviewLineKind {
+    return try FfiConverterTypeReviewLineKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeReviewLineKind_lower(_ value: ReviewLineKind) -> RustBuffer {
+    return FfiConverterTypeReviewLineKind.lower(value)
+}
+
+
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -4157,6 +5302,30 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeAutomationSettings: FfiConverterRustBuffer {
+    typealias SwiftType = AutomationSettings?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeAutomationSettings.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeAutomationSettings.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeDaemonSnapshot: FfiConverterRustBuffer {
     typealias SwiftType = DaemonSnapshot?
 
@@ -4229,6 +5398,30 @@ fileprivate struct FfiConverterOptionTypeMobileTurnManifest: FfiConverterRustBuf
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeNewChatDefaults: FfiConverterRustBuffer {
+    typealias SwiftType = NewChatDefaults?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeNewChatDefaults.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeNewChatDefaults.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeSubagentQuestionSource: FfiConverterRustBuffer {
     typealias SwiftType = SubagentQuestionSource?
 
@@ -4245,6 +5438,30 @@ fileprivate struct FfiConverterOptionTypeSubagentQuestionSource: FfiConverterRus
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeSubagentQuestionSource.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionSequenceTypePairedDevice: FfiConverterRustBuffer {
+    typealias SwiftType = [PairedDevice]?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterSequenceTypePairedDevice.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterSequenceTypePairedDevice.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -4295,6 +5512,31 @@ fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterString.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeBackgroundJob: FfiConverterRustBuffer {
+    typealias SwiftType = [BackgroundJob]
+
+    public static func write(_ value: [BackgroundJob], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeBackgroundJob.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [BackgroundJob] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [BackgroundJob]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeBackgroundJob.read(from: &buf))
         }
         return seq
     }
@@ -4503,6 +5745,31 @@ fileprivate struct FfiConverterSequenceTypeModelSummary: FfiConverterRustBuffer 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypePairedDevice: FfiConverterRustBuffer {
+    typealias SwiftType = [PairedDevice]
+
+    public static func write(_ value: [PairedDevice], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePairedDevice.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PairedDevice] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PairedDevice]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePairedDevice.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypePendingAskUser: FfiConverterRustBuffer {
     typealias SwiftType = [PendingAskUser]
 
@@ -4603,6 +5870,81 @@ fileprivate struct FfiConverterSequenceTypeProjectInfo: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeReviewFile: FfiConverterRustBuffer {
+    typealias SwiftType = [ReviewFile]
+
+    public static func write(_ value: [ReviewFile], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeReviewFile.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ReviewFile] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ReviewFile]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeReviewFile.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeReviewHunk: FfiConverterRustBuffer {
+    typealias SwiftType = [ReviewHunk]
+
+    public static func write(_ value: [ReviewHunk], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeReviewHunk.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ReviewHunk] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ReviewHunk]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeReviewHunk.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeReviewLine: FfiConverterRustBuffer {
+    typealias SwiftType = [ReviewLine]
+
+    public static func write(_ value: [ReviewLine], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeReviewLine.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ReviewLine] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ReviewLine]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeReviewLine.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeSessionInfo: FfiConverterRustBuffer {
     typealias SwiftType = [SessionInfo]
 
@@ -4670,6 +6012,31 @@ fileprivate struct FfiConverterSequenceTypeTodoItem: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeTodoItem.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWorkerInfo: FfiConverterRustBuffer {
+    typealias SwiftType = [WorkerInfo]
+
+    public static func write(_ value: [WorkerInfo], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWorkerInfo.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WorkerInfo] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WorkerInfo]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWorkerInfo.read(from: &buf))
         }
         return seq
     }
@@ -4798,6 +6165,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_list_sessions() != 24240) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_mew_mobile_core_checksum_method_mobilecore_load_older_history() != 13695) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_new_session() != 18312) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -4810,10 +6180,25 @@ private let initializationResult: InitializationResult = {
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_prompt() != 57596) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_mew_mobile_core_checksum_method_mobilecore_read_automation_settings() != 45149) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mew_mobile_core_checksum_method_mobilecore_read_daemon_settings() != 38957) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mew_mobile_core_checksum_method_mobilecore_read_session_diff() != 23773) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_remove_daemon() != 48368) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_mew_mobile_core_checksum_method_mobilecore_rename_daemon() != 32468) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_rename_session() != 2472) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mew_mobile_core_checksum_method_mobilecore_reset_session_defaults() != 2776) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_respond_ask_user() != 37321) {
@@ -4825,10 +6210,19 @@ private let initializationResult: InitializationResult = {
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_respond_to_goal() != 11714) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_mew_mobile_core_checksum_method_mobilecore_set_auto_summary() != 57757) {
+    if (uniffi_mew_mobile_core_checksum_method_mobilecore_retry_connection() != 59563) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_mew_mobile_core_checksum_method_mobilecore_set_auto_title() != 54262) {
+    if (uniffi_mew_mobile_core_checksum_method_mobilecore_revoke_device() != 6592) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mew_mobile_core_checksum_method_mobilecore_save_session_defaults() != 49993) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mew_mobile_core_checksum_method_mobilecore_set_auto_summary() != 64538) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mew_mobile_core_checksum_method_mobilecore_set_auto_title() != 55637) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_set_listener() != 46926) {
@@ -4850,6 +6244,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_switch_persona() != 3069) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mew_mobile_core_checksum_method_mobilecore_read_job_output() != 46219) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mew_mobile_core_checksum_method_mobilecore_read_subagent_history() != 61410) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mew_mobile_core_checksum_method_corelistener_on_event() != 53351) {

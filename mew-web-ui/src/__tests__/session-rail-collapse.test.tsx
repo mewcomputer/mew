@@ -9,12 +9,8 @@ import { ProjectPickerModal } from "../components/session-rail";
 import { setClient } from "../lib/client-ref";
 import type { DirEntry } from "@mew/web-client";
 
-// Mock TanStack Router — SessionRail calls useRouter().navigate.
-vi.mock("@tanstack/react-router", () => ({
-  useRouter: () => ({
-    navigate: vi.fn(),
-  }),
-}));
+const router = vi.hoisted(() => ({ navigate: vi.fn(), state: { location: { pathname: "/session/original" } } }));
+vi.mock("@tanstack/react-router", () => ({ useRouter: () => router }));
 
 function makeSession(overrides: Partial<SessionInfo> = {}): SessionInfo {
   return {
@@ -26,9 +22,9 @@ function makeSession(overrides: Partial<SessionInfo> = {}): SessionInfo {
   };
 }
 
-function renderRail(client: Parameters<typeof SessionRail>[0]["client"] = null) {
+function renderRail(client: Parameters<typeof SessionRail>[0]["client"] = null, defaultOpen = true) {
   return render(
-    <SidebarProvider>
+    <SidebarProvider defaultOpen={defaultOpen}>
       <SessionRail client={client} />
     </SidebarProvider>,
   );
@@ -37,7 +33,7 @@ function renderRail(client: Parameters<typeof SessionRail>[0]["client"] = null) 
 /** Choose Workspace from the labeled ViewSwitcher menu. */
 async function switchToWorkspace() {
   const user = userEvent.setup();
-  const trigger = screen.getAllByRole("button", { name: "Session view: Timeline" })[0]!;
+  const trigger = screen.getAllByRole("button", { name: "mew menu" })[0]!;
   await user.click(trigger);
   await user.click(await screen.findByRole("menuitem", { name: "Workspace" }));
 }
@@ -58,23 +54,138 @@ describe("SessionRail workspace collapse", () => {
     });
   });
 
-  it("reserves space for session actions so they cannot cover the title", () => {
-    useSessionStore.setState({
-      availableSessions: [
-        makeSession({
-          session_id: "sess_actions",
-          first_message: "can you create a function to reverse this?",
-          cwd: "/projects/mew",
-        }),
-      ],
-      connectionState: "connected",
-    });
+  it("renders an icon rail without expanded controls or chat titles when collapsed", () => {
+    useSessionStore.setState({ availableSessions: [makeSession({ first_message: "A chat title that should not clip", model: "fake" })] });
+    renderRail(null, false);
+    for (const name of ["Expand sidebar", "New chat", "Search chats", "Show archived sessions", "Open settings"]) {
+      expect(screen.getByRole("button", { name }).textContent?.trim()).toBe("");
+    }
+    expect(screen.queryByRole("textbox", { name: "Search sessions" })).toBeNull();
+    expect(screen.queryByText("A chat title that should not clip")).toBeNull();
+    expect(screen.queryByText("Continue latest")).toBeNull();
+    expect(screen.queryByRole("button", { name: "mew menu" })).toBeNull();
+  });
 
+  it("expands the compact rail and focuses its real chat search", async () => {
+    renderRail(null, false);
+    fireEvent.click(screen.getByRole("button", { name: "Search chats" }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Search sessions" })));
+    fireEvent.change(screen.getByRole("textbox", { name: "Search sessions" }), { target: { value: "missing chat" } });
+    expect(screen.getByText("No sessions match “missing chat”")).toBeTruthy();
+  });
+
+  it("clears a search filter when its control is closed", async () => {
+    useSessionStore.setState({ availableSessions: [makeSession({ first_message: "Visible chat" })] });
+    const user = userEvent.setup();
     renderRail();
+    const search = screen.getByRole("button", { name: "Search chats" });
+    await user.click(search);
+    expect(search.getAttribute("aria-expanded")).toBe("true");
+    await user.type(screen.getByRole("textbox", { name: "Search sessions" }), "missing");
+    expect(screen.queryByRole("button", { name: "Visible chat" })).toBeNull();
 
-    const title = screen.getByText("can you create a function to reverse this?");
-    const titleRow = title.parentElement?.parentElement;
-    expect(titleRow?.className).toContain("pr-24");
+    await user.click(search);
+    expect(search.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByRole("textbox", { name: "Search sessions" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Visible chat" })).toBeTruthy();
+    await user.click(search);
+    expect((screen.getByRole("textbox", { name: "Search sessions" }) as HTMLInputElement).value).toBe("");
+  });
+
+  it("closes search on Escape, restores its trigger focus and removes the filter", async () => {
+    useSessionStore.setState({ availableSessions: [makeSession({ first_message: "Visible chat" })] });
+    const user = userEvent.setup();
+    renderRail();
+    const search = screen.getByRole("button", { name: "Search chats" });
+    await user.click(search);
+    await user.type(screen.getByRole("textbox", { name: "Search sessions" }), "missing");
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("textbox", { name: "Search sessions" })).toBeNull();
+    expect(document.activeElement).toBe(search);
+    expect(screen.getByRole("button", { name: "Visible chat" })).toBeTruthy();
+  });
+
+  it("shows one loading or empty status in every chat view", async () => {
+    const user = userEvent.setup();
+    renderRail();
+    expect(screen.getByRole("status").textContent).toBe("No sessions yet");
+    expect(screen.queryByText("Recent")).toBeNull();
+    await switchToWorkspace();
+    expect(screen.getByRole("status").textContent).toBe("No sessions yet");
+    act(() => useSessionStore.setState({ sessionsLoading: true }));
+    expect(screen.getByRole("status").textContent).toBe("Loading sessions…");
+    await user.click(screen.getByRole("button", { name: "mew menu" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Grouped" }));
+    expect(screen.getByRole("status").textContent).toBe("Loading sessions…");
+  });
+
+  it("creates a real new chat from the compact icon button", async () => {
+    const newSession = vi.fn().mockResolvedValue("compact-new");
+    useSessionStore.setState({ connectionState: "connected" });
+    renderRail({ newSession, listSessions: vi.fn().mockResolvedValue([]) } as never, false);
+    await userEvent.setup().click(screen.getByRole("button", { name: "New chat" }));
+    expect(newSession).toHaveBeenCalledOnce();
+  });
+
+  it("does not navigate to a new chat after the user selects another page", async () => {
+    let finish!: (id: string) => void;
+    const newSession = vi.fn(() => new Promise<string>((resolve) => { finish = resolve; }));
+    useSessionStore.setState({ connectionState: "connected" });
+    router.navigate.mockClear();
+    renderRail({ newSession, listSessions: vi.fn().mockResolvedValue([]) } as never, false);
+    await userEvent.setup().click(screen.getByRole("button", { name: "New chat" }));
+    router.state.location = { pathname: "/settings" };
+    await act(async () => { finish("late-chat"); await Promise.resolve(); });
+    expect(router.navigate).not.toHaveBeenCalled();
+  });
+
+  it("groups pinned chats ahead of recent chats in the notifications view", () => {
+    useSessionStore.setState({ availableSessions: [makeSession({ session_id: "pinned", first_message: "Priority work", pinned: true }), makeSession({ session_id: "recent", first_message: "Recent work", created_at: Date.now() })] });
+    renderRail();
+    expect(screen.getByText("Priority")).toBeTruthy();
+    expect(screen.getByText("Today")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "mew menu" })).toBeTruthy();
+  });
+
+  it("labels recent chat groups by their local calendar date", () => {
+    const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1);
+    const weekday = new Date(); weekday.setDate(weekday.getDate() - 3);
+    const older = new Date(); older.setDate(older.getDate() - 10);
+    useSessionStore.setState({ availableSessions: [makeSession({ session_id: "yesterday", created_at: yesterday.getTime() }), makeSession({ session_id: "weekday", created_at: weekday.getTime() }), makeSession({ session_id: "older", created_at: older.getTime() })] });
+    renderRail();
+    expect(screen.getByText("Yesterday")).toBeTruthy();
+    expect(screen.getByText(weekday.toLocaleDateString(undefined, { weekday: "long" }))).toBeTruthy();
+    expect(screen.getByText(older.toLocaleDateString(undefined, { month: "short", day: "numeric" }))).toBeTruthy();
+  });
+
+  it("reloads the canonical chat list after a new chat is confirmed", async () => {
+    const listSessions = vi.fn().mockResolvedValueOnce([]).mockResolvedValue([makeSession({ session_id: "confirmed-chat", first_message: "A real new chat" })]);
+    useSessionStore.setState({ connectionState: "connected" });
+    renderRail({ listSessions } as never);
+    await waitFor(() => expect(screen.getByText("No sessions yet")).toBeTruthy());
+    act(() => useSessionStore.getState().setSessionId("confirmed-chat"));
+    await waitFor(() => expect(screen.getByRole("button", { name: /^A real new chat$/ })).toBeTruthy());
+    expect(listSessions).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps chat management actions in the row menu", async () => {
+    const pinSession = vi.fn();
+    useSessionStore.setState({ availableSessions: [makeSession({ first_message: "Review the UI", cwd: "/projects/mew" })] });
+    renderRail({ pinSession } as never);
+    expect(screen.queryByRole("button", { name: "Pin session" })).toBeNull();
+    await userEvent.setup().click(screen.getByRole("button", { name: "Chat actions: Review the UI" }));
+    await userEvent.setup().click(screen.getByRole("menuitem", { name: "Pin chat" }));
+    expect(pinSession).toHaveBeenCalledWith("sess_test1", true);
+  });
+
+  it("exposes the current chat and updates it when selection changes", () => {
+    useSessionStore.setState({ sessionId: "first", availableSessions: [makeSession({ session_id: "first", first_message: "First chat" }), makeSession({ session_id: "second", first_message: "Second chat" })] });
+    renderRail();
+    expect(screen.getByRole("button", { name: "First chat" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("button", { name: "Second chat" }).hasAttribute("aria-current")).toBe(false);
+    act(() => useSessionStore.setState({ sessionId: "second" }));
+    expect(screen.getByRole("button", { name: "First chat" }).hasAttribute("aria-current")).toBe(false);
+    expect(screen.getByRole("button", { name: "Second chat" }).getAttribute("aria-current")).toBe("page");
   });
 
   it("clears the previous session before creating a new one", async () => {
@@ -95,7 +206,7 @@ describe("SessionRail workspace collapse", () => {
     });
 
     renderRail({ newSession, listSessions: vi.fn(() => Promise.resolve([])) } as never);
-    await userEvent.setup().click(screen.getByRole("button", { name: "New session" }));
+    await userEvent.setup().click(screen.getByRole("button", { name: "New chat" }));
 
     expect(newSession).toHaveBeenCalledOnce();
   });
@@ -157,6 +268,24 @@ describe("SessionRail workspace collapse", () => {
     // Click again to expand.
     act(() => { fireEvent.click(folderButton!); });
     expect(container.querySelectorAll("[data-sidebar='group-content']").length).toBeGreaterThan(0);
+  });
+
+  it("exposes the complete workspace header as a keyboard disclosure", async () => {
+    useSessionStore.setState({ availableSessions: [makeSession({ cwd: "/projects/alpha", first_message: "Workspace chat" })] });
+    const user = userEvent.setup();
+    renderRail();
+    await switchToWorkspace();
+    const header = screen.getByRole("button", { name: "Collapse workspace alpha" });
+    expect(header.getAttribute("aria-expanded")).toBe("true");
+    expect(header.textContent).toContain("alpha");
+    header.focus();
+    await user.keyboard("{Enter}");
+    expect(screen.queryByRole("button", { name: "Workspace chat alpha" })).toBeNull();
+    const collapsed = screen.getByRole("button", { name: "Expand workspace alpha" });
+    expect(collapsed.getAttribute("aria-expanded")).toBe("false");
+    await user.keyboard(" ");
+    expect(screen.getByRole("button", { name: "Collapse workspace alpha" }).getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByText("Workspace chat")).toBeTruthy();
   });
 });
 

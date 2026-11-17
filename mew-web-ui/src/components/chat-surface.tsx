@@ -20,16 +20,10 @@ function EmptyChatSurface() {
     .slice(0, 3);
 
   return (
-    <div className="flex gap-2 px-4 pb-12 pt-20">
+    <div className="flex gap-2 px-1 pb-12 pt-16">
       <div className="flex h-full flex-col items-start justify-center text-start">
-        <div className="mb-4 flex gap-4 items-center">
-          <img
-            src="/mew-transparent-closeup.png"
-            className="size-12"
-            alt=""
-            aria-hidden="true"
-          />
-          <h2 className="mb-2 text-xl text-foreground mt-4">Where to next?</h2>
+        <div className="mb-4 flex items-center">
+          <h2 className="text-xl font-medium tracking-tight text-foreground">What can we work on?</h2>
         </div>
         {recent.length > 0 && (
           <div className="mt-6 w-full max-w-sm space-y-1 text-left">
@@ -44,7 +38,7 @@ function EmptyChatSurface() {
                   localStorage.setItem(SESSION_ID_KEY, s.session_id);
                   router.navigate({ to: "/session/$sessionId", params: { sessionId: s.session_id } });
                 }}
-                className="flex w-full items-center gap-2 rounded-md border border-border bg-card px-3 py-2 text-left transition-[background-color,border-color] duration-150 ease-out hover:border-foreground/20 hover:bg-accent"
+                className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left transition-colors hover:bg-accent"
                 aria-label={"Open session " + (titles.get(s.session_id) ?? s.summary ?? s.first_message ?? s.session_id)}
               >
                 <MessageSquare className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -91,9 +85,9 @@ export function ChatSurface() {
     <div
       ref={scrollRef}
       onScroll={handleScroll}
-      className="chat-scroll-container min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-3 pb-32 pt-4 sm:px-4 sm:pb-28"
+      className="chat-scroll-container min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-4 pb-6 pt-6 sm:px-6"
     >
-      <div className="mx-auto min-w-0 max-w-3xl space-y-4">
+      <div className="mew-conversation-width mx-auto min-w-0 space-y-6">
         {messages.length === 0 && <EmptyChatSurface />}
         {messages.filter((msg) => msg.role !== "system").map((msg) => (
           <ErrorBoundary

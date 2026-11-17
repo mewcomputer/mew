@@ -42,9 +42,6 @@ pub(super) struct DesktopShell {
     pub(super) theme_mode: DesktopThemeMode,
     pub(super) light_theme: String,
     pub(super) dark_theme: String,
-    pub(super) open_tabs: Vec<OpenConversationTab>,
-    pub(super) active_tab: Option<usize>,
-    pub(super) tab_scroll_handle: gpui::ScrollHandle,
     pub(super) layout: ShellLayoutState,
     pub(super) sidebar_rows: Vec<SidebarRow>,
     pub(super) sidebar_list: gpui::ListState,
@@ -55,6 +52,7 @@ pub(super) struct DesktopShell {
     pub(super) workspace_open_destinations: Vec<WorkspaceOpenDestination>,
     pub(super) remembered_editor: Option<String>,
     pub(super) sidebar_search: String,
+    pub(super) sidebar_search_open: bool,
     pub(super) sidebar_filter: SidebarFilter,
     pub(super) sidebar_search_focus_handle: FocusHandle,
     pub(super) sidebar_focus_handle: FocusHandle,
@@ -69,6 +67,8 @@ pub(super) struct DesktopShell {
     pub(super) model_picker_marked_range: Option<Range<usize>>,
     pub(super) model_picker_filtered_indices: Vec<usize>,
     pub(super) model_picker_rows: Vec<ModelPickerRow>,
+    pub(super) model_picker_list: gpui::ListState,
+    pub(super) model_picker_highlighted_index: Option<usize>,
     pub(super) recent_models: Vec<String>,
     pub(super) thinking_effort_drag_index: Option<usize>,
     pub(super) thinking_effort_drag_position: Option<f32>,
@@ -89,10 +89,12 @@ pub(super) struct DesktopShell {
     pub(super) rename_marked_range: Option<Range<usize>>,
     pub(super) sidebar_animation_id: u64,
     pub(super) workbench_animation_id: u64,
-    pub(super) terminal_animation_id: u64,
     pub(super) window_width: f32,
-    pub(super) workbench_width: f32,
-    pub(super) auxiliary_view: AuxiliaryView,
+    pub(super) conversation_width: f32,
+    pub(super) work_tabs: WorkTabs,
+    pub(super) workbench_focus_handle: FocusHandle,
+    pub(super) work_tab_scroll: gpui::ScrollHandle,
+    pub(super) work_tab_scroll_pending: bool,
     pub(super) transcript_list: gpui::ListState,
     pub(super) transcript_scrolled_away: bool,
     pub(super) transcript_scrollbar_grab_offset: Option<f32>,
@@ -120,11 +122,24 @@ pub(super) struct DesktopShell {
     pub(super) review_error: Option<String>,
     pub(super) input_animation_id: u64,
     pub(super) composer_focus_handle: FocusHandle,
+    pub(super) transcript_focus_handle: FocusHandle,
+    pub(super) composer_scroll_offset: Pixels,
+    pub(super) composer_scroll_max: Pixels,
+    pub(super) composer_line_count: usize,
+    pub(super) composer_expanded: bool,
+    pub(super) composer_preserve_scroll_on_resize: bool,
+    pub(super) composer_scrollbar_grab_offset: Option<Pixels>,
+    pub(super) composer_preferred_column: Option<Pixels>,
+    pub(super) composer_cursor_downstream: bool,
     pub(super) composer_selection: Range<usize>,
     pub(super) composer_selection_reversed: bool,
     pub(super) composer_marked_range: Option<Range<usize>>,
     pub(super) composer_is_selecting: bool,
     pub(super) composer_bounds: Option<Bounds<Pixels>>,
+    pub(super) composer_container_bounds: Option<Bounds<Pixels>>,
+    pub(super) composer_area_bounds: Option<Bounds<Pixels>>,
+    pub(super) text_input_layout: Option<Rc<composer::TextInputLayout>>,
+    pub(super) composer_text_layout: Option<Rc<composer::TextInputLayout>>,
     pub(super) browser_url_focus_handle: FocusHandle,
     pub(super) browser_url_focus_requested: bool,
     pub(super) browser_url_selection: Range<usize>,
@@ -151,6 +166,8 @@ pub(super) struct DesktopShell {
     pub(super) task_drafts: TaskDrafts,
     pub(super) initial_auto_attach: bool,
     pub(super) attachments: Vec<Attachment>,
+    pub(super) attachment_scroll: gpui::ScrollHandle,
+    pub(super) attachment_remove_focus: Vec<(FocusHandle, Subscription)>,
     pub(super) attachment_error: Option<String>,
     pub(super) pending_model: Option<(String, String)>,
     pub(super) awaiting_model_switch: Option<(String, String)>,
@@ -170,7 +187,7 @@ pub(super) struct DesktopShell {
     pub(super) browser_title: String,
     pub(super) browser_error: Option<String>,
     pub(super) browser_confirmed_sessions: BTreeSet<String>,
-    pub(super) browser_registration_attempts: BTreeMap<BrowserOwner, String>,
+    pub(super) browser_registration_attempts: BTreeMap<BrowserOwner, BrowserRegistration>,
     pub(super) browser_pump: Option<Entity<BrowserPumpView>>,
     pub(super) settings_open: bool,
     pub(super) settings_page: SettingsPage,
@@ -189,6 +206,8 @@ pub(super) struct DesktopShell {
     pub(super) _appearance_subscription: Subscription,
     pub(super) _bounds_subscription: Subscription,
     pub(super) _supervisor: Option<DesktopSupervisor>,
+    pub(super) supervisor_retry_pending: bool,
+    pub(super) supervisor_startup_cancel: Option<mew_desktop_supervisor::DaemonStartupCancellation>,
     pub(super) frame_probe: Option<DesktopFrameProbe>,
 }
 
@@ -223,7 +242,7 @@ impl DesktopFrameProbe {
             return None;
         }
 
-        gpui::profiler::set_frame_trace_enabled(true);
+        gpui::profiler::set_trace_enabled(true);
         eprintln!("[mew desktop perf] frame tracing enabled");
         let trace_path = std::env::temp_dir().join("mew-desktop-frame-trace.log");
         let trace_file = OpenOptions::new()
@@ -258,17 +277,19 @@ impl DesktopFrameProbe {
     }
 
     pub(super) fn collect(&mut self) {
-        self.samples
-            .extend(
-                self.collector
-                    .collect_unseen()
-                    .into_iter()
-                    .map(|frame| DesktopFrameSample {
+        self.samples.extend(
+            self.collector
+                .collect_unseen()
+                .into_iter()
+                .filter_map(|event| match event {
+                    gpui::FrameEvent::Draw(frame) => Some(DesktopFrameSample {
                         draw_duration: frame.draw_duration(),
                         dirty_to_draw_duration: frame.dirty_to_draw_duration(),
                         invalidations: frame.invalidations,
                     }),
-            );
+                    gpui::FrameEvent::Present(_) => None,
+                }),
+        );
 
         if self.samples.len() >= DESKTOP_FRAME_TRACE_BATCH_SIZE {
             self.report();
@@ -342,30 +363,20 @@ pub(super) enum ModelPickerRow {
     Model { index: usize, recent: bool },
 }
 
+impl ModelPickerRow {
+    pub(super) fn height(&self) -> Pixels {
+        px(match self {
+            Self::Header(_) => 24.,
+            Self::Model { .. } => 56.,
+        })
+    }
+}
+
 /// Pumps native CEF work without invalidating the entire shell at a fixed
 /// interval. The browser child is native, so the view itself has no pixels;
 /// its entity is only a narrow GPUI invalidation boundary.
 pub(super) struct BrowserPumpView {
     shell: WeakEntity<DesktopShell>,
-}
-
-pub(super) struct TooltipLabel {
-    pub(super) text: SharedString,
-    pub(super) background: gpui::Rgba,
-    pub(super) foreground: gpui::Rgba,
-}
-
-impl Render for TooltipLabel {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px(px(8.))
-            .py(px(5.))
-            .rounded(px(6.))
-            .bg(self.background)
-            .text_xs()
-            .text_color(self.foreground)
-            .child(self.text.clone())
-    }
 }
 
 impl BrowserPumpView {
@@ -378,6 +389,15 @@ impl BrowserPumpView {
             let Some(this) = this.upgrade() else {
                 break;
             };
+            let ready = shell_for_task.upgrade().is_some_and(|shell| {
+                shell.read_with(cx, |shell, _| {
+                    browser_pump_is_needed(shell.browser_portal.is_some(), shell.quitting)
+                })
+            });
+            if ready {
+                // Native menu callbacks must be able to borrow the GPUI app.
+                mew_cef_host::embed::CefEmbedController::do_message_loop_work();
+            }
             let keep_pumping = this.update(cx, |pump, cx| {
                 let Some(shell) = pump.shell.upgrade() else {
                     return false;
@@ -385,9 +405,6 @@ impl BrowserPumpView {
                 shell.update(cx, |shell, cx| {
                     if !browser_pump_is_needed(shell.browser_portal.is_some(), shell.quitting) {
                         return false;
-                    }
-                    if let Some(portal) = shell.browser_portal.as_ref() {
-                        portal.pump();
                     }
                     if shell.apply_browser_events(cx) {
                         cx.notify();
@@ -400,9 +417,7 @@ impl BrowserPumpView {
             }
         })
         .detach();
-        Self {
-            shell: shell_for_task,
-        }
+        Self { shell }
     }
 }
 
@@ -443,26 +458,26 @@ impl Drop for DesktopShell {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct OpenConversationTab {
-    pub(super) session_id: Option<String>,
-    pub(super) title: String,
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct SessionViewState {
     pub(super) layout: ShellLayoutState,
-    pub(super) auxiliary_view: AuxiliaryView,
-    pub(super) workbench_width: f32,
+    pub(super) work_tabs: WorkTabs,
+    pub(super) conversation_width: f32,
     pub(super) expanded_chat_parts: BTreeSet<String>,
-    pub(super) browser_panel_open: bool,
-    pub(super) browser_url: String,
-    pub(super) browser_title: String,
     pub(super) transcript_scroll_anchor: Option<mew_config::DesktopTranscriptScrollAnchor>,
 }
 
 impl SessionViewState {
     pub(super) fn from_persisted(state: &mew_config::DesktopSessionViewState) -> Self {
+        let mut work_tabs = WorkTabs::from_persisted(
+            state.work_tabs.as_ref(),
+            &state.auxiliary_view,
+            !state.terminal_collapsed,
+        );
+        if state.work_tabs.is_none() && work_tabs.active().kind == WorkTabKind::Browser {
+            work_tabs.active_mut().url = state.browser_url.clone();
+            work_tabs.active_mut().title = state.browser_title.clone();
+        }
         Self {
             layout: ShellLayoutState {
                 sidebar_collapsed: state.sidebar_collapsed,
@@ -472,19 +487,9 @@ impl SessionViewState {
                 local_expanded: state.local_expanded,
                 activity_expanded: state.activity_expanded,
             },
-            auxiliary_view: match state.auxiliary_view.as_str() {
-                "browser" => AuxiliaryView::Browser,
-                "local" => AuxiliaryView::Local,
-                "activity" => AuxiliaryView::Activity,
-                _ => AuxiliaryView::Changes,
-            },
-            workbench_width: state
-                .workbench_width
-                .clamp(WORKBENCH_MIN_WIDTH, WORKBENCH_MAX_WIDTH),
+            work_tabs,
+            conversation_width: state.conversation_width.max(CHAT_MIN_WIDTH),
             expanded_chat_parts: state.expanded_chat_parts.iter().cloned().collect(),
-            browser_panel_open: state.browser_panel_open,
-            browser_url: state.browser_url.clone(),
-            browser_title: state.browser_title.clone(),
             transcript_scroll_anchor: state.transcript_scroll_anchor,
         }
     }
@@ -497,24 +502,28 @@ impl SessionViewState {
             changes_expanded: self.layout.changes_expanded,
             local_expanded: self.layout.local_expanded,
             activity_expanded: self.layout.activity_expanded,
-            auxiliary_view: match self.auxiliary_view {
-                AuxiliaryView::Browser => "browser",
-                AuxiliaryView::Changes => "changes",
-                AuxiliaryView::Local => "local",
-                AuxiliaryView::Activity => "activity",
-            }
-            .into(),
-            workbench_width: self.workbench_width,
+            auxiliary_view: self.work_tabs.active().kind.key().into(),
+            work_tabs: Some(self.work_tabs.to_persisted()),
+            conversation_width: self.conversation_width,
             expanded_chat_parts: self.expanded_chat_parts.iter().cloned().collect(),
-            browser_panel_open: self.browser_panel_open,
-            browser_url: self.browser_url.clone(),
-            browser_title: self.browser_title.clone(),
+            browser_panel_open: self.work_tabs.active().kind == WorkTabKind::Browser,
+            browser_url: self
+                .work_tabs
+                .browser_tab()
+                .map(|tab| tab.url.clone())
+                .unwrap_or_default(),
+            browser_title: self
+                .work_tabs
+                .browser_tab()
+                .map(|tab| tab.title.clone())
+                .unwrap_or_default(),
             transcript_scroll_anchor: self.transcript_scroll_anchor,
         }
     }
 }
 
 pub(super) struct ToolTextCache {
+    pub(super) line_offsets: Arc<Vec<usize>>,
     pub(super) source_identity: usize,
     pub(super) source_len: usize,
     pub(super) lines: Arc<Vec<SharedString>>,
@@ -535,6 +544,7 @@ pub(super) struct TranscriptSelection {
 
 #[derive(Clone)]
 pub(super) struct TranscriptTextEntry {
+    pub(super) source_offset: usize,
     pub(super) message_index: usize,
     pub(super) block_index: usize,
     pub(super) text: String,
@@ -545,6 +555,8 @@ pub(super) struct TranscriptTextEntry {
 pub(super) enum SidebarFilter {
     #[default]
     All,
+    Inbox,
+    Archived,
     Running,
     Attention,
 }
@@ -554,6 +566,11 @@ impl SidebarFilter {
         let running = conversation.state == mew_protocol::SessionState::Running;
         match self {
             Self::All => true,
+            Self::Inbox => {
+                !conversation.archived
+                    && (conversation.needs_attention || !running && conversation.unread_completion)
+            }
+            Self::Archived => conversation.archived,
             Self::Running => running && !conversation.needs_attention,
             Self::Attention => {
                 conversation.needs_attention
@@ -598,14 +615,6 @@ pub(super) const UNGROUPED_GROUP_ID: &str = "__ungrouped__";
 pub(super) const ARCHIVED_GROUP_ID: &str = "__archived__";
 /// Pseudo-group id for pinned sessions kept at the top of the rail.
 pub(super) const PINNED_GROUP_ID: &str = "__pinned__";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum AuxiliaryView {
-    Browser,
-    Changes,
-    Local,
-    Activity,
-}
 
 pub(super) struct WorkbenchResizeDrag;
 
@@ -911,12 +920,13 @@ impl PromptHistory {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ShellCommand {
+    NewWorkTab,
+    CloseWorkTab,
     ToggleSidebar,
     ToggleTerminal,
     ToggleWorkbench,
     NewConversation,
-    CloseActiveTab,
-    SelectTab(usize),
+    CloseConversation,
 }
 
 pub(super) const SIDEBAR_COLLAPSED_WIDTH: f32 = 0.;
@@ -924,14 +934,13 @@ pub(super) const SIDEBAR_MIN_WIDTH: f32 = 232.;
 pub(super) const SIDEBAR_MAX_WIDTH: f32 = 360.;
 pub(super) const SIDEBAR_EXPANDED_WIDTH: f32 = 264.;
 pub(super) const WORKBENCH_COLLAPSED_WIDTH: f32 = 0.;
-pub(super) const WORKBENCH_EXPANDED_WIDTH: f32 = 360.;
-pub(super) const SHELL_GUTTER: f32 = 8.;
-pub(super) const SHELL_SURFACE_RADIUS: f32 = 14.;
-pub(super) const CHAT_CONTENT_MAX_WIDTH: f32 = 760.;
+pub(super) const PANE_HEADER_HEIGHT: f32 = 38.;
+pub(super) const PANE_DIVIDER_WIDTH: f32 = 1.;
+pub(super) const CHAT_DEFAULT_WIDTH: f32 = 480.;
+pub(super) const CHAT_CONTENT_MAX_WIDTH: f32 = 680.;
 pub(super) const CHAT_TRANSCRIPT_PADDING: f32 = 24.;
 pub(super) const CHAT_MIN_WIDTH: f32 = 420.;
-pub(super) const WORKBENCH_MIN_WIDTH: f32 = 280.;
-pub(super) const WORKBENCH_MAX_WIDTH: f32 = 960.;
+pub(super) const WORKBENCH_MIN_WIDTH: f32 = 360.;
 pub(super) const EFFORT_TRACK_MAX_INSET: f32 = 38.;
 pub(super) const RECENT_MODEL_LIMIT: usize = 6;
 pub(super) const TERMINAL_EXPANDED_ROWS: u16 = 7;
@@ -950,7 +959,22 @@ pub(super) struct CachedMarkdown {
     pub(super) source_identity: usize,
     pub(super) source_len: usize,
     pub(super) render_blocks: Vec<MarkdownRenderBlock>,
+    pub(super) scroll_groups: Vec<MarkdownScrollGroup>,
     pub(super) streaming: Option<StreamingMarkdown>,
+    pub(super) completed_tool: bool,
+}
+
+pub(super) struct MarkdownScrollGroup {
+    pub(super) blocks: Range<usize>,
+    pub(super) is_code: bool,
+    pub(super) handle: gpui::ScrollHandle,
+    pub(super) code_width: RefCell<Option<MarkdownCodeWidth>>,
+}
+
+pub(super) struct MarkdownCodeWidth {
+    pub(super) font: gpui::Font,
+    pub(super) font_size: Pixels,
+    pub(super) width: Pixels,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -958,4 +982,64 @@ pub(super) struct TranscriptRenderRow {
     pub(super) message_index: usize,
     pub(super) part_index: usize,
     pub(super) block_index: usize,
+    pub(super) tool_group_len: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{DrawPhases, FrameEvent, FrameTiming, PresentTiming, WindowId};
+    use std::time::Instant;
+
+    #[test]
+    fn frame_probe_collects_each_draw_once_without_counting_presentations() {
+        let enabled_tracing = gpui::profiler::set_trace_enabled(true);
+        let mut probe = DesktopFrameProbe {
+            collector: gpui::FrameTimingCollector::new(),
+            trace_file: None,
+            samples: Vec::new(),
+            root_renders: 0,
+            transcript_renders: 0,
+        };
+        let start = Instant::now();
+        let frame = FrameTiming {
+            window_id: WindowId::from(1),
+            dirty_at: Some(start),
+            invalidations: 3,
+            draw_start: start + Duration::from_millis(2),
+            draw_end: start + Duration::from_millis(6),
+            refresh_interval: None,
+            signal_at: None,
+            phases: DrawPhases::default(),
+        };
+        gpui::profiler::record_frame_event(FrameEvent::Draw(frame));
+        gpui::profiler::record_frame_event(FrameEvent::Present(PresentTiming {
+            window_id: frame.window_id,
+            present_start: frame.draw_end,
+            present_end: start + Duration::from_millis(7),
+            animation_interval: None,
+        }));
+        gpui::profiler::record_frame_event(FrameEvent::Draw(FrameTiming {
+            dirty_at: None,
+            invalidations: 1,
+            ..frame
+        }));
+
+        probe.collect();
+        probe.collect();
+
+        if enabled_tracing {
+            gpui::profiler::set_trace_enabled(false);
+        }
+        assert_eq!(probe.samples.len(), 2);
+        assert_eq!(probe.samples[0].draw_duration, Duration::from_millis(4));
+        assert_eq!(
+            probe.samples[0].dirty_to_draw_duration,
+            Some(Duration::from_millis(6))
+        );
+        assert_eq!(probe.samples[0].invalidations, 3);
+        assert_eq!(probe.samples[1].draw_duration, Duration::from_millis(4));
+        assert_eq!(probe.samples[1].dirty_to_draw_duration, None);
+        assert_eq!(probe.samples[1].invalidations, 1);
+    }
 }

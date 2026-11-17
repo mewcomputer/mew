@@ -113,6 +113,8 @@ mod tests {
         transport.push_server_message(ServerMessage::Pong {
             version: "test".into(),
             protocol_version: mew_protocol::PROTOCOL_VERSION,
+            browser_focus_preflight: false,
+            scoped_session_failures: false,
         });
         let mut connection = transport.connect().await.unwrap();
 

@@ -5,6 +5,14 @@
 //! `PartUpdated` is authoritative — when it arrives for a part built from
 //! accumulated deltas, replace the accumulated state wholesale.
 
+#[derive(Debug, Clone, Copy, uniffi::Record)]
+pub struct AutomationSettings {
+    /// Generates titles for prompts submitted through this connection.
+    pub auto_title_enabled: bool,
+    /// Enables idle summaries for every session on the daemon.
+    pub auto_summary_enabled: bool,
+}
+
 /// A snapshot of a daemon's state — the full mirror that Swift pulls
 /// after reconnect or attach instead of replaying deltas.
 #[derive(Debug, Clone, Default, uniffi::Record)]
@@ -21,6 +29,7 @@ pub struct DaemonSnapshot {
     pub thinking_variant: Option<String>,
     pub current_persona: Option<String>,
     pub available_personas: Vec<crate::events::PersonaInfo>,
+    pub automation_settings: Option<AutomationSettings>,
 }
 
 /// A session in the snapshot.
@@ -37,6 +46,9 @@ pub struct SessionInfo {
     pub output_tokens: u64,
     pub turns: u32,
     pub todos: Vec<crate::events::TodoItem>,
+    pub history_before: Option<u64>,
+    pub subagents: Vec<crate::activity::WorkerInfo>,
+    pub jobs: Vec<crate::activity::BackgroundJob>,
 }
 
 /// A chat message in the snapshot.
@@ -332,7 +344,7 @@ impl SessionState {
                                 kind: PartKind::ToolCall,
                                 text: None,
                                 tool_name: Some(tcp.tool_name.clone()),
-                                tool_state: Some(format!("{:?}", tcp.state).to_lowercase()),
+                                tool_state: Some(tool_state_name(&tcp.state).into()),
                                 tool_input: input_str,
                                 tool_output: output,
                                 tool_error: error,
@@ -443,7 +455,7 @@ impl SessionState {
     }
 }
 
-fn to_mobile_message(message: &mew_message::Message) -> Option<ChatMessage> {
+pub(crate) fn to_mobile_message(message: &mew_message::Message) -> Option<ChatMessage> {
     let role = match message.role {
         mew_message::Role::User => "user",
         mew_message::Role::Assistant => "assistant",
@@ -518,7 +530,7 @@ fn to_mobile_part(part: &mew_message::Part) -> Option<MessagePart> {
         kind: PartKind::ToolCall,
         text: None,
         tool_name: Some(base.tool_name.clone()),
-        tool_state: Some(format!("{:?}", base.state).to_lowercase()),
+        tool_state: Some(tool_state_name(&base.state).into()),
         tool_input,
         tool_output,
         tool_error,
@@ -527,6 +539,15 @@ fn to_mobile_part(part: &mew_message::Part) -> Option<MessagePart> {
         tool_time_end,
         tool_sensitivity: None,
     })
+}
+
+pub(crate) fn tool_state_name(state: &mew_message::ToolState) -> &'static str {
+    match state {
+        mew_message::ToolState::Pending(_) => "pending",
+        mew_message::ToolState::Running(_) => "running",
+        mew_message::ToolState::Completed(_) => "completed",
+        mew_message::ToolState::Error(_) => "error",
+    }
 }
 
 /// Extracted fields from a `ToolState`.

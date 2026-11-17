@@ -184,6 +184,116 @@ async fn new_session_returns_session_ready() {
 }
 
 #[tokio::test]
+async fn client_presence_contains_only_other_attached_connections() {
+    async fn flush(ws: &mut Ws) -> Vec<ServerMessage> {
+        send(ws, ClientMessage::Ping).await;
+        recv_until(ws, |message| matches!(message, ServerMessage::Pong { .. })).await
+    }
+
+    fn peers(messages: &[ServerMessage]) -> Vec<(u64, ClientKind)> {
+        messages
+            .iter()
+            .filter_map(|message| match message {
+                ServerMessage::ClientAttached {
+                    client_id,
+                    client_kind,
+                } => Some((*client_id, *client_kind)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    let script = Arc::new(|| FakeProvider::text_response("hello"));
+    let (_dir, socket) = spawn_daemon(make_text_agent_factory(script)).await;
+    let mut first = connect(&socket).await;
+    send(
+        &mut first,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: ClientKind::Desktop,
+        },
+    )
+    .await;
+    let created = flush(&mut first).await;
+    let session_id = created
+        .iter()
+        .find_map(|message| match message {
+            ServerMessage::SessionReady { session_id, .. } => Some(session_id.clone()),
+            _ => None,
+        })
+        .expect("the first client creates a session");
+    assert!(peers(&created).is_empty(), "a lone client has no peers");
+
+    let mut second = connect(&socket).await;
+    send(
+        &mut second,
+        ClientMessage::AttachSession {
+            session_id: session_id.clone(),
+            client_kind: ClientKind::Web,
+        },
+    )
+    .await;
+    let second_peers = peers(&flush(&mut second).await);
+    assert_eq!(
+        second_peers.len(),
+        1,
+        "the joining client must not receive its own presence"
+    );
+    assert_eq!(second_peers[0].1, ClientKind::Desktop);
+    let first_id = second_peers[0].0;
+    let first_peers = peers(&flush(&mut first).await);
+    assert_eq!(first_peers.len(), 1);
+    assert_eq!(first_peers[0].1, ClientKind::Web);
+    let second_id = first_peers[0].0;
+    assert_ne!(first_id, second_id);
+
+    first.close(None).await.unwrap();
+    let detached = recv_until(&mut second, |message| {
+        matches!(message, ServerMessage::ClientDetached { client_id } if *client_id == first_id)
+    })
+    .await;
+    assert!(peers(&detached).is_empty());
+    let remaining = second_peers
+        .iter()
+        .filter(|(client_id, _)| *client_id != first_id)
+        .collect::<Vec<_>>();
+    assert!(
+        remaining.is_empty(),
+        "disconnecting the only peer leaves no self entry"
+    );
+
+    let mut reconnected = connect(&socket).await;
+    send(
+        &mut reconnected,
+        ClientMessage::AttachSession {
+            session_id,
+            client_kind: ClientKind::Tui,
+        },
+    )
+    .await;
+    assert_eq!(
+        peers(&flush(&mut reconnected).await),
+        [(second_id, ClientKind::Web)]
+    );
+    let second_updates = peers(&flush(&mut second).await);
+    assert_eq!(second_updates.len(), 1);
+    assert_eq!(second_updates[0].1, ClientKind::Tui);
+    assert_ne!(
+        second_updates[0].0, first_id,
+        "reconnections have a fresh identity"
+    );
+    assert_ne!(second_updates[0].0, second_id);
+
+    second.close(None).await.unwrap();
+    recv_until(&mut reconnected, |message| {
+        matches!(message, ServerMessage::ClientDetached { client_id } if *client_id == second_id)
+    })
+    .await;
+    assert!(peers(&flush(&mut reconnected).await).is_empty());
+    reconnected.close(None).await.unwrap();
+}
+
+#[tokio::test]
 async fn switching_sessions_detaches_the_previous_session_client() {
     let script = Arc::new(|| FakeProvider::text_response("hello"));
     let (_dir, socket) = spawn_daemon(make_text_agent_factory(script)).await;
@@ -1072,6 +1182,14 @@ async fn ping_returns_pong_with_version() {
     send(&mut ws, ClientMessage::Ping).await;
 
     let msg = recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::Pong { .. })).await;
+    assert_eq!(
+        serde_json::to_value(&msg).unwrap()["browser_focus_preflight"],
+        true
+    );
+    assert_eq!(
+        serde_json::to_value(&msg).unwrap()["scoped_session_failures"],
+        true
+    );
     match msg {
         ServerMessage::Pong { version, .. } => {
             assert!(

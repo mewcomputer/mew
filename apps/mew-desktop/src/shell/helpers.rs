@@ -99,6 +99,8 @@ pub(super) fn detect_workspace_open_destinations() -> Vec<WorkspaceOpenDestinati
 fn application_available(name: &str) -> bool {
     std::process::Command::new("open")
         .args(["-Ra", name])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
 }
@@ -146,51 +148,41 @@ pub(super) fn sidebar_transition_width(collapsed: bool, delta: f32, expanded_wid
     from + (to - from) * delta
 }
 
-pub(super) fn sidebar_transition_offset(collapsed: bool, delta: f32, expanded_width: f32) -> f32 {
-    if collapsed {
-        -expanded_width * delta
-    } else {
-        -expanded_width * (1. - delta)
-    }
+pub(super) fn sidebar_width_from_pointer(pointer_x: f32, window_width: f32) -> f32 {
+    let max_width = (window_width - CHAT_MIN_WIDTH).clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+    pointer_x.clamp(SIDEBAR_MIN_WIDTH, max_width)
 }
 
-pub(super) fn sidebar_width_from_pointer(pointer_x: f32) -> f32 {
-    (pointer_x - SHELL_GUTTER).clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH)
-}
-
-pub(super) fn workbench_transition_width(collapsed: bool, delta: f32) -> f32 {
+pub(super) fn workbench_transition_width(collapsed: bool, delta: f32, expanded_width: f32) -> f32 {
     let (from, to) = if collapsed {
-        (WORKBENCH_EXPANDED_WIDTH, WORKBENCH_COLLAPSED_WIDTH)
+        (expanded_width, WORKBENCH_COLLAPSED_WIDTH)
     } else {
-        (WORKBENCH_COLLAPSED_WIDTH, WORKBENCH_EXPANDED_WIDTH)
+        (WORKBENCH_COLLAPSED_WIDTH, expanded_width)
     };
     from + (to - from) * delta
 }
 
-pub(super) fn workbench_transition_offset(collapsed: bool, delta: f32, expanded_width: f32) -> f32 {
-    if collapsed {
-        -expanded_width * delta
-    } else {
-        -expanded_width * (1. - delta)
-    }
+pub(super) fn workbench_max_width(window_width: f32, sidebar_width: f32) -> f32 {
+    (window_width - sidebar_width - CHAT_MIN_WIDTH - PANE_DIVIDER_WIDTH).max(0.)
 }
 
-pub(super) fn workbench_max_width(window_width: f32, sidebar_width: f32) -> f32 {
-    (window_width - sidebar_width - CHAT_MIN_WIDTH).max(0.)
+pub(super) fn composer_settings_are_compact(bounds: Option<Bounds<Pixels>>) -> bool {
+    // A 480 px conversation leaves 410 px after its gutters, composer border and padding.
+    bounds.is_none_or(|bounds| bounds.size.width < px(410.))
 }
 
 pub(super) fn workbench_fits_window(window_width: f32, sidebar_width: f32) -> bool {
-    window_width >= sidebar_width + CHAT_MIN_WIDTH + WORKBENCH_MIN_WIDTH
+    window_width >= sidebar_width + CHAT_MIN_WIDTH + WORKBENCH_MIN_WIDTH + PANE_DIVIDER_WIDTH
 }
 
-pub(super) fn workbench_width_from_pointer(
+pub(super) fn conversation_width_from_pointer(
     window_width: f32,
     pointer_x: f32,
     sidebar_width: f32,
 ) -> f32 {
-    let max_width = workbench_max_width(window_width, sidebar_width);
-    let min_width = WORKBENCH_MIN_WIDTH.min(max_width);
-    (window_width - pointer_x - SHELL_GUTTER).clamp(min_width, max_width)
+    let max_width = (window_width - sidebar_width - WORKBENCH_MIN_WIDTH - PANE_DIVIDER_WIDTH)
+        .max(CHAT_MIN_WIDTH);
+    (pointer_x - sidebar_width).clamp(CHAT_MIN_WIDTH, max_width)
 }
 pub(super) fn byte_offset_for_utf16(text: &str, utf16_offset: usize) -> usize {
     let mut byte_offset = 0;
@@ -266,16 +258,11 @@ pub(super) fn shell_command_for_key(key: &str, platform_modifier: bool) -> Optio
         return None;
     }
     match key {
+        "t" => Some(ShellCommand::NewWorkTab),
         "b" => Some(ShellCommand::ToggleSidebar),
         "j" => Some(ShellCommand::ToggleTerminal),
         "n" => Some(ShellCommand::NewConversation),
-        "w" => Some(ShellCommand::CloseActiveTab),
-        key if key.chars().count() == 1 => key
-            .chars()
-            .next()
-            .and_then(|character| character.to_digit(10))
-            .and_then(|number| number.checked_sub(1))
-            .map(|index| ShellCommand::SelectTab(index as usize)),
+        "w" => Some(ShellCommand::CloseConversation),
         _ => None,
     }
 }
@@ -296,10 +283,6 @@ pub(super) fn escape_dismisses_shell_popover(
             || thinking_open
             || terminal_font_open
             || connection_open)
-}
-
-pub(super) fn is_copy_keystroke(event: &gpui::KeyDownEvent) -> bool {
-    event.keystroke.key == "c" && event.keystroke.modifiers.platform
 }
 
 pub(super) fn client_event_is_text_delta(event: &ClientEvent) -> bool {
@@ -348,13 +331,33 @@ pub(super) fn non_empty_label(value: Option<&str>, fallback: &str) -> String {
         .to_owned()
 }
 
-pub(super) fn model_picker_list_height(option_count: usize) -> Pixels {
-    px((option_count.clamp(1, 5) as f32 * 64.).min(320.))
+pub(super) fn model_display_name(model: &mew_protocol::ModelInfo) -> &str {
+    model
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(&model.model)
 }
 
-pub(super) fn model_picker_height(option_count: usize, effort_option_count: usize) -> Pixels {
+pub(super) fn model_picker_list_height(rows: &[ModelPickerRow]) -> Pixels {
+    if rows.is_empty() {
+        px(64.)
+    } else {
+        rows.iter()
+            .map(ModelPickerRow::height)
+            .sum::<Pixels>()
+            .min(px(320.))
+    }
+}
+
+pub(super) fn model_picker_height(rows: &[ModelPickerRow], effort_option_count: usize) -> Pixels {
+    model_picker_popup_height(model_picker_list_height(rows), effort_option_count)
+}
+
+pub(super) fn model_picker_popup_height(list_height: Pixels, effort_option_count: usize) -> Pixels {
     let effort_height = if effort_option_count > 0 { 72. } else { 0. };
-    model_picker_list_height(option_count) + px(52. + effort_height)
+    list_height + px(52. + effort_height)
 }
 
 pub(super) fn recent_model_indices(
@@ -385,35 +388,37 @@ pub(super) fn build_model_picker_rows(
     let filtered_indices = models
         .iter()
         .enumerate()
-        .filter(|(_, model)| {
-            model_matches_query(
-                &model.id,
-                &model.provider,
-                &model.model,
-                model.description.as_deref(),
-                query,
-            )
-        })
+        .filter(|(_, model)| model_matches_query(model, query))
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
 
     let mut selectable = Vec::with_capacity(filtered_indices.len());
     let mut rows = Vec::with_capacity(filtered_indices.len() + 2);
-    if query.trim().is_empty() {
-        let recent_indices = recent_model_indices(models, recent_models);
-        if !recent_indices.is_empty() {
-            rows.push(ModelPickerRow::Header("Recent"));
-            for index in recent_indices {
-                rows.push(ModelPickerRow::Model {
-                    index,
-                    recent: true,
-                });
-                selectable.push(index);
-            }
-            rows.push(ModelPickerRow::Header("All Models"));
+    let recent_indices = if query.trim().is_empty() {
+        recent_model_indices(models, recent_models)
+    } else {
+        Vec::new()
+    };
+    if !recent_indices.is_empty() {
+        rows.push(ModelPickerRow::Header("Recent"));
+        for &index in &recent_indices {
+            rows.push(ModelPickerRow::Model {
+                index,
+                recent: true,
+            });
+            selectable.push(index);
+        }
+        if filtered_indices
+            .iter()
+            .any(|index| !recent_indices.contains(index))
+        {
+            rows.push(ModelPickerRow::Header("Other models"));
         }
     }
     for index in filtered_indices {
+        if recent_indices.contains(&index) {
+            continue;
+        }
         rows.push(ModelPickerRow::Model {
             index,
             recent: false,
@@ -515,27 +520,22 @@ pub(super) fn persona_picker_height(option_count: usize) -> Pixels {
     persona_picker_list_height(option_count) + px(16.)
 }
 
-pub(super) fn model_matches_query(
-    id: &str,
-    provider: &str,
-    model: &str,
-    description: Option<&str>,
-    query: &str,
-) -> bool {
+pub(super) fn model_matches_query(model: &mew_protocol::ModelInfo, query: &str) -> bool {
     let query = query.trim().to_lowercase();
     query.is_empty()
-        || id.to_lowercase().contains(&query)
-        || provider.to_lowercase().contains(&query)
-        || model.to_lowercase().contains(&query)
-        || description.is_some_and(|description| description.to_lowercase().contains(&query))
+        || [
+            model.id.as_str(),
+            model.provider.as_str(),
+            model.model.as_str(),
+        ]
+        .into_iter()
+        .chain(model.display_name.as_deref())
+        .chain(model.description.as_deref())
+        .any(|value| value.to_lowercase().contains(&query))
 }
 
 pub(super) fn should_animate_transcript_row(row_index: usize, row_count: usize) -> bool {
     row_count > 0 && row_index + 1 == row_count
-}
-
-pub(super) fn chat_content_column_width(available_width: f32) -> f32 {
-    available_width.clamp(0., CHAT_CONTENT_MAX_WIDTH)
 }
 
 /// Slash menu entries matching the current composer text. The menu is only
@@ -848,14 +848,11 @@ pub(super) fn picker_popup_position_in_window_right_aligned(
 }
 
 pub(super) fn pending_actions_anchor(composer_bounds: Bounds<Pixels>) -> Point<Pixels> {
-    point(
-        composer_bounds.origin.x - px(12.),
-        composer_bounds.origin.y - px(20.),
-    )
+    point(composer_bounds.origin.x, composer_bounds.origin.y - px(8.))
 }
 
 pub(super) fn pending_actions_width(composer_bounds: Bounds<Pixels>) -> Pixels {
-    composer_bounds.size.width + px(24.)
+    composer_bounds.size.width
 }
 
 pub(super) fn cached_markdown_source_unchanged(
@@ -926,6 +923,31 @@ pub(super) fn build_workspace_sidebar_rows(
                 last_used_at: None,
                 pinned: false,
             });
+    }
+
+    if filter == SidebarFilter::Inbox {
+        let mut sessions = conversations
+            .iter()
+            .filter(|conversation| filter.matches(conversation))
+            .filter(|conversation| {
+                conversation_matches_query(conversation, &query)
+                    || conversation
+                        .workspace_path
+                        .as_ref()
+                        .and_then(|path| project_by_path.get(path))
+                        .is_some_and(|project| project_matches_query(project, &query))
+            })
+            .collect::<Vec<_>>();
+        sessions.sort_by(|a, b| {
+            b.needs_attention
+                .cmp(&a.needs_attention)
+                .then_with(|| b.last_message_at.cmp(&a.last_message_at))
+                .then_with(|| a.session_id.cmp(&b.session_id))
+        });
+        let mut rows = Vec::with_capacity(sessions.len() + 1);
+        rows.push(SidebarRow::Toolbar);
+        rows.extend(sessions.into_iter().cloned().map(SidebarRow::Session));
+        return rows;
     }
 
     let mut workspace_projects = project_by_path.into_values().collect::<Vec<_>>();
@@ -1360,6 +1382,148 @@ mod workspace_tests {
     }
 
     #[test]
+    fn inbox_contains_unarchived_requests_and_unread_finished_turns() {
+        for archived in [false, true] {
+            for running in [false, true] {
+                for needs_attention in [false, true] {
+                    for unread_completion in [false, true] {
+                        for last_turn_failed in [false, true] {
+                            let mut conversation = task(1, None, false);
+                            conversation.archived = archived;
+                            conversation.state = if running {
+                                SessionState::Running
+                            } else {
+                                SessionState::Idle
+                            };
+                            conversation.needs_attention = needs_attention;
+                            conversation.unread_completion = unread_completion;
+                            conversation.last_turn_failed = last_turn_failed;
+                            assert_eq!(
+                                SidebarFilter::Inbox.matches(&conversation),
+                                !archived && (needs_attention || !running && unread_completion),
+                                "{conversation:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inbox_is_flat_uncapped_and_prioritizes_requests_over_recency_and_pins() {
+        let mut tasks = (0..8)
+            .map(|id| {
+                let mut conversation = task(id, Some("/work/app"), id == 0);
+                conversation.unread_completion = true;
+                conversation
+            })
+            .collect::<Vec<_>>();
+        let mut older_request = task(20, Some("/work/pinned"), false);
+        older_request.needs_attention = true;
+        older_request.state = SessionState::Running;
+        older_request.last_message_at = None;
+        tasks.push(older_request);
+        let mut newer_request = task(21, None, false);
+        newer_request.needs_attention = true;
+        newer_request.last_message_at = Some(1);
+        tasks.push(newer_request);
+        let mut tied_result = task(10, Some("/work/pinned"), false);
+        tied_result.unread_completion = true;
+        tied_result.last_message_at = Some(7);
+        tasks.push(tied_result);
+        let mut archived_request = task(30, None, true);
+        archived_request.needs_attention = true;
+        archived_request.archived = true;
+        tasks.push(archived_request);
+        let mut read_failure = task(31, None, true);
+        read_failure.last_turn_failed = true;
+        tasks.push(read_failure);
+        let mut running_result = task(32, None, true);
+        running_result.state = SessionState::Running;
+        running_result.unread_completion = true;
+        tasks.push(running_result);
+        tasks.reverse();
+
+        let rows = build_workspace_sidebar_rows(
+            &tasks,
+            &[project("/work/app", false), project("/work/pinned", true)],
+            &BTreeSet::from(["/work/app".into(), "/work/pinned".into()]),
+            &BTreeSet::new(),
+            "",
+            Some("session-0"),
+            SidebarFilter::Inbox,
+        );
+        assert_eq!(rows.first(), Some(&SidebarRow::Toolbar));
+        let ids = rows[1..]
+            .iter()
+            .map(|row| match row {
+                SidebarRow::Session(conversation) => conversation.session_id.as_str(),
+                row => panic!("unexpected inbox row: {row:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            [
+                "session-21",
+                "session-20",
+                "session-10",
+                "session-7",
+                "session-6",
+                "session-5",
+                "session-4",
+                "session-3",
+                "session-2",
+                "session-1",
+                "session-0",
+            ]
+        );
+    }
+
+    #[test]
+    fn inbox_search_matches_full_title_cwd_and_workspace_identity() {
+        let mut conversation = task(1, Some("/work/checkouts/project-root"), false);
+        conversation.title = "A long conversation title with a distinctive ending".into();
+        conversation.cwd = Some("/work/checkouts/project-root/nested/package".into());
+        conversation.unread_completion = true;
+        let mut workspace = project("/work/checkouts/project-root", false);
+        workspace.display_name = "Desktop Studio".into();
+        let mut inferred = task(2, Some("/external/inferred-project"), false);
+        inferred.cwd = None;
+        inferred.needs_attention = true;
+        let mut other = task(3, None, false);
+        other.title = "Unrelated unread result".into();
+        other.unread_completion = true;
+        let tasks = [conversation, inferred, other];
+        for (query, expected) in [
+            (" DISTINCTIVE ENDING ", vec!["session-1"]),
+            ("nested/package", vec!["session-1"]),
+            ("Desktop Studio", vec!["session-1"]),
+            ("checkouts/project-root", vec!["session-1"]),
+            ("inferred-project", vec!["session-2"]),
+            ("missing", vec![]),
+        ] {
+            let rows = build_workspace_sidebar_rows(
+                &tasks,
+                std::slice::from_ref(&workspace),
+                &BTreeSet::new(),
+                &BTreeSet::new(),
+                query,
+                None,
+                SidebarFilter::Inbox,
+            );
+            let ids = rows[1..]
+                .iter()
+                .map(|row| match row {
+                    SidebarRow::Session(conversation) => conversation.session_id.as_str(),
+                    row => panic!("unexpected inbox search row: {row:?}"),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(ids, expected, "query: {query}");
+        }
+    }
+
+    #[test]
     fn workspace_collapse_controls_are_only_available_in_the_all_view() {
         let mut conversation = task(1, Some("/work/app"), false);
         conversation.state = SessionState::Running;
@@ -1483,6 +1647,30 @@ mod workspace_tests {
 mod workspace_open_tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn unavailable_workspace_application_is_silent() {
+        const CHILD: &str = "MEW_TEST_MISSING_APPLICATION";
+        if std::env::var_os(CHILD).is_some() {
+            assert!(!application_available("mew-nonexistent-editor-7866137"));
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "shell::helpers::workspace_open_tests::unavailable_workspace_application_is_silent",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(
+            output.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[test]
     fn remembered_editor_falls_back_when_unavailable() {
         let available = vec![WorkspaceOpenDestination::DefaultApp];
@@ -1546,8 +1734,6 @@ pub(super) fn display_path_from_home(path: &str, home: Option<&Path>) -> String 
 }
 
 pub(super) fn compact_session_title(title: &str) -> String {
-    const MAX_TITLE_CHARS: usize = 28;
-
     let mut normalized = String::with_capacity(title.len());
     for word in title.split_whitespace() {
         if !normalized.is_empty() {
@@ -1555,13 +1741,7 @@ pub(super) fn compact_session_title(title: &str) -> String {
         }
         normalized.push_str(word);
     }
-    let mut chars = normalized.chars();
-    let compact = chars.by_ref().take(MAX_TITLE_CHARS).collect::<String>();
-    if chars.next().is_some() {
-        format!("{compact}…")
-    } else {
-        compact
-    }
+    normalized
 }
 
 #[cfg(test)]
@@ -1621,12 +1801,12 @@ pub(super) fn transcript_attention(
     if has_pending_action {
         return None;
     }
-    if !running && last_turn_failed {
+    if running {
+        Some(TranscriptAttention::Running)
+    } else if last_turn_failed {
         Some(TranscriptAttention::Failed)
     } else if !last_message_is_user {
         None
-    } else if running {
-        Some(TranscriptAttention::Running)
     } else {
         Some(TranscriptAttention::Waiting)
     }
@@ -1876,7 +2056,11 @@ pub(super) fn normalize_browser_url(value: &str) -> Option<String> {
 }
 
 pub(super) fn theme_rgb(theme: &Theme, token: &str) -> gpui::Rgba {
-    let color = match theme.resolve(token) {
+    rgb(theme_rgb_value(theme, token))
+}
+
+pub(super) fn theme_rgb_value(theme: &Theme, token: &str) -> u32 {
+    match theme.resolve(token) {
         Color::Rgb(red, green, blue) => ((red as u32) << 16) | ((green as u32) << 8) | blue as u32,
         Color::Black => 0x000000,
         Color::DarkGray => 0x555555,
@@ -1899,8 +2083,7 @@ pub(super) fn theme_rgb(theme: &Theme, token: &str) -> gpui::Rgba {
             (value << 16) | (value << 8) | value
         }
         Color::Reset => 0x000000,
-    };
-    rgb(color)
+    }
 }
 
 #[cfg(test)]

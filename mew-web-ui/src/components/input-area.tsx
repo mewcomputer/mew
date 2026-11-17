@@ -2,12 +2,14 @@ import {
   forwardRef,
   useRef,
   useState,
+  useEffect,
+  useLayoutEffect,
   useImperativeHandle,
   type ClipboardEvent,
   type DragEvent,
   type KeyboardEvent,
 } from "react";
-import { Square, Paperclip, X, CornerDownLeft } from "lucide-react";
+import { Square, Plus, X, ArrowUp, Shield, Loader2, File } from "lucide-react";
 import { cn } from "../lib/utils";
 import { useSessionStore } from "../stores/session";
 import { useSidebar } from "@/components/ui/sidebar";
@@ -16,10 +18,11 @@ import { PersonaPill } from "./persona-pill";
 import type { Attachment } from "@mew/web-client";
 
 interface InputAreaProps {
-  onSend: (text: string, attachments?: Attachment[]) => void;
+  onSend: (text: string, attachments?: Attachment[]) => void | Promise<void>;
   onSlash?: (command: string) => void;
   onCancel: () => void;
   connected: boolean;
+  draftId?: string;
 }
 
 interface SlashCommand {
@@ -37,22 +40,55 @@ const SLASH_COMMANDS: SlashCommand[] = [
  *  produce very large WebSocket frames that may exceed daemon limits. */
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 
-/** Minimal Claude Code-style composer: a single rounded bar with attach,
- *  textarea, and send/stop. Slash commands and @ personas still surface as
- *  small palettes when the user types `/` or `@`. */
+interface ComposerDraft { text: string; files: File[] }
+const composerDrafts = new Map<string, ComposerDraft>();
+const EMPTY_DRAFT: ComposerDraft = { text: "", files: [] };
+
+/** Chat composer with attachments, policy, persona and model controls. */
 export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
-  function InputArea({ onSend, onSlash, onCancel, connected }, ref) {
+  function InputArea({ onSend, onSlash, onCancel, connected, draftId }, ref) {
     const { isMobile } = useSidebar();
-    const [text, setText] = useState("");
-    const [files, setFiles] = useState<File[]>([]);
+    const sessionId = useSessionStore((state) => state.sessionId) ?? "new";
+    const draftOwner = draftId ?? sessionId;
+    const [, refreshDraft] = useState(0);
+    const { text, files } = composerDrafts.get(draftOwner) ?? EMPTY_DRAFT;
+    const setText = (value: string | ((previous: string) => string)) => {
+      const current = composerDrafts.get(draftOwner) ?? EMPTY_DRAFT;
+      composerDrafts.set(draftOwner, { ...current, text: typeof value === "function" ? value(current.text) : value });
+      refreshDraft((revision) => revision + 1);
+    };
+    const setFiles = (value: File[] | ((previous: File[]) => File[])) => {
+      const current = composerDrafts.get(draftOwner) ?? EMPTY_DRAFT;
+      composerDrafts.set(draftOwner, { ...current, files: typeof value === "function" ? value(current.files) : value });
+      refreshDraft((revision) => revision + 1);
+    };
     const [menuOpen, setMenuOpen] = useState<"slash" | "persona" | null>(null);
     const [menuIndex, setMenuIndex] = useState(0);
     const [focused, setFocused] = useState(false);
+    const [sendError, setSendError] = useState<string | null>(null);
+    const permissionMode = useSessionStore((state) => state.permissionMode);
     const [historyIndex, setHistoryIndex] = useState<number | null>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
+    useLayoutEffect(() => {
+      const input = textareaRef.current;
+      if (!input) return;
+      input.style.height = "auto";
+      input.style.height = `${Math.min(input.scrollHeight, isMobile ? 120 : 160)}px`;
+    }, [text, sessionId, isMobile]);
+
+    useEffect(() => {
+      setSendError(null);
+      setHistoryIndex(null);
+      setMenuOpen(null);
+    }, [draftOwner]);
+
     useImperativeHandle(ref, () => textareaRef.current!, []);
+
+    useEffect(() => {
+      if (connected) textareaRef.current?.focus();
+    }, [connected, sessionId]);
 
     const hasStreaming = useSessionStore((s) => s.streamingPartId !== null);
     const selectPersona = useSessionStore((s) => s.selectPersona);
@@ -77,6 +113,7 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
     const activeMenu = menuOpen === "slash" ? filteredSlash : filteredPersonas;
 
     const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+      if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
       if (menuOpen && activeMenu.length > 0) {
         if (e.key === "ArrowDown") {
           e.preventDefault();
@@ -141,16 +178,9 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
         }
       }
 
-      if (isMobile) {
-        if (e.key === "Enter" && !e.shiftKey) {
-          e.preventDefault();
-          handleSubmit();
-        }
-      } else {
-        if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-          e.preventDefault();
-          handleSubmit();
-        }
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        void handleSubmit();
       }
 
       if (e.key === "Escape" && hasStreaming) {
@@ -171,7 +201,6 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
       } else {
         closeMenu();
       }
-      autoResize();
     };
 
     const closeMenu = () => {
@@ -194,6 +223,7 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
       }
 
       setIsSending(true);
+      setSendError(null);
       try {
         // Convert File objects to Attachment[] (data URLs for wire protocol).
         let attachments: Attachment[] | undefined;
@@ -203,22 +233,27 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
           );
         }
 
-        onSend(trimmed, attachments);
+        if ((useSessionStore.getState().sessionId ?? "new") !== sessionId) return;
+        const pending = onSend(trimmed, attachments);
+        if (pending !== undefined) await pending;
         pushPromptHistory(trimmed);
-        setText("");
-        setHistoryIndex(null);
-        setFiles([]);
-        closeMenu();
-        if (textareaRef.current) textareaRef.current.style.height = "auto";
+        setText((current) => current === text ? "" : current);
+        if (files.length > 0) setFiles((current) => current.filter((file) => !files.includes(file)));
+        if ((useSessionStore.getState().sessionId ?? "new") === sessionId) {
+          setHistoryIndex(null);
+          closeMenu();
+        }
       } catch (e) {
-        // FileReader error — log and reset, don't crash.
-        console.error("[mew] attachment conversion failed:", e);
+        if (draftId === "new" || (useSessionStore.getState().sessionId ?? "new") === sessionId) {
+          setSendError(e instanceof Error ? e.message : "Could not send the message.");
+        }
       } finally {
         setIsSending(false);
       }
     };
 
     const selectSlash = (cmd: SlashCommand) => {
+      if (!connected) return;
       if (onSlash) {
         onSlash(cmd.command);
       }
@@ -228,19 +263,11 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
     };
 
     const selectPersonaAction = (name: string) => {
+      if (!connected) return;
       selectPersona(name);
       setText("");
       closeMenu();
       if (textareaRef.current) textareaRef.current.style.height = "auto";
-    };
-
-    const autoResize = () => {
-      const el = textareaRef.current;
-      if (el) {
-        el.style.height = "auto";
-        el.style.height =
-          Math.min(el.scrollHeight, isMobile ? 120 : 160) + "px";
-      }
     };
 
     const addFiles = (incoming: File[]) => {
@@ -315,9 +342,9 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
 
     return (
       <div
-        className="shrink-0 px-3 pb-2 pt-2 sm:px-4 sm:pb-3"
+        className="shrink-0 px-4 pb-3 pt-3 sm:px-6"
       >
-        <div className="mx-auto max-w-3xl">
+        <div className="mew-conversation-width mx-auto">
           <div className="relative">
             <div
               data-testid="composer-surface"
@@ -325,9 +352,9 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
               onDragOver={handleDragOver}
               onDragLeave={handleDragLeave}
               className={cn(
-                "pointer-events-auto rounded-xl border bg-background px-3 py-2 shadow-md transition-[background-color,border-color,box-shadow] duration-150 ease-out",
-                focused ? "border-ring bg-muted" : "border-border",
-                isDragging && "border-primary border-2",
+                "mew-composer pointer-events-auto rounded-2xl border bg-card px-3 pb-2 pt-2 shadow-xs transition-colors duration-150",
+                focused ? "border-foreground/25" : "border-border/60 hover:border-foreground/15",
+                isDragging && "border-primary ring-2 ring-primary/20",
               )}
             >
               <div className="flex items-end gap-2">
@@ -340,11 +367,11 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
                   onPaste={handlePaste}
                   onFocus={() => setFocused(true)}
                   onBlur={() => setFocused(false)}
-                  placeholder={connected ? "Ask mew anything…" : "Connecting…"}
+                  placeholder={connected ? "Ask anything, or describe a task" : "Connecting…"}
                   aria-label="Message prompt"
                   disabled={!connected}
                   rows={1}
-                  className="min-w-0 flex-1 resize-none bg-transparent py-1.5 text-sm leading-5 text-foreground placeholder:text-muted-foreground focus:outline-hidden"
+                  className="min-h-10 min-w-0 flex-1 resize-none bg-transparent px-0.5 pb-2 pt-1 text-[13px] leading-[1.6] text-foreground placeholder:text-muted-foreground focus:outline-hidden disabled:cursor-not-allowed"
                 />
 
                 <input
@@ -359,19 +386,20 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
               {(attachmentError || files.length > 0) && (
                 <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-1.5 border-t border-border/50 pt-1.5">
                   {attachmentError && (
-                    <span className="text-[10px] text-destructive">
+                    <span role="alert" className="text-xs text-text-error">
                       {attachmentError}
                     </span>
                   )}
                   {files.map((f, i) => (
                     <span
                       key={`${f.name}-${i}`}
-                      className="flex max-w-full items-center gap-1 rounded-md bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground"
+                      className="flex max-w-full items-center gap-1.5 rounded-lg border border-border/70 bg-background/50 py-1 pl-2 pr-1 text-[11px] text-foreground"
                     >
+                      <File className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                       <span className="truncate">{f.name}</span>
                       <button
                         onClick={() => removeFile(f)}
-                        className="shrink-0 rounded-full hover:text-foreground"
+                        className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
                         title="Remove"
                         aria-label={"Remove " + f.name}
                       >
@@ -382,41 +410,47 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
                 </div>
               )}
 
-              <div className="mt-1.5 flex items-center justify-between gap-1">
-                <div className="mt-1.5 flex items-center gap-1">
+              {sendError && <p role="alert" className="pb-2 text-xs text-destructive">{sendError}</p>}
+              <div className="flex min-w-0 items-center justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-1">
                 <button
                   onClick={() => fileInputRef.current?.click()}
                   disabled={!connected}
-                  className="motion-pressable flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-50"
+                  className="motion-pressable flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-50"
                   title="Attach file"
                   aria-label="Attach file"
                 >
-                  <Paperclip className="h-4 w-4" />
+                  <Plus className="h-4 w-4" />
                 </button>
+                  <span className="flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap px-1 text-[11px] text-muted-foreground" title={`Permission mode: ${permissionMode}`} aria-label={`Permission mode: ${permissionMode}`}>
+                    <Shield className="h-3.5 w-3.5 shrink-0" />
+                    <span className="mew-composer-permission-label">{permissionMode === "dangerous" ? "Full access" : permissionMode === "standard" ? "Default permissions" : permissionMode.replace("_", " ")}</span>
+                  </span>
                   <PersonaPill />
                 </div>
-                <div className="mt-1.5 flex items-center gap-1">
+                <div className="flex min-w-0 flex-1 items-center justify-end gap-1">
                 <ModelPill />
                 {hasStreaming ? (
                   <button
                     onClick={onCancel}
-                    className="motion-pressable flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-destructive/50 text-destructive hover:bg-destructive/10"
+                    className="motion-pressable flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-foreground text-background hover:opacity-90"
                     title="Cancel"
                     aria-label="Cancel response"
                   >
-                    <Square className="h-4 w-4" />
+                    <Square className="h-3 w-3 fill-current" />
                   </button>
                 ) : (
                   <button
                     onClick={handleSubmit}
                     disabled={!text.trim() || !connected || isSending}
+                    aria-busy={isSending}
                     className={cn(
-                      "motion-pressable flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50",
+                      "motion-pressable flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-foreground text-background hover:opacity-90 disabled:opacity-40",
                     )}
-                    title="Send"
+                    title={isSending ? "Sending…" : "Send"}
                     aria-label="Send prompt"
                   >
-                    <CornerDownLeft className="h-4 w-4" />
+                    {isSending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowUp className="h-4 w-4" />}
                   </button>
                   )}
                   </div>
@@ -465,7 +499,7 @@ function MenuPanel({
   children: React.ReactNode;
 }) {
   return (
-    <div className="motion-enter absolute bottom-full left-0 z-30 mb-1 w-56 rounded-lg border border-border bg-popover shadow-lg">
+    <div data-mew-overlay="" className="motion-enter absolute bottom-full left-0 z-30 mb-1 w-56 rounded-lg border border-border bg-popover shadow-lg">
       <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
         {title}
       </div>

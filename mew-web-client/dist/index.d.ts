@@ -3,6 +3,25 @@ export interface Attachment {
     mime?: string;
 }
 export type PermissionDecision = "allow_once" | "allow_session" | "deny";
+export interface NewChatDefaults {
+    model: string | null;
+    provider: string | null;
+    persona: string | null;
+    thinking_variant: string | null;
+    permission_mode: string;
+}
+export interface PairedDevice {
+    id: string;
+    name: string;
+    node_id: string;
+    scope: "observe" | "collaborate" | "control" | null;
+    paired_at: number | null;
+}
+export interface DaemonSettings {
+    request_id: string | null;
+    defaults: NewChatDefaults | null;
+    devices: PairedDevice[] | null;
+}
 export type ClientMessage = {
     type: "remote_hello";
     token?: string;
@@ -44,12 +63,36 @@ export type ClientMessage = {
     type: "set_auto_title";
     enabled: boolean;
 } | {
+    type: "read_daemon_settings";
+    request_id: string;
+} | {
+    type: "save_session_defaults";
+    session_id: string;
+    request_id: string;
+} | {
+    type: "reset_session_defaults";
+    request_id: string;
+} | {
+    type: "revoke_device";
+    device_id: string;
+    request_id: string;
+} | {
     type: "set_auto_summary";
     enabled: boolean;
 } | {
     type: "prompt";
     text: string;
     attachments: Attachment[];
+} | {
+    type: "submit_prompt";
+    session_id: string;
+    request_id: string;
+    text: string;
+    attachments: Attachment[];
+} | {
+    type: "read_prompt_receipt";
+    session_id: string;
+    request_id: string;
 } | {
     type: "cancel";
 } | {
@@ -155,6 +198,17 @@ export type ClientMessage = {
     type: "list_filesystem_dir";
     path?: string;
 } | {
+    type: "register_browser_page";
+    session_id: string;
+    page_instance: string;
+    cdp_endpoint: string;
+    target_id: string;
+    focus_url?: string;
+} | {
+    type: "unregister_browser_page";
+    session_id: string;
+    page_instance: string;
+} | {
     type: "browser_open";
     url: string;
     tab_id?: string;
@@ -215,41 +269,35 @@ export type ProviderEventWire = {
     type: "error";
     error: MessageError;
 };
-export type Part = {
+export type Part = PartBase & ({
     type: "text";
-    base: PartBase;
     text: string;
-    synthetic: boolean;
+    synthetic?: boolean;
 } | {
     type: "reasoning";
-    base: PartBase;
     text: string;
     signature?: string;
 } | {
     type: "tool_call";
-    base: PartBase;
     tool_name: string;
     call_id: string;
     state: ToolState;
 } | {
     type: "tool_result";
-    base: PartBase;
     call_id: string;
     output?: string;
 } | {
     type: "file";
-    base: PartBase;
     mime: string;
     filename?: string;
     url: string;
 } | {
     type: "compaction";
-    base: PartBase;
     auto: boolean;
     overflow: boolean;
     summary?: string;
     removed_count?: number;
-};
+});
 export interface PartBase {
     id: string;
     message_id: string;
@@ -369,6 +417,8 @@ export interface ModelInfo {
     provider: string;
     /** Model ID within the provider (e.g. "deepseek-v4-flash"). */
     model: string;
+    /** Catalog-provided display name; absent for unnamed models and older daemons. */
+    display_name?: string;
     /** Human-readable description for the picker UI. */
     description?: string;
     /** Available thinking/reasoning variants for this model. */
@@ -542,6 +592,23 @@ export interface Segment {
     children: Segment[];
 }
 export type ServerMessage = {
+    type: "prompt_receipt";
+    session_id: string;
+    request_id: string;
+    status: "accepted" | "rejected" | "unknown";
+    message?: string;
+} | {
+    type: "session_operation_failed";
+    operation: "create" | "attach";
+    session_id: string | null;
+    message: string;
+} | ({
+    type: "daemon_settings";
+} & DaemonSettings) | {
+    type: "daemon_settings_failed";
+    request_id: string;
+    message: string;
+} | {
     type: "remote_ready";
     scope: "observe" | "collaborate" | "control";
 } | {
@@ -777,9 +844,16 @@ export type ServerMessage = {
     type: "pong";
     version: string;
     protocol_version?: number;
+    browser_focus_preflight?: boolean;
+    scoped_session_failures?: boolean;
 } | {
     type: "project_list";
     projects: ProjectInfo[];
+} | {
+    type: "browser_page_registration";
+    session_id: string;
+    page_instance: string;
+    error: string | null;
 } | {
     type: "browser_snapshot";
     snapshot: string;
@@ -818,6 +892,11 @@ export interface MewWebSocket {
 }
 export type SocketFactory = (url: string) => MewWebSocket;
 export interface MewClientEvents {
+    "daemon-settings": (data: DaemonSettings) => void;
+    "daemon-settings-failed": (data: {
+        request_id: string;
+        message: string;
+    }) => void;
     open: () => void;
     close: (code: number, reason: string) => void;
     error: (err: unknown) => void;
@@ -827,6 +906,17 @@ export interface MewClientEvents {
         model?: string;
         provider?: string;
         permission_mode?: string;
+    }) => void;
+    "prompt-receipt": (data: {
+        session_id: string;
+        request_id: string;
+        status: "accepted" | "rejected" | "unknown";
+        message?: string;
+    }) => void;
+    "session-operation-failed": (data: {
+        operation: "create" | "attach";
+        session_id: string | null;
+        message: string;
     }) => void;
     provider: (ev: ProviderEventWire) => void;
     "user-message": (data: {
@@ -1033,9 +1123,15 @@ export interface MewClientEvents {
     pong: (data: {
         version: string;
         protocol_version: number;
+        browser_focus_preflight: boolean;
     }) => void;
     "project-list": (data: {
         projects: ProjectInfo[];
+    }) => void;
+    "browser-page-registration": (data: {
+        session_id: string;
+        page_instance: string;
+        error: string | null;
     }) => void;
     "browser-snapshot": (data: {
         snapshot: string;
@@ -1093,22 +1189,31 @@ export declare class MewClient {
     private openPromise;
     /** Session id returned by `newSession`. */
     private sessionId;
+    private confirmedSessions;
+    private browserFocusPreflight;
     /** Messages currently projected from the most recent history pages. */
     private sessionHistoryMessages;
     /** Session lifecycle requests share uncorrelated daemon errors. */
     private sessionCommandTail;
+    private scopedSessionFailures;
+    private pendingSessionCommands;
     constructor(url: string, opts?: MewClientOptions);
     /** Open the WebSocket connection. Idempotent. */
     connect(): Promise<void>;
     /** Close the WebSocket. After calling this, the client cannot be reused. */
     disconnect(code?: number, reason?: string): void;
     isConnected(): boolean;
+    hasConfirmedSession(sessionId: string): boolean;
+    isSessionStable(sessionId: string): boolean;
     /** Serialize lifecycle requests because daemon errors have no request id. */
     private enqueueSessionCommand;
+    private requestSession;
     /** Send `new_session`. Resolves with the daemon-assigned session id. */
     newSession(cwd?: string | null): Promise<string>;
     /** Send `prompt`. Streaming events are emitted via the registered handlers. */
     prompt(text: string, attachments?: Attachment[]): void;
+    /** Submit to the confirmed conversation and retain the draft until receipt. */
+    submitPrompt(sessionId: string, text: string, attachments?: Attachment[]): Promise<void>;
     /** Compare and save one todo; resolve only after the daemon confirms it. */
     updateTodo(sessionId: string, edit: TodoEdit): Promise<Todo[]>;
     /** Send `cancel` to abort the current turn. */
@@ -1150,6 +1255,10 @@ export declare class MewClient {
     renameSession(session_id: string, title: string): void;
     /** Enable or disable auto-generated session titles. */
     setAutoTitle(enabled: boolean): void;
+    readDaemonSettings(requestId: string): void;
+    saveSessionDefaults(sessionId: string, requestId: string): void;
+    resetSessionDefaults(requestId: string): void;
+    revokeDevice(deviceId: string, requestId: string): void;
     setAutoSummary(enabled: boolean): void;
     /** List available models from all configured providers. */
     listModels(): Promise<ModelInfo[]>;
@@ -1207,6 +1316,9 @@ export declare class MewClient {
     ping(): Promise<string>;
     /** List known projects (recent session cwds). */
     listProjects(): void;
+    registerBrowserPage(sessionId: string, pageInstance: string, cdpEndpoint: string, targetId: string, focusUrl?: string): Promise<void>;
+    unregisterBrowserPage(sessionId: string, pageInstance: string): Promise<void>;
+    private browserPageRequest;
     browserOpen(url: string, tabId?: string): void;
     browserSnapshot(tabId?: string): void;
     browserScreenshot(annotate?: boolean, tabId?: string): void;

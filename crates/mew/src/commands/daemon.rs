@@ -235,6 +235,7 @@ fn build_daemon_server_with_config(
                 id: "fake/fake".into(),
                 provider: "fake".into(),
                 model: "fake".into(),
+                display_name: None,
                 description: Some("local test model · standard".into()),
                 thinking_variants: Vec::new(),
                 thinking_budget: None,
@@ -296,6 +297,7 @@ fn build_daemon_server_with_config(
                                 id: format!("{}/{}", provider_id, m.id),
                                 provider: provider_id.clone(),
                                 model: m.id.clone(),
+                                display_name: m.display_name.clone(),
                                 description: Some(format!(
                                     "{} ctx · {}",
                                     m.context_window,
@@ -871,6 +873,91 @@ mod tests {
         assert_eq!(
             remote_invite_payload("node-1", "mew_invite"),
             "computer.mew.mew://node-1?token=mew_invite"
+        );
+    }
+}
+
+#[cfg(test)]
+mod model_list_tests {
+    use super::*;
+
+    #[test]
+    fn catalog_names_survive_daemon_model_listing() {
+        // Isolate credential and session discovery in a child test process.
+        if std::env::var_os("MEW_MODEL_NAME_TEST_CHILD").is_none() {
+            let dir = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "commands::daemon::model_list_tests::catalog_names_survive_daemon_model_listing"])
+                .env("MEW_MODEL_NAME_TEST_CHILD", "1")
+                .env("MEW_CRED_MODEL_NAME_TEST_FIXTURE", "local-test-value")
+                .env("MEW_SESSION_DIR", dir.path().join("sessions"))
+                .env("MEW_CONFIG_DIR", dir.path().join("config"))
+                .env("MEW_DATA_DIR", dir.path().join("data"))
+                .output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let mut cfg = mew_config::Config::default();
+        cfg.providers.clear();
+        for provider in ["opencode-zen", "other"] {
+            cfg.providers.insert(
+                provider.into(),
+                mew_config::ProviderConfig {
+                    shape: "openai".into(),
+                    credential_ref: "model-name-test-fixture".into(),
+                    ..Default::default()
+                },
+            );
+        }
+        let mut catalog = mew_catalog::Catalog::empty();
+        catalog.merge_local(
+            serde_json::from_value(serde_json::json!([
+                {"id":"snapshot", "provider":"opencode", "display_name":"Aurora"},
+                {"id":"snapshot", "provider":"other", "display_name":"Swift"},
+                {"id":"legacy", "provider":"other"}
+            ]))
+            .unwrap(),
+        );
+        let server = build_daemon_server_with_config(
+            cfg,
+            Some(catalog),
+            false,
+            "opencode-zen",
+            Some("snapshot".into()),
+            false,
+            mew_hooks::PermissionMode::Standard,
+        )
+        .unwrap();
+        let models = server.model_lister.unwrap()();
+        let values = models
+            .iter()
+            .map(|model| {
+                (
+                    model.id.as_str(),
+                    model.provider.as_str(),
+                    model.model.as_str(),
+                    model.display_name.as_deref(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            values,
+            vec![
+                (
+                    "opencode-zen/snapshot",
+                    "opencode-zen",
+                    "snapshot",
+                    Some("Aurora")
+                ),
+                ("other/legacy", "other", "legacy", None),
+                ("other/snapshot", "other", "snapshot", Some("Swift")),
+            ]
         );
     }
 }
