@@ -2384,3 +2384,26 @@ Verified `cargo test -p mew-agent` (208 tests), `cargo test -p mew-prompts`
 A partless final provider message reports an agent error rather than returning
 an earlier progress message. The regression test exercises that sequence with
 an actual subagent runner; all 211 mew-agent tests passed.
+
+# 2026-11-16 — Hy thinking levels from models.dev
+
+Read provider-specific Hy effort levels from models.dev for OpenCode and
+OpenRouter when the request uses `reasoning_effort`. Keep provider identity
+through the daemon and terminal pickers so identical model IDs do not share
+levels. Explicit `none` disables thinking on the wire, and the default selects
+an enabled level. Entries requiring an unknown toggle format remain unavailable.
+
+Verified the catalog parsing regressions, OpenAI adapter off regression,
+`mew-tui` library tests, daemon policy and reasoning-resolution tests,
+`cargo check -p mew --bin mew --tests`, and `just arch-check`. No live provider
+request was made. The generated local Cargo.lock needed notify 9.0.0-rc.4:
+rc.9 is incompatible with fff-notify-debouncer-full 0.9.4.
+
+### 2026-11-16: preserve provider-specific thinking on model switches
+
+Thinking-level carryover now uses the destination provider's variants and
+budget. Numeric budget resolution also selects that provider's range instead
+of an unrelated model with the same id.
+
+The catalog tests and thinking-resolution tests passed, including duplicate
+model ids with different provider levels and budget ranges.

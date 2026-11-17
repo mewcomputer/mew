@@ -2057,6 +2057,52 @@ fn test_thinking_picker_uses_model_variants() {
 }
 
 #[test]
+fn thinking_picker_uses_selected_provider_for_duplicate_model_ids() {
+    let mut app = App::new();
+    app.status.provider = "one".into();
+    app.status.model = "hy3".into();
+    let model = |provider: &str, levels: &[&str]| mew_protocol::ModelInfo {
+        id: format!("{provider}/hy3"),
+        provider: provider.into(),
+        model: "hy3".into(),
+        description: None,
+        thinking_variants: levels
+            .iter()
+            .map(|name| mew_protocol::ThinkingVariantInfo {
+                name: (*name).into(),
+            })
+            .collect(),
+        thinking_budget: None,
+        context_window: None,
+    };
+    app.apply_daemon_notification(&mew_protocol::ServerMessage::ModelList {
+        models: vec![model("one", &["low", "high"]), model("two", &["high"])],
+    });
+    app.open_thinking_variant_picker();
+    assert_eq!(
+        app.picker
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .map(|i| i.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["off", "low", "high"]
+    );
+    app.open_thinking_variant_picker_for(Some("two/hy3"));
+    assert_eq!(
+        app.picker
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .map(|i| i.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["off", "high"]
+    );
+}
+
+#[test]
 fn test_thinking_picker_no_variants_shows_only_off() {
     let mut app = App::new();
     app.status.model = "unknown-model".into();
@@ -2327,10 +2373,10 @@ fn test_model_list_populates_picker_state() {
             ),
         ]
     );
-    // Thinking variants keyed by bare model id; models without variants
+    // Thinking variants keyed by provider and model id; models without variants
     // are omitted.
     assert_eq!(
-        app.thinking_variants.get("k3").map(Vec::as_slice),
+        app.thinking_variants.get("kimi/k3").map(Vec::as_slice),
         Some(["high".to_string(), "max".to_string()].as_slice())
     );
     assert!(!app.thinking_variants.contains_key("deepseek-v4-flash"));
@@ -3539,9 +3585,9 @@ fn test_model_list_populates_thinking_budget() {
     };
     app.apply_daemon_notification(&msg);
 
-    assert!(app.thinking_budget.contains_key("qwen3.8-max"));
+    assert!(app.thinking_budget.contains_key("qwen/qwen3.8-max"));
     assert!(!app.thinking_budget.contains_key("deepseek-v4-flash"));
-    let budget = &app.thinking_budget["qwen3.8-max"];
+    let budget = &app.thinking_budget["qwen/qwen3.8-max"];
     assert_eq!(
         (budget.min, budget.max, budget.step, budget.default),
         (0, 262_144, 1024, 131_072)

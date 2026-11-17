@@ -282,9 +282,14 @@ fn build_daemon_server_with_config(
                             if !m.text_output {
                                 continue;
                             }
-                            let thinking_variants = cat
-                                .thinking_variants(&m.id)
+                            let thinking_variants =
+                                crate::setup::providers::provider_thinking_variants(
+                                    cat,
+                                    provider_id,
+                                    &m.id,
+                                )
                                 .into_iter()
+                                .filter(|v| v.name != "none" && v.name != "off")
                                 .map(|v| mew_protocol::ThinkingVariantInfo { name: v.name })
                                 .collect();
                             models.push(mew_protocol::ModelInfo {
@@ -370,6 +375,7 @@ fn apply_session_thinking(
     let off = variant.is_some_and(|name| matches!(name, "" | "none" | "off"));
     let resolved = crate::setup::providers::resolve_reasoning(
         catalog,
+        &agent.provider_id,
         model,
         if off { Some("off") } else { variant },
     );

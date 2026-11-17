@@ -549,14 +549,14 @@ impl App {
         self.open_thinking_variant_picker_for(None);
     }
 
-    /// Open the thinking variant picker for a specific model. When `model` is
-    /// None, uses the active model. The `model` param is a bare model id or a
-    /// "provider/model" pair; the provider prefix is stripped since
-    /// `thinking_variants` is keyed by bare model id.
+    /// Open the thinking variant picker for a specific model, or the active model.
     pub fn open_thinking_variant_picker_for(&mut self, model: Option<&str>) {
-        let bare_model = model
-            .map(|m| m.rsplit('/').next().unwrap_or(m))
-            .unwrap_or_else(|| self.status.model.as_str());
+        let active_id = format!("{}/{}", self.status.provider, self.status.model);
+        let model_id = model.unwrap_or(&active_id);
+        let bare_model = model_id
+            .split_once('/')
+            .map(|(_, model)| model)
+            .unwrap_or(model_id);
         let mut items = vec![PickerItem {
             id: "off".into(),
             label: "Off".into(),
@@ -564,15 +564,19 @@ impl App {
             ..Default::default()
         }];
         // Variant names come from the catalog (populated into
-        // `thinking_variants` at startup), keyed by model slug. This holds the
+        // `thinking_variants` at startup), keyed by provider and model. This holds the
         // model's actual levels — e.g. codex models expose
         // low/medium/high/xhigh/max/ultra — rather than a hardcoded list.
         let variant_names = self
             .thinking_variants
-            .get(bare_model)
+            .get(model_id)
+            .or_else(|| self.thinking_variants.get(bare_model))
             .cloned()
             .unwrap_or_default();
         for name in variant_names {
+            if name == "none" || name == "off" {
+                continue;
+            }
             items.push(PickerItem {
                 id: name.clone(),
                 label: name.clone(),
@@ -584,7 +588,11 @@ impl App {
         // the effort rows. The draft is seeded from the active budget
         // variant if set, else the effort mapping of the active effort,
         // else the metadata default.
-        let budget = self.thinking_budget.get(bare_model).cloned();
+        let budget = self
+            .thinking_budget
+            .get(model_id)
+            .or_else(|| self.thinking_budget.get(bare_model))
+            .cloned();
         let picker_budget = budget.map(|info| {
             let seed = self.active_budget_seed(&info);
             crate::app::PickerBudget {
