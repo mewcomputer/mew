@@ -61,14 +61,19 @@ jobs:
       - name: Build web UI (mew-web-bridge embeds dist/)
         run: pnpm --filter @mew/web-client build && pnpm --filter mew-web-ui build
 
+      - name: Install CEF SDK
+        run: |
+          scripts/setup-ci-cef.sh "$RUNNER_TEMP/mew-cef"
+          echo "CEF_PATH=$RUNNER_TEMP/mew-cef" >> "$GITHUB_ENV"
+
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
       - name: cargo clippy
-        run: cargo clippy --all -- -D warnings
+        run: cargo clippy --locked --all -- -D warnings
 
       - name: cargo test
-        run: cargo test --all
+        run: cargo test --locked --all
 
   web-ci:
     name: Web UI + Client typecheck

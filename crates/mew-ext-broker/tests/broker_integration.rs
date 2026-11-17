@@ -78,15 +78,15 @@ fn make_plugin_dir(binary_path: PathBuf) -> tempfile::TempDir {
         .to_string_lossy()
         .to_string();
     let dst = dir.path().join(&name);
-    std::fs::copy(&binary_path, &dst).expect("copy plugin binary");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&dst).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&dst, perms).unwrap();
-    }
+    install_plugin(&binary_path, &dst);
     dir
+}
+
+fn install_plugin(src: &std::path::Path, dst: &std::path::Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(src, dst).expect("link plugin binary");
+    #[cfg(not(unix))]
+    std::fs::copy(src, dst).expect("copy plugin binary");
 }
 
 /// Create a plugin dir with the sample-plugin binary.
@@ -229,20 +229,13 @@ async fn test_collision_rejection() {
     // We need both sample-plugin and conflicting-plugin in the same dir.
     let dir = tempfile::tempdir().expect("tempdir");
 
-    // Copy both binaries into the plugin dir.
+    // Put both binaries in the plugin dir.
     for (src_path, name) in [
         (sample_plugin_path(), "sample-plugin"),
         (conflicting_plugin_path(), "conflicting-plugin"),
     ] {
         let dst = dir.path().join(name);
-        std::fs::copy(&src_path, &dst).expect("copy plugin binary");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&dst).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&dst, perms).unwrap();
-        }
+        install_plugin(&src_path, &dst);
     }
 
     let host = test_host();
@@ -294,8 +287,14 @@ async fn test_gate_audit() {
     .await
     .expect("broker creation");
 
-    broker.set_session_id("test-session-1".into());
+    let session_id = format!(
+        "test-session-{}",
+        dir.path().file_name().unwrap().to_string_lossy()
+    );
+    broker.set_session_id(session_id.clone());
     broker.init(&host).await;
+    let prompt = broker.on_system_prompt("test".into()).await;
+    assert!(prompt.contains("[sample-plugin]"), "plugin failed to start");
 
     use mew_hooks::ToolCall;
     let call = ToolCall {
@@ -311,14 +310,13 @@ async fn test_gate_audit() {
 
     // Check the audit log.
     let entries = broker.audit_entries("sample-plugin");
-    assert!(
-        !entries.is_empty(),
-        "audit log should have at least one entry"
-    );
-    let entry = &entries[0];
+    let entry = entries
+        .iter()
+        .find(|entry| entry.session_id == session_id)
+        .expect("audit log should contain the current session's entry");
     assert_eq!(entry.extension, "sample-plugin");
     assert_eq!(entry.tool, "bash");
-    assert_eq!(entry.session_id, "test-session-1");
+    assert_eq!(entry.session_id, session_id);
 
     broker.shutdown().await;
 }
@@ -334,14 +332,7 @@ async fn test_last_writer_wins() {
         (conflicting_plugin_path(), "conflicting-plugin"),
     ] {
         let dst = dir.path().join(name);
-        std::fs::copy(&src_path, &dst).expect("copy plugin binary");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&dst).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&dst, perms).unwrap();
-        }
+        install_plugin(&src_path, &dst);
     }
 
     let host = test_host();

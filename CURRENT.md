@@ -2314,3 +2314,46 @@ helper reports 0.34.0 and matches the workflow's pinned SHA256. CEF reports
 executables and property lists passed verification. Build dependencies stayed in
 task caches; global tools were not replaced. The app was not launched, leaving
 focus, browser ownership and terminal interaction for the requested live pass.
+
+### 2026-11-16: make Rust dependency resolution reproducible
+
+The workspace now tracks Cargo.lock and CI uses locked resolution. This keeps
+fff-search's debouncer on its compatible notify prerelease rather than picking
+an incompatible newer prerelease in a clean checkout.
+
+The locked workspace passed Clippy, and mew-tools tests passed, including its
+search integration tests. Cargo metadata also verified the lockfile is current.
+
+### 2026-11-16: provision the CEF SDK for CI
+
+CI now downloads and verifies the CEF SDK matching the locked bindings before
+building. This avoids the bundled downloader's outdated index size limit.
+
+The actual Linux and macOS archives passed checksum and extraction checks; the
+macOS SDK also built the CEF host with locked dependencies.
+
+### 2026-11-16: fix Rust 1.100 clippy failures
+
+The terminal chat renderer and desktop selection copier iterate over their rows
+without indexing range loops, preserving the original ordering and bounds.
+
+Workspace Clippy passed with Rust 1.100 and Zig 0.15.2. The expanded tool batch
+rendering regression and all 154 desktop tests passed.
+
+### 2026-11-16: avoid copying plugin executables in Unix tests
+
+Unix plugin tests now link to the built sample executable instead of copying it
+immediately before launch. This avoids opening each test executable for writing
+while other test processes start, which can make Linux reject exec with ETXTBSY.
+
+All 17 plugin integration and restart tests passed, including 24 concurrent
+launches. A Linux container reproduced ETXTBSY with a held writable descriptor
+and completed 1,600 concurrent launches through symbolic links.
+
+### 2026-11-16: stabilize broker plugin test setup
+
+Broker integration fixtures also link their built plugin executables on Unix,
+including tests that load multiple plugins. The audit test checks that its
+plugin started and looks for an entry from its own session.
+
+The broker integration test compiled, and the two-plugin collision test passed.

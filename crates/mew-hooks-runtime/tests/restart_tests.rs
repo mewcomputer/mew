@@ -24,6 +24,35 @@ async fn wait_until_healthy(slot: &PluginSlot, timeout: Duration) -> bool {
     false
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plugins_launch_concurrently_from_separate_directories() {
+    common::sample_plugin_path();
+    let barrier = Arc::new(tokio::sync::Barrier::new(24));
+    let mut tasks = Vec::new();
+    for _ in 0..24 {
+        let barrier = Arc::clone(&barrier);
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            let dir = tokio::task::spawn_blocking(make_plugin_dir_with_binary)
+                .await
+                .expect("prepare plugin");
+            let slot = PluginSlot::spawn(
+                mew_hooks_runtime::SpawnSpec::Path(dir.path().join("sample-plugin")),
+                test_host(),
+                Duration::from_secs(5),
+            )
+            .await
+            .expect("spawn plugin");
+            let response = slot.call("init", &serde_json::json!({})).await.unwrap();
+            assert!(response.contains("ok"), "unexpected response: {response}");
+            slot.shutdown().await;
+        }));
+    }
+    for task in tasks {
+        task.await.expect("plugin task");
+    }
+}
+
 #[tokio::test]
 async fn test_restart_after_external_restart() {
     // Spawn a plugin slot directly.

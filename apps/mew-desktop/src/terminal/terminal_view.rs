@@ -723,8 +723,13 @@ impl TerminalView {
         }
 
         let mut text = String::new();
-        for row_idx in start.row..=end.row.min(num_rows - 1) {
-            let row = &self.cached_rows[row_idx];
+        for (row_idx, row) in self
+            .cached_rows
+            .iter()
+            .enumerate()
+            .take(end.row + 1)
+            .skip(start.row)
+        {
             let row_text = row.text.trim_end_matches(' ');
             if row_idx == start.row && row_idx == end.row {
                 let s = start.col.min(row_text.len());
