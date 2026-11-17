@@ -5057,6 +5057,314 @@ async fn cancelling_a_new_job_does_not_lose_the_completion_notification() {
     assert!(!agent.cancel_shell_job("missing").await);
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn cancelling_job_after_shell_exits_stops_its_remaining_child() {
+    let agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let cwd = tempfile::tempdir().unwrap();
+    let id = agent
+        .start_shell_job(
+            "printf '%s' $$ > leader.pid; (printf 'ready\\n'; i=0; while [ ! -f child_gate ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i+1)); done; [ -f child_gate ] && printf leaked > child.txt) & exit 0",
+            cwd.path(),
+        )
+        .await;
+    wait_for_shell_job_output(&agent, &id, "ready").await;
+    let leader = std::fs::read_to_string(cwd.path().join("leader.pid")).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let output = tokio::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &leader])
+                .output()
+                .await
+                .unwrap();
+            if !output.status.success() || String::from_utf8_lossy(&output.stdout).contains('Z') {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("shell did not exit");
+
+    assert!(agent.cancel_shell_job(&id).await);
+    assert!(matches!(
+        agent.shell_job_status(&id).await.unwrap().0,
+        crate::agent::ShellJobState::Cancelled
+    ));
+    std::fs::write(cwd.path().join("child_gate"), "").unwrap();
+    let leaked = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while !cwd.path().join("child.txt").exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(leaked.is_err(), "child continued after cancellation");
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn job_fails_if_another_reaper_takes_its_shell() {
+    use nix::sys::wait::{waitpid, WaitStatus};
+    use nix::unistd::Pid;
+
+    let agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let cwd = tempfile::tempdir().unwrap();
+    let id = agent
+        .start_shell_job(
+            "printf '%s' $$ > leader.pid; (echo ready; while [ ! -f release ]; do sleep 0.05; done) & while [ ! -f exit ]; do sleep 0.01; done",
+            cwd.path(),
+        )
+        .await;
+    wait_for_shell_job_output(&agent, &id, "ready").await;
+    let pid = std::fs::read_to_string(cwd.path().join("leader.pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    std::fs::write(cwd.path().join("exit"), "").unwrap();
+    let status = tokio::task::spawn_blocking(move || waitpid(Pid::from_raw(pid), None))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(status, WaitStatus::Exited(_, 0)));
+    let cancelling_agent = agent.clone();
+    let cancelling_id = id.clone();
+    let cancellation =
+        tokio::spawn(async move { cancelling_agent.cancel_shell_job(&cancelling_id).await });
+    std::fs::write(cwd.path().join("release"), "").unwrap();
+    cancellation.await.unwrap();
+    let (state, _) = agent.shell_job_block(&id, 3).await.unwrap();
+    assert!(matches!(state, crate::agent::ShellJobState::Failed { .. }));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelling_a_stopped_process_group_completes() {
+    let agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let cwd = tempfile::tempdir().unwrap();
+    let id = agent
+        .start_shell_job(
+            "ps -o pgid= -p $$ | tr -d ' ' > group.pid; printf 'ready\\n'; kill -STOP 0; sleep 5",
+            cwd.path(),
+        )
+        .await;
+    wait_for_shell_job_output(&agent, &id, "ready").await;
+    let group: u32 = std::fs::read_to_string(cwd.path().join("group.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let output = tokio::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &group.to_string()])
+                .output()
+                .await
+                .unwrap();
+            if String::from_utf8_lossy(&output.stdout).contains('T') {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("process group did not stop");
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        agent.cancel_shell_job(&id),
+    )
+    .await;
+    if result.is_err() {
+        let _ = tokio::process::Command::new("sh")
+            .args(["-c", &format!("kill -KILL -{group}")])
+            .status()
+            .await;
+    }
+    assert!(result.expect("stopped process group could not be cancelled"));
+    assert!(matches!(
+        agent.shell_job_status(&id).await.unwrap().0,
+        crate::agent::ShellJobState::Cancelled
+    ));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shell_job_preserves_a_signal_exit() {
+    let agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let cwd = tempfile::tempdir().unwrap();
+    let id = agent.start_shell_job("kill -TERM $$", cwd.path()).await;
+    let (state, _) = agent.shell_job_block(&id, 3).await.unwrap();
+    assert!(matches!(
+        state,
+        crate::agent::ShellJobState::Completed { exit_code: -1 }
+    ));
+}
+
+#[tokio::test]
+async fn blocked_job_status_does_not_block_other_jobs() {
+    let agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let cwd = tempfile::tempdir().unwrap();
+    let first = agent.start_shell_job("sleep 5", cwd.path()).await;
+    let second = agent.start_shell_job("sleep 5", cwd.path()).await;
+    let first_state = agent.shell_jobs.lock().await[&first].state.clone();
+    let state_guard = first_state.lock().await;
+
+    let status = agent.shell_job_status(&first);
+    tokio::pin!(status);
+    assert!(futures::poll!(&mut status).is_pending());
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        agent.shell_job_status(&second)
+    )
+    .await
+    .expect("another job's status was blocked")
+    .is_some());
+    drop(state_guard);
+    assert!(status.await.is_some());
+    agent.cancel_shell_job(&first).await;
+    agent.cancel_shell_job(&second).await;
+}
+
+#[cfg(unix)]
+#[test]
+fn detached_output_helper() {
+    if std::env::var_os("MEW_DETACHED_OUTPUT_HELPER").is_none() {
+        return;
+    }
+    nix::unistd::setsid().unwrap();
+    println!("detached output ready");
+    for _ in 0..500 {
+        if std::path::Path::new("release").exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn moved_group_helper() {
+    let Some(group) = std::env::var_os("MEW_TEST_PARENT_GROUP") else {
+        return;
+    };
+    let group = group.to_string_lossy().parse().unwrap();
+    nix::unistd::setpgid(
+        nix::unistd::Pid::from_raw(0),
+        nix::unistd::Pid::from_raw(group),
+    )
+    .unwrap();
+    println!("moved group ready");
+    for _ in 0..500 {
+        if std::path::Path::new("release").exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn cancelling_job_stops_leader_that_changed_process_group() {
+    let agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let cwd = tempfile::tempdir().unwrap();
+    let executable = std::env::current_exe()
+        .unwrap()
+        .to_string_lossy()
+        .replace('\'', "'\\''");
+    let parent_group = nix::unistd::getpgrp();
+    let id = agent
+        .start_shell_job(
+            &format!("sleep 5 & MEW_TEST_PARENT_GROUP={parent_group} exec '{executable}' --exact tests::moved_group_helper --nocapture"),
+            cwd.path(),
+        )
+        .await;
+    wait_for_shell_job_output(&agent, &id, "moved group ready").await;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        agent.cancel_shell_job(&id),
+    )
+    .await;
+    std::fs::write(cwd.path().join("release"), "").unwrap();
+    assert!(result.expect("moved group leader could not be cancelled"));
+    assert!(matches!(
+        agent.shell_job_status(&id).await.unwrap().0,
+        crate::agent::ShellJobState::Cancelled
+    ));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn job_block_timeout_remains_responsive_while_cancellation_drains_output() {
+    let agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let cwd = tempfile::tempdir().unwrap();
+    let executable = std::env::current_exe()
+        .unwrap()
+        .to_string_lossy()
+        .replace('\'', "'\\''");
+    let id = agent
+        .start_shell_job(
+            &format!("MEW_DETACHED_OUTPUT_HELPER=1 '{executable}' --exact tests::detached_output_helper --nocapture & wait"),
+            cwd.path(),
+        )
+        .await;
+    wait_for_shell_job_output(&agent, &id, "detached output ready").await;
+    let cancellation_agent = agent.clone();
+    let cancellation_id = id.clone();
+    let cancellation =
+        tokio::spawn(async move { cancellation_agent.cancel_shell_job(&cancellation_id).await });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let status = tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        agent.shell_job_block(&id, 0),
+    )
+    .await;
+    std::fs::write(cwd.path().join("release"), "").unwrap();
+    cancellation.await.unwrap();
+    assert!(status.is_ok(), "job_block did not honor its timeout");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn cancellation_returns_only_after_the_job_has_stopped() {
