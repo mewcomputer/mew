@@ -125,7 +125,7 @@ fn default_max_subagent_depth() -> u32 {
 }
 
 fn default_max_duration_secs() -> u64 {
-    300
+    600
 }
 
 fn default_leak_reminder_max() -> u32 {
@@ -958,9 +958,16 @@ responses_lite = true
         let cfg: Config = toml::from_str("").unwrap();
         assert_eq!(cfg.orchestration.max_concurrent_subagents, 4);
         assert_eq!(cfg.orchestration.max_subagent_depth, 1);
-        assert_eq!(cfg.orchestration.default_max_duration_secs, 300);
+        assert_eq!(cfg.orchestration.default_max_duration_secs, 600);
         assert!(cfg.orchestration.leak_reminder);
         assert_eq!(cfg.orchestration.leak_reminder_max, 2);
+    }
+
+    #[test]
+    fn test_orchestration_timeout_override() {
+        let cfg: Config =
+            toml::from_str("[orchestration]\ndefault_max_duration_secs = 1200\n").unwrap();
+        assert_eq!(cfg.orchestration.default_max_duration_secs, 1200);
     }
 
     #[test]

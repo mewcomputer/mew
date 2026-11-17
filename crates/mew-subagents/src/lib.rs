@@ -98,7 +98,7 @@ pub const DEFAULT_MAX_TURNS: u32 = 500;
 
 /// Default wall-clock cap (seconds) applied to any subagent invocation that
 /// doesn't set `max_duration_secs` on its def.
-pub const DEFAULT_MAX_DURATION_SECS: u64 = 300; // 5 minutes
+pub const DEFAULT_MAX_DURATION_SECS: u64 = 600; // 10 minutes
 
 /// A pool of human-friendly names the runner can pick from to give each
 /// subagent run a personality. Just for fun. The list is intentionally
@@ -328,7 +328,7 @@ impl Loader {
                 model: None,
                 tools: Some(vec!["read".into(), "glob".into(), "grep".into()]),
                 max_turns: Some(DEFAULT_MAX_TURNS),
-                max_duration_secs: Some(DEFAULT_MAX_DURATION_SECS),
+                max_duration_secs: None,
                 body: mew_prompts::vfs::read_builtin("subagents/researcher")
                     .unwrap_or("")
                     .to_string(),
@@ -343,7 +343,7 @@ impl Loader {
                 model: None,
                 tools: Some(vec!["read".into(), "glob".into(), "grep".into()]),
                 max_turns: Some(DEFAULT_MAX_TURNS),
-                max_duration_secs: Some(DEFAULT_MAX_DURATION_SECS),
+                max_duration_secs: None,
                 body: mew_prompts::vfs::read_builtin("subagents/plan-reviewer")
                     .unwrap_or("")
                     .to_string(),
@@ -358,7 +358,7 @@ impl Loader {
                 model: None,
                 tools: Some(vec!["read".into(), "write".into(), "edit".into(), "glob".into(), "grep".into(), "bash".into()]),
                 max_turns: Some(DEFAULT_MAX_TURNS),
-                max_duration_secs: Some(DEFAULT_MAX_DURATION_SECS),
+                max_duration_secs: None,
                 body: mew_prompts::vfs::read_builtin("subagents/coder")
                     .unwrap_or("")
                     .to_string(),
@@ -713,6 +713,32 @@ mod tests {
         assert_eq!(user_defs[0].name, "no-fm");
         assert_eq!(user_defs[0].description, "");
         assert_eq!(user_defs[0].body, "Just a body");
+    }
+
+    #[test]
+    fn builtin_agents_inherit_the_configured_duration_unless_overridden() {
+        let mut defs = Loader::builtin_defaults();
+        assert_eq!(DEFAULT_MAX_DURATION_SECS, 600);
+        assert!(defs.iter().all(|def| def.max_duration_secs.is_none()));
+        let overrides = std::collections::HashMap::from([(
+            "researcher".to_string(),
+            AgentConfigOverride {
+                max_duration_secs: Some(45),
+                ..Default::default()
+            },
+        )]);
+        apply_config_overrides(&mut defs, &overrides);
+        assert_eq!(
+            defs.iter()
+                .find(|def| def.name == "researcher")
+                .unwrap()
+                .max_duration_secs,
+            Some(45)
+        );
+        assert!(defs
+            .iter()
+            .filter(|def| def.name != "researcher")
+            .all(|def| def.max_duration_secs.is_none()));
     }
 
     #[test]
