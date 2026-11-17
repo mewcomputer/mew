@@ -2433,3 +2433,10 @@ Verified the competing-reaper, post-exit, stopped-group, moved-leader, cleanup,
 and timeout regressions with `cargo test --locked -p mew-agent --lib` (226
 passing), `cargo clippy --locked -p mew-agent --all-targets -- -D warnings`,
 and `just arch-check` on macOS.
+
+### 2026-11-17: refresh agent guidance
+
+Updated `AGENTS.md` for the native desktop workflow, locked CI dependencies,
+provider-specific thinking, subagent results and time limits, and background
+job cancellation. Verified the guidance against the implementation and CI,
+checked Cargo metadata with `--locked`, and ran `just arch-check`.
