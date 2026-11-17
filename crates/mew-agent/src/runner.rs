@@ -394,16 +394,13 @@ impl SubagentRunner for SimpleRunner {
         // Run the prompt through the agent.
         let mut rx = agent.run_with_parts(prompt, vec![], Some(cancel.clone()));
         let mut result_text = String::new();
+        let mut message_open = false;
+        let mut text_parts = std::collections::HashSet::new();
         let mut turns_used: u32 = 0;
         let mut last_error: Option<String> = None;
         let started_at = std::time::Instant::now();
         let max_duration = std::time::Duration::from_secs(max_duration_secs);
         let mut hit_time_limit = false;
-        // Map call_id → tool_name so we can emit SubagentEvent::ToolStart /
-        // ToolEnd (the AgentEvent variants don't carry the tool name; we
-        // pick it up from PartStart).
-        let mut tool_names: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
         // Live copy of every tool-call part the subagent has emitted. We
         // track these so we can (a) parse streamed arguments into `input`
         // ourselves (mirroring the agent's reconcile) and (b) read the
@@ -427,16 +424,29 @@ impl SubagentRunner for SimpleRunner {
             while let Some(event) = rx.recv().await {
                 match event {
                     crate::AgentEvent::Provider(mew_provider::ProviderEvent::PartStart {
-                        part: mew_message::Part::ToolCall(tc),
+                        part,
                     }) => {
-                        tool_names.insert(tc.call_id.clone(), tc.tool_name.clone());
-                        tool_parts.insert(tc.base.id, tc.clone());
-                        let _ = event_tx
-                            .send(SubagentEvent::ToolStart {
-                                call_id: tc.call_id,
-                                tool_name: tc.tool_name,
-                            })
-                            .await;
+                        if !message_open {
+                            result_text.clear();
+                            text_parts.clear();
+                            message_open = true;
+                        }
+                        match part {
+                            mew_message::Part::Text(text) => {
+                                text_parts.insert(text.base.id);
+                                result_text.push_str(&text.text);
+                            }
+                            mew_message::Part::ToolCall(tc) => {
+                                tool_parts.insert(tc.base.id, tc.clone());
+                                let _ = event_tx
+                                    .send(SubagentEvent::ToolStart {
+                                        call_id: tc.call_id,
+                                        tool_name: tc.tool_name,
+                                    })
+                                    .await;
+                            }
+                            _ => {}
+                        }
                     }
                     crate::AgentEvent::Provider(mew_provider::ProviderEvent::PartDelta {
                         part_id,
@@ -448,10 +458,10 @@ impl SubagentRunner for SimpleRunner {
                         }
                     }
                     crate::AgentEvent::Provider(mew_provider::ProviderEvent::PartDelta {
-                        field: "text",
+                        part_id,
+                        field,
                         delta,
-                        ..
-                    }) => {
+                    }) if matches!(field, "text" | "") && text_parts.contains(&part_id) => {
                         result_text.push_str(&delta);
                         let _ = event_tx
                             .send(SubagentEvent::TextDelta { text: delta })
@@ -493,6 +503,7 @@ impl SubagentRunner for SimpleRunner {
                     crate::AgentEvent::Provider(mew_provider::ProviderEvent::MessageEnd {
                         ..
                     }) => {
+                        message_open = false;
                         turns_used += 1;
                         if let Some(limit) =
                             def.max_turns.or(Some(mew_subagents::DEFAULT_MAX_TURNS))
@@ -607,6 +618,8 @@ impl SubagentRunner for SimpleRunner {
                     SchemaCheck::InvalidOutput(err) if can_correct => {
                         correction_used = true;
                         result_text.clear();
+                        text_parts.clear();
+                        message_open = false;
                         exit_answer = None;
                         let correction = format!(
                             "Your final output did not satisfy the required output schema.\n\
@@ -1033,7 +1046,7 @@ mod tests {
                 assert_eq!(turns_used, 2);
                 assert!(!hit_turn_limit);
                 assert!(!hit_time_limit);
-                assert!(text.contains("t0") && text.contains("t1"));
+                assert_eq!(text, "t1");
             }
             other => panic!("expected Complete, got {other:?}"),
         }
@@ -1292,6 +1305,11 @@ mod tests {
         assert!(
             system.contains("ROLE_MARKER investigate the thing"),
             "system prompt must include the def body"
+        );
+        assert!(
+            system.contains("The parent receives only that message")
+                && system.contains("including any requested JSON"),
+            "the fallback contract must require complete final results"
         );
         assert!(
             !system.contains("{{ "),
@@ -1766,8 +1784,14 @@ mod tests {
         def: SubagentDef,
     ) -> (SubagentResult, Arc<SequentialProvider>) {
         let provider = Arc::new(SequentialProvider::new(scripts));
-        let runner =
-            SimpleRunner::new(provider.clone(), vec![], Arc::new(mew_hooks::NopDispatcher));
+        let runner = SimpleRunner::new(
+            provider.clone(),
+            vec![
+                Arc::new(mew_tools::tools::progress_update::ProgressUpdate),
+                exit_tool(),
+            ],
+            Arc::new(mew_hooks::NopDispatcher),
+        );
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
         let cancel = tokio_util::sync::CancellationToken::new();
         let drain = tokio::spawn(async move { while let Some(_ev) = rx.recv().await {} });
@@ -1786,6 +1810,144 @@ mod tests {
             .unwrap();
         drain.abort();
         (result, provider)
+    }
+
+    #[tokio::test]
+    async fn final_json_is_validated_without_earlier_narration() {
+        let mut progress = turn("checking the data");
+        progress.pop();
+        progress.extend(mew_provider_fake::FakeProvider::tool_call(
+            "progress_update",
+            "progress",
+            serde_json::json!({"message": "checking"}),
+        ));
+        let def = typed_def(serde_json::json!({"type": "object", "required": ["answer"]}));
+        let (result, provider) = run_typed(vec![progress, turn("{\"answer\":42}")], def).await;
+        assert!(
+            matches!(result, SubagentResult::Complete { text, .. } if text == "{\"answer\":42}")
+        );
+        assert_eq!(
+            *provider.calls.lock().unwrap(),
+            2,
+            "valid final JSON must not trigger a correction"
+        );
+    }
+
+    #[tokio::test]
+    async fn exit_tool_returns_its_json_without_narration() {
+        let mut progress = turn("checking the data");
+        progress.pop();
+        progress.extend(mew_provider_fake::FakeProvider::tool_call(
+            "progress_update",
+            "progress",
+            serde_json::json!({"message": "checking"}),
+        ));
+        let mut finishing = turn("ready to report");
+        finishing.pop();
+        finishing.extend(exit_tool_script("exit", "{\"answer\":42}"));
+        let def = typed_def(serde_json::json!({"type": "object", "required": ["answer"]}));
+        let (result, provider) = run_typed(vec![progress, finishing], def).await;
+        assert!(
+            matches!(result, SubagentResult::Complete { text, .. } if text == "{\"answer\":42}")
+        );
+        assert_eq!(*provider.calls.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn final_message_includes_every_text_part_and_initial_content() {
+        let mut first = turn(" first");
+        if let mew_provider::ProviderEvent::PartStart {
+            part: mew_message::Part::Text(text),
+        } = &mut first[0]
+        {
+            text.text = "initial".into();
+        } else {
+            panic!("expected a text part");
+        }
+        first.pop();
+        let mut second = turn(" second");
+        if let mew_provider::ProviderEvent::PartDelta { field, .. } = &mut second[1] {
+            *field = "";
+        }
+        first.extend(second);
+        let result =
+            run_subagent(vec![(Duration::ZERO, first)], make_def(Some(10), Some(60))).await;
+        assert!(
+            matches!(result, SubagentResult::Complete { text, .. } if text == "initial first second")
+        );
+    }
+
+    #[tokio::test]
+    async fn final_reasoning_is_not_returned_as_answer() {
+        let reasoning_id = mew_message::PartId::new();
+        let mut events = vec![
+            mew_provider::ProviderEvent::PartStart {
+                part: mew_message::Part::Reasoning(mew_message::ReasoningPart {
+                    base: mew_message::PartBase {
+                        id: reasoning_id,
+                        message_id: mew_message::MessageId::new(),
+                        session_id: mew_message::SessionId::new(),
+                    },
+                    text: String::new(),
+                    signature: None,
+                    encrypted_content: None,
+                    provider_item_id: None,
+                }),
+            },
+            mew_provider::ProviderEvent::PartDelta {
+                part_id: reasoning_id,
+                field: "text",
+                delta: "private reasoning".into(),
+            },
+            mew_provider::ProviderEvent::PartEnd {
+                part_id: reasoning_id,
+            },
+        ];
+        events.extend(turn("final answer"));
+        let result =
+            run_subagent(vec![(Duration::ZERO, events)], make_def(Some(10), Some(60))).await;
+        assert!(matches!(result, SubagentResult::Complete { text, .. } if text == "final answer"));
+    }
+
+    #[tokio::test]
+    async fn tool_only_last_message_does_not_reuse_earlier_narration() {
+        let mut first = turn("earlier status");
+        first.pop();
+        first.extend(mew_provider_fake::FakeProvider::tool_call(
+            "progress_update",
+            "first",
+            serde_json::json!({"message": "working"}),
+        ));
+        let last = mew_provider_fake::FakeProvider::tool_call(
+            "progress_update",
+            "last",
+            serde_json::json!({"message": "still working"}),
+        );
+        let (result, _) = run_typed(vec![first, last], make_def(Some(2), Some(60))).await;
+        assert!(
+            matches!(result, SubagentResult::Complete { text, hit_turn_limit: true, .. } if text.is_empty())
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_final_message_does_not_reuse_earlier_narration() {
+        let mut first = turn("earlier status");
+        first.pop();
+        first.extend(mew_provider_fake::FakeProvider::tool_call(
+            "progress_update",
+            "progress",
+            serde_json::json!({"message": "working"}),
+        ));
+        let last = vec![mew_provider::ProviderEvent::MessageEnd {
+            finish: mew_message::Finish::Stop,
+            usage: mew_message::Tokens::default(),
+            cost: 0.0,
+        }];
+        let (result, _) = run_typed(vec![first, last], make_def(Some(10), Some(60))).await;
+        assert!(
+            matches!(&result, SubagentResult::Error { reason } if reason == "no assistant message received"),
+            "unexpected result: {result:?}"
+        );
     }
 
     #[tokio::test]

@@ -2366,3 +2366,21 @@ limit is checked after each provider message, so a stalled message can exceed it
 
 The mew-agent, mew-config and mew-subagents tests passed, including coverage for
 the default and both override paths. The architecture check passed.
+
+# 2026-11-16 — Return only the subagent's final result
+
+The subagent runner previously concatenated text deltas from every assistant
+message, including reasoning, when the child did not call `exit_tool`. It now
+returns the last assistant message's text, while the explicit `exit_tool`
+payload remains authoritative. The subagent prompt tells children to include
+the complete result and requested JSON in that final message. Live progress
+and the child transcript remain available separately.
+
+Verified `cargo test -p mew-agent` (208 tests), `cargo test -p mew-prompts`
+(64 tests), and `just arch-check`.
+
+### 2026-11-16: verify empty subagent final responses
+
+A partless final provider message reports an agent error rather than returning
+an earlier progress message. The regression test exercises that sequence with
+an actual subagent runner; all 211 mew-agent tests passed.
