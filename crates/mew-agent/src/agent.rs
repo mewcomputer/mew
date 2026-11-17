@@ -141,6 +141,7 @@ impl ShellJobState {
 /// A background shell command tracked as a job. The process runs in a
 /// background task that reads stdout/stderr into `output` and updates
 /// `state` on exit. Callers use `done` to wait for completion.
+#[derive(Clone)]
 pub struct ShellJob {
     pub id: String,
     pub command: String,
@@ -151,6 +152,7 @@ pub struct ShellJob {
     pub output: Arc<tokio::sync::Mutex<String>>,
     /// Current state. `Running` until the process exits or is cancelled.
     pub state: Arc<tokio::sync::Mutex<ShellJobState>>,
+    lifecycle: Arc<tokio::sync::Mutex<()>>,
     /// Notified once when the job reaches a terminal state. Used by
     /// `job_block` to wait without polling.
     pub done: Arc<tokio::sync::Notify>,
@@ -1653,6 +1655,7 @@ impl Agent {
         let cancel = self.cancel_token.child_token();
         let output = Arc::new(tokio::sync::Mutex::new(String::new()));
         let state = Arc::new(tokio::sync::Mutex::new(ShellJobState::Running));
+        let lifecycle = Arc::new(tokio::sync::Mutex::new(()));
         let done = Arc::new(tokio::sync::Notify::new());
         let output_incomplete = Arc::new(AtomicBool::new(false));
 
@@ -1663,24 +1666,16 @@ impl Agent {
             cancel: cancel.clone(),
             output: output.clone(),
             state: state.clone(),
+            lifecycle,
             done: done.clone(),
             output_incomplete: output_incomplete.clone(),
         };
 
         // Spawn the background runner.
-        let cmd = command.to_string();
+        let runner = job.clone();
         let cwd = cwd.to_path_buf();
         tokio::spawn(async move {
-            run_shell_job(
-                &cmd,
-                &cwd,
-                &output,
-                &state,
-                &done,
-                &cancel,
-                &output_incomplete,
-            )
-            .await;
+            run_shell_job(&runner, &cwd).await;
         });
 
         self.shell_jobs.lock().await.insert(id.clone(), job);
@@ -1689,11 +1684,18 @@ impl Agent {
 
     /// Get the current state and accumulated output of a shell job.
     pub async fn shell_job_status(&self, job_id: &str) -> Option<(ShellJobState, String)> {
-        let jobs = self.shell_jobs.lock().await;
-        let job = jobs.get(job_id)?;
-        let state = job.state.lock().await.clone();
-        let mut output = job.output.lock().await.clone();
-        if state.is_terminal() && job.output_incomplete.load(Ordering::Acquire) {
+        let (state, output, output_incomplete) = {
+            let jobs = self.shell_jobs.lock().await;
+            let job = jobs.get(job_id)?;
+            (
+                job.state.clone(),
+                job.output.clone(),
+                job.output_incomplete.clone(),
+            )
+        };
+        let state = state.lock().await.clone();
+        let mut output = output.lock().await.clone();
+        if state.is_terminal() && output_incomplete.load(Ordering::Acquire) {
             output
                 .push_str("\n[output incomplete: a reader did not reach EOF after process exit]\n");
         }
@@ -1733,12 +1735,19 @@ impl Agent {
         job_id: &str,
         offset: u64,
     ) -> Result<ShellJobOutput, String> {
-        let jobs = self.shell_jobs.lock().await;
-        let job = jobs
-            .get(job_id)
-            .ok_or_else(|| format!("unknown job: {job_id}"))?;
-        let terminal = job.state.lock().await.is_terminal();
-        let output = job.output.lock().await;
+        let (state, output, output_incomplete) = {
+            let jobs = self.shell_jobs.lock().await;
+            let job = jobs
+                .get(job_id)
+                .ok_or_else(|| format!("unknown job: {job_id}"))?;
+            (
+                job.state.clone(),
+                job.output.clone(),
+                job.output_incomplete.clone(),
+            )
+        };
+        let terminal = state.lock().await.is_terminal();
+        let output = output.lock().await;
         let start = usize::try_from(offset).map_err(|_| "invalid output offset".to_string())?;
         if start > output.len() || !output.is_char_boundary(start) {
             return Err("invalid output offset".to_string());
@@ -1751,47 +1760,79 @@ impl Agent {
             output: output[start..end].to_string(),
             next_offset: end as u64,
             done: terminal && end == output.len(),
-            incomplete: terminal && job.output_incomplete.load(Ordering::Acquire),
+            incomplete: terminal && output_incomplete.load(Ordering::Acquire),
         })
     }
 
-    /// Cancel a running shell job by killing the process. Returns true if
-    /// the job existed and was running.
+    /// Cancel a running shell job and wait for it to reach a terminal state.
+    /// Returns true if the job existed and was running.
     pub async fn cancel_shell_job(&self, job_id: &str) -> bool {
-        let jobs = self.shell_jobs.lock().await;
-        let Some(job) = jobs.get(job_id) else {
-            return false;
+        let (cancel, done, state, lifecycle) = {
+            let jobs = self.shell_jobs.lock().await;
+            let Some(job) = jobs.get(job_id) else {
+                return false;
+            };
+            (
+                job.cancel.clone(),
+                job.done.clone(),
+                job.state.clone(),
+                job.lifecycle.clone(),
+            )
         };
-        let state = job.state.lock().await;
-        if state.is_terminal() {
+        let notified = done.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        let lifecycle_guard = lifecycle.lock().await;
+        let current = state.lock().await;
+        if current.is_terminal() {
             return false;
         }
-        drop(state);
-        job.cancel.cancel();
+        cancel.cancel();
+        drop(current);
+        drop(lifecycle_guard);
+        notified.await;
         true
     }
 }
 
 /// Background runner for a shell job. Reads stdout/stderr into `output`,
 /// updates `state` on exit, and notifies `done`.
-async fn run_shell_job(
-    command: &str,
-    cwd: &std::path::Path,
-    output: &Arc<tokio::sync::Mutex<String>>,
-    state: &Arc<tokio::sync::Mutex<ShellJobState>>,
-    done: &Arc<tokio::sync::Notify>,
-    cancel: &tokio_util::sync::CancellationToken,
-    output_incomplete: &Arc<AtomicBool>,
-) {
+async fn run_shell_job(job: &ShellJob, cwd: &std::path::Path) {
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::process::Command;
+    let ShellJob {
+        command,
+        output,
+        state,
+        done,
+        cancel,
+        output_incomplete,
+        ..
+    } = job;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let lifecycle = &job.lifecycle;
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let signal = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child()) {
+        Ok(signal) => signal,
+        Err(error) => {
+            *state.lock().await = ShellJobState::Failed {
+                reason: format!("failed to listen for child exit: {error}"),
+            };
+            done.notify_waiters();
+            return;
+        }
+    };
 
     let mut cmd = Command::new("sh");
     cmd.arg("-c").arg(command);
     cmd.current_dir(cwd);
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     cmd.kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
@@ -1843,38 +1884,298 @@ async fn run_shell_job(
         });
     }
 
-    let final_state = tokio::select! {
-        biased;
-        _ = cancel.cancelled() => {
-            let _ = child.kill().await;
-            ShellJobState::Cancelled
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    finish_shell_job(
+        &mut child,
+        &mut readers,
+        cancel,
+        state,
+        lifecycle,
+        output_incomplete,
+        signal,
+    )
+    .await;
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let final_state = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                #[cfg(unix)]
+                let stopped = {
+                    use nix::errno::Errno;
+                    use nix::sys::signal::{killpg, Signal};
+                    use nix::unistd::Pid;
+
+                    let group_result = child.id()
+                        .and_then(|id| i32::try_from(id).ok())
+                        .ok_or_else(|| "job process id is unavailable".to_string())
+                        .and_then(|id| match killpg(Pid::from_raw(id), Signal::SIGKILL) {
+                            Ok(()) | Err(Errno::ESRCH) => Ok(()),
+                            Err(error) => Err(format!("failed to kill job process group: {error}")),
+                        });
+                    match group_result {
+                        Ok(()) => child.wait().await.map(|_| ()).map_err(|e| format!("wait failed: {e}")),
+                        Err(error) => {
+                            if child.start_kill().is_ok() {
+                                let _ = child.wait().await;
+                            }
+                            Err(error)
+                        }
+                    }
+                };
+                #[cfg(not(unix))]
+                let stopped = child.kill().await.map_err(|e| format!("failed to kill job: {e}"));
+                match stopped {
+                    Ok(()) => ShellJobState::Cancelled,
+                    Err(reason) => ShellJobState::Failed { reason },
+                }
+            }
+            status = child.wait() => {
+                match status {
+                    Ok(s) => ShellJobState::Completed { exit_code: s.code().unwrap_or(-1) },
+                    Err(e) => ShellJobState::Failed { reason: format!("wait failed: {}", e) },
+                }
+            }
+        };
+
+        // Descendants can inherit a pipe after the shell exits. Preserve buffered
+        // output, but bound that wait so those descendants cannot retain the job.
+        let mut complete = true;
+        let drained = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while let Some(result) = readers.join_next().await {
+                complete &= matches!(result, Ok(true));
+            }
+        })
+        .await
+        .is_ok();
+        if !drained {
+            readers.abort_all();
+            while readers.join_next().await.is_some() {}
         }
-        status = child.wait() => {
-            match status {
-                Ok(s) => ShellJobState::Completed { exit_code: s.code().unwrap_or(-1) },
-                Err(e) => ShellJobState::Failed { reason: format!("wait failed: {}", e) },
+        output_incomplete.store(!drained || !complete, Ordering::Release);
+        *state.lock().await = final_state;
+    }
+
+    done.notify_waiters();
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn shell_has_exited(pid: u32) -> std::io::Result<bool> {
+    loop {
+        // WNOWAIT keeps the exited leader unreaped, so its process-group ID
+        // cannot be reused while output is draining and cancellation can fire.
+        let mut info: nix::libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            nix::libc::waitid(
+                nix::libc::P_PID,
+                pid as nix::libc::id_t,
+                &mut info,
+                nix::libc::WEXITED | nix::libc::WNOHANG | nix::libc::WNOWAIT,
+            )
+        };
+        if result == -1 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        return Ok(unsafe { info.si_pid() != 0 });
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct ShellProcessGroupGuard(Option<u32>);
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl Drop for ShellProcessGroupGuard {
+    fn drop(&mut self) {
+        use nix::sys::signal::{kill, killpg, Signal};
+        use nix::unistd::Pid;
+
+        if let Some(pid) = self.0 {
+            if let Ok(exited) = shell_has_exited(pid) {
+                if let Ok(pid) = i32::try_from(pid) {
+                    let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
+                    if !exited {
+                        let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
+                    }
+                }
             }
         }
-    };
+    }
+}
 
-    // Descendants can inherit a pipe after the shell exits. Preserve buffered
-    // output, but bound that wait so those descendants cannot retain the job.
-    let mut complete = true;
-    let drained = tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        while let Some(result) = readers.join_next().await {
-            complete &= matches!(result, Ok(true));
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn wait_for_shell_exit(
+    pid: u32,
+    mut signal: tokio::signal::unix::Signal,
+) -> std::io::Result<()> {
+    loop {
+        if shell_has_exited(pid)? {
+            return Ok(());
         }
-    })
-    .await
-    .is_ok();
+        if signal.recv().await.is_none() {
+            return Err(std::io::Error::other("SIGCHLD listener closed"));
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn finish_shell_job(
+    child: &mut tokio::process::Child,
+    readers: &mut tokio::task::JoinSet<bool>,
+    cancel: &tokio_util::sync::CancellationToken,
+    state: &tokio::sync::Mutex<ShellJobState>,
+    lifecycle: &tokio::sync::Mutex<()>,
+    output_incomplete: &AtomicBool,
+    signal: tokio::signal::unix::Signal,
+) {
+    use nix::errno::Errno;
+    use nix::sys::signal::{killpg, Signal};
+    use nix::unistd::Pid;
+
+    let Some(pid) = child.id() else {
+        output_incomplete.store(true, Ordering::Release);
+        *state.lock().await = ShellJobState::Failed {
+            reason: "job process id is unavailable".into(),
+        };
+        return;
+    };
+    let mut process_group_guard = ShellProcessGroupGuard(Some(pid));
+    let mut complete = true;
+    let mut cancelled = false;
+    let mut failure = None;
+    let mut ownership_lost = false;
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => cancelled = true,
+        result = wait_for_shell_exit(pid, signal) => {
+            if let Err(error) = result {
+                failure = Some(format!("wait failed: {error}"));
+                ownership_lost = true;
+                process_group_guard.0 = None;
+            }
+        }
+    }
+
+    let mut drained = false;
+    if !cancelled && failure.is_none() {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => cancelled = true,
+            result = drain_shell_output(readers, &mut complete) => drained = result,
+        }
+    }
+
+    // Serialize the final cancellation check with cancel_shell_job so it
+    // cannot accept a cancellation after the group has been reaped.
+    let _lifecycle_guard = lifecycle.lock().await;
+    if failure.is_none() && cancel.is_cancelled() {
+        cancelled = true;
+    }
+    let mut can_wait = !ownership_lost;
+    if (cancelled || failure.is_some()) && !ownership_lost {
+        // The Child must remain exclusively owned here, as required by Tokio's
+        // process handling. Never signal a group if the child is no longer ours.
+        match shell_has_exited(pid) {
+            Ok(exited) => {
+                let group_result = i32::try_from(pid)
+                    .map_err(|_| "invalid job process id".to_string())
+                    .and_then(|id| match killpg(Pid::from_raw(id), Signal::SIGKILL) {
+                        Ok(()) | Err(Errno::ESRCH) => Ok(()),
+                        Err(error) => Err(format!("failed to kill job process group: {error}")),
+                    });
+                if let Err(error) = group_result {
+                    failure.get_or_insert(error);
+                }
+                // The leader can leave its original group while descendants
+                // remain in it, so group signalling alone cannot stop it.
+                if !exited {
+                    if let Err(error) = child.start_kill() {
+                        match shell_has_exited(pid) {
+                            Ok(true) => {}
+                            result => {
+                                if result.is_err() {
+                                    process_group_guard.0 = None;
+                                }
+                                can_wait = false;
+                                failure
+                                    .get_or_insert(format!("failed to kill job process: {error}"));
+                            }
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                // The saved pid may no longer belong to our child.
+                process_group_guard.0 = None;
+                can_wait = false;
+                failure.get_or_insert(format!("could not verify job process: {error}"));
+            }
+        }
+    }
+
+    let status = if can_wait {
+        Some(child.wait().await)
+    } else {
+        None
+    };
+    if status.is_some() {
+        process_group_guard.0 = None;
+    }
+    if cancelled || failure.is_some() {
+        drained = drain_shell_output(readers, &mut complete).await;
+    }
     if !drained {
         readers.abort_all();
         while readers.join_next().await.is_some() {}
     }
-    output_incomplete.store(!drained || !complete, Ordering::Release);
+    let final_state = match (failure, status) {
+        (Some(reason), _) => ShellJobState::Failed { reason },
+        (None, Some(Err(error))) => ShellJobState::Failed {
+            reason: format!("wait failed: {error}"),
+        },
+        (None, Some(Ok(_))) if cancelled => ShellJobState::Cancelled,
+        (None, Some(Ok(status))) => ShellJobState::Completed {
+            exit_code: status.code().unwrap_or(-1),
+        },
+        (None, None) => unreachable!("failed signalling records an error"),
+    };
+    let incomplete = !drained || !complete;
+    output_incomplete.store(incomplete, Ordering::Release);
     *state.lock().await = final_state;
+}
 
-    done.notify_waiters();
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn drain_shell_output(readers: &mut tokio::task::JoinSet<bool>, complete: &mut bool) -> bool {
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while let Some(result) = readers.join_next().await {
+            *complete &= matches!(result, Ok(true));
+        }
+    })
+    .await
+    .is_ok()
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod shell_job_cleanup_tests {
+    #[tokio::test]
+    async fn dropping_a_job_kills_its_process_group() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let mut command = tokio::process::Command::new("sh");
+        command.args(["-c", "exec sleep 5"]).process_group(0);
+        let mut child = command.spawn().unwrap();
+        let guard = super::ShellProcessGroupGuard(Some(child.id().unwrap()));
+        drop(guard);
+        let status = tokio::time::timeout(std::time::Duration::from_secs(2), child.wait())
+            .await
+            .expect("process group was not killed")
+            .unwrap();
+        assert_eq!(status.signal(), Some(nix::libc::SIGKILL));
+    }
 }
 
 /// Build the `<available_skills>` block for the system prompt. **Moved to

@@ -154,8 +154,9 @@ impl Tool for JobCancel {
     }
 
     fn description(&self) -> &str {
-        "Cancel a running background job by killing its process. No-op if \
-         the job already finished."
+        "Cancel a running background job and wait for it to stop. On Unix, \
+         its process group is killed, including children that remain in the group. \
+         No-op if the job already finished."
     }
 
     fn schema(&self) -> &Value {

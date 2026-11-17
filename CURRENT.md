@@ -2407,3 +2407,29 @@ of an unrelated model with the same id.
 
 The catalog tests and thinking-resolution tests passed, including duplicate
 model ids with different provider levels and budget ranges.
+
+# 2026-11-16 — Cancel background shell process groups
+
+Background shell cancellation killed only the `sh` leader and reported success
+before it stopped. On Unix each job now runs in its own process group, and
+cancellation kills that group and waits for the job to reach a terminal state.
+The tool reports failures instead of emitting a false cancelled update. A child
+that explicitly creates another process group or session can still outlive the
+job; the bounded pipe drain reports incomplete output in that case.
+
+Verified real subprocess and sibling-isolation regressions, immediate and
+repeated cancellation, detached pipe handling, the `job_cancel` tool flow,
+`cargo test -p mew-agent -p mew-daemon -p mew-tools`, and `just arch-check`.
+
+### 2026-11-16: finish shell job cancellation during output drain
+
+Shell jobs on Linux and macOS keep their leader waitable through the existing
+bounded output drain, so cancellation can still stop the process group after
+the shell exits. Cancellation also stops a leader that changes groups, handles
+stopped groups, and leaves status and block timeouts responsive. If child
+ownership is lost, the job reports failure without signalling the saved ID.
+
+Verified the competing-reaper, post-exit, stopped-group, moved-leader, cleanup,
+and timeout regressions with `cargo test --locked -p mew-agent --lib` (226
+passing), `cargo clippy --locked -p mew-agent --all-targets -- -D warnings`,
+and `just arch-check` on macOS.
