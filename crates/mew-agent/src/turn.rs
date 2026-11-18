@@ -5,8 +5,8 @@ use ulid::Ulid;
 
 use mew_hooks::ChatParams;
 use mew_message::{
-    AssistantMeta, CompactionPart, ErrorKind, Message, MessageError, Part, PartBase, Role,
-    TextPart, Time, Tokens, ToolResultPart, ToolState, ToolStateError, ToolTime,
+    CompactionPart, ErrorKind, Finish, Message, MessageError, Part, PartBase, Role, TextPart, Time,
+    ToolResultPart, ToolState, ToolStateError, ToolTime,
 };
 use mew_provider::{ProviderEvent, Request, ToolDef};
 use mew_tools::tools::flag_important::FlagMode;
@@ -306,116 +306,79 @@ impl Agent {
                 .on_pre_model_turn(&req.messages, &req.system)
                 .await;
 
-            let req_for_fallback = req.clone();
-
             *self.pending_manifest.lock().unwrap() = Some(manifest);
 
-            self.mark_prompt_request_sent();
-            let mut stream = match self.provider.stream(req).await {
-                Ok(s) => s,
-                Err(e) => {
-                    // Try fallback models before giving up. Each fallback
-                    // is a "provider/model" string; the provider_builder
-                    // callback (set by the main loop) constructs a new
-                    // provider for it. If any fallback succeeds, we swap
-                    // it in as the active provider and retry the request.
-                    let mut resolved_stream: Option<_> = None;
-                    if let Some(ref fb) = self.fallback_models {
-                        if !fb.is_empty() {
-                            if let Some(ref builder) = self.provider_builder {
-                                let mut last_err = e.to_string();
-                                for model_str in fb.iter() {
-                                    tracing::warn!(
-                                        primary_error = %last_err,
-                                        fallback = %model_str,
-                                        "primary provider failed; trying fallback model"
-                                    );
-                                    let _ = ev_tx
-                                        .send(AgentEvent::Error(format!(
-                                            "provider error ({}); trying fallback: {model_str}",
-                                            last_err
-                                        )))
-                                        .await;
-                                    match (builder.0)(model_str) {
-                                        Ok(new_provider) => {
-                                            self.provider = new_provider;
-                                            match self
-                                                .provider
-                                                .stream(req_for_fallback.clone())
-                                                .await
-                                            {
-                                                Ok(s) => {
-                                                    resolved_stream = Some(s);
-                                                    break;
-                                                }
-                                                Err(e2) => {
-                                                    last_err = e2.to_string();
-                                                    tracing::warn!(
-                                                        fallback = %model_str,
-                                                        error = %last_err,
-                                                        "fallback provider also failed"
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        Err(build_err) => {
-                                            tracing::warn!(
-                                                fallback = %model_str,
-                                                error = %build_err,
-                                                "could not build fallback provider"
-                                            );
-                                            last_err = build_err;
-                                        }
-                                    }
-                                }
-                                if resolved_stream.is_none() {
-                                    let _ = ev_tx
-                                        .send(AgentEvent::Error(format!(
-                                            "all fallback models exhausted: {}",
-                                            last_err
-                                        )))
-                                        .await;
-                                    return Err(Box::<dyn std::error::Error + Send + Sync>::from(
-                                        last_err,
-                                    ));
-                                }
+            let cancel = self.cancel_token.clone();
+            let opening = async {
+                let fallback = self
+                    .fallback_models
+                    .as_ref()
+                    .filter(|models| !models.is_empty())
+                    .zip(self.provider_builder.as_ref())
+                    .map(|(models, builder)| (models, builder, req.clone()));
+                self.mark_prompt_request_sent();
+                let primary_error = match self.provider.stream(req).await {
+                    Ok(stream) => return Ok(stream),
+                    Err(error) => error,
+                };
+                let Some((models, builder, request)) = fallback else {
+                    return Err(format!("provider stream: {primary_error}"));
+                };
+
+                let mut last_error = primary_error.to_string();
+                for (index, model) in models.iter().enumerate() {
+                    tracing::warn!(error = %last_error, fallback = %model, "trying fallback provider");
+                    let _ = ev_tx
+                        .send(AgentEvent::Provider(ProviderEvent::RetryWait {
+                            attempt: index as u32 + 1,
+                            max_attempts: models.len() as u32,
+                            delay_secs: 0,
+                            reason: format!("trying fallback: {model}"),
+                        }))
+                        .await;
+                    match (builder.0)(model) {
+                        Ok(provider) => match provider.stream(request.clone()).await {
+                            Ok(stream) => {
+                                self.provider = provider;
+                                return Ok(stream);
                             }
-                        }
-                    }
-                    match resolved_stream {
-                        Some(s) => s,
-                        None => {
-                            let _ = ev_tx
-                                .send(AgentEvent::Error(format!("provider stream: {}", e)))
-                                .await;
-                            return Err(Box::new(e));
-                        }
+                            Err(error) => last_error = error.to_string(),
+                        },
+                        Err(error) => last_error = error,
                     }
                 }
+                Err(format!("all fallback models exhausted: {last_error}"))
+            };
+            let mut stream = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    let _ = ev_tx.send(AgentEvent::Error("aborted".into())).await;
+                    return Ok(());
+                }
+                result = opening => match result {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        let _ = ev_tx.send(AgentEvent::Error(error)).await;
+                        return Ok(());
+                    }
+                },
             };
 
             let mut assistant_msg: Option<Message> = None;
 
-            // Stream provider events until the stream ends or we are cancelled.
-            loop {
+            let finish = loop {
                 tokio::select! {
                     biased;
                     _ = self.cancel_token.cancelled() => {
                         if let Some(ref mut msg) = assistant_msg {
-                            let now = Utc::now().timestamp_millis();
-                            msg.time.completed = Some(now);
-                            msg.assistant = Some(AssistantMeta {
-                                provider_id: String::new(),
-                                model_id: String::new(),
-                                cost: 0.0,
-                                tokens: Tokens::default(),
-                                finish: None,
-                                error: Some(MessageError {
+                            msg.parts.retain(|part| !matches!(part, Part::ToolCall(_)));
+                            msg.time.completed = Some(Utc::now().timestamp_millis());
+                            if let Some(meta) = &mut msg.assistant {
+                                meta.error = Some(MessageError {
                                     kind: ErrorKind::Aborted,
                                     message: "aborted".into(),
-                                }),
-                                manifest: None,
-                            });
+                                });
+                            }
                             self.append_message(msg.clone()).await;
                         }
                         let _ = ev_tx.send(AgentEvent::Error("aborted".into())).await;
@@ -423,8 +386,26 @@ impl Agent {
                     }
                     ev = stream.next() => {
                         match ev {
-                            None => break,
-                            Some(ev) => {
+                            None => {
+                                let error = ProviderEvent::Error(MessageError {
+                                    kind: ErrorKind::ProviderApi,
+                                    message: "provider stream ended before completion".into(),
+                                });
+                                self.handle_provider_event(&error, &mut assistant_msg, &ev_tx).await;
+                                self.dispatcher.on_provider_event(&error).await;
+                                return Ok(());
+                            }
+                            Some(mut ev) => {
+                                if let ProviderEvent::MessageEnd { usage, cost, .. } = &mut ev {
+                                    if !cost.is_finite() || *cost <= 0.0 {
+                                        *cost = (f64::from(usage.input) * self.input_price
+                                            + f64::from(usage.output) * self.output_price
+                                            + f64::from(usage.reasoning) * self.reasoning_price
+                                            + f64::from(usage.cache_read) * self.cache_read_price
+                                            + f64::from(usage.cache_write) * self.cache_write_price)
+                                            / 1_000_000.0;
+                                    }
+                                }
                                 self.handle_provider_event(
                                     &ev,
                                     &mut assistant_msg,
@@ -450,6 +431,7 @@ impl Agent {
                                             cost,
                                         )
                                         .await;
+                                    break *finish;
                                 }
                                 if matches!(ev, ProviderEvent::Error(_)) {
                                     return Ok(());
@@ -458,9 +440,16 @@ impl Agent {
                         }
                     }
                 }
-            }
+            };
 
-            // Stream ended naturally.
+            if finish == Finish::Error {
+                let _ = ev_tx
+                    .send(AgentEvent::Error(
+                        "provider reported a failed response".into(),
+                    ))
+                    .await;
+                return Ok(());
+            }
             if assistant_msg.is_none() {
                 let _ = ev_tx
                     .send(AgentEvent::Error("no assistant message received".into()))
@@ -511,35 +500,21 @@ impl Agent {
                 }
             }
 
-            if self.cancel_token.is_cancelled() {
-                if let Some(ref mut msg) = assistant_msg {
-                    let now = Utc::now().timestamp_millis();
-                    msg.time.completed = Some(now);
-                    msg.assistant = Some(AssistantMeta {
-                        provider_id: String::new(),
-                        model_id: String::new(),
-                        cost: 0.0,
-                        tokens: Tokens::default(),
-                        finish: None,
-                        error: Some(MessageError {
-                            kind: ErrorKind::Aborted,
-                            message: "aborted".into(),
-                        }),
-                        manifest: None,
-                    });
-                    self.append_message(msg.clone()).await;
-                }
-                let _ = ev_tx.send(AgentEvent::Error("aborted".into())).await;
-                return Ok(());
-            }
-
             let msg = assistant_msg.as_ref().ok_or_else(|| {
                 Box::<dyn std::error::Error + Send + Sync>::from(
                     "assistant message missing after stream ended".to_string(),
                 )
             })?;
-            let pending = self.pending_tool_calls(msg);
+            let pending = if finish == Finish::ToolUse {
+                self.pending_tool_calls(msg)
+            } else {
+                Vec::new()
+            };
             if pending.is_empty() {
+                if self.cancel_token.is_cancelled() {
+                    let _ = ev_tx.send(AgentEvent::Error("aborted".into())).await;
+                    return Ok(());
+                }
                 let messages = self.messages.lock().await.clone();
                 self.dispatcher.on_turn_end(&messages).await;
 
@@ -683,18 +658,12 @@ impl Agent {
                 if let Some(ref mut msg) = assistant_msg {
                     let now = Utc::now().timestamp_millis();
                     msg.time.completed = Some(now);
-                    msg.assistant = Some(AssistantMeta {
-                        provider_id: String::new(),
-                        model_id: String::new(),
-                        cost: 0.0,
-                        tokens: Tokens::default(),
-                        finish: None,
-                        error: Some(MessageError {
+                    if let Some(meta) = &mut msg.assistant {
+                        meta.error = Some(MessageError {
                             kind: ErrorKind::Aborted,
                             message: "aborted".into(),
-                        }),
-                        manifest: None,
-                    });
+                        });
+                    }
                     let assistant_id = msg.id;
                     for tc in &pending {
                         let already_has_result = result_parts.iter().any(

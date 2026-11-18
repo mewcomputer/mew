@@ -1170,6 +1170,104 @@ async fn test_text_turn() {
 }
 
 #[tokio::test]
+async fn unconfirmed_tool_calls_are_discarded_and_the_partial_reply_is_saved() {
+    for finish in [None, Some(Finish::Length), Some(Finish::Error)] {
+        let directory = tempfile::tempdir().unwrap();
+        let session_id = ulid::Ulid::new();
+        let session_key = session_id.to_string();
+        let writer = mew_session::Writer::open_at(directory.path(), &session_key)
+            .await
+            .unwrap();
+        let mut script = FakeProvider::text_response("partial reply");
+        script.pop();
+        let mut tool = FakeProvider::tool_call("echo", "unconfirmed", serde_json::json!({}));
+        let mut terminal = tool.pop().unwrap();
+        script.extend(tool);
+        if let Some(finish) = finish {
+            let ProviderEvent::MessageEnd { finish: kind, .. } = &mut terminal else {
+                panic!("expected completion");
+            };
+            *kind = finish;
+            script.push(terminal);
+        }
+        let provider = Arc::new(CapturingProvider::new(vec![script]));
+        let agent = Agent::new(
+            provider.clone(),
+            Arc::new(NopDispatcher),
+            Some(writer),
+            vec![Arc::new(EchoTool {
+                schema: serde_json::json!({"type": "object"}),
+                sensitivity: Sensitivity::ReadOnly,
+            })],
+            Some(session_id),
+        );
+
+        let mut events = agent.run("call echo".into());
+        let mut terminal_error = None;
+        while let Some(event) = events.recv().await {
+            match event {
+                AgentEvent::ToolStart { .. } => panic!("unconfirmed tool executed for {finish:?}"),
+                AgentEvent::Error(error) => terminal_error = Some(error),
+                _ => {}
+            }
+        }
+        assert_eq!(provider.captured.lock().unwrap().len(), 1);
+        if finish != Some(Finish::Length) {
+            assert!(
+                terminal_error.is_some(),
+                "missing terminal error for {finish:?}"
+            );
+        }
+        let transcript = mew_session::Reader::load_from(directory.path(), &session_key)
+            .await
+            .unwrap();
+        assert_eq!(transcript.len(), 2);
+        let assistant = transcript.last().unwrap();
+        assert!(matches!(&assistant.parts[..], [Part::Text(part)] if part.text == "partial reply"));
+        if finish != Some(Finish::Length) {
+            assert!(assistant.assistant.as_ref().unwrap().error.is_some());
+        }
+    }
+}
+
+#[tokio::test]
+async fn response_usage_reports_the_same_cost_as_the_saved_message() {
+    for (reported, expected) in [(0.0, 0.000_03), (0.125, 0.125)] {
+        let mut script = FakeProvider::text_response("response");
+        let Some(ProviderEvent::MessageEnd { usage, cost, .. }) = script.last_mut() else {
+            panic!("expected completion");
+        };
+        *usage = Tokens {
+            input: 10,
+            output: 5,
+            ..Tokens::default()
+        };
+        *cost = reported;
+        let mut agent = Agent::new(
+            Arc::new(CapturingProvider::new(vec![script])),
+            Arc::new(NopDispatcher),
+            None,
+            vec![],
+            None,
+        );
+        agent.input_price = 2.0;
+        agent.output_price = 2.0;
+
+        let mut events = agent.run("hi".into());
+        let mut emitted_cost = None;
+        while let Some(event) = events.recv().await {
+            if let AgentEvent::Provider(ProviderEvent::MessageEnd { cost, .. }) = event {
+                emitted_cost = Some(cost);
+            }
+        }
+        let messages = agent.messages.lock().await;
+        let stored_cost = messages.last().unwrap().assistant.as_ref().unwrap().cost;
+        assert!((stored_cost - expected).abs() < 1e-12);
+        assert_eq!(emitted_cost, Some(stored_cost));
+    }
+}
+
+#[tokio::test]
 async fn test_tool_turn_allowed() {
     let script1 = FakeProvider::tool_call("echo", "c1", serde_json::json!({"input": "hi"}));
     let script2 = FakeProvider::text_response("done");
@@ -3800,6 +3898,58 @@ impl Provider for ErroringProvider {
 }
 
 #[tokio::test]
+async fn cancellation_interrupts_primary_and_fallback_provider_startup() {
+    #[derive(Default)]
+    struct WaitingProvider(tokio::sync::Notify);
+
+    #[async_trait]
+    impl Provider for WaitingProvider {
+        fn name(&self) -> &str {
+            "waiting"
+        }
+
+        async fn stream(&self, _req: Request) -> Result<EventStream, ProviderError> {
+            self.0.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    for fallback in [false, true] {
+        let waiting = Arc::new(WaitingProvider::default());
+        let provider: Arc<dyn Provider> = if fallback {
+            Arc::new(ErroringProvider)
+        } else {
+            waiting.clone()
+        };
+        let mut agent = Agent::new(provider, Arc::new(NopDispatcher), None, vec![], None);
+        if fallback {
+            let fallback_provider = waiting.clone();
+            agent.fallback_models = Some(vec!["test/waiting".into()]);
+            agent.set_provider_builder(Box::new(move |_| Ok(fallback_provider.clone())));
+        }
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut events = agent.run_with_parts("hello".into(), vec![], Some(cancel.clone()));
+        tokio::time::timeout(std::time::Duration::from_secs(3), waiting.0.notified())
+            .await
+            .expect("provider startup did not begin");
+        cancel.cancel();
+        let errors = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let mut errors = Vec::new();
+            while let Some(event) = events.recv().await {
+                if let AgentEvent::Error(error) = event {
+                    errors.push(error);
+                }
+            }
+            errors
+        })
+        .await
+        .expect("cancelled provider startup did not finish");
+        assert_eq!(errors, ["aborted"]);
+    }
+}
+
+#[tokio::test]
 async fn test_fallback_model_retries_on_stream_error() {
     use mew_message::SessionId;
 
@@ -3825,23 +3975,26 @@ async fn test_fallback_model_retries_on_stream_error() {
 
     let mut rx = agent.run("hello".into());
     let mut got_text = String::new();
-    let mut had_error = false;
+    let mut tried_fallback = false;
     while let Some(ev) = rx.recv().await {
         match ev {
             crate::AgentEvent::Provider(ProviderEvent::PartDelta { delta, .. }) => {
                 got_text.push_str(&delta);
             }
-            crate::AgentEvent::Error(msg) if msg.contains("trying fallback") => {
-                had_error = true;
+            AgentEvent::Provider(ProviderEvent::RetryWait { reason, .. })
+                if reason.contains("trying fallback") =>
+            {
+                tried_fallback = true;
             }
-            crate::AgentEvent::Provider(ProviderEvent::MessageEnd { .. }) => break,
-            crate::AgentEvent::Error(_) => {}
+            AgentEvent::Error(error) => {
+                panic!("successful fallback emitted a terminal error: {error}")
+            }
             _ => {}
         }
     }
     assert!(
-        had_error,
-        "should have emitted a 'trying fallback' error event"
+        tried_fallback,
+        "should have emitted a 'trying fallback' status"
     );
     assert!(
         got_text.contains("fallback response"),

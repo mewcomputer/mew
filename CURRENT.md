@@ -4032,3 +4032,16 @@ the desktop-host subprocess suite, and the actual daemon/bridge round trip.
 Also verified React production assets and the Electron support and policy
 tests. The packaged Electron guest and CEF window flows remain separate
 release checks.
+
+## 2026-11-18 Provider and child turn completion
+
+Race provider startup and fallback against cancellation. Keep fallback
+attempts visible as retry status. A provider must confirm tool use and
+complete its function arguments before tools can run. On interruption,
+save the partial reply and report failure. Send the saved response cost
+through the live event and telemetry paths.
+
+Apply the child deadline while waiting for events and during a schema retry.
+Cancel the child and allow bounded cleanup before reporting a timeout.
+Verified 212 agent tests and 98 provider adapter tests, including the
+interrupted-stream fixtures and the successful tool continuations.
