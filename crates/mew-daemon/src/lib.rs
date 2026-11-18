@@ -2052,7 +2052,7 @@ where
                             *session.is_running.lock().await = false;
                             let status = match &error {
                                 mew_agent::PromptAdmissionError::Persistence(
-                                    mew_session::SessionError::PromptCommitUnknown { .. },
+                                    mew_session::SessionError::TranscriptCommitUnknown { .. },
                                 ) => mew_protocol::PromptStatus::Unknown,
                                 _ => mew_protocol::PromptStatus::Rejected,
                             };
@@ -2421,11 +2421,13 @@ where
                     let result = {
                         let agent = session.agent.lock().await;
                         match cmd {
-                            "/clear" => {
-                                agent.clear_context().await;
-                                session.broadcast(ServerMessage::SessionCleared).await;
-                                Some("context cleared".to_string())
-                            }
+                            "/clear" => match agent.clear_context().await {
+                                Ok(()) => {
+                                    session.broadcast(ServerMessage::SessionCleared).await;
+                                    Some("context cleared".to_string())
+                                }
+                                Err(error) => Some(format!("Could not clear context. {error}")),
+                            },
                             "/compact" => {
                                 agent.force_compact().await;
                                 Some("compaction done".to_string())

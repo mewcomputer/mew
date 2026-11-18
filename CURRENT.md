@@ -4045,3 +4045,11 @@ Apply the child deadline while waiting for events and during a schema retry.
 Cancel the child and allow bounded cleanup before reporting a timeout.
 Verified 212 agent tests and 98 provider adapter tests, including the
 interrupted-stream fixtures and the successful tool continuations.
+
+## 2026-11-18 Durable context reset
+
+Commit the clear marker before resetting live model context. A failed
+transcript commit preserves the current context and returns an error.
+The TUI waits for the daemon's reset event before clearing its display.
+Verified the persistence failure and restart cases, 115 daemon tests,
+12 session tests, and all 30 TUI dispatch tests.

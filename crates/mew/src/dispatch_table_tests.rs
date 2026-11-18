@@ -391,6 +391,32 @@ async fn test_action_variant_table() {
 // -----------------------------------------------------------------------
 
 #[tokio::test]
+async fn clear_keeps_the_transcript_until_the_daemon_confirms() {
+    let mut app = mew_tui::App::new();
+    app.push_synthetic_message("existing transcript".into());
+    let existing = app.messages()[0].id;
+    let mut target = RecordingTarget::new();
+    let mut should_break = false;
+    let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
+        active_persona: None,
+    }));
+    let mut cx = runtime::Ctx {
+        app: &mut app,
+        target: &mut target,
+        should_break: &mut should_break,
+        cat: None,
+        loaded_personas: &[],
+        plugin_info: &plugin_info,
+    };
+    for action in [Action::Clear, Action::SlashCommand("/clear".into())] {
+        let _ = runtime::handle_action(&mut cx, action).await;
+        assert_eq!(cx.app.messages().len(), 1);
+        assert_eq!(cx.app.messages()[0].id, existing);
+    }
+    assert_eq!(target.calls, ["clear", "clear"]);
+}
+
+#[tokio::test]
 async fn test_synthetic_message_renders_immediately() {
     let mut app = mew_tui::App::new();
     let mut target = RecordingTarget::new();

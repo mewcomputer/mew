@@ -163,12 +163,8 @@ pub async fn handle_action<T: CommandTarget>(cx: &mut Ctx<'_, T>, action: Action
             Flow::Quit
         }
         Action::Clear => {
-            match cx.target.clear().await {
-                Ok(()) => {
-                    cx.app.clear_messages();
-                    cx.app.push_synthetic_message("context cleared".into());
-                }
-                Err(Unsupported(reason)) => cx.app.set_alert(reason),
+            if let Err(Unsupported(reason)) = cx.target.clear().await {
+                cx.app.set_alert(reason);
             }
             Flow::Continue
         }
@@ -478,12 +474,8 @@ async fn handle_slash_command<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: Strin
             Flow::Quit
         }
         SlashResult::Clear => {
-            match cx.target.clear().await {
-                Ok(()) => {
-                    cx.app.clear_messages();
-                    cx.app.push_synthetic_message("context cleared".into());
-                }
-                Err(Unsupported(reason)) => cx.app.set_alert(reason),
+            if let Err(Unsupported(reason)) = cx.target.clear().await {
+                cx.app.set_alert(reason);
             }
             Flow::Continue
         }

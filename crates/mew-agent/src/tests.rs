@@ -381,7 +381,7 @@ async fn test_clear_context_empties_messages() {
     agent.load_messages(vec![msg]).await;
     assert_eq!(agent.messages.lock().await.len(), 1);
 
-    agent.clear_context().await;
+    agent.clear_context().await.unwrap();
     assert_eq!(agent.messages.lock().await.len(), 0);
 }
 
@@ -420,7 +420,7 @@ async fn test_clear_context_preserves_permission_caches() {
         "session-allow should hit before /clear"
     );
 
-    agent.clear_context().await;
+    agent.clear_context().await.unwrap();
     assert_eq!(
         agent.messages.lock().await.len(),
         0,
@@ -446,7 +446,7 @@ async fn test_clear_context_preserves_permission_caches() {
     agent.workspace_allowances.lock().await.insert(dir.clone());
     assert!(agent.workspace_allowances.lock().await.contains(&dir));
 
-    agent.clear_context().await;
+    agent.clear_context().await.unwrap();
 
     assert!(
         agent.workspace_allowances.lock().await.contains(&dir),
@@ -469,7 +469,7 @@ async fn test_clear_context_writes_marker_to_session() {
         None,
     );
 
-    agent.clear_context().await;
+    agent.clear_context().await.unwrap();
 
     let msgs = mew_session::Reader::load_from(tmp.path(), &session_id)
         .await
@@ -503,7 +503,7 @@ async fn clear_context_stays_cleared_after_session_reload() {
     let old = context_message(Role::User, "Discard this old instruction.".into());
     let retained = context_message(Role::User, "Use the new instructions.".into());
     agent.append_message(old.clone()).await;
-    agent.clear_context().await;
+    agent.clear_context().await.unwrap();
     agent.append_message(retained.clone()).await;
 
     let history = mew_session::Reader::load_from(directory.path(), &id)
@@ -523,6 +523,69 @@ async fn clear_context_stays_cleared_after_session_reload() {
     );
     resumed.load_messages(history).await;
     assert_eq!(*resumed.messages.lock().await, vec![retained]);
+}
+
+#[tokio::test]
+async fn failed_clear_preserves_live_and_reloaded_context() {
+    let directory = tempfile::tempdir().unwrap();
+    let id = ulid::Ulid::new().to_string();
+    let writer = mew_session::Writer::open_at(directory.path(), &id)
+        .await
+        .unwrap();
+    let transcript = writer.path().clone();
+    let saved = transcript.with_extension("saved");
+    let agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        Some(writer),
+        vec![],
+        None,
+    );
+    let original = context_message(Role::User, "Keep this instruction.".into());
+    agent.append_message(original.clone()).await;
+    tokio::fs::rename(&transcript, &saved).await.unwrap();
+    tokio::fs::create_dir(&transcript).await.unwrap();
+
+    assert!(agent.clear_context().await.is_err());
+    assert_eq!(*agent.messages.lock().await, vec![original.clone()]);
+
+    tokio::fs::remove_dir(&transcript).await.unwrap();
+    tokio::fs::rename(&saved, &transcript).await.unwrap();
+    let history = mew_session::Reader::load_from(directory.path(), &id)
+        .await
+        .unwrap();
+    assert_eq!(history, vec![original]);
+}
+
+#[tokio::test]
+async fn clear_succeeds_when_the_transcript_commits_but_metadata_cannot_update() {
+    let directory = tempfile::tempdir().unwrap();
+    let id = ulid::Ulid::new().to_string();
+    let writer = mew_session::Writer::open_at(directory.path(), &id)
+        .await
+        .unwrap();
+    let metadata = writer.path().with_file_name("meta.json");
+    let agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        Some(writer),
+        vec![],
+        None,
+    );
+    let original = context_message(Role::User, "Clear this instruction.".into());
+    agent.append_message(original.clone()).await;
+    tokio::fs::remove_file(&metadata).await.unwrap();
+
+    agent.clear_context().await.unwrap();
+    assert!(agent.messages.lock().await.is_empty());
+    let history = mew_session::Reader::load_from(directory.path(), &id)
+        .await
+        .unwrap();
+    assert_eq!(history.first(), Some(&original));
+    assert!(matches!(
+        history.last().map(|message| message.parts.as_slice()),
+        Some([Part::Text(marker)]) if marker.synthetic && marker.text == crate::turn::CONTEXT_CLEARED_TEXT
+    ));
 }
 
 #[tokio::test]

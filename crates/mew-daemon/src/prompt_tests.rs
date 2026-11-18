@@ -179,3 +179,49 @@ async fn unwritable_transcript_rejects_submission_and_leaves_turn_idle() {
     assert!(session.current_turn_cancel.lock().await.is_none());
     assert!(tokio::fs::read(&saved).await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn failed_clear_reports_the_error_without_broadcasting_a_reset() {
+    let directory = tempfile::tempdir().unwrap();
+    let server = server(directory.path());
+    let session = server.session_manager.create(None).await.unwrap();
+    let mut socket = connect(&server).await;
+    attach(&mut socket, &session.id).await;
+    send(&mut socket, submit(&session.id, "before-clear")).await;
+    assert_eq!(
+        receipt(&mut socket, "before-clear").await.0,
+        mew_protocol::PromptStatus::Accepted
+    );
+    let finished = session.turn_lock.lock().await;
+    let before = session.agent.lock().await.messages.lock().await.clone();
+    drop(finished);
+    assert_eq!(before.len(), 2);
+    let path = directory.path().join(&session.id).join("session.jsonl");
+    let saved = path.with_extension("saved");
+    tokio::fs::rename(&path, &saved).await.unwrap();
+    tokio::fs::create_dir(&path).await.unwrap();
+
+    send(
+        &mut socket,
+        ClientMessage::SlashCommand {
+            command: "/clear".into(),
+        },
+    )
+    .await;
+    let (text, cleared) = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        let mut cleared = false;
+        loop {
+            let frame = socket.next().await.unwrap().unwrap().into_text().unwrap();
+            match mew_protocol::decode_json::<ServerMessage>(&frame).unwrap() {
+                ServerMessage::SlashResult { text } => break (text, cleared),
+                ServerMessage::SessionCleared => cleared = true,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(text.contains("Could not clear context"), "{text}");
+    assert!(!cleared);
+    assert_eq!(*session.agent.lock().await.messages.lock().await, before);
+}

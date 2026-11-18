@@ -20,7 +20,7 @@ pub enum SessionError {
     #[error("serialization error: {0}")]
     Serialize(#[from] serde_json::Error),
     #[error("could not confirm the transcript after a write failure: {source}; cleanup failed: {rollback}")]
-    PromptCommitUnknown {
+    TranscriptCommitUnknown {
         source: io::Error,
         rollback: io::Error,
     },
@@ -447,10 +447,19 @@ impl Writer {
         message: &Message,
         request_id: &str,
     ) -> Result<(), SessionError> {
-        let mut record = serde_json::to_vec(&StoredPrompt {
+        let record = serde_json::to_vec(&StoredPrompt {
             message,
             prompt_request_id: request_id,
         })?;
+        self.commit_record(record).await
+    }
+
+    /// Commit a context-reset marker before the agent drops its live context.
+    pub async fn write_context_marker(&mut self, marker: &Message) -> Result<(), SessionError> {
+        self.commit_record(serde_json::to_vec(marker)?).await
+    }
+
+    async fn commit_record(&mut self, mut record: Vec<u8>) -> Result<(), SessionError> {
         record.push(b'\n');
         self.file.flush().await?;
 
@@ -467,7 +476,7 @@ impl Writer {
                     .set_len(start)
                     .and_then(|()| transcript.sync_data())
                 {
-                    return Err(SessionError::PromptCommitUnknown { source, rollback });
+                    return Err(SessionError::TranscriptCommitUnknown { source, rollback });
                 }
                 return Err(source.into());
             }
@@ -477,7 +486,7 @@ impl Writer {
         .map_err(io::Error::other)??;
 
         if let Err(error) = self.touch_last_message().await {
-            tracing::warn!(%error, "could not update metadata for the saved prompt");
+            tracing::warn!(%error, "could not update metadata after a transcript commit");
         }
         Ok(())
     }

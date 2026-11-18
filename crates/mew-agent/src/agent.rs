@@ -1142,10 +1142,9 @@ impl Agent {
         *self.force_compact.lock().await = true;
     }
 
-    /// Clear the in-memory conversation context and append a clear marker to
-    /// the session log. The session file is the immutable event log and keeps
-    /// everything; only what the model sees this turn is reset. Resume
-    /// reconstructs forward from the marker.
+    /// Commit a clear marker to the session log, then reset live context.
+    /// The full transcript remains available, and resume reconstructs the
+    /// model's context from the marker.
     ///
     /// Permission caches are tied to the *session* lifetime (the JSONL log),
     /// not the *context* (what the model sees this turn), so they survive
@@ -1157,12 +1156,7 @@ impl Agent {
     /// Clearing the latter doesn't invalidate the user's prior grants
     /// within the former. Pinned by
     /// `tests::test_clear_context_preserves_permission_caches`.
-    pub async fn clear_context(&self) {
-        self.messages.lock().await.clear();
-        // Clear the classifier cache too — a fresh context should get
-        // fresh classifier decisions, not stale ones from before the clear.
-        self.clear_classifier_cache();
-
+    pub async fn clear_context(&self) -> Result<(), mew_session::SessionError> {
         if let Some(session) = &self.session {
             let now = chrono::Utc::now().timestamp_millis();
             let msg_id = Ulid::new();
@@ -1185,10 +1179,11 @@ impl Agent {
                 },
                 assistant: None,
             };
-            if let Err(e) = session.lock().await.write_message(&marker).await {
-                tracing::warn!(error = %e, "failed to write clear marker to session");
-            }
+            session.lock().await.write_context_marker(&marker).await?;
         }
+        self.messages.lock().await.clear();
+        self.clear_classifier_cache();
+        Ok(())
     }
 
     /// Resolve the configured plan path against the session working directory.
