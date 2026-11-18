@@ -14,6 +14,7 @@ const MAX_REQUEST_BYTES: usize = 16_384;
 #[serde(rename_all = "camelCase")]
 struct Bootstrap {
     daemon_url: String,
+    websocket_url: String,
     theme_mode: ThemeMode,
     light_theme: String,
     dark_theme: String,
@@ -36,10 +37,11 @@ enum ThemeMode {
 }
 
 impl Bootstrap {
-    fn load(daemon_url: String) -> Self {
+    fn load(daemon_url: String, websocket_url: String) -> Self {
         let state = mew_config::load_state().unwrap_or_default();
         Self {
             daemon_url,
+            websocket_url,
             theme_mode: match state.desktop_theme_mode.as_str() {
                 "light" => ThemeMode::Light,
                 "dark" => ThemeMode::Dark,
@@ -242,7 +244,8 @@ pub async fn run() -> Result<()> {
     .await??;
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     let app_url = format!("http://{}/", listener.local_addr()?);
-    let bootstrap = Bootstrap::load(endpoint.websocket_url);
+    let relay = mew_web_bridge::DesktopRelay::bind(endpoint.websocket_url.clone(), "mew://app")?;
+    let bootstrap = Bootstrap::load(endpoint.websocket_url, relay.url().to_owned());
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
     struct Ready<'a> {
@@ -262,6 +265,7 @@ pub async fn run() -> Result<()> {
     .await?;
     let result = tokio::select! {
         result = mew_web_bridge::serve_assets(listener) => result.context("desktop UI asset server stopped"),
+        result = relay.run() => result.context("desktop UI WebSocket relay stopped"),
         result = requests(bootstrap, output) => result,
     };
     drop(supervisor);

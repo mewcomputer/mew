@@ -49,8 +49,8 @@ async function start() {
   if (!endpoint) throw new Error('Chromium did not publish its local browser endpoint.');
 
   const appUrl = 'mew://app/';
-  const daemonUrl = support.bootstrap.daemonUrl;
-  const protectedPorts = new Set([support.appUrl, daemonUrl, endpoint].map((value) => {
+  const daemonUrl = support.bootstrap.websocketUrl;
+  const protectedPorts = new Set([support.appUrl, support.bootstrap.daemonUrl, daemonUrl, endpoint].map((value) => {
     const url = new URL(value);
     return url.port || (['https:', 'wss:'].includes(url.protocol) ? '443' : '80');
   }));
@@ -129,7 +129,7 @@ async function start() {
     { role: 'windowMenu' },
   ]));
   await window.loadURL(appUrl);
-  console.log(JSON.stringify({ host: 'electron', packaged: app.isPackaged, pid: process.pid, appUrl, daemonUrl }));
+  console.log(JSON.stringify({ host: 'electron', packaged: app.isPackaged, pid: process.pid, appUrl }));
 }
 
 start().catch((error) => {

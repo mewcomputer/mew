@@ -976,6 +976,7 @@ async fn translate_server_message(
         | ServerMessage::DaemonSettings { .. }
         | ServerMessage::DaemonSettingsFailed { .. }
         | ServerMessage::SessionOperationFailed { .. }
+        | ServerMessage::SessionDeletionResult { .. }
         | ServerMessage::AutoSummaryChanged { .. }
         | ServerMessage::ModelSwitched { .. }
         | ServerMessage::RequestResolved { .. }

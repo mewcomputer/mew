@@ -4008,3 +4008,27 @@ affected all-targets and workspace clippy, formatting, architecture and
 generated-theme checks passed with commit hooks enabled. See
 `apps/mew-electron/README.md` and the updated migration/checklist
 notes for commands, evidence boundaries and the remaining first-release work.
+
+## 2026-11-18 Session recovery and transport hardening
+
+Serialize session metadata changes and replace the metadata file atomically.
+Recover complete JSONL messages after interrupted appends. Scoped submissions
+now persist input and request identity before acknowledgement, and daemon and
+one-shot writers share a per-session ownership lock.
+
+Restore the active response prefix on attach, index transcript records for
+bounded page reads, and reserve a history slot alongside the live socket queue.
+Web and Electron reattach before enabling submission, reconcile uncertain
+receipts, load older pages, and apply deletion only on a matching confirmation.
+The browser bridge and native desktop relay enforce local origin boundaries.
+
+Budget provider requests against their assembled context and retain a bounded
+set of explicit user excerpts across compaction. Preserve the clear boundary
+on restart. Lock workspace dependencies and build embedded React assets before
+the release binary.
+
+Verified focused storage, agent, daemon, transport, and web-client suites,
+the desktop-host subprocess suite, and the actual daemon/bridge round trip.
+Also verified React production assets and the Electron support and policy
+tests. The packaged Electron guest and CEF window flows remain separate
+release checks.

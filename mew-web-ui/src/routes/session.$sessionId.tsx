@@ -19,16 +19,14 @@ export const Route = createFileRoute("/session/$sessionId")({
 function SessionRouteComponent() {
   const { sessionId } = Route.useParams();
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
-  const connected = useSessionStore((s) => s.connectionState === "connected");
+  const connected = useSessionStore((s) => s.connectionState === "connected" && s.confirmedSessionId === sessionId);
+  const current = useSessionStore((s) => s.sessionId === sessionId);
 
-  useSessionAttach(sessionId);
+  const attachError = useSessionAttach(sessionId);
   useComposerFocusShortcut(inputRef);
 
-  const handleSend = (text: string, attachments: Attachment[] = []) => {
-    const store = useSessionStore.getState();
-    store.addUserMessage(text);
-    getClient().prompt(text, attachments);
-  };
+  const handleSend = (text: string, attachments: Attachment[] = []) =>
+    getClient().submitPrompt(sessionId, text, attachments);
 
   const handleSlash = async (command: string) => {
     const result = await getClient().slashCommand(command);
@@ -38,7 +36,8 @@ function SessionRouteComponent() {
   };
 
   const handleCancel = () => {
-    getClient().cancel();
+    const client = getClient();
+    if (client.isSessionAttached(sessionId)) client.cancel();
   };
 
   const handlePermission = (
@@ -56,15 +55,15 @@ function SessionRouteComponent() {
   return (
     <ConversationLayout>
       <div className="relative flex min-h-0 flex-1 flex-col">
-        <VirtualChatSurface />
+        {current && <VirtualChatSurface />}
+        {attachError && <p role="alert" className="px-4 py-2 text-sm text-destructive">{attachError}</p>}
       </div>
       <div className="shrink-0">
-        <AskUserCard />
-        <GoalCard />
-        <InputArea ref={inputRef} onSend={handleSend} onSlash={handleSlash} onCancel={handleCancel} connected={connected} />
+        {connected && <><AskUserCard /><GoalCard /></>}
+        <InputArea ref={inputRef} onSend={handleSend} onSlash={handleSlash} onCancel={handleCancel} connected={connected} draftSessionId={sessionId} />
         <StatusFooter />
       </div>
-      <PermissionToast onResolve={handlePermission} />
+      {connected && <PermissionToast onResolve={handlePermission} />}
     </ConversationLayout>
   );
 }

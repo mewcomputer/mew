@@ -119,6 +119,7 @@ async fn confirmed_sessions_publish_persisted_todos_and_empty_new_snapshots() {
             .await
             .unwrap();
     }
+    drop(session);
     server.session_manager.remove(&id).await;
     let mut socket = connect(&server).await;
     send(
@@ -237,9 +238,23 @@ async fn effective_policy_and_todos_survive_runtime_reload() {
     assert_eq!(saved.persona.as_deref(), Some("planner"));
     assert_eq!(saved.thinking_variant, None);
     assert_eq!(saved.permission_mode, "permissive");
+    // Switch the socket away before simulating eviction of the old runtime.
+    send(
+        &mut socket,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: ClientKind::Tui,
+        },
+    )
+    .await;
+    assert!(flush(&mut socket).await.iter().any(|message| {
+        matches!(message, ServerMessage::SessionReady { session_id, .. } if session_id != &id)
+    }));
+    let previous = Arc::downgrade(&session);
+    drop(session);
     server.session_manager.remove(&id).await;
+    assert!(previous.upgrade().is_none());
     let restored = server.session_manager.attach(&id).await.unwrap();
-    assert!(!Arc::ptr_eq(&session, &restored));
     let agent = restored.agent.lock().await;
     assert_eq!(agent.model_id, "chosen");
     assert_eq!(agent.persona_name.as_deref(), Some("planner"));
@@ -333,6 +348,7 @@ async fn malformed_policy_prevents_silent_resume_with_defaults() {
     let server = policy_server(root.path().to_path_buf());
     let session = server.session_manager.create(None).await.unwrap();
     let id = session.id.clone();
+    drop(session);
     server.session_manager.remove(&id).await;
     tokio::fs::write(root.path().join(&id).join("policy.json"), b"{invalid")
         .await
@@ -476,6 +492,7 @@ async fn invalid_persisted_todos_fail_resume_visibly() {
     let server = policy_server(root.path().to_path_buf());
     let session = server.session_manager.create(None).await.unwrap();
     let id = session.id.clone();
+    drop(session);
     server.session_manager.remove(&id).await;
     tokio::fs::write(root.path().join(&id).join("todos.json"), b"{invalid")
         .await
@@ -570,7 +587,22 @@ async fn explicit_default_persona_clears_runtime_and_survives_reload() {
         }
     }
     assert_eq!(session.agent.lock().await.persona_name, None);
+    // Switch the socket away before simulating eviction of the old runtime.
+    send(
+        &mut socket,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: ClientKind::Tui,
+        },
+    )
+    .await;
+    assert!(flush(&mut socket).await.iter().any(|message| {
+        matches!(message, ServerMessage::SessionReady { session_id, .. } if session_id != &id)
+    }));
+    let previous = Arc::downgrade(&session);
+    drop(session);
     server.session_manager.remove(&id).await;
+    assert!(previous.upgrade().is_none());
     let restored = server.session_manager.attach(&id).await.unwrap();
     assert_eq!(restored.agent.lock().await.persona_name, None);
 }
@@ -637,13 +669,12 @@ async fn new_chat_defaults_survive_restart_without_changing_existing_chats() {
     );
     let created = restarted.session_manager.create(None).await.unwrap();
     assert_eq!(created.policy(&*created.agent.lock().await).await, defaults);
-    let restored = restarted
-        .session_manager
-        .attach(&original.id)
-        .await
-        .unwrap();
-    assert_eq!(restored.agent.lock().await.model_id, "initial");
     assert_eq!(original.agent.lock().await.model_id, "initial");
+    let id = original.id.clone();
+    drop(original);
+    drop(server);
+    let restored = restarted.session_manager.attach(&id).await.unwrap();
+    assert_eq!(restored.agent.lock().await.model_id, "initial");
 
     restarted
         .session_manager

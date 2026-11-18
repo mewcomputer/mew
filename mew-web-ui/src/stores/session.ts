@@ -9,6 +9,7 @@ import type {
   PermissionDecision,
   ModelInfo,
   SessionInfo,
+  SessionHistoryPage,
   Message,
   Question,
   SubagentQuestionSource,
@@ -166,10 +167,12 @@ interface SessionState {
   connectionError: string | null;
   connectionRetryToken: number;
   sessionId: string | null;
+  confirmedSessionId: string | null;
   sessionCwd: string | null;
 
   // Messages
   messages: ChatMessage[];
+  historyCursor: number | null;
   streamingPartId: string | null;
   streamingText: string;
   streamingReasoningId: string | null;
@@ -314,7 +317,7 @@ interface SessionState {
   // Shared-session actions
   setAvailableSessions: (sessions: SessionInfo[]) => void;
   setSessionsLoading: (loading: boolean) => void;
-  onSessionHistory: (messages: Message[]) => void;
+  onSessionHistory: (messages: Message[], page?: SessionHistoryPage) => void;
   onSessionCleared: () => void;
 
   // Subagent actions
@@ -353,8 +356,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   connectionError: null,
   connectionRetryToken: 0,
   sessionId: null,
+  confirmedSessionId: null,
   sessionCwd: null,
   messages: [],
+  historyCursor: null,
   streamingPartId: null,
   streamingText: "",
   streamingReasoningId: null,
@@ -982,12 +987,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   setSessionsLoading: (loading) => set({ sessionsLoading: loading }),
 
-  onSessionHistory: (messages) =>
-    set({
-      // Replace the message list with the resumed history. Map wire parts
-      // to display parts, filtering out nulls (ToolResult, empty text)
-      // and skipping messages that end up with no visible parts.
-      messages: messages
+  onSessionHistory: (messages, page) =>
+    set((state) => {
+      if (page && page.session_id !== state.sessionId) return state;
+      const history = (page?.messages ?? messages)
         .map((m) => ({
           id: m.id,
           role: m.role as "user" | "assistant" | "system",
@@ -997,18 +1000,28 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           timestamp: m.time.created,
           assistantMeta: m.assistant ?? undefined,
         }))
-        .filter((m) => m.parts.length > 0 || m.assistantMeta),
-      streamingPartId: null,
-      streamingText: "",
-      streamingReasoningId: null,
-      streamingReasoningText: "",
-      toolStates: new Map(),
-      toolOutputs: new Map(),
+        .filter((m) => m.parts.length > 0 || m.assistantMeta);
+      const historyCursor = page?.next_cursor ?? null;
+      if (page && !page.replace) {
+        const existing = new Set(state.messages.map(({ id }) => id));
+        return { historyCursor, messages: [...history.filter(({ id }) => !existing.has(id)), ...state.messages] };
+      }
+      return {
+        messages: history,
+        historyCursor,
+        streamingPartId: null,
+        streamingText: "",
+        streamingReasoningId: null,
+        streamingReasoningText: "",
+        toolStates: new Map(),
+        toolOutputs: new Map(),
+      };
     }),
 
   onSessionCleared: () =>
     set({
       messages: [],
+      historyCursor: null,
       streamingPartId: null,
       streamingText: "",
       streamingReasoningId: null,
@@ -1174,6 +1187,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   reset: () =>
     set({
       messages: [],
+      historyCursor: null,
       streamingPartId: null,
       streamingText: "",
       streamingReasoningId: null,
@@ -1215,15 +1229,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 export function bridgeClientToStore(client: MewClient) {
   const store = useSessionStore;
 
-  client.on("open", () => {
-    store.getState().setConnectionState("connected");
-    store.getState().setConnectionError(null);
-  });
-  client.on("close", () => store.getState().setConnectionState("disconnected"));
+  client.on("close", () => store.setState({ connectionState: "disconnected", confirmedSessionId: null }));
 
   client.on("session-ready", (data) => {
-    store.getState().setSessionId(data.session_id);
     useSessionStore.setState({
+      sessionId: data.session_id,
+      confirmedSessionId: data.session_id,
       sessionCwd: data.cwd ?? null,
       pendingPermissions: [],
       pendingAskUser: [],
@@ -1246,15 +1257,7 @@ export function bridgeClientToStore(client: MewClient) {
 
   client.on("provider", (ev) => store.getState().onProviderEvent(ev));
 
-  client.on("user-message", (data) => {
-    const store = useSessionStore.getState();
-    // Deduplicate: the sending client already added the message locally.
-    const last = store.messages[store.messages.length - 1];
-    if (last && last.role === "user" && last.parts.some((p) => p.type === "text" && p.text === data.text)) {
-      return;
-    }
-    store.addUserMessage(data.text);
-  });
+  client.on("user-message", ({ text }) => store.getState().addUserMessage(text));
 
   client.on("tool-start", (data) => store.getState().onToolStart(data.call_id));
   client.on("tool-end", (data) => store.getState().onToolEnd(data.call_id, data.success));
@@ -1417,7 +1420,7 @@ export function bridgeClientToStore(client: MewClient) {
     store.getState().setAvailableSessions(data.sessions);
     store.getState().setSessionsLoading(false);
   });
-  client.on("session-history", (data) => store.getState().onSessionHistory(data.messages));
+  client.on("session-history-page", (page) => store.getState().onSessionHistory(page.messages, page));
   client.on("session-cleared", () => store.getState().onSessionCleared());
   client.on("request-resolved", (data) => {
     store.getState().resolvePermission(data.request_id);

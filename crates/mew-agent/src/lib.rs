@@ -304,7 +304,7 @@ mod tools;
 mod turn;
 mod workspace;
 
-pub use agent::Agent;
+pub use agent::{AcceptedPrompt, Agent, PromptAdmissionError};
 pub use mew_subagents::SubagentOutcome;
 pub use prompt_cache::PromptCacheRetention;
 pub use reasoning_truncator::{

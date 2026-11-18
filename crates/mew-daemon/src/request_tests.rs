@@ -4,7 +4,7 @@ use tokio_tungstenite::{client_async, WebSocketStream};
 
 type TestSocket = WebSocketStream<tokio::io::DuplexStream>;
 
-fn test_server(path: PathBuf) -> DaemonServer {
+pub(super) fn test_server(path: PathBuf) -> DaemonServer {
     DaemonServer::with_session_dir(
         Arc::new(|params| {
             let agent = Agent::new(
@@ -66,7 +66,7 @@ async fn publish(
     session: &Arc<Session>,
     event: AgentEvent,
 ) -> Vec<ServerMessage> {
-    let (sender, mut receiver) = mpsc::unbounded_channel();
+    let (sender, mut receiver) = ClientSender::channel(CancellationToken::new());
     let (client_id, _) = session.attach_client(sender, ClientKind::Unknown).await;
     for message in translate_event(event, session, &server.session_manager).await {
         session.broadcast(message).await;
@@ -138,6 +138,232 @@ fn hook_call() -> mew_hooks::ToolCall {
         call_id: "write-1".into(),
         input: serde_json::json!({"path": "answer.txt", "content": "hello"}),
     }
+}
+
+#[tokio::test]
+async fn session_deletion_waits_for_other_attached_clients_to_leave() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = test_server(dir.path().to_path_buf());
+    let session = server.session_manager.create(None).await.unwrap();
+    let id = session.id.clone();
+    drop(session);
+    let mut owner = connect(&server).await;
+    let mut other = connect(&server).await;
+    for client in [&mut owner, &mut other] {
+        send(
+            client,
+            ClientMessage::AttachSession {
+                session_id: id.clone(),
+                client_kind: ClientKind::Tui,
+            },
+        )
+        .await;
+        assert!(flush(client).await.iter().any(
+            |event| matches!(event, ServerMessage::SessionReady { session_id, .. } if session_id == &id)
+        ));
+    }
+    flush(&mut owner).await;
+
+    send(
+        &mut owner,
+        ClientMessage::DeleteSessionConfirmed {
+            session_id: id.clone(),
+            request_id: "while-attached".into(),
+        },
+    )
+    .await;
+    assert!(flush(&mut owner).await.iter().any(
+        |event| matches!(event, ServerMessage::SessionDeletionResult {
+            session_id, request_id, error: Some(message)
+        } if session_id == &id && request_id == "while-attached" && message.contains("another client"))
+    ));
+    assert!(dir.path().join(&id).is_dir());
+
+    send(
+        &mut other,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: ClientKind::Tui,
+        },
+    )
+    .await;
+    assert!(flush(&mut other)
+        .await
+        .iter()
+        .any(|event| matches!(event, ServerMessage::SessionReady { .. })));
+
+    send(
+        &mut owner,
+        ClientMessage::DeleteSessionConfirmed {
+            session_id: id.clone(),
+            request_id: "after-detach".into(),
+        },
+    )
+    .await;
+    assert!(flush(&mut owner).await.iter().any(
+        |event| matches!(event, ServerMessage::SessionDeletionResult {
+            session_id, request_id, error: None
+        } if session_id == &id && request_id == "after-detach")
+    ));
+    assert!(!dir.path().join(&id).exists());
+    assert!(matches!(
+        server.session_manager.attach(&id).await,
+        Err(AttachError::NotFound)
+    ));
+}
+
+#[tokio::test]
+async fn listing_idle_session_previews_stops_after_the_first_user_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = test_server(dir.path().to_path_buf());
+    let session = server.session_manager.create(None).await.unwrap();
+    let id = session.id.clone();
+    let session_id = session.agent.lock().await.session_id;
+    let message_id = ulid::Ulid::new();
+    let message = mew_message::Message {
+        id: message_id,
+        session_id,
+        role: mew_message::Role::User,
+        parts: vec![mew_message::Part::Text(mew_message::TextPart {
+            base: mew_message::PartBase {
+                id: ulid::Ulid::new(),
+                message_id,
+                session_id,
+            },
+            text: "first user message".into(),
+            synthetic: false,
+        })],
+        time: mew_message::Time {
+            created: 0,
+            completed: None,
+        },
+        assistant: None,
+    };
+    {
+        use tokio::io::AsyncWriteExt;
+        let path = dir.path().join(&id).join("session.jsonl");
+        let mut log = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .await
+            .unwrap();
+        log.write_all(&serde_json::to_vec(&message).unwrap())
+            .await
+            .unwrap();
+        log.write_all(b"\n").await.unwrap();
+        log.write_all(&[0xff]).await.unwrap();
+        log.flush().await.unwrap();
+    }
+    server.session_manager.remove(&id).await;
+    let sessions = server.session_manager.list().await;
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(
+        sessions[0].first_message.as_deref(),
+        Some("first user message")
+    );
+}
+
+#[tokio::test]
+async fn a_paused_client_detaches_without_interrupting_a_reading_peer() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = test_server(dir.path().to_path_buf());
+    let session = server.session_manager.create(None).await.unwrap();
+    let mut paused = connect(&server).await;
+    let mut reading = connect(&server).await;
+    for client in [&mut paused, &mut reading] {
+        send(
+            client,
+            ClientMessage::AttachSession {
+                session_id: session.id.clone(),
+                client_kind: ClientKind::Tui,
+            },
+        )
+        .await;
+        flush(client).await;
+    }
+
+    let payload = "x".repeat(1024);
+    for index in 0..1500 {
+        let text = format!("{index}:{payload}");
+        session
+            .broadcast(ServerMessage::SlashResult { text: text.clone() })
+            .await;
+        let events = flush(&mut reading).await;
+        assert!(events.iter().any(
+            |event| matches!(event, ServerMessage::SlashResult { text: got } if got == &text)
+        ));
+    }
+    assert_eq!(session.client_count().await, 1);
+}
+
+#[tokio::test]
+async fn attaching_during_an_assistant_response_replays_the_visible_prefix_once() {
+    use mew_message::ProviderEventWire;
+
+    let dir = tempfile::tempdir().unwrap();
+    let server = test_server(dir.path().to_path_buf());
+    let session = server.session_manager.create(None).await.unwrap();
+    let mut script = mew_provider_fake::FakeProvider::text_response("first and second").into_iter();
+    for event in script.by_ref().take(3) {
+        session
+            .broadcast(ServerMessage::Provider {
+                event: mew_protocol::provider_event_to_wire(&event),
+            })
+            .await;
+    }
+    let mut reconnecting = connect(&server).await;
+    send(
+        &mut reconnecting,
+        ClientMessage::AttachSession {
+            session_id: session.id.clone(),
+            client_kind: ClientKind::Web,
+        },
+    )
+    .await;
+    let events = flush(&mut reconnecting).await;
+    let history = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                ServerMessage::SessionHistoryPage { replace: true, .. }
+            )
+        })
+        .unwrap();
+    let prefix: Vec<_> = events
+        .iter()
+        .skip(history + 1)
+        .filter_map(|event| match event {
+            ServerMessage::Provider { event } => Some(event),
+            _ => None,
+        })
+        .collect();
+    let [ProviderEventWire::PartStart { part }, ProviderEventWire::PartDelta { part_id, delta, .. }] =
+        prefix.as_slice()
+    else {
+        panic!("expected one start and a coalesced prefix after history, got {prefix:?}");
+    };
+    assert_eq!(part.id(), *part_id);
+    assert_eq!(delta, "first an");
+
+    for event in script {
+        session
+            .broadcast(ServerMessage::Provider {
+                event: mew_protocol::provider_event_to_wire(&event),
+            })
+            .await;
+    }
+    let suffix: String = flush(&mut reconnecting)
+        .await
+        .into_iter()
+        .filter_map(|event| match event {
+            ServerMessage::Provider {
+                event: ProviderEventWire::PartDelta { delta, .. },
+            } => Some(delta),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(suffix, "d second");
 }
 
 #[tokio::test]
@@ -340,13 +566,15 @@ async fn history_pages_preserve_messages_before_compaction_and_live_updates() {
         expected.push(live);
     }
 
+    let id = session.id.clone();
+    drop(session);
     for expected in [expected, persisted] {
         for client_kind in [ClientKind::Tui, ClientKind::Desktop] {
             let mut socket = connect(&server).await;
             send(
                 &mut socket,
                 ClientMessage::AttachSession {
-                    session_id: session.id.clone(),
+                    session_id: id.clone(),
                     client_kind,
                 },
             )
@@ -394,7 +622,7 @@ async fn history_pages_preserve_messages_before_compaction_and_live_updates() {
                 send(
                     &mut socket,
                     ClientMessage::LoadSessionHistory {
-                        session_id: session.id.clone(),
+                        session_id: id.clone(),
                         before,
                         limit: mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT,
                     },
@@ -403,9 +631,91 @@ async fn history_pages_preserve_messages_before_compaction_and_live_updates() {
             }
 
             assert_eq!(recovered, expected);
+            send(
+                &mut socket,
+                ClientMessage::NewSession {
+                    cwd: None,
+                    client_kind,
+                },
+            )
+            .await;
+            assert!(flush(&mut socket).await.iter().any(
+                |event| matches!(event, ServerMessage::SessionReady { session_id, .. } if session_id != &id)
+            ));
         }
-        server.session_manager.remove(&session.id).await;
+        server.session_manager.remove(&id).await;
     }
+}
+
+#[tokio::test]
+async fn history_snapshot_keeps_its_upper_bound_and_new_pages_pick_up_revisions() {
+    use mew_message::{Message, Role, Time};
+
+    let directory = tempfile::tempdir().unwrap();
+    let server = test_server(directory.path().to_path_buf());
+    let session = server.session_manager.create(None).await.unwrap();
+    let session_id = session.agent.lock().await.session_id;
+    let first = Message {
+        id: mew_message::MessageId::new(),
+        session_id,
+        role: Role::User,
+        parts: vec![],
+        time: Time {
+            created: 1,
+            completed: None,
+        },
+        assistant: None,
+    };
+    let latest = Message {
+        id: mew_message::MessageId::new(),
+        time: Time {
+            created: 2,
+            completed: None,
+        },
+        ..first.clone()
+    };
+    let writer = session.agent.lock().await.session.clone().unwrap();
+    {
+        let mut writer = writer.lock().await;
+        writer.write_message(&first).await.unwrap();
+        writer.write_message(&latest).await.unwrap();
+    }
+
+    let mut snapshot = session.history().await.unwrap();
+    let (page, before) = snapshot.page(usize::MAX, 1).await.unwrap();
+    assert_eq!(page, vec![latest.clone()]);
+    assert_eq!(before, Some(1));
+
+    let revised = Message {
+        time: Time {
+            completed: Some(3),
+            ..first.time.clone()
+        },
+        ..first.clone()
+    };
+    let appended = Message {
+        id: mew_message::MessageId::new(),
+        time: Time {
+            created: 4,
+            completed: None,
+        },
+        ..first.clone()
+    };
+    {
+        let mut writer = writer.lock().await;
+        writer.write_message(&revised).await.unwrap();
+        writer.write_message(&appended).await.unwrap();
+    }
+
+    assert_eq!(
+        snapshot.page(before.unwrap(), 1).await.unwrap(),
+        (vec![first], None)
+    );
+    let mut refreshed = session.history().await.unwrap();
+    assert_eq!(
+        refreshed.page(usize::MAX, 3).await.unwrap(),
+        (vec![revised, latest, appended], None)
+    );
 }
 
 #[tokio::test]
@@ -857,7 +1167,7 @@ async fn delayed_todo_events_publish_canonical_state_instead_of_old_snapshots() 
     let dir = tempfile::tempdir().unwrap();
     let server = test_server(dir.path().to_path_buf());
     let session = server.session_manager.create(None).await.unwrap();
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = ClientSender::channel(CancellationToken::new());
     session
         .attach_client(tx, mew_protocol::ClientKind::Unknown)
         .await;
@@ -1060,7 +1370,7 @@ async fn child_question_replays_and_resolves_only_its_original_channel() {
     }
 }
 
-async fn receipt(
+pub(super) async fn receipt(
     socket: &mut TestSocket,
     request: &str,
 ) -> (
@@ -1170,24 +1480,24 @@ async fn cancelling_before_the_agent_lock_is_released_prevents_provider_work() {
             },
         )
         .await;
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !*session.is_running.lock().await {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("turn must register before waiting for the agent lock");
+        send(&mut socket, ClientMessage::Cancel).await;
+        flush(&mut socket).await;
+        assert_eq!(provider.requests.load(Ordering::SeqCst), 0);
+        drop(agent);
+
         if command == "submit" {
             assert_eq!(
                 receipt(&mut socket, "cancel-before-start").await.0,
                 mew_protocol::PromptStatus::Accepted
             );
-        } else {
-            tokio::time::timeout(std::time::Duration::from_secs(3), async {
-                while !*session.is_running.lock().await {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .expect("turn must register before waiting for the agent lock");
         }
-        send(&mut socket, ClientMessage::Cancel).await;
-        flush(&mut socket).await;
-        assert_eq!(provider.requests.load(Ordering::SeqCst), 0);
-        drop(agent);
 
         let mut messages = tokio::time::timeout(std::time::Duration::from_secs(3), async {
             let mut messages = Vec::new();

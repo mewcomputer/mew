@@ -18,6 +18,7 @@ function HomeComponent() {
   const connectionError = useSessionStore((s) => s.connectionError);
   const retryConnection = useSessionStore((s) => s.retryConnection);
   const attemptedResume = useRef(false);
+  const newChatId = useRef<string | null>(null);
   const [resumeState, setResumeState] = useState<"idle" | "loading" | "failed">("idle");
 
   useEffect(() => {
@@ -31,7 +32,9 @@ function HomeComponent() {
       client
         .attachSession(prevSessionId)
         .then(() => {
-          router.navigate({ to: "/session/$sessionId", params: { sessionId: prevSessionId } });
+          if (router.state.location.pathname === "/") {
+            void router.navigate({ to: "/session/$sessionId", params: { sessionId: prevSessionId } });
+          }
         })
         .catch(() => setResumeState("failed"));
     }
@@ -39,10 +42,16 @@ function HomeComponent() {
 
   const sendNewMessage = async (text: string, attachments?: Attachment[]) => {
     const client = getClient();
-    const newId = await client.newSession();
+    if (newChatId.current === null) {
+      useSessionStore.getState().reset();
+      newChatId.current = await client.newSession();
+    }
+    const newId = newChatId.current;
+    if (!client.isSessionAttached(newId)) await client.attachSession(newId);
+    if (router.state.location.pathname !== "/") throw new Error("The selected conversation changed before sending.");
+    await client.submitPrompt(newId, text, attachments);
+    if (router.state.location.pathname !== "/") return;
     localStorage.setItem(SESSION_ID_KEY, newId);
-    useSessionStore.getState().addUserMessage(text);
-    client.prompt(text, attachments);
     await router.navigate({ to: "/session/$sessionId", params: { sessionId: newId } });
   };
 
@@ -83,7 +92,9 @@ function HomeComponent() {
           )}
         </section>
       </main>
-      <InputArea connected={connectionState === "connected" && resumeState !== "loading"} onSend={sendNewMessage} onCancel={() => getClient().cancel()} />
+      <InputArea connected={connectionState === "connected" && resumeState !== "loading"} onSend={sendNewMessage} onCancel={() => {
+        if (newChatId.current && getClient().isSessionAttached(newChatId.current)) getClient().cancel();
+      }} draftSessionId="new" />
     </ConversationLayout>
   );
 }

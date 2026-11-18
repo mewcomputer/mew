@@ -65,10 +65,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: cargo clippy
-        run: cargo clippy --all -- -D warnings
+        run: cargo clippy --locked --all -- -D warnings
 
       - name: cargo test
-        run: cargo test --all
+        run: cargo test --locked --all
 
   web-ci:
     name: Web UI + Client typecheck
@@ -105,3 +105,10 @@ jobs:
 
       - name: Web-client tests
         run: pnpm --filter @mew/web-client test
+
+      - name: React behavior tests
+        run: pnpm --filter mew-web-ui test
+
+      - name: Electron host tests
+        working-directory: apps/mew-electron
+        run: node --test package.test.cjs policy.test.cjs support.test.cjs

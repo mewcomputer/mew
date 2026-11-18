@@ -10,24 +10,26 @@ capabilities.
 ## Starting the web UI
 
 ```sh
-mew daemon --port 127.0.0.1:9847
 mew-web
 ```
 
 Then open `http://localhost:9847` in your browser. The `mew-web` bridge
 serves the built React app and relays WebSocket connections to the daemon.
+The bridge accepts browser connections from its own local origin. Use the
+bridge URL for browser chat and the daemon's loopback TCP endpoint for native clients.
 
 For development with hot reload:
 
 ```sh
-just dev-ui
+just dev-web
 ```
 
-This starts Vite with HMR and auto-spawns the daemon. Use `--open` to
+This starts Vite with HMR and the bridge, which starts a daemon when the local
+socket is idle. Use `--open` to
 launch the browser automatically:
 
 ```sh
-just dev-ui -- --open
+just dev-web --open
 ```
 
 ## What you see

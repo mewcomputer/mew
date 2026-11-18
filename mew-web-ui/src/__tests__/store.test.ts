@@ -85,7 +85,7 @@ describe("pending input recovery", () => {
     handlers.get("ask-user-request")?.({ request_id: "q", call_id: "call-q", questions: [] });
     handlers.get("goal-proposed")?.({ request_id: "g", call_id: "call-g", objective: "finish the task" });
 
-    handlers.get("session-history")?.({ messages: [] });
+    handlers.get("session-history-page")?.({ session_id: store().sessionId, messages: [], replace: false });
 
     expect(store().pendingPermissions).toHaveLength(1);
     expect(store().pendingAskUser).toHaveLength(1);
@@ -118,6 +118,66 @@ describe("connection recovery", () => {
 });
 
 describe("session-ready bridge", () => {
+  it("clears the socket's chat confirmation on close while retaining its selected chat", () => {
+    const handlers = new Map<string, (data: any) => void>();
+    const client = {
+      on: (event: string, handler: (data: any) => void) => handlers.set(event, handler),
+      off: vi.fn(),
+      listModels: vi.fn(() => Promise.resolve([])),
+      listPersonas: vi.fn(() => Promise.resolve([])),
+    } as unknown as MewClient;
+    bridgeClientToStore(client);
+    handlers.get("session-ready")?.({ session_id: "chat" });
+    expect(store().confirmedSessionId).toBe("chat");
+    handlers.get("close")?.(1006);
+    expect(store().confirmedSessionId).toBeNull();
+    expect(store().sessionId).toBe("chat");
+  });
+
+  it("adds each authoritative user message even when consecutive prompts have identical text", () => {
+    const handlers = new Map<string, (data: any) => void>();
+    bridgeClientToStore({
+      on: (event: string, handler: (data: any) => void) => handlers.set(event, handler),
+    } as unknown as MewClient);
+    useSessionStore.setState({ messages: [] });
+    handlers.get("user-message")?.({ text: "same prompt" });
+    handlers.get("user-message")?.({ text: "same prompt" });
+    expect(store().messages).toHaveLength(2);
+  });
+
+  it("prepends older history without replacing live state or accepting another chat's page", () => {
+    const handlers = new Map<string, (data: any) => void>();
+    bridgeClientToStore({
+      on: (event: string, handler: (data: any) => void) => handlers.set(event, handler),
+    } as unknown as MewClient);
+    useSessionStore.setState({ sessionId: "chat", messages: [], streamingPartId: null });
+    const message = (id: string) => ({
+      id,
+      session_id: "chat",
+      role: "user",
+      parts: [{ id: `part-${id}`, type: "text", text: id }],
+      time: { created: 0 },
+    });
+    const history = handlers.get("session-history-page");
+    history?.({
+      session_id: "chat", replace: true, messages: [message("recent")], next_cursor: 1,
+    });
+    expect(store().historyCursor).toBe(1);
+    store().addUserMessage("live prompt");
+    useSessionStore.setState({ streamingPartId: "live-response" });
+    history?.({ session_id: "other", replace: true, messages: [] });
+    history?.({
+      session_id: "chat", replace: false, messages: [message("old"), message("recent")],
+    });
+    expect(store().messages.map((entry) => entry.parts[0])).toEqual([
+      { type: "text", text: "old" },
+      { type: "text", text: "recent" },
+      { type: "text", text: "live prompt" },
+    ]);
+    expect(store().streamingPartId).toBe("live-response");
+    expect(store().historyCursor).toBeNull();
+  });
+
   it("changes persona only after the daemon confirms an explicit switch", () => {
     const handlers = new Map<string, (data: any) => void>();
     const client = {

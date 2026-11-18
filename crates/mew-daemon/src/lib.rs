@@ -57,6 +57,8 @@ mod browser_tests;
 pub mod client;
 pub mod files;
 pub mod groups;
+mod history;
+mod outbox;
 pub mod projects;
 pub mod remote;
 pub mod session;
@@ -67,6 +69,7 @@ mod workspace;
 pub mod iroh_transport;
 
 pub use client::DaemonClient;
+pub use outbox::{ClientFrames, ClientSender};
 pub use session::{AttachError, Session, SessionManager};
 
 pub(crate) fn workspace_roots() -> Vec<PathBuf> {
@@ -282,10 +285,13 @@ impl DaemonServer {
         Ok(())
     }
 
-    /// Run the daemon, listening on the given TCP address (e.g.
-    /// `127.0.0.1:9847`). Browser-based frontends connect to this. Same
-    /// per-connection semantics as `run()` over a Unix socket.
+    /// Run the native TCP transport on loopback. Browser clients connect
+    /// through a host relay that authenticates their origin and connection.
     pub async fn run_tcp(self, addr: SocketAddr) -> Result<()> {
+        anyhow::ensure!(
+            addr.ip().is_loopback(),
+            "the native daemon TCP listener requires a loopback address"
+        );
         let listener = TcpListener::bind(addr)
             .await
             .with_context(|| format!("bind tcp {addr}"))?;
@@ -328,7 +334,13 @@ impl DaemonServer {
                             let auto_summary_enabled = auto_summary_enabled.clone();
                             tokio::spawn(async move {
                                 info!(conn_id, %peer, "connection accepted (tcp)");
-                                if let Err(e) = handle_connection(stream, session_manager, groups_store, thinking_setter, auto_summary_enabled).await {
+                                let connection = async {
+                                    let socket = tokio_tungstenite::accept_hdr_async(stream, native_tcp_handshake)
+                                        .await
+                                        .context("native websocket handshake")?;
+                                    handle_websocket(socket, session_manager, groups_store, thinking_setter, auto_summary_enabled, None, None, false, None).await
+                                };
+                                if let Err(e) = connection.await {
                                     if !e.to_string().contains("connection reset") {
                                         warn!(conn_id, error = %e, "connection ended with error");
                                     }
@@ -346,6 +358,25 @@ impl DaemonServer {
         }
         Ok(())
     }
+}
+
+#[allow(clippy::result_large_err)]
+fn native_tcp_handshake(
+    request: &tungstenite::handshake::server::Request,
+    response: tungstenite::handshake::server::Response,
+) -> std::result::Result<
+    tungstenite::handshake::server::Response,
+    tungstenite::handshake::server::ErrorResponse,
+> {
+    if request
+        .headers()
+        .contains_key(tungstenite::http::header::ORIGIN)
+    {
+        let mut denied = tungstenite::handshake::server::ErrorResponse::new(None);
+        *denied.status_mut() = tungstenite::http::StatusCode::FORBIDDEN;
+        return Err(denied);
+    }
+    Ok(response)
 }
 
 // ---------------------------------------------------------------------------
@@ -371,6 +402,7 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
                 | ClientMessage::LoadSessionHistory { .. }
                 | ClientMessage::ListSessions
                 | ClientMessage::DeleteSession { .. }
+                | ClientMessage::DeleteSessionConfirmed { .. }
                 | ClientMessage::RenameSession { .. }
                 | ClientMessage::ReadAutomationSettings
                 | ClientMessage::ReadDaemonSettings { .. }
@@ -465,30 +497,6 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
         )
 }
 
-/// Select the newest messages before `before` without constructing a wire
-/// frame large enough to trip the WebSocket frame limit. The returned cursor
-/// is the index to pass for the next request.
-fn history_page(
-    messages: &[mew_message::Message],
-    before: usize,
-    limit: usize,
-) -> (Vec<mew_message::Message>, Option<usize>) {
-    let end = before.min(messages.len());
-    let limit = limit.max(1);
-    let mut start = end;
-    let mut bytes = 0usize;
-    while start > 0 && end - start < limit {
-        let message = &messages[start - 1];
-        let message_bytes = serde_json::to_vec(message).map_or(0, |encoded| encoded.len());
-        if start < end && bytes.saturating_add(message_bytes) > HISTORY_PAGE_MAX_BYTES {
-            break;
-        }
-        bytes = bytes.saturating_add(message_bytes);
-        start -= 1;
-    }
-    (messages[start..end].to_vec(), (start > 0).then_some(start))
-}
-
 async fn detach_connection_client(
     session_manager: &Arc<SessionManager>,
     session: Arc<Session>,
@@ -520,7 +528,11 @@ async fn detach_connection_client(
 /// change. This intentionally keeps the watcher dependency-free: daemon
 /// sessions can live on network filesystems where native watcher backends are
 /// not consistently available.
-async fn watch_workspace(session: Arc<Session>, root: PathBuf, cancel: CancellationToken) {
+async fn watch_workspace(
+    session: std::sync::Weak<Session>,
+    root: PathBuf,
+    cancel: CancellationToken,
+) {
     let mut previous = tokio::task::spawn_blocking({
         let root = root.clone();
         move || workspace_snapshot(&root)
@@ -542,6 +554,7 @@ async fn watch_workspace(session: Arc<Session>, root: PathBuf, cancel: Cancellat
                 let changed = changed_workspace_paths(&previous, &next);
                 previous = next;
                 if !changed.is_empty() {
+                    let Some(session) = session.upgrade() else { break; };
                     session.broadcast(ServerMessage::FsChanged { session_id: session.id.clone(), paths: changed }).await;
                 }
             }
@@ -770,7 +783,7 @@ pub async fn handle_connection_with_authorizer<S>(
     groups_store: Arc<groups::GroupsStore>,
     thinking_setter: Option<ThinkingSetter>,
     auto_summary_enabled: watch::Sender<bool>,
-    mut remote_scope: Option<RemoteScope>,
+    remote_scope: Option<RemoteScope>,
     remote_authorizer: Option<RemoteAuthorizer>,
     legacy_iroh: bool,
     remote_peer: Option<String>,
@@ -779,15 +792,42 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let ws_stream = accept_async(stream).await.context("websocket handshake")?;
+    handle_websocket(
+        ws_stream,
+        session_manager,
+        groups_store,
+        thinking_setter,
+        auto_summary_enabled,
+        remote_scope,
+        remote_authorizer,
+        legacy_iroh,
+        remote_peer,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_websocket<S>(
+    ws_stream: tokio_tungstenite::WebSocketStream<S>,
+    session_manager: Arc<SessionManager>,
+    groups_store: Arc<groups::GroupsStore>,
+    thinking_setter: Option<ThinkingSetter>,
+    auto_summary_enabled: watch::Sender<bool>,
+    mut remote_scope: Option<RemoteScope>,
+    remote_authorizer: Option<RemoteAuthorizer>,
+    legacy_iroh: bool,
+    remote_peer: Option<String>,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let (ws_tx, mut ws_rx) = ws_stream.split();
 
-    let (client_tx, mut client_rx): (
-        mpsc::UnboundedSender<ServerMessage>,
-        mpsc::UnboundedReceiver<ServerMessage>,
-    ) = mpsc::unbounded_channel();
+    let connection_lifetime = CancellationToken::new();
+    let (client_tx, ClientFrames(mut client_rx)) =
+        ClientSender::channel(connection_lifetime.clone());
     let mut attached_session: Option<Arc<Session>> = None;
     let browser_owner = ulid::Ulid::new().to_string();
-    let connection_lifetime = CancellationToken::new();
     let mut confirmed_desktop_sessions = std::collections::HashSet::new();
     let browser_pages = Arc::new(std::sync::Mutex::new(
         HashMap::<String, BrowserRegistration>::new(),
@@ -833,7 +873,12 @@ where
                             break;
                         }
                     };
-                    if send_msg(&mut ws_tx, msg).await.is_err() {
+                    if !matches!(
+                        tokio::time::timeout(outbox::WRITE_TIMEOUT, send_msg(&mut ws_tx, msg))
+                            .await,
+                        Ok(Ok(()))
+                    ) {
+                        writer_lifetime.cancel();
                         break;
                     }
                 }
@@ -1048,6 +1093,16 @@ where
                             message,
                         })
                     }
+                    ClientMessage::DeleteSessionConfirmed {
+                        session_id,
+                        request_id,
+                    } => {
+                        reply(ServerMessage::SessionDeletionResult {
+                            session_id: session_id.clone(),
+                            request_id: request_id.clone(),
+                            error: Some(message),
+                        });
+                    }
                     _ => reply(ServerMessage::Error { message }),
                 }
                 continue;
@@ -1143,16 +1198,20 @@ where
                 match session_manager.create(cwd.clone()).await {
                     Ok(session) => {
                         if let Some(group_id) = requested_group_id.as_deref() {
-                            let dir = session_manager.session_dir.clone();
-                            let agent = session.agent.lock().await;
-                            if let Some(writer) = &agent.session {
-                                let _ = writer
-                                    .lock()
-                                    .await
-                                    .set_group_id(&dir, Some(group_id.to_owned()))
-                                    .await;
+                            let group = group_id.to_owned();
+                            if let Err(e) = session_manager
+                                .update_metadata(&session.id, move |meta| {
+                                    meta.group_id = Some(group)
+                                })
+                                .await
+                            {
+                                session_failure(
+                                    mew_protocol::SessionOperation::Create,
+                                    None,
+                                    format!("failed to store session group: {e}"),
+                                );
+                                continue;
                             }
-                            drop(agent);
                             if let Err(e) = groups_store
                                 .assign_session(&session.id, Some(group_id.to_owned()))
                                 .await
@@ -1190,18 +1249,6 @@ where
                             let agent = session.agent.lock().await;
                             agent.active_thinking_variant().map(str::to_owned)
                         };
-                        // Persist cwd on the session meta.
-                        if let Some(cwd_path) = &cwd {
-                            let dir = session_manager.session_dir.clone();
-                            let agent = session.agent.lock().await;
-                            if let Some(writer) = &agent.session {
-                                let _ = writer
-                                    .lock()
-                                    .await
-                                    .set_cwd(&dir, cwd_path.to_string_lossy().into_owned())
-                                    .await;
-                            }
-                        }
                         let (cid, was_first) = session
                             .attach_client_ready(
                                 client_tx.clone(),
@@ -1298,6 +1345,9 @@ where
                             .session_cwd(&session_id)
                             .await
                             .map(|path| path.to_string_lossy().into_owned());
+                        // Register and queue history plus the in-flight prefix
+                        // before the provider can publish another delta.
+                        let provider_replay = session.provider_replay.lock().await;
                         let (cid, was_first) = session
                             .attach_client_ready(
                                 client_tx.clone(),
@@ -1340,39 +1390,37 @@ where
                             variant: thinking_variant,
                         });
 
-                        // The TUI receives the whole transcript in bounded frames.
-                        // Other clients request older pages through the cursor.
-                        match session.history().await {
-                            Ok(messages) => {
-                                let mut before = messages.len();
-                                let mut replace = true;
-                                loop {
-                                    let (page, next_cursor) = history_page(
-                                        &messages,
-                                        before,
-                                        mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT,
-                                    );
-                                    reply(ServerMessage::SessionHistoryPage {
-                                        session_id: session_id.clone(),
-                                        messages: page,
-                                        next_cursor,
-                                        replace,
-                                    });
-                                    match next_cursor {
-                                        Some(cursor) if client_kind == ClientKind::Tui => {
-                                            before = cursor;
-                                            replace = false;
-                                        }
-                                        _ => break,
-                                    }
-                                }
+                        let initial_history = async {
+                            let mut history = session.history().await?;
+                            let (messages, next_cursor) = history
+                                .page(usize::MAX, mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT)
+                                .await?;
+                            let already_in_history = provider_replay.present_in(&messages);
+                            client_tx
+                                .send_history_page(ServerMessage::SessionHistoryPage {
+                                    session_id: session_id.clone(),
+                                    messages,
+                                    next_cursor,
+                                    replace: true,
+                                })
+                                .await?;
+                            if !already_in_history {
+                                provider_replay.send(&client_tx);
                             }
+                            Ok::<_, anyhow::Error>(next_cursor.map(|cursor| (history, cursor)))
+                        }
+                        .await;
+                        let older_history = match initial_history {
+                            Ok(history) => history,
                             Err(error) => {
                                 reply(ServerMessage::Error {
                                     message: format!("failed to load session history: {error:#}"),
                                 });
+                                provider_replay.send(&client_tx);
+                                None
                             }
-                        }
+                        };
+                        drop(provider_replay);
 
                         // Replay current flagged-files set so the UI has it
                         // immediately after attach.
@@ -1435,6 +1483,45 @@ where
                         if !was_first {
                             session.notify_client_attached(cid, client_kind).await;
                         }
+
+                        // The TUI receives older pages without holding the
+                        // publication locks needed by a live turn.
+                        if let Some((mut history, mut before)) =
+                            older_history.filter(|_| client_kind == ClientKind::Tui)
+                        {
+                            loop {
+                                let (messages, next_cursor) = match history
+                                    .page(before, mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT)
+                                    .await
+                                {
+                                    Ok(page) => page,
+                                    Err(error) => {
+                                        reply(ServerMessage::Error {
+                                            message: format!(
+                                                "failed to load session history: {error:#}"
+                                            ),
+                                        });
+                                        break;
+                                    }
+                                };
+                                if client_tx
+                                    .send_history_page(ServerMessage::SessionHistoryPage {
+                                        session_id: session_id.clone(),
+                                        messages,
+                                        next_cursor,
+                                        replace: false,
+                                    })
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                                let Some(cursor) = next_cursor else {
+                                    break;
+                                };
+                                before = cursor;
+                            }
+                        }
                     }
                     Err(AttachError::NotFound) => {
                         session_failure(
@@ -1448,6 +1535,13 @@ where
                             mew_protocol::SessionOperation::Attach,
                             Some(session_id),
                             "cannot attach to subagent session".into(),
+                        );
+                    }
+                    Err(error @ AttachError::InUse) => {
+                        session_failure(
+                            mew_protocol::SessionOperation::Attach,
+                            Some(session_id),
+                            error.to_string(),
                         );
                     }
                     Err(AttachError::BuildAgent(e)) => {
@@ -1477,8 +1571,15 @@ where
                     });
                     continue;
                 }
-                let messages = match session.history().await {
-                    Ok(messages) => messages,
+                let page = async {
+                    let mut history = session.history().await?;
+                    history
+                        .page(before, limit.min(mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT))
+                        .await
+                }
+                .await;
+                let (messages, next_cursor) = match page {
+                    Ok(page) => page,
                     Err(error) => {
                         reply(ServerMessage::Error {
                             message: format!("failed to load session history: {error:#}"),
@@ -1486,17 +1587,14 @@ where
                         continue;
                     }
                 };
-                let (messages, next_cursor) = history_page(
-                    &messages,
-                    before,
-                    limit.min(mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT),
-                );
-                reply(ServerMessage::SessionHistoryPage {
-                    session_id,
-                    messages,
-                    next_cursor,
-                    replace: false,
-                });
+                let _ = client_tx
+                    .send_history_page(ServerMessage::SessionHistoryPage {
+                        session_id,
+                        messages,
+                        next_cursor,
+                        replace: false,
+                    })
+                    .await;
             }
             ClientMessage::ReadJobOutput {
                 session_id,
@@ -1569,30 +1667,45 @@ where
                 let groups = groups_store.list().await;
                 reply(ServerMessage::GroupList { groups });
             }
-            ClientMessage::DeleteSession { session_id } => {
-                confirmed_desktop_sessions.remove(&session_id);
+            ClientMessage::DeleteSession { ref session_id }
+            | ClientMessage::DeleteSessionConfirmed { ref session_id, .. } => {
+                let report = |error: Option<String>| {
+                    if let ClientMessage::DeleteSessionConfirmed { request_id, .. } = &client_msg {
+                        reply(ServerMessage::SessionDeletionResult {
+                            session_id: session_id.clone(),
+                            request_id: request_id.clone(),
+                            error,
+                        });
+                    } else if let Some(message) = error {
+                        reply(ServerMessage::Error { message });
+                    }
+                };
+                let browser_session = browser_pages
+                    .lock()
+                    .expect("browser registrations lock")
+                    .get(session_id)
+                    .map(|registration| Arc::downgrade(&registration.session));
+                if let Err(error) = session_manager
+                    .delete(
+                        session_id,
+                        attached_session.as_ref(),
+                        browser_session.as_ref(),
+                    )
+                    .await
+                {
+                    report(Some(format!("could not delete session: {error}")));
+                    continue;
+                }
+                confirmed_desktop_sessions.remove(session_id);
                 browser_pages
                     .lock()
                     .expect("browser registrations lock")
-                    .remove(&session_id);
-                // Remove from active sessions if present.
-                session_manager.remove(&session_id).await;
-                // Delete from disk.
-                let dir = session_manager.session_dir.join(&session_id);
-                if dir.exists() {
-                    match tokio::fs::remove_dir_all(&dir).await {
-                        Ok(_) => {
-                            tracing::info!(session_id = %session_id, "deleted session");
-                        }
-                        Err(e) => {
-                            tracing::warn!(session_id = %session_id, error = %e, "failed to delete session dir");
-                        }
-                    }
-                }
+                    .remove(session_id);
+                tracing::info!(session_id = %session_id, "deleted session");
                 // If the deleted session was the current one, navigate home.
                 if attached_session
                     .as_ref()
-                    .is_some_and(|session| session.id == session_id)
+                    .is_some_and(|session| session.id == *session_id)
                 {
                     if let Some(watch) = workspace_watch.take() {
                         watch.cancel();
@@ -1605,15 +1718,21 @@ where
                         previous_terminal.close();
                     }
                 }
+                report(None);
             }
             ClientMessage::RenameSession { session_id, title } => {
-                // Persist to disk for both active and idle sessions.
-                let dir = session_manager.session_dir.clone();
-                if let Ok(Some(mut meta)) = mew_session::Meta::read(&dir, &session_id).await {
-                    let _ = meta.set_custom_title(&dir, title.clone()).await;
+                let stored_title = title.clone();
+                match session_manager
+                    .update_metadata(&session_id, move |meta| {
+                        meta.custom_title = Some(stored_title)
+                    })
+                    .await
+                {
+                    Ok(_) => session_manager.broadcast_title(&session_id, title).await,
+                    Err(error) => reply(ServerMessage::Error {
+                        message: format!("could not rename session: {error}"),
+                    }),
                 }
-                // Broadcast to all clients.
-                session_manager.broadcast_title(&session_id, title).await;
             }
             ClientMessage::RegenerateTitle { session_id } => {
                 // Attach (loads from disk if idle) so we can access the
@@ -1646,14 +1765,18 @@ where
                         };
                         // Generate title via LLM (falls back to text truncation).
                         let title = generate_session_title(&agent, &prompt_text).await;
-                        // Persist the title to disk.
-                        let dir = session.session_dir.clone();
-                        if let Ok(Some(mut meta)) = mew_session::Meta::read(&dir, &session_id).await
+                        let stored_title = title.clone();
+                        match session_manager
+                            .update_metadata(&session_id, move |meta| {
+                                meta.custom_title = Some(stored_title);
+                            })
+                            .await
                         {
-                            let _ = meta.set_custom_title(&dir, title.clone()).await;
+                            Ok(_) => session_manager.broadcast_title(&session_id, title).await,
+                            Err(error) => reply(ServerMessage::Error {
+                                message: format!("could not save session title: {error}"),
+                            }),
                         }
-                        // Broadcast to all clients.
-                        session_manager.broadcast_title(&session_id, title).await;
                     }
                     Err(_) => {
                         reply(ServerMessage::Error {
@@ -1814,6 +1937,32 @@ where
                         .await
                         .get(&request_id)
                         .cloned(),
+                    None if !request_id.is_empty()
+                        && request_id.len() <= 128
+                        && std::path::Path::new(&session_id)
+                            .file_name()
+                            .is_some_and(|name| name == session_id.as_str()) =>
+                    {
+                        match mew_session::Reader::has_prompt_receipt(
+                            &session_manager.session_dir,
+                            &session_id,
+                            &request_id,
+                        )
+                        .await
+                        {
+                            Ok(true) => Some((mew_protocol::PromptStatus::Accepted, None)),
+                            Ok(false) => None,
+                            Err(mew_session::SessionError::Io(error))
+                                if error.kind() == std::io::ErrorKind::NotFound =>
+                            {
+                                None
+                            }
+                            Err(error) => {
+                                tracing::warn!(%session_id, %error, "could not read persisted prompt receipt");
+                                None
+                            }
+                        }
+                    }
                     None => None,
                 };
                 let (status, message) = receipt.unwrap_or((mew_protocol::PromptStatus::Unknown, Some("submission could not be confirmed; inspect the conversation before retrying".into())));
@@ -1885,8 +2034,44 @@ where
                         });
                         return;
                     }
-                    let _guard = guard.expect("validated turn lock");
+                    let guard = guard.expect("validated turn lock");
                     let token = register_turn(&session).await;
+                    // Attach registers and queues its history under the same lock.
+                    // A new peer sees this message in history or in the live echo.
+                    let projection = session.provider_replay.lock().await;
+                    let admitted = session
+                        .agent
+                        .lock()
+                        .await
+                        .accept_prompt(text.clone(), attachment_parts(attachments), &request_id)
+                        .await;
+                    let prompt = match admitted {
+                        Ok(prompt) => prompt,
+                        Err(error) => {
+                            *session.current_turn_cancel.lock().await = None;
+                            *session.is_running.lock().await = false;
+                            let status = match &error {
+                                mew_agent::PromptAdmissionError::Persistence(
+                                    mew_session::SessionError::PromptCommitUnknown { .. },
+                                ) => mew_protocol::PromptStatus::Unknown,
+                                _ => mew_protocol::PromptStatus::Rejected,
+                            };
+                            let message = Some(error.to_string());
+                            receipts.insert(request_id.clone(), (status, message.clone()));
+                            drop(receipts);
+                            let _ = client_tx.send(ServerMessage::PromptReceipt {
+                                session_id: session_id.clone(),
+                                request_id,
+                                status,
+                                message,
+                            });
+                            drop(projection);
+                            session_mgr
+                                .broadcast_activity(&session_id, SessionState::Idle)
+                                .await;
+                            return;
+                        }
+                    };
                     receipts.insert(
                         request_id.clone(),
                         (mew_protocol::PromptStatus::Accepted, None),
@@ -1904,13 +2089,14 @@ where
                             request_id: Some(request_id),
                         })
                         .await;
+                    drop(projection);
                     finish_prompt_turn(
                         &session,
                         &session_mgr,
                         text,
-                        attachments,
+                        PromptTurn::Accepted(prompt),
                         auto_title_enabled,
-                        _guard,
+                        guard,
                         token,
                     )
                     .await;
@@ -1946,8 +2132,8 @@ where
                     finish_prompt_turn(
                         &session,
                         &session_mgr,
-                        text,
-                        attachments,
+                        text.clone(),
+                        PromptTurn::New { text, attachments },
                         auto_title_enabled,
                         _guard,
                         token,
@@ -2326,8 +2512,10 @@ where
                                     &session,
                                     &session_manager_clone,
                                     &wiki_agent,
-                                    wiki_prompt.to_string(),
-                                    vec![],
+                                    PromptTurn::New {
+                                        text: wiki_prompt.to_string(),
+                                        attachments: Vec::new(),
+                                    },
                                     token.clone(),
                                 )
                                 .await;
@@ -2554,18 +2742,34 @@ where
                         if let Ok(entries) = tokio::fs::read_dir(&dir).await {
                             let mut entries = entries;
                             while let Ok(Some(entry)) = entries.next_entry().await {
-                                if let Some(id) = entry.file_name().to_str() {
-                                    if let Ok(Some(mut meta)) =
-                                        mew_session::Meta::read(&dir, id).await
-                                    {
-                                        if meta.group_id.as_deref() == Some(&group_id) {
-                                            let _ = meta.set_group_id(&dir, None).await;
-                                            ungrouped_sessions.push((
-                                                id.to_owned(),
-                                                meta.archived,
-                                                meta.pinned,
-                                            ));
+                                let name = entry.file_name();
+                                let Some(id) = name.to_str() else {
+                                    continue;
+                                };
+                                if !matches!(mew_session::Meta::read(&dir, id).await,
+                                    Ok(Some(meta)) if meta.group_id.as_deref() == Some(&group_id)
+                                ) {
+                                    continue;
+                                }
+                                let removed_group = group_id.clone();
+                                match session_manager
+                                    .update_metadata(id, move |meta| {
+                                        if meta.group_id.as_deref() == Some(&removed_group) {
+                                            meta.group_id = None;
                                         }
+                                    })
+                                    .await
+                                {
+                                    Ok(meta) if meta.group_id.is_none() => {
+                                        ungrouped_sessions.push((
+                                            id.to_owned(),
+                                            meta.archived,
+                                            meta.pinned,
+                                        ));
+                                    }
+                                    Ok(_) => {}
+                                    Err(error) => {
+                                        tracing::warn!(session_id = id, %error, "could not clear deleted group")
                                     }
                                 }
                             }
@@ -2594,25 +2798,28 @@ where
                 group_id,
                 position: _,
             } => {
-                let dir = session_manager.session_dir.clone();
-                let mut meta_group_id = None;
-                let mut meta_archived = false;
-                let mut meta_pinned = false;
-                if let Ok(Some(mut meta)) = mew_session::Meta::read(&dir, &session_id).await {
-                    let _ = meta.set_group_id(&dir, group_id.clone()).await;
-                    meta_group_id = meta.group_id.clone();
-                    meta_archived = meta.archived;
-                    meta_pinned = meta.pinned;
-                }
+                let stored_group = group_id.clone();
+                let meta = match session_manager
+                    .update_metadata(&session_id, move |meta| meta.group_id = stored_group)
+                    .await
+                {
+                    Ok(meta) => meta,
+                    Err(error) => {
+                        reply(ServerMessage::Error {
+                            message: format!("failed to save session group: {error}"),
+                        });
+                        continue;
+                    }
+                };
                 match groups_store.assign_session(&session_id, group_id).await {
                     Ok(groups) => {
                         session_manager.broadcast_groups(groups).await;
                         session_manager
                             .broadcast_all(ServerMessage::SessionMetaChanged {
-                                session_id: session_id.clone(),
-                                archived: meta_archived,
-                                pinned: meta_pinned,
-                                group_id: meta_group_id,
+                                session_id,
+                                archived: meta.archived,
+                                pinned: meta.pinned,
+                                group_id: meta.group_id,
                             })
                             .await;
                     }
@@ -2623,46 +2830,42 @@ where
                     }
                 }
             }
-            ClientMessage::ArchiveSession {
-                session_id,
-                archived,
-            } => {
-                let dir = session_manager.session_dir.clone();
-                let mut meta_group_id = None;
-                let mut meta_pinned = false;
-                if let Ok(Some(mut meta)) = mew_session::Meta::read(&dir, &session_id).await {
-                    meta_group_id = meta.group_id.clone();
-                    if meta.set_archived(&dir, archived).await.is_ok() {
-                        meta_pinned = meta.pinned;
-                    }
-                }
-                session_manager
-                    .broadcast_all(ServerMessage::SessionMetaChanged {
-                        session_id: session_id.clone(),
+            message @ (ClientMessage::ArchiveSession { .. } | ClientMessage::PinSession { .. }) => {
+                let (session_id, archived, pinned) = match message {
+                    ClientMessage::ArchiveSession {
+                        session_id,
                         archived,
-                        pinned: meta_pinned,
-                        group_id: meta_group_id,
-                    })
-                    .await;
-            }
-            ClientMessage::PinSession { session_id, pinned } => {
-                let dir = session_manager.session_dir.clone();
-                let mut meta_group_id = None;
-                let mut meta_archived = false;
-                if let Ok(Some(mut meta)) = mew_session::Meta::read(&dir, &session_id).await {
-                    meta_group_id = meta.group_id.clone();
-                    if meta.set_pinned(&dir, pinned).await.is_ok() {
-                        meta_archived = meta.archived;
+                    } => (session_id, Some(archived), None),
+                    ClientMessage::PinSession { session_id, pinned } => {
+                        (session_id, None, Some(pinned))
                     }
-                }
-                session_manager
-                    .broadcast_all(ServerMessage::SessionMetaChanged {
-                        session_id: session_id.clone(),
-                        archived: meta_archived,
-                        pinned,
-                        group_id: meta_group_id,
+                    _ => unreachable!(),
+                };
+                match session_manager
+                    .update_metadata(&session_id, move |meta| {
+                        if let Some(archived) = archived {
+                            meta.archived = archived;
+                        }
+                        if let Some(pinned) = pinned {
+                            meta.pinned = pinned;
+                        }
                     })
-                    .await;
+                    .await
+                {
+                    Ok(meta) => {
+                        session_manager
+                            .broadcast_all(ServerMessage::SessionMetaChanged {
+                                session_id,
+                                archived: meta.archived,
+                                pinned: meta.pinned,
+                                group_id: meta.group_id,
+                            })
+                            .await
+                    }
+                    Err(error) => reply(ServerMessage::Error {
+                        message: format!("could not update session metadata: {error}"),
+                    }),
+                }
             }
 
             // -- Phase 3: File service --
@@ -2800,7 +3003,7 @@ where
                     };
                     let cancel = CancellationToken::new();
                     let task_cancel = cancel.clone();
-                    tokio::spawn(watch_workspace(session, root, task_cancel));
+                    tokio::spawn(watch_workspace(Arc::downgrade(&session), root, task_cancel));
                     workspace_watch = Some(cancel);
                 }
             }
@@ -3182,27 +3385,26 @@ async fn register_turn(session: &Session) -> CancellationToken {
     token
 }
 
+enum PromptTurn {
+    New {
+        text: String,
+        attachments: Vec<mew_protocol::Attachment>,
+    },
+    Accepted(mew_agent::AcceptedPrompt),
+}
+
 /// Complete the serialized turn before generating its optional title.
 async fn finish_prompt_turn(
     session: &Arc<Session>,
     session_mgr: &Arc<SessionManager>,
-    text: String,
-    attachments: Vec<mew_protocol::Attachment>,
+    prompt_text: String,
+    prompt: PromptTurn,
     auto_title: bool,
     guard: tokio::sync::MutexGuard<'_, ()>,
     token: CancellationToken,
 ) {
     let agent = session.agent.lock().await.clone();
-    let prompt_text = text.clone();
-    let had_error = run_turn(
-        session,
-        session_mgr,
-        &agent,
-        text,
-        attachments,
-        token.clone(),
-    )
-    .await;
+    let had_error = run_turn(session, session_mgr, &agent, prompt, token.clone()).await;
     drop(guard);
 
     // Generate a session title from the first user message
@@ -3221,16 +3423,42 @@ async fn finish_prompt_turn(
             drop(generated);
 
             let title = generate_session_title(&agent, &prompt_text).await;
-            if let Ok(Some(mut meta)) =
-                mew_session::Meta::read(&session.session_dir, &session.id).await
+            match session_mgr
+                .update_metadata(&session.id, move |meta| {
+                    meta.custom_title.get_or_insert(title);
+                })
+                .await
             {
-                let _ = meta
-                    .set_custom_title(&session.session_dir, title.clone())
-                    .await;
+                Ok(meta) => {
+                    if let Some(title) = meta.custom_title {
+                        session_mgr.broadcast_title(&session.id, title).await;
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(session_id = %session.id, %error, "could not save automatic title")
+                }
             }
-            session_mgr.broadcast_title(&session.id, title).await;
         }
     }
+}
+
+fn attachment_parts(attachments: Vec<mew_protocol::Attachment>) -> Vec<mew_message::Part> {
+    attachments
+        .into_iter()
+        .map(|attachment| {
+            let filename = attachment.path.rsplit('/').next().map(str::to_owned);
+            mew_message::Part::File(mew_message::FilePart {
+                base: mew_message::PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: ulid::Ulid::new(),
+                    session_id: ulid::Ulid::new(),
+                },
+                mime: attachment.mime.unwrap_or_default(),
+                filename,
+                url: attachment.path,
+            })
+        })
+        .collect()
 }
 
 /// Run and persist a turn, then publish its idle state and outcome.
@@ -3238,57 +3466,38 @@ async fn run_turn(
     session: &Arc<Session>,
     session_mgr: &Arc<SessionManager>,
     agent: &Agent,
-    prompt_text: String,
-    attachments: Vec<mew_protocol::Attachment>,
+    prompt: PromptTurn,
     token: CancellationToken,
 ) -> bool {
     session_mgr
         .broadcast_activity(&session.id, SessionState::Running)
         .await;
 
-    // Convert wire attachments to message Parts.
-    let parts: Vec<mew_message::Part> = attachments
-        .iter()
-        .map(|a| {
-            let filename = a.path.rsplit('/').next().map(|s| s.to_string());
-            mew_message::Part::File(mew_message::FilePart {
-                base: mew_message::PartBase {
-                    id: ulid::Ulid::new(),
-                    message_id: ulid::Ulid::new(),
-                    session_id: ulid::Ulid::new(),
-                },
-                mime: a.mime.clone().unwrap_or_default(),
-                filename,
-                url: a.path.clone(),
-            })
-        })
-        .collect();
-
-    let rx = agent.run_with_parts(prompt_text, parts, Some(token));
+    let rx = match prompt {
+        PromptTurn::New { text, attachments } => {
+            agent.run_with_parts(text, attachment_parts(attachments), Some(token))
+        }
+        PromptTurn::Accepted(prompt) => agent.run_accepted_prompt(prompt, token),
+    };
     let had_error = forward_events(rx, session.clone(), session_mgr.clone()).await;
 
     *session.current_turn_cancel.lock().await = None;
     *session.is_running.lock().await = false;
 
-    // Update last_turn_failed + increment turn count. Meta is read from
-    // disk: the MessageEnd intercepts persist usage and context occupancy
-    // there, while the agent's writer keeps a stale in-memory copy.
-    let dir = session_mgr.session_dir.clone();
-    let (usage_wire, context_tokens) = match mew_session::Meta::read(&dir, &session.id).await {
-        Ok(Some(mut meta)) => {
-            let _ = meta.set_last_turn_failed(&dir, had_error).await;
-            let context_tokens = meta.context_tokens;
-            let wire = if let Some(u) = meta.usage.as_mut() {
-                u.add_turn();
-                let wire = mew_protocol::SessionUsageWire::from(&*u);
-                let _ = meta.set_usage(&dir, wire.clone().into()).await;
-                Some(wire)
-            } else {
-                None
-            };
-            (wire, context_tokens)
+    let (usage_wire, context_tokens) = match session_mgr
+        .update_metadata(&session.id, move |meta| {
+            meta.last_turn_failed = had_error;
+            if let Some(usage) = meta.usage.as_mut() {
+                usage.add_turn();
+            }
+        })
+        .await
+    {
+        Ok(meta) => (meta.usage.as_ref().map(Into::into), meta.context_tokens),
+        Err(error) => {
+            tracing::warn!(session_id = %session.id, %error, "could not save turn metadata");
+            (None, None)
         }
-        _ => (None, None),
     };
 
     // Broadcast idle state.
@@ -3297,11 +3506,11 @@ async fn run_turn(
         .await;
 
     // Broadcast usage (only if we have data).
-    if let Some(u) = &usage_wire {
+    if let Some(usage) = usage_wire {
         session_mgr
             .broadcast_all(ServerMessage::SessionUsageChanged {
                 session_id: session.id.clone(),
-                usage: u.clone(),
+                usage,
                 context_tokens,
             })
             .await;
@@ -3348,6 +3557,7 @@ async fn forward_events(
             }
         }
     }
+    session.provider_replay.lock().await.clear();
     had_error
 }
 
@@ -3634,15 +3844,23 @@ async fn idle_summary_task(
                     .summary_running
                     .store(false, std::sync::atomic::Ordering::Release);
                 if let Some(summary) = summary {
-                    if let Ok(Some(mut meta)) = mew_session::Meta::read(&dir, &id_clone).await {
-                        let _ = meta.set_summary(&dir, summary.clone()).await;
+                    let stored_summary = summary.clone();
+                    match manager
+                        .update_metadata(&id_clone, move |meta| meta.summary = Some(stored_summary))
+                        .await
+                    {
+                        Ok(_) => {
+                            manager
+                                .broadcast_all(mew_protocol::ServerMessage::SessionSummaryChanged {
+                                    session_id: id_clone,
+                                    summary,
+                                })
+                                .await
+                        }
+                        Err(error) => {
+                            tracing::warn!(session_id = %id_clone, %error, "could not save automatic summary")
+                        }
                     }
-                    manager
-                        .broadcast_all(mew_protocol::ServerMessage::SessionSummaryChanged {
-                            session_id: id_clone.clone(),
-                            summary,
-                        })
-                        .await;
                 }
             });
         }
@@ -3888,32 +4106,27 @@ async fn translate_event(
         AgentEvent::Provider(pe) => {
             // Intercept MessageEnd to accumulate usage on Meta and extract manifest.
             if let mew_provider::ProviderEvent::MessageEnd { usage, cost, .. } = &pe {
-                let dir = session.session_dir.clone();
-
-                // Phase 1: accumulate usage on session meta while holding agent lock.
-                {
-                    let agent = session.agent.lock().await;
-                    if let Some(mut meta) = agent.session_meta().await {
-                        let u = meta
-                            .usage
-                            .get_or_insert_with(mew_session::SessionUsage::default);
-                        u.add_message(
-                            usage.input as u64,
-                            usage.output as u64,
-                            usage.cache_read as u64,
-                            usage.cache_write as u64,
-                            *cost,
-                        );
-                        // The request's prompt size is the session's current
-                        // context occupancy. Zero usage marks a provider that
-                        // reported nothing; keep the last real reading.
+                let (usage, cost) = (*usage, *cost);
+                if let Err(error) = session_mgr
+                    .update_metadata(&session.id, move |meta| {
+                        meta.usage
+                            .get_or_insert_with(mew_session::SessionUsage::default)
+                            .add_message(
+                                usage.input as u64,
+                                usage.output as u64,
+                                usage.cache_read as u64,
+                                usage.cache_write as u64,
+                                cost,
+                            );
+                        // Keep the last real context reading if the provider did
+                        // not report prompt usage on this response.
                         if usage.input > 0 {
                             meta.context_tokens = Some(usage.input as u64);
                         }
-                        let usage_clone = u.clone();
-                        let _ = meta.set_usage(&dir, usage_clone).await;
-                    }
-                    // agent guard dropped here — do NOT hold it across messages lock.
+                    })
+                    .await
+                {
+                    tracing::warn!(session_id = %session.id, %error, "could not save provider usage");
                 }
 
                 // Phase 2: extract manifest from the last *assistant* message.
@@ -4128,28 +4341,30 @@ async fn translate_event(
             added,
             removed,
         } => {
-            let dir = session.session_dir.clone();
-            let session_id = session.id.clone();
-            let (total_added, total_removed, files_changed) = {
-                let agent = session.agent.lock().await;
-                if let Some(mut meta) = agent.session_meta().await {
-                    let _ = meta.apply_file_delta(&dir, &path, added, removed).await;
-                    let stats = meta.change_stats.as_ref();
-                    (
-                        stats.map(|s| s.added).unwrap_or(0),
-                        stats.map(|s| s.removed).unwrap_or(0),
-                        stats.map(|s| s.files.len() as u64).unwrap_or(0),
-                    )
-                } else {
-                    (0u64, 0u64, 0u64)
+            match session_mgr
+                .update_metadata(&session.id, move |meta| {
+                    meta.change_stats
+                        .get_or_insert_with(mew_session::ChangeStats::default)
+                        .apply_delta(&path, added, removed);
+                })
+                .await
+            {
+                Ok(meta) => {
+                    let stats = meta
+                        .change_stats
+                        .expect("file delta initialized change stats");
+                    vec![ServerMessage::SessionStatsChanged {
+                        session_id: session.id.clone(),
+                        added: stats.added,
+                        removed: stats.removed,
+                        files_changed: stats.files.len() as u64,
+                    }]
                 }
-            };
-            vec![ServerMessage::SessionStatsChanged {
-                session_id,
-                added: total_added,
-                removed: total_removed,
-                files_changed,
-            }]
+                Err(error) => {
+                    tracing::warn!(session_id = %session.id, %error, "could not save file changes");
+                    Vec::new()
+                }
+            }
         }
         AgentEvent::FlaggedFilesChanged { files } => {
             let wire_files: Vec<mew_protocol::FlaggedFileWire> = files
@@ -4192,9 +4407,12 @@ async fn translate_event(
 
 async fn send_msg<S: AsyncRead + AsyncWrite + Unpin + Send>(
     ws_tx: &mut WsSink<S>,
-    msg: ServerMessage,
+    msg: outbox::ClientFrame,
 ) -> Result<()> {
-    let json = mew_protocol::encode_json(&msg)?;
+    let outbox::ClientFrame {
+        json,
+        budget: _budget,
+    } = msg;
     ws_tx.send(Message::Text(json)).await?;
     Ok(())
 }
@@ -4207,6 +4425,12 @@ mod review_tests;
 
 #[cfg(test)]
 mod policy_tests;
+
+#[cfg(test)]
+mod meta_tests;
+
+#[cfg(test)]
+mod prompt_tests;
 
 #[cfg(test)]
 mod tests {
@@ -4226,16 +4450,22 @@ mod tests {
         }
     }
 
-    #[test]
-    fn history_page_reads_backwards_and_returns_a_cursor() {
+    #[tokio::test]
+    async fn history_page_reads_backwards_and_returns_a_cursor() {
         let messages = (0..5).map(test_message).collect::<Vec<_>>();
-        let (page, cursor) = history_page(&messages, messages.len(), 2);
+        let mut history = history::HistorySnapshot::new(
+            None,
+            Arc::default(),
+            Arc::new(tokio::sync::Mutex::new(messages)),
+        )
+        .await;
+        let (page, cursor) = history.page(usize::MAX, 2).await.unwrap();
         assert_eq!(page.len(), 2);
         assert_eq!(page[0].time.created, 3);
         assert_eq!(page[1].time.created, 4);
         assert_eq!(cursor, Some(3));
 
-        let (older, cursor) = history_page(&messages, cursor.unwrap(), 2);
+        let (older, cursor) = history.page(cursor.unwrap(), 2).await.unwrap();
         assert_eq!(older.len(), 2);
         assert_eq!(older[0].time.created, 1);
         assert_eq!(older[1].time.created, 2);

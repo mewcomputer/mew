@@ -5,7 +5,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { getClient } from "@/lib/client";
 import { routerRef } from "@/lib/router-ref";
 import { useSessionStore } from "@/stores/session";
-import { useMewConnection, useSessionNavigation } from "@/lib/hooks";
+import { useMewConnection } from "@/lib/hooks";
 import { MobileNav } from "@/components/mobile-nav";
 import { ConnectionBanner } from "@/components/connection-banner";
 import { WorkspaceFrame } from "@/components/workspace-frame";
@@ -17,7 +17,6 @@ export const Route = createRootRoute({
 function RootComponent() {
   const router = useRouter();
   useMewConnection();
-  useSessionNavigation();
   const [paletteOpen, setPaletteOpen] = useState(false);
 
   // Populate the module-level router ref for non-React navigation.

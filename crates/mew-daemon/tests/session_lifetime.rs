@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use mew_agent::Agent;
-use mew_daemon::{DaemonServer, Session};
+use mew_daemon::{ClientSender, DaemonServer, Session};
 use mew_hooks::NopDispatcher;
 use mew_protocol::{ClientKind, ClientMessage, ServerMessage, SessionState};
 use mew_provider_fake::FakeProvider;
@@ -362,7 +362,7 @@ async fn session_lookup_protects_attachment_before_client_registration() {
         Arc::ptr_eq(&attaching, &current),
         "client lookup must not return an orphaned runtime"
     );
-    let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (sender, _receiver) = ClientSender::channel(Default::default());
     let (client_id, _) = attaching.attach_client(sender, ClientKind::Desktop).await;
     assert_eq!(attaching.client_count().await, 1);
     attaching.detach_client(client_id).await;

@@ -4,12 +4,17 @@ import { useSessionStore } from "../stores/session";
 import { MessageItem } from "./message-item";
 import { ErrorBoundary } from "./error-boundary";
 import { ChatSurface } from "./chat-surface";
+import { getClient } from "../lib/client";
+import { Button } from "./ui/button";
 
 /** Virtualized chat surface using TanStack Virtual's end-anchoring pattern.
  *  See: https://github.com/tanstack/virtual/blob/main/docs/chat.md */
 export function VirtualChatSurface() {
   const messages = useSessionStore((s) => s.messages);
   const sessionId = useSessionStore((s) => s.sessionId);
+  const attached = useSessionStore((s) => s.connectionState === "connected" && s.confirmedSessionId === s.sessionId);
+  const historyCursor = useSessionStore((s) => s.historyCursor);
+  const [loadingCursor, setLoadingCursor] = useState<number | null>(null);
   const parentRef = useRef<HTMLDivElement>(null);
   const [didInitialScroll, setDidInitialScroll] = useState(false);
 
@@ -38,11 +43,29 @@ export function VirtualChatSurface() {
     setDidInitialScroll(false);
   }, [sessionId]);
 
-  if (messages.length === 0) {
-    return <ChatSurface />;
+  useEffect(() => {
+    if (loadingCursor === null) return;
+    if (!attached || loadingCursor !== historyCursor) {
+      setLoadingCursor(null);
+      return;
+    }
+    const timeout = setTimeout(() => setLoadingCursor(null), 10000);
+    return () => clearTimeout(timeout);
+  }, [attached, historyCursor, loadingCursor, sessionId]);
+
+  function loadEarlier() {
+    if (!sessionId || !attached || historyCursor === null || loadingCursor !== null) return;
+    const client = getClient();
+    if (!client.isSessionAttached(sessionId)) return;
+    try {
+      client.loadSessionHistory(sessionId, historyCursor);
+      setLoadingCursor(historyCursor);
+    } catch (error) {
+      useSessionStore.getState().onError(error instanceof Error ? error.message : "Could not load earlier messages.");
+    }
   }
 
-  return (
+  const transcript = messages.length === 0 ? <ChatSurface /> : (
     <div
       ref={parentRef}
       className="chat-scroll-container min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-4 pb-6 pt-6 sm:px-6"
@@ -90,5 +113,17 @@ export function VirtualChatSurface() {
         })}
       </div>
     </div>
+  );
+  return (
+    <>
+      {historyCursor !== null && (
+        <div className="flex shrink-0 justify-center px-4 pt-2">
+          <Button onClick={loadEarlier} disabled={!attached || loadingCursor !== null} variant="ghost" size="sm">
+            {loadingCursor !== null ? "Loading earlier messages…" : "Load earlier messages"}
+          </Button>
+        </div>
+      )}
+      {transcript}
+    </>
   );
 }

@@ -9,6 +9,7 @@ export interface HostTheme {
 export interface HostBootstrap {
   browserMode?: "electron";
   daemonUrl: string;
+  websocketUrl?: string;
   themeMode: "system" | "light" | "dark";
   lightTheme: string;
   darkTheme: string;
@@ -81,11 +82,12 @@ export function initializeHost(): Promise<void> {
   if (typeof window === "undefined") return Promise.resolve();
   initialization = isDesktopHost()
     ? hostRequest<HostBootstrap>({ type: "bootstrap" }).then((result) => {
-        if (!/^wss?:\/\//.test(result.daemonUrl) || !Array.isArray(result.themes)) {
+        const endpoint = result.websocketUrl ?? result.daemonUrl;
+        if (!/^wss?:\/\//.test(endpoint) || !Array.isArray(result.themes)) {
           throw new Error("The native host returned invalid startup settings.");
         }
         bootstrap = result;
-        websocketUrl = result.daemonUrl;
+        websocketUrl = endpoint;
         unsubscribeHostEvents = window.mewListen?.((event) => {
           if (event.type === "browser") window.dispatchEvent(new CustomEvent("mew:browser-event", { detail: event.detail }));
           if (event.type === "menu") window.dispatchEvent(new CustomEvent("mew:menu-action", { detail: event.detail }));

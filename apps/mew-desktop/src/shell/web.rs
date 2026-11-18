@@ -11,6 +11,7 @@ use commands::*;
 #[serde(rename_all = "camelCase")]
 struct Bootstrap {
     daemon_url: String,
+    websocket_url: String,
     #[serde(flatten)]
     preferences: ThemePreferences,
     themes: Vec<HostTheme>,
@@ -28,7 +29,7 @@ struct HostTheme {
 }
 
 impl Bootstrap {
-    fn load(daemon_url: String) -> Self {
+    fn load(daemon_url: String, websocket_url: String) -> Self {
         let state = mew_config::load_state().unwrap_or_default();
         let themes = Theme::list_available()
             .into_iter()
@@ -49,6 +50,7 @@ impl Bootstrap {
             .collect();
         Self {
             daemon_url,
+            websocket_url,
             preferences: ThemePreferences {
                 theme_mode: match state.desktop_theme_mode.as_str() {
                     "light" => ThemeMode::Light,
@@ -93,16 +95,19 @@ impl Bootstrap {
 
 struct AssetServer {
     url: String,
+    websocket_url: String,
     handle: tokio::runtime::Handle,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl AssetServer {
-    fn start() -> Result<Self> {
+    fn start(daemon_url: String) -> Result<Self> {
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
         listener.set_nonblocking(true)?;
         let url = format!("http://{}/", listener.local_addr()?);
+        let relay = mew_web_bridge::DesktopRelay::bind(daemon_url, url.trim_end_matches('/'))?;
+        let websocket_url = relay.url().to_owned();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
@@ -112,7 +117,10 @@ impl AssetServer {
             runtime.block_on(async move {
                 let result = async {
                     let listener = tokio::net::TcpListener::from_std(listener)?;
-                    mew_web_bridge::serve_assets(listener).await
+                    tokio::select! {
+                        result = mew_web_bridge::serve_assets(listener) => result,
+                        result = relay.run() => result,
+                    }
                 };
                 tokio::select! {
                     result = result => if let Err(error) = result { tracing::error!(%error, "desktop UI asset server stopped"); },
@@ -122,6 +130,7 @@ impl AssetServer {
         })?;
         Ok(Self {
             url,
+            websocket_url,
             handle,
             stop: Some(stop),
             thread: Some(thread),
@@ -249,7 +258,7 @@ impl WebShell {
             Err(error) => (
                 None,
                 None,
-                Bootstrap::load(String::new()),
+                Bootstrap::load(String::new(), String::new()),
                 Some(error.to_string()),
             ),
         };
@@ -608,8 +617,9 @@ pub(crate) fn run() {
             }),
             "the web interface currently requires a loopback daemon; use the native app for remote connections"
         );
-        let bootstrap = Bootstrap::load(endpoint.websocket_url);
-        Ok((AssetServer::start()?, supervisor, bootstrap))
+        let assets = AssetServer::start(endpoint.websocket_url.clone())?;
+        let bootstrap = Bootstrap::load(endpoint.websocket_url, assets.websocket_url.clone());
+        Ok((assets, supervisor, bootstrap))
     })();
     application()
         .with_assets(IconAssets)

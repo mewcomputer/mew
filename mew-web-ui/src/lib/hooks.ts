@@ -1,5 +1,4 @@
-import { useEffect, type RefObject } from "react";
-import { useRouter } from "@tanstack/react-router";
+import { useEffect, useState, type RefObject } from "react";
 import { useSessionStore } from "../stores/session";
 import { getClient, SESSION_ID_KEY } from "./client";
 
@@ -33,27 +32,24 @@ export function useMewConnection() {
       try {
         await client.connect();
         if (cancelled) return;
+        const version = await client.ping();
+        if (cancelled) return;
         attempt = 0;
+        useSessionStore.getState().setDaemonVersion(version);
         useSessionStore.getState().setConnectionState("connected");
         useSessionStore.getState().setConnectionError(null);
-        client
-          .ping()
-          .then((version) => useSessionStore.getState().setDaemonVersion(version))
-          .catch(() => {
-            /* daemon may not support ping yet — ignore */
-          });
       } catch (error) {
-        console.error("[mew] connect failed:", error);
         if (cancelled) return;
-        attempt += 1;
+        client.disconnect();
+        if (!reconnectTimer) attempt += 1;
         useSessionStore.getState().setConnectionError(connectionErrorMessage(error));
         scheduleRetry();
       }
     };
 
     const handleClose = () => {
-      if (cancelled) return;
-      attempt = Math.max(attempt + 1, 1);
+      if (cancelled || reconnectTimer) return;
+      attempt += 1;
       useSessionStore.getState().setConnectionError("The daemon connection closed.");
       scheduleRetry();
     };
@@ -92,48 +88,27 @@ export function useComposerFocusShortcut(inputRef: RefObject<HTMLTextAreaElement
   }, [inputRef]);
 }
 
-/** Sync store sessionId → router navigation. */
-export function useSessionNavigation() {
-  const router = useRouter();
-  useEffect(() => {
-    if (!router) return;
-    const unsub = useSessionStore.subscribe((state, prev) => {
-      if (state.sessionId && state.sessionId !== prev.sessionId) {
-        const current = router.state.location.pathname;
-        const expected = `/session/${state.sessionId}`;
-        if (current !== expected) {
-          router.navigate({ to: "/session/$sessionId", params: { sessionId: state.sessionId } });
-        }
-      }
-    });
-    return unsub;
-  }, [router]);
-}
-
-/** Attach to a session by ID, with cleanup. */
+/** Attach the selected session again after each confirmed connection. */
 export function useSessionAttach(sessionId: string) {
-  const router = useRouter();
+  const connected = useSessionStore((s) => s.connectionState === "connected");
+  const [attachError, setAttachError] = useState<string | null>(null);
 
   useEffect(() => {
+    setAttachError(null);
+    if (!connected) return;
     const client = getClient();
     const store = useSessionStore.getState();
-
-    // New-session flows receive SessionReady before navigation. The client
-    // is already attached in that case, even if React has not observed the
-    // store update yet; attaching again races the daemon and can surface a
-    // misleading "session not found" error.
-    if (store.sessionId === sessionId || client.getSessionId() === sessionId) {
-      if (store.sessionId !== sessionId) store.setSessionId(sessionId);
-      return;
-    }
-
-    store.reset();
-    localStorage.setItem(SESSION_ID_KEY, sessionId);
-    // Clear alerts for this session since we're now viewing it.
-    store.clearAlertsForSession(sessionId);
-
-    client.attachSession(sessionId).catch(() => {
-      router.navigate({ to: "/" });
+    if (store.sessionId !== sessionId) store.reset();
+    let current = true;
+    void client.attachSession(sessionId).then(() => {
+      if (!current) return;
+      localStorage.setItem(SESSION_ID_KEY, sessionId);
+      store.clearAlertsForSession(sessionId);
+    }).catch((error: unknown) => {
+      if (!current || !client.isConnected()) return;
+      setAttachError(error instanceof Error ? error.message : "Could not open the conversation.");
     });
-  }, [sessionId, router]);
+    return () => { current = false; };
+  }, [sessionId, connected]);
+  return attachError;
 }

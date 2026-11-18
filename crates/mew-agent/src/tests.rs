@@ -487,6 +487,45 @@ async fn test_clear_context_writes_marker_to_session() {
 }
 
 #[tokio::test]
+async fn clear_context_stays_cleared_after_session_reload() {
+    let directory = tempfile::tempdir().unwrap();
+    let id = ulid::Ulid::new().to_string();
+    let writer = mew_session::Writer::open_at(directory.path(), &id)
+        .await
+        .unwrap();
+    let agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        Some(writer),
+        vec![],
+        None,
+    );
+    let old = context_message(Role::User, "Discard this old instruction.".into());
+    let retained = context_message(Role::User, "Use the new instructions.".into());
+    agent.append_message(old.clone()).await;
+    agent.clear_context().await;
+    agent.append_message(retained.clone()).await;
+
+    let history = mew_session::Reader::load_from(directory.path(), &id)
+        .await
+        .unwrap();
+    assert_eq!(
+        history.first(),
+        Some(&old),
+        "the transcript remains complete"
+    );
+    let resumed = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    resumed.load_messages(history).await;
+    assert_eq!(*resumed.messages.lock().await, vec![retained]);
+}
+
+#[tokio::test]
 async fn test_flagged_files_re_injected_after_compaction() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let plan_path = tmp.path().join("plan.md");
@@ -502,10 +541,8 @@ async fn test_flagged_files_re_injected_after_compaction() {
         vec![],
         None,
     );
-    // Tiny context window so compaction triggers; keep only the most recent
-    // turn so older history is dropped and the flagged file is the surviving
-    // signal.
-    agent.context_window = 10;
+    // Forced compaction leaves room for the current prompt and included plan.
+    agent.context_window = 256;
     agent.keep_turns = 1;
 
     // Pre-populate history so compaction has something to compact away.
@@ -668,6 +705,107 @@ async fn test_compaction_keeps_tool_call_with_result() {
     }));
 }
 
+fn context_message(role: Role, text: String) -> Message {
+    let id = ulid::Ulid::new();
+    let session_id = ulid::Ulid::new();
+    Message {
+        id,
+        session_id,
+        role,
+        parts: vec![Part::Text(TextPart {
+            base: PartBase {
+                id: ulid::Ulid::new(),
+                message_id: id,
+                session_id,
+            },
+            text,
+            synthetic: false,
+        })],
+        time: Time {
+            created: 0,
+            completed: None,
+        },
+        assistant: None,
+    }
+}
+
+#[tokio::test]
+async fn rejects_request_when_persona_tools_and_output_reserve_leave_no_room() {
+    let provider = Arc::new(CapturingProvider::new(vec![FakeProvider::text_response(
+        "ok",
+    )]));
+    let mut tool = EchoTool::mutating();
+    tool.schema["description"] = serde_json::json!("additional schema detail ".repeat(30));
+    let mut agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![Arc::new(tool)],
+        None,
+    );
+    agent.set_model_info("gpt-4o", "fixture");
+    agent.context_window = 128;
+    agent.default_max_output_tokens = 32;
+    agent.persona_prompt = Some("additional persona guidance ".repeat(20));
+
+    let mut events = agent.run("hello".into());
+    let mut overflow = false;
+    while let Some(event) = events.recv().await {
+        if matches!(event, AgentEvent::Error(message) if message.contains("context window")) {
+            overflow = true;
+        }
+    }
+
+    assert!(overflow);
+    assert!(provider.captured.lock().unwrap().is_empty());
+    assert_eq!(agent.messages.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn compaction_carries_recent_user_constraints_without_retaining_large_history() {
+    let provider = Arc::new(CapturingProvider::new(vec![FakeProvider::text_response(
+        "ok",
+    )]));
+    let mut agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    agent.set_model_info("gpt-4o", "fixture");
+    agent.context_window = 1024;
+    agent.default_max_output_tokens = 256;
+    agent.keep_turns = 1;
+    let historical = context_message(Role::User, "old bulk paste ".repeat(400));
+    let constraint = context_message(Role::User, "Keep the public API stable.".into());
+    let assistant = context_message(Role::Assistant, "Understood.".into());
+    agent
+        .load_messages(vec![historical, constraint, assistant])
+        .await;
+
+    let mut events = agent.run("Proceed with the migration.".into());
+    while events.recv().await.is_some() {}
+
+    let captured = provider.captured.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    let text: Vec<_> = captured[0]
+        .messages
+        .iter()
+        .filter(|message| message.role == Role::User)
+        .flat_map(|message| message.parts.iter())
+        .filter_map(|part| match part {
+            Part::Text(part) => Some(part.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(text
+        .iter()
+        .any(|text| text.contains("Keep the public API stable.")));
+    assert!(text.iter().all(|text| !text.contains("old bulk paste")));
+    assert_eq!(text.last(), Some(&"Proceed with the migration."));
+}
+
 #[tokio::test]
 async fn test_compaction_marker_preserves_prefix_across_turns_and_resume() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -738,15 +876,18 @@ async fn test_compaction_marker_preserves_prefix_across_turns_and_resume() {
             .any(|part| matches!(part, Part::Compaction(_)))
     }));
 
+    let resumed_provider = Arc::new(CapturingProvider::new(vec![FakeProvider::text_response(
+        "resumed",
+    )]));
     let resumed = Agent::new(
-        std::sync::Arc::new(FakeProvider::new(vec![])),
+        resumed_provider.clone(),
         std::sync::Arc::new(NopDispatcher),
         None,
         vec![],
         None,
     );
     resumed.load_messages(raw).await;
-    let resumed_messages = resumed.messages.lock().await;
+    let resumed_messages = resumed.messages.lock().await.clone();
     assert!(!resumed_messages.iter().any(|message| message.id == old_id));
     assert!(resumed_messages.iter().any(|message| {
         message
@@ -759,6 +900,16 @@ async fn test_compaction_marker_preserves_prefix_across_turns_and_resume() {
             .parts
             .iter()
             .any(|part| matches!(part, Part::Text(text) if text.text == "first prompt"))
+    }));
+    let mut events = resumed.run("resumed prompt".into());
+    while events.recv().await.is_some() {}
+    let captured = resumed_provider.captured.lock().unwrap();
+    assert!(captured[0].messages.iter().any(|message| {
+        message.role == Role::User
+            && message
+                .parts
+                .iter()
+                .any(|part| matches!(part, Part::Text(text) if text.text.contains("old context")))
     }));
 }
 

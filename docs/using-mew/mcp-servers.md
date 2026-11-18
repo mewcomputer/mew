@@ -1,17 +1,17 @@
 ---
 title: MCP Servers
-description: Connect external tools to mew via the Model Context Protocol.
+description: Experimental Model Context Protocol support in the mew-mcp library.
 ---
 
-mew supports MCP (Model Context Protocol) servers. Each server exposes
-tools that are automatically wrapped as `McpTool` implementations and
-registered alongside the built-in tools. This lets you extend the agent
-with domain-specific capabilities without writing Rust code.
+The experimental `mew-mcp` library wraps Model Context Protocol tools as
+`McpTool` implementations. Standard daemon chat uses the built-in tool
+registry. The configuration below describes the format for developing
+against the MCP library.
 
 ## Configuration
 
-MCP servers are configured in `mcp.json` in your working directory. The
-code also checks `.mcp.json`, `.mew/mcp.json`, and `.mew/.mcp.json`
+The library resolver looks for `mcp.json` in the requested working directory.
+It also checks `.mcp.json`, `.mew/mcp.json`, and `.mew/.mcp.json`
 (in that order, first match wins).
 
 ### Stdio transport
@@ -59,24 +59,13 @@ For servers reachable over HTTP, use `type` and `url` instead of
 
 ## How it works
 
-1. At startup, mew reads `mcp.json` and connects to each server.
-2. Stdio servers are spawned as subprocesses. HTTP servers are contacted
-   directly. Both use the MCP JSON-RPC protocol for communication.
-3. The server's tools are discovered via `tools/list` and registered in
-   the agent's tool map.
-4. When the model calls an MCP tool, mew forwards the request to the
-   server and waits for the response.
-5. Tool output is returned to the model as a tool result.
+The library connects to stdio servers as subprocesses and contacts HTTP
+servers directly. It uses JSON-RPC `tools/list` for discovery and wraps
+tool calls so their output can be returned to the agent.
 
 MCP tool names are qualified to avoid collisions with built-in tools:
 `mcp__<server>__<tool>`. For example, a tool called `search` on a server
 named `context7` becomes `mcp__context7__search`.
-
-## MCP status in the sidebar
-
-The sidebar's Environment section shows MCP server connection status and
-tool count. Press `Ctrl+1` to expand it. Each server shows its name,
-whether it connected successfully, and how many tools it exposes.
 
 ## Permissions
 
@@ -95,7 +84,7 @@ decision = "allow"
 
 ## Common MCP servers
 
-These are popular MCP servers that work with mew:
+Examples of servers that expose MCP tools:
 
 | Server | Purpose | Install |
 |--------|---------|---------|
@@ -109,9 +98,8 @@ Check each server's docs for required environment variables.
 
 ## Troubleshooting
 
-**Server not connecting**: check the sidebar Environment section (Ctrl+1)
-for error messages. Common causes: wrong command path, missing `npx`, server
-crashing on startup.
+When testing the library, check the command path and startup logs if a
+server fails to start.
 
 **Tools not appearing**: the server may not expose any tools, or the
 connection may have failed silently. Try running the server command

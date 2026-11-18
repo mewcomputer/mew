@@ -73,6 +73,30 @@ async fn connect_tcp(addr: SocketAddr) -> Ws {
     ws
 }
 
+#[tokio::test]
+async fn native_tcp_listener_requires_browser_clients_to_use_a_host_relay() {
+    let addr = spawn_daemon_tcp().await;
+    let stream = TcpStream::connect(addr).await.unwrap();
+    let request = ClientRequestBuilder::new(format!("ws://{addr}/").parse().unwrap())
+        .with_header("Origin", format!("http://{addr}"));
+    let result = client_async(request, stream).await;
+    assert!(matches!(
+        result,
+        Err(tokio_tungstenite::tungstenite::Error::Http(response))
+            if response.status() == 403
+    ));
+
+    let mut native = connect_tcp(addr).await;
+    send(&mut native, ClientMessage::Ping).await;
+    assert!(recv_until(&mut native, |message| matches!(
+        message,
+        ServerMessage::Pong { .. }
+    ))
+    .await
+    .iter()
+    .any(|message| matches!(message, ServerMessage::Pong { .. })));
+}
+
 async fn send(ws: &mut Ws, msg: ClientMessage) {
     let json = mew_protocol::encode_json(&msg).expect("encode");
     ws.send(Message::Text(json)).await.expect("send");

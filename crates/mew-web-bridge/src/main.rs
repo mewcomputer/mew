@@ -14,7 +14,7 @@
 //! protocol, it just forwards frames in both directions. Each browser
 //! connection opens a fresh daemon connection.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -24,16 +24,25 @@ use futures::{SinkExt, StreamExt};
 use mew_web_bridge::serve_http;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UnixStream};
-use tokio_tungstenite::tungstenite::{client::ClientRequestBuilder, protocol::WebSocketConfig};
-use tokio_tungstenite::{client_async_with_config, WebSocketStream};
+use tokio_tungstenite::tungstenite::{
+    client::ClientRequestBuilder,
+    handshake::server::{ErrorResponse, Request},
+    http::{header, uri::Authority, StatusCode},
+    protocol::WebSocketConfig,
+};
+use tokio_tungstenite::{accept_hdr_async, client_async_with_config, WebSocketStream};
 use tracing::{error, info, warn};
 
 #[derive(Parser, Debug)]
 #[command(name = "mew-web", about = "WebSocket bridge + chat UI for mew daemon")]
 struct Args {
-    /// TCP address to listen on for browser connections.
+    /// Loopback TCP address to listen on for browser connections.
     #[arg(long, default_value = "127.0.0.1:9847")]
     port: SocketAddr,
+
+    /// Additional loopback HTTP(S) origin allowed to open a WebSocket. Repeat as needed.
+    #[arg(long = "allow-origin", value_parser = parse_loopback_origin)]
+    allowed_origins: Vec<String>,
 
     /// Unix socket path the daemon is listening on.
     /// Same default as `mew daemon`.
@@ -53,20 +62,91 @@ fn default_daemon_socket() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("/tmp/mew.sock"))
 }
 
+fn parse_loopback_origin(value: &str) -> std::result::Result<String, String> {
+    let invalid =
+        || "expected an HTTP(S) loopback origin such as http://localhost:5173".to_string();
+    let (scheme, authority) = value.split_once("://").ok_or_else(invalid)?;
+    if !matches!(scheme, "http" | "https") || authority.contains(['/', '?', '#', '@']) {
+        return Err(invalid());
+    }
+    let authority = authority.parse::<Authority>().map_err(|_| invalid())?;
+    let host = authority.host();
+    if authority.as_str() != host && authority.port_u16().is_none() {
+        return Err(invalid());
+    }
+    if host.eq_ignore_ascii_case("localhost")
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+    {
+        return Ok(value.to_string());
+    }
+    Err(invalid())
+}
+
+struct BrowserIngress {
+    hosts: Vec<String>,
+    origins: Vec<String>,
+}
+
+impl BrowserIngress {
+    fn new(bound: SocketAddr, mut origins: Vec<String>) -> Self {
+        let mut hosts = vec![bound.to_string(), format!("localhost:{}", bound.port())];
+        if bound.port() == 80 {
+            hosts.push(bound.to_string().trim_end_matches(":80").to_string());
+            hosts.push("localhost".into());
+        }
+        origins.extend(hosts.iter().map(|host| format!("http://{host}")));
+        Self { hosts, origins }
+    }
+
+    fn accepts(&self, request: &Request) -> bool {
+        let mut hosts = request.headers().get_all(header::HOST).iter();
+        if !hosts
+            .next()
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|host| {
+                self.hosts
+                    .iter()
+                    .any(|allowed| allowed.eq_ignore_ascii_case(host))
+            })
+            || hosts.next().is_some()
+        {
+            return false;
+        }
+
+        let mut origins = request.headers().get_all(header::ORIGIN).iter();
+        let Some(origin) = origins.next() else {
+            // Native clients on this loopback listener do not supply an Origin.
+            return true;
+        };
+        origins.next().is_none()
+            && origin.to_str().ok().is_some_and(|origin| {
+                self.origins
+                    .iter()
+                    .any(|allowed| allowed.eq_ignore_ascii_case(origin))
+            })
+    }
+}
+
 /// Per-connection handler. Routes between static UI and WS proxy.
 ///
 /// We can't read the HTTP request first and then hand the stream to
 /// tungstenite — tungstenite expects to read the request itself. So
 /// instead we use a BufReader and `fill_buf()` to peek at the request
 /// line + headers without consuming them, then decide:
-///   - If WS upgrade: hand the BufReader to `accept_async` (which reads
+///   - If WS upgrade: hand the BufReader to tungstenite (which reads
 ///     the same bytes from the buffer).
 ///   - Otherwise: read more from the BufReader (request body) and serve
 ///     the static UI.
+#[allow(clippy::result_large_err)] // The WebSocket handshake fixes the callback error type.
 async fn handle_connection(
     stream: TcpStream,
     peer: SocketAddr,
     daemon_socket: Arc<String>,
+    ingress: Arc<BrowserIngress>,
 ) -> Result<()> {
     let mut buf: BufReader<TcpStream> = BufReader::with_capacity(8192, stream);
 
@@ -112,9 +192,17 @@ async fn handle_connection(
         // Hand the BufReader (still containing the request bytes) to
         // tungstenite — it will read from the cursor position, which is
         // still at the start of the request.
-        let browser_ws = tokio_tungstenite::accept_async(buf)
-            .await
-            .context("server-side WS handshake")?;
+        let browser_ws = accept_hdr_async(buf, |request: &Request, response| {
+            if ingress.accepts(request) {
+                return Ok(response);
+            }
+            let mut rejection =
+                ErrorResponse::new(Some("WebSocket Host or Origin is not allowed.".into()));
+            *rejection.status_mut() = StatusCode::FORBIDDEN;
+            Err(rejection)
+        })
+        .await
+        .context("server-side WS handshake")?;
         info!(%peer, "browser ws upgraded; connecting to daemon");
         let daemon_ws = connect_to_daemon(&daemon_socket).await?;
         return proxy(browser_ws, daemon_ws).await;
@@ -321,6 +409,10 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+    anyhow::ensure!(
+        args.port.ip().is_loopback(),
+        "mew-web requires a loopback listen address"
+    );
     let daemon_socket = args
         .daemon_socket
         .clone()
@@ -334,11 +426,15 @@ async fn main() -> Result<()> {
     let listener = TcpListener::bind(args.port)
         .await
         .with_context(|| format!("bind {}", args.port))?;
+    let bound = listener
+        .local_addr()
+        .context("read bridge listen address")?;
+    let ingress = Arc::new(BrowserIngress::new(bound, args.allowed_origins));
     info!(
-        port = %args.port,
+        port = %bound,
         daemon = %daemon_socket_str,
         "mew-web listening — open http://{}/ in a browser",
-        args.port
+        bound
     );
 
     let daemon_socket = Arc::new(daemon_socket_str);
@@ -351,8 +447,9 @@ async fn main() -> Result<()> {
             }
         };
         let daemon_socket = Arc::clone(&daemon_socket);
+        let ingress = Arc::clone(&ingress);
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, peer, daemon_socket).await {
+            if let Err(e) = handle_connection(stream, peer, daemon_socket, ingress).await {
                 warn!(%peer, error = %e, "connection ended with error");
             }
         });

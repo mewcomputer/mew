@@ -9,6 +9,9 @@ function isBootstrap(value) {
   try {
     const daemon = new URL(value.daemonUrl);
     if (!['ws:', 'wss:'].includes(daemon.protocol)) return false;
+    const relay = new URL(value.websocketUrl);
+    if (relay.protocol !== 'ws:' || relay.hostname !== '127.0.0.1' || !relay.port
+      || relay.pathname === '/' || relay.username || relay.password || relay.search || relay.hash) return false;
   } catch { return false; }
   return ['system', 'light', 'dark'].includes(value.themeMode)
     && typeof value.lightTheme === 'string'
@@ -91,6 +94,10 @@ async function startSupport(binary, {
       return;
     }
     if (!ready) {
+      if (value.type === 'ready' && value.bootstrap && value.bootstrap.websocketUrl === undefined) {
+        fail(new Error('Update the desktop support binary to use the authenticated WebSocket relay.'));
+        return;
+      }
       if (value.type !== 'ready' || !isAppUrl(value.appUrl) || !isBootstrap(value.bootstrap)) {
         fail(new Error('Desktop support returned invalid startup settings.'));
         return;

@@ -36,6 +36,9 @@ binding. It reuses `mew-desktop-supervisor` to attach to a healthy local daemon
 or own a daemon for the app lifetime. An explicit `MEW_DESKTOP_DAEMON_URL` is
 attach-only. Theme inventory and CSS come from the existing Rust loader,
 including installed themes; settings are saved through existing state storage.
+The Rust host issues a private loopback WebSocket URL for the `mew://app`
+renderer. Use a support binary that advertises this relay when setting
+`MEW_DESKTOP_DAEMON_BINARY`.
 
 Electron owns the window, menus and DOM browser guests. The trusted app uses
 `mew://app/` and its own persistent Session. External guests share a separate

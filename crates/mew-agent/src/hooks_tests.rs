@@ -20,6 +20,7 @@ use crate::{Agent, AgentEvent, PromptCacheRetention};
 struct RecordingDispatcher {
     pub system_prompt_calls: Arc<StdMutex<Vec<String>>>,
     pub turn_end_calls: Arc<StdMutex<usize>>,
+    message_replacement: StdMutex<Option<(mew_message::MessageId, String)>>,
 }
 
 impl RecordingDispatcher {
@@ -27,6 +28,7 @@ impl RecordingDispatcher {
         Self {
             system_prompt_calls: Arc::new(StdMutex::new(Vec::new())),
             turn_end_calls: Arc::new(StdMutex::new(0)),
+            message_replacement: StdMutex::new(None),
         }
     }
 }
@@ -66,7 +68,14 @@ impl Dispatcher for RecordingDispatcher {
     async fn on_pre_compaction(&self, _messages: &[Message]) {}
     async fn on_post_compaction(&self, _messages: &[Message]) {}
 
-    async fn on_chat_message(&self, msg: Message) -> Message {
+    async fn on_chat_message(&self, mut msg: Message) -> Message {
+        if let Some((id, replacement)) = &*self.message_replacement.lock().unwrap() {
+            if msg.id == *id {
+                if let Some(mew_message::Part::Text(text)) = msg.parts.first_mut() {
+                    text.text.clone_from(replacement);
+                }
+            }
+        }
         msg
     }
     async fn on_chat_params(&self, p: ChatParams) -> ChatParams {
@@ -382,6 +391,42 @@ async fn test_on_system_prompt_called_each_turn() {
     );
     assert_eq!(calls[0], "prompt v1");
     assert_eq!(calls[1], "prompt v2");
+}
+
+#[tokio::test]
+async fn request_budget_counts_a_hook_revision_of_a_previously_seen_message() {
+    let dispatcher = Arc::new(RecordingDispatcher::new());
+    let provider = Arc::new(FakeProvider::new(FakeProvider::text_response("response")));
+    let mut agent = Agent::new(provider, dispatcher.clone(), None, vec![], None);
+    agent.set_model_info("gpt-4o", "fixture");
+    agent.context_window = 128;
+
+    let mut first = agent.run("short initial prompt".into());
+    let mut completed = false;
+    while let Some(event) = first.recv().await {
+        if matches!(
+            event,
+            AgentEvent::Provider(ProviderEvent::MessageEnd { .. })
+        ) {
+            completed = true;
+        }
+    }
+    assert!(completed);
+    let message_id = agent.messages.lock().await[0].id;
+    *dispatcher.message_replacement.lock().unwrap() = Some((message_id, "expanded ".repeat(300)));
+
+    let mut second = agent.run("follow up".into());
+    let mut overflow = None;
+    while let Some(event) = second.recv().await {
+        match event {
+            AgentEvent::Error(message) => overflow = Some(message),
+            AgentEvent::Provider(event) => {
+                panic!("oversized request reached the provider: {event:?}")
+            }
+            _ => {}
+        }
+    }
+    assert!(overflow.is_some_and(|message| message.contains("context window")));
 }
 
 /// Multi-script provider for multi-turn tests.

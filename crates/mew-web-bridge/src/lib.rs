@@ -7,6 +7,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
 use tracing::warn;
 
+mod desktop;
+pub use desktop::DesktopRelay;
+
 /// The built React app. Rebuild the UI before compiling its host.
 static UI_DIST: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../../mew-web-ui/dist");
 

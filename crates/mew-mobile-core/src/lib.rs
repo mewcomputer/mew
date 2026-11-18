@@ -2451,7 +2451,8 @@ fn translate_message(
         // Explicit arms for unhandled variants — no silent catch-all.
         // New ServerMessage variants will cause a compile error here,
         // forcing a decision about how to handle them.
-        ServerMessage::SessionOperationFailed { .. } => {}
+        ServerMessage::SessionOperationFailed { .. }
+        | ServerMessage::SessionDeletionResult { .. } => {}
         ServerMessage::Error { message } => {
             events.push(CoreEvent::Alert {
                 daemon: d.clone(),

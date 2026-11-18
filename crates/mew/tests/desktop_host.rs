@@ -173,6 +173,22 @@ fn host_serves_embedded_assets_preserves_themes_and_stops_owned_resources_on_eof
     assert_eq!(ready["type"], "ready");
     let bootstrap = &ready["bootstrap"];
     assert_eq!(bootstrap["daemonUrl"], format!("ws://{daemon}"));
+    let (relay, route) = bootstrap["websocketUrl"]
+        .as_str()
+        .unwrap()
+        .trim_start_matches("ws://")
+        .split_once('/')
+        .unwrap();
+    let relay: SocketAddr = relay.parse().unwrap();
+    assert_ne!(relay, daemon);
+    let mut socket = TcpStream::connect_timeout(&relay, Duration::from_secs(2)).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    write!(socket, "GET /{route} HTTP/1.1\r\nHost: {relay}\r\nOrigin: mew://app\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n").unwrap();
+    let mut status = String::new();
+    BufReader::new(socket).read_line(&mut status).unwrap();
+    assert!(status.starts_with("HTTP/1.1 101 "));
     assert_eq!(bootstrap["themeMode"], "system");
     assert_eq!(bootstrap["lightTheme"], "codex-light");
     assert_eq!(bootstrap["darkTheme"], "codex-dark");
@@ -213,6 +229,7 @@ fn host_serves_embedded_assets_preserves_themes_and_stops_owned_resources_on_eof
     process.eof();
     assert!(TcpStream::connect(daemon).is_err());
     assert!(TcpStream::connect(assets).is_err());
+    assert!(TcpStream::connect(relay).is_err());
     assert!(std::fs::read_to_string(&process.stderr).unwrap().is_empty());
     let mut restarted = Process::start(root.path(), daemon, false);
     let saved = restarted.read();

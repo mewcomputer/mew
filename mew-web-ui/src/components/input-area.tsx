@@ -22,6 +22,7 @@ interface InputAreaProps {
   onSlash?: (command: string) => void;
   onCancel: () => void;
   connected: boolean;
+  draftSessionId?: string;
 }
 
 interface SlashCommand {
@@ -45,9 +46,10 @@ const EMPTY_DRAFT: ComposerDraft = { text: "", files: [] };
 
 /** Chat composer with attachments, policy, persona and model controls. */
 export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
-  function InputArea({ onSend, onSlash, onCancel, connected }, ref) {
+  function InputArea({ onSend, onSlash, onCancel, connected, draftSessionId }, ref) {
     const { isMobile } = useSidebar();
-    const sessionId = useSessionStore((state) => state.sessionId) ?? "new";
+    const sessionId = useSessionStore((state) => draftSessionId ?? state.sessionId) ?? "new";
+    const activeDraft = useRef<string | null>(sessionId);
     const [, refreshDraft] = useState(0);
     const { text, files } = composerDrafts.get(sessionId) ?? EMPTY_DRAFT;
     const setText = (value: string | ((previous: string) => string)) => {
@@ -68,6 +70,11 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
     const [historyIndex, setHistoryIndex] = useState<number | null>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
+
+    useLayoutEffect(() => {
+      activeDraft.current = sessionId;
+      return () => { activeDraft.current = null; };
+    }, [sessionId]);
 
     useLayoutEffect(() => {
       const input = textareaRef.current;
@@ -231,18 +238,18 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
           );
         }
 
-        if ((useSessionStore.getState().sessionId ?? "new") !== sessionId) return;
+        if (activeDraft.current !== sessionId) return;
         const pending = onSend(trimmed, attachments);
         if (pending !== undefined) await pending;
         pushPromptHistory(trimmed);
         setText((current) => current === text ? "" : current);
         if (files.length > 0) setFiles((current) => current.filter((file) => !files.includes(file)));
-        if ((useSessionStore.getState().sessionId ?? "new") === sessionId) {
+        if (activeDraft.current === sessionId) {
           setHistoryIndex(null);
           closeMenu();
         }
       } catch (e) {
-        if ((useSessionStore.getState().sessionId ?? "new") === sessionId) {
+        if (activeDraft.current === sessionId) {
           setSendError(e instanceof Error ? e.message : "Could not send the message.");
         }
       } finally {

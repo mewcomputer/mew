@@ -93,6 +93,12 @@ pub enum ClientMessage {
         session_id: String,
     },
 
+    /// Delete a session and report whether the requested deletion completed.
+    DeleteSessionConfirmed {
+        session_id: String,
+        request_id: String,
+    },
+
     /// Rename a session (set a custom title).
     RenameSession {
         session_id: String,
@@ -137,7 +143,8 @@ pub enum ClientMessage {
         #[serde(default)]
         attachments: Vec<Attachment>,
     },
-    /// Submit to an explicit attached session and await its receipt.
+    /// Submit to an explicit attached session. Accepted means the input and
+    /// request ID were committed to its transcript, independently of turn outcome.
     SubmitPrompt {
         session_id: String,
         request_id: String,
@@ -732,6 +739,13 @@ pub enum ServerMessage {
         operation: SessionOperation,
         session_id: Option<String>,
         message: String,
+    },
+
+    SessionDeletionResult {
+        session_id: String,
+        request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
 
     /// An error before or outside a session turn.

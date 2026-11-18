@@ -1,23 +1,22 @@
 ---
 title: Plugins
-description: How to use and manage mew plugins.
+description: Manage installed mew plugins and learn about the experimental hook runtime.
 ---
 
 Plugins are external programs that extend mew's capabilities. They can
 register tools, add slash commands, modify requests, observe events, and
 push UI updates. Plugins are the original extension format — the newer
 [extension package](/docs/using-mew/extensions/) format adds manifests,
-sandboxing, and consent, but bare plugins continue to work.
+sandboxing, and consent. Hook execution through daemon chat is experimental.
 
 ## Where plugins live
 
 Plugins are discovered as executable files in these directories:
 
-1. `~/.config/mew/plugins/` (global — loads for every session)
+1. `~/.config/mew/plugins/` (global)
 2. `.mew/plugins/` in your project directory (project-local)
 
-Any executable file in these directories is loaded automatically on
-startup. Plugins are loaded in alphabetical order by filename.
+The hook runtime discovers executable files in alphabetical order.
 
 ## Managing plugins
 
