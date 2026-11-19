@@ -2,6 +2,7 @@ packages:
   - apps/mew-electron
   - mew-web-client
   - mew-web-ui
+  - jianghu
   - site
 onlyBuiltDependencies:
   - electron

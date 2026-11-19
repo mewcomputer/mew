@@ -1,4 +1,38 @@
+@import "../../../jianghu/mew-palette.css";
+
 :root {
+  --background: var(--surface);
+  --foreground: var(--ink);
+  --gray-1: var(--ink);
+  --gray-2: color-mix(in oklab, var(--ink) 85%, var(--surface));
+  --gray-3: var(--ink-muted);
+  --gray-4: var(--line-strong);
+  --gray-5: color-mix(in oklab, var(--line) 70%, var(--ink-muted));
+  --gray-6: var(--line);
+  --gray-7: var(--surface-raised);
+  --gray-8: color-mix(in oklab, var(--surface-raised) 72%, var(--line));
+
+  --primary: var(--jade);
+  --primary-foreground: var(--on-jade);
+  --secondary: var(--surface-raised);
+  --muted: var(--surface-raised);
+  --muted-foreground: var(--ink-muted);
+  --accent: color-mix(in oklab, var(--jade) 13%, var(--surface-raised));
+  --accent-foreground: var(--ink);
+  --border: var(--line);
+  --ring: var(--jade);
+  --mark-background: var(--accent);
+  --popover-background: var(--surface-raised);
+
+  --sl-color-bg-nav: var(--surface-raised);
+  --sl-color-bg-sidebar: var(--surface);
+  --sl-color-bg-inline-code: var(--surface-raised);
+  --sl-color-text-accent: var(--jade);
+  --sl-color-text-invert: var(--on-jade);
+  --sl-color-accent-low: var(--accent);
+  --sl-color-accent: var(--jade);
+  --sl-color-accent-high: var(--jade);
+
   /* base font */
   --sl-font: "MiSans", sans-serif;
   --sl-font-mono: "Ioskeley Mono", monospace;
@@ -11,4 +45,13 @@ h4,
 h5,
 h6 {
   font-family: "Banga", sans-serif !important;
+}
+
+.sl-markdown-content a:not([class]) {
+  color: var(--jade);
+}
+
+::selection {
+  color: var(--on-jade);
+  background: var(--jade);
 }

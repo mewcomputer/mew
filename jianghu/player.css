@@ -1,0 +1,23 @@
+body { margin: 0; background: #0e1213; }
+
+#jianghu.waterworks-player {
+  display: grid;
+  place-items: center;
+  height: clamp(280px, 64vw, 860px);
+  overflow: hidden;
+  background: #0e1213;
+}
+
+#jianghu.waterworks-player canvas,
+#jianghu.waterworks-player img {
+  grid-area: 1 / 1;
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  object-fit: contain;
+}
+
+#jianghu.waterworks-player [hidden] { display: none; }
+#jianghu.waterworks-player canvas { cursor: grab; touch-action: pan-y; }
+#jianghu.waterworks-player canvas:active { cursor: grabbing; }

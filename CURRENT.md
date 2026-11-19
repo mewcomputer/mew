@@ -4183,3 +4183,15 @@ workspace suite, workspace clippy and formatting, architecture and theme checks,
 51 TypeScript client tests, 218 UI tests, 30 Electron host tests, production web
 and site builds, and three bridge subprocess tests. The Electron signed-package
 test is opt-in and was not rerun.
+
+### 2026-11-19: Garden homepage, docs palette, and share image
+
+The Astro homepage now uses Jianghu's landing markup, assets, and live
+garden runtime. Its calls to action open the installation docs. Starlight
+shares the landing palette for its light and dark surfaces, links, code
+blocks, and navigation. The homepage advertises a 1200 × 630 Open Graph
+image with the large headline and garden.
+
+Verified the frozen workspace install, all 110 Jianghu tests, and the Astro
+production build with its two smoke tests. Checked garden controls, the
+homepage-to-docs link, both docs themes, and the served share image.

@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mew</title>
+<link rel="icon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600&text=%E5%96%B5&display=swap">
+<link rel="stylesheet" href="./mew.css">
+</head>
+<body>
+<div class="wash left" aria-hidden="true"></div>
+<div class="wash right" aria-hidden="true"></div>
+<div class="stage" data-garden-stage data-sprite-sheet="./vendor/tactics/a1.png" data-garden-model="./assets/mew-diorama.glb">
+  <p data-status role="status">Loading the garden…</p>
+  <canvas id="stage" hidden aria-label="A model of a walled garden. Drag to turn it."></canvas>
+</div>
+
+<header class="bar">
+  <a class="word" href="#top" aria-label="mew, back to top"><span class="seal" aria-hidden="true">喵</span><span class="name">mew</span></a>
+  <nav class="links" aria-label="Links">
+    <a href="https://github.com/mewcomputer/mew">GitHub</a>
+    <a href="https://mew.computer/docs/getting-started/installation/">Docs</a>
+  </nav>
+  <a class="btn primary" href="https://mew.computer/docs/getting-started/installation/">Get started</a>
+</header>
+
+<div class="view" data-controls hidden role="group" aria-label="Garden view">
+  <span class="hint">Drag to turn the garden</span>
+  <button data-turn="left" type="button" aria-label="Turn the garden left">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.3-5.6"/><path d="M4 4v4h4"/></svg>
+  </button>
+  <button data-turn="right" type="button" aria-label="Turn the garden right">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.6"/><path d="M20 4v4h-4"/></svg>
+  </button>
+  <button data-tilt aria-pressed="false" type="button" aria-label="Change the viewing angle">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 15l9 5 9-5-9-5z"/><path d="M12 10V4"/><path d="M9.5 6.5L12 4l2.5 2.5"/></svg>
+  </button>
+  <button data-night aria-pressed="true" type="button" aria-label="Switch to day">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M5.6 18.4 7 17M17 7l1.4-1.4M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0z"/></svg>
+  </button>
+</div>
+
+<main data-mew-story>
+  <section class="hero" id="top" data-focus="garden">
+    <div class="intro">
+      <h1>Mew is an agent harness designed for your work.</h1>
+      <p class="lede">mew gives you a place to work with agents you can configure. Choose a model, give it instructions, and decide which tools it can use.</p>
+      <div class="ctas">
+        <a class="btn primary" href="https://mew.computer/docs/getting-started/installation/">Get started with mew <span aria-hidden="true">→</span></a>
+        <a class="btn" href="https://github.com/mewcomputer/mew">View on GitHub</a>
+      </div>
+      <p class="note">mew is experimental and under active development.</p>
+    </div>
+
+  </section>
+
+  <section class="room" data-focus="hall" data-side="left">
+    <div class="panel">
+      <p class="num">01</p>
+      <h2>Give it a task.</h2>
+      <p>Ask mew to explore a codebase, investigate a problem, or make a change. It can search and read files, edit them, and run commands as the work takes shape.</p>
+      <p>You can follow along, answer questions, and change direction at any point.</p>
+    </div>
+  </section>
+
+  <section class="room" data-focus="pavilion" data-side="right">
+    <div class="panel">
+      <p class="num">02</p>
+      <h2>Bring in another agent.</h2>
+      <p>Give a subagent a focused task while mew continues working. Ask for an investigation, a review, or a second perspective on a plan. The subagent reports its result back to the conversation.</p>
+      <p>You can give subagents their own instructions and choose which models and tools they use.</p>
+    </div>
+  </section>
+
+  <section class="room" data-focus="gallery" data-side="left">
+    <div class="panel">
+      <p class="num">03</p>
+      <h2>Make an agent for the job.</h2>
+      <p>Personas let you give an agent a role and its own instructions. You might set up one for coding, one for research, or one that’s just there for conversation.</p>
+      <p>Each persona can use a different model and tool set. Give a coding persona access to the shell, or leave tools off entirely.</p>
+    </div>
+  </section>
+
+  <section class="room" data-focus="wall" data-side="right">
+    <div class="panel">
+      <p class="num">04</p>
+      <h2>Choose when mew asks.</h2>
+      <p>Set permissions for the actions you want to review. You can configure rules for tools, commands, and paths, then choose a permission mode that suits the work.</p>
+    </div>
+  </section>
+
+  <section class="room" data-focus="gate" data-side="left">
+    <div class="panel">
+      <p class="num">05</p>
+      <h2>Give it context that carries forward.</h2>
+      <p>Add project instructions and reusable skills for the things you do often. Mew can load them into a conversation as needed.</p>
+      <p>Your sessions are saved locally, so you can return to a conversation and see what happened.</p>
+    </div>
+  </section>
+
+  <section class="room" id="start" data-focus="tower" data-side="left">
+    <div class="panel">
+      <p class="num">06</p>
+      <h2>Start with a model and a task.</h2>
+      <p>Choose a supported provider, open a session, and tell mew what you want to work on.</p>
+      <div class="ctas">
+        <a class="btn primary" href="https://mew.computer/docs/getting-started/installation/">Get started with mew <span aria-hidden="true">→</span></a>
+        <a class="btn" href="https://mew.computer/docs/getting-started/installation/">Read the docs</a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="foot">
+    <a href="https://github.com/mewcomputer/mew">GitHub</a>
+    <a href="https://mew.computer/docs/getting-started/installation/">Docs</a>
+    <span>Sprites by <a href="https://3d.internet.dev">3d.internet.dev</a></span>
+  </div>
+</footer>
+
+<div id="character-label" role="status" hidden><span class="name"></span><span class="line"></span></div>
+<script type="module" src="./generated/garden-main.js"></script>
+</body>
+</html>

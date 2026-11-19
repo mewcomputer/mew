@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Jianghu · Agent map</title>
+  <link rel="stylesheet" href="https://api.fontshare.com/v2/css?f[]=sentient@400&amp;display=swap">
+  <link rel="stylesheet" href="./tokens.css">
+  <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./agent-map.css">
+</head>
+<body>
+  <main id="jianghu" class="agent-map" data-sprite-sheet="./vendor/tactics/a1.png">
+    <header class="sandbox-header">
+      <div class="wordmark">
+        <span class="seal" lang="zh-Hans" aria-hidden="true">江</span>
+        <h1>jianghu</h1>
+      </div>
+      <a class="world-workshop" href="./index.html">Waterworks</a>
+    </header>
+    <div class="world-layout">
+      <section class="scene world-scene" aria-labelledby="district-title">
+        <h2 id="district-title">Waterworks</h2>
+        <p class="world-note" role="status">Loading the map…</p>
+        <div class="viewport">
+          <img class="fallback" src="./assets/waterworks.webp" alt="">
+          <canvas aria-hidden="true" hidden></canvas>
+          <div class="map-units" aria-label="Map agents" role="group"></div>
+        </div>
+        <div class="camera-controls" role="group" aria-label="Camera controls" hidden>
+          <button type="button" data-camera="left" aria-label="Rotate left">←</button>
+          <button type="button" data-camera="right" aria-label="Rotate right">→</button>
+          <button type="button" data-camera="out" aria-label="Zoom out">−</button>
+          <button type="button" data-camera="in" aria-label="Zoom in">+</button>
+          <button type="button" data-camera="reset" aria-label="Reset camera">↺</button>
+        </div>
+      </section>
+      <aside class="world-sidebar">
+        <section class="agent-panel" aria-labelledby="agents-title">
+          <div class="agent-panel-heading">
+            <h2 id="agents-title">Agents</h2>
+            <button type="button" data-next disabled aria-keyshortcuts="N">Next approval <kbd>N</kbd></button>
+          </div>
+          <p class="agent-counts" aria-live="polite"></p>
+          <ul class="agent-list"></ul>
+          <div class="agent-actions">
+            <button type="button" data-filter aria-pressed="false">Needs me</button>
+            <button type="button" data-demo>Meet at the bridge</button>
+          </div>
+          <p class="world-announcement" role="status" aria-live="polite"></p>
+        </section>
+        <section class="agent-panel agent-detail" aria-labelledby="detail-title" hidden>
+          <div class="agent-panel-heading">
+            <h2 id="detail-title"></h2>
+            <button type="button" data-close aria-keyshortcuts="Escape">Close</button>
+          </div>
+          <p class="agent-task"></p>
+          <p class="agent-activity"></p>
+          <div class="approval-panel" hidden>
+            <h3>Approval requested</h3>
+            <p class="approval-summary"></p>
+            <div class="agent-actions">
+              <button type="button" data-outcome="approved">Approve</button>
+              <button type="button" data-outcome="declined">Decline</button>
+            </div>
+          </div>
+        </section>
+      </aside>
+    </div>
+  </main>
+  <script type="module" src="./generated/map-main.js"></script>
+</body>
+</html>

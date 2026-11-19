@@ -1,0 +1,79 @@
+#jianghu .world-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 2.5fr) minmax(255px, 1fr);
+  gap: var(--space-4);
+  padding: var(--space-6) clamp(var(--space-3), 4cqw, var(--space-12)) 0;
+  align-items: start;
+}
+#jianghu .world-scene { margin: 0; }
+#jianghu .world-scene h2 { text-shadow: 0 1px var(--surface); }
+#jianghu .world-scene .viewport { height: clamp(375px, 56cqw, 660px); }
+#jianghu .world-note { position: absolute; z-index: 3; bottom: 0; left: var(--space-4); color: var(--ink-muted); }
+#jianghu .map-units { position: absolute; inset: 0; pointer-events: none; }
+#jianghu .map-unit {
+  position: absolute;
+  transform: translate(-50%, -20px);
+  min-height: 56px;
+  align-content: start;
+  width: 48px;
+  box-sizing: border-box;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  gap: 1px;
+  pointer-events: auto;
+  background: transparent;
+}
+#jianghu .map-unit:hover { background: transparent; z-index: 2; }
+#jianghu .map-status {
+  min-width: 17px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  padding-inline: 2px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  color: var(--ink-muted);
+  font-size: 12px;
+  line-height: 1;
+}
+#jianghu [data-state='running'] .map-status { color: var(--jade); }
+#jianghu [data-state='waiting'] .map-status { color: var(--ochre); }
+#jianghu [data-state='needs_approval'] .map-status { color: var(--on-vermilion); background: var(--vermilion); }
+#jianghu .map-unit[data-muted] { opacity: .24; }
+#jianghu .map-unit:focus-visible { opacity: 1; }
+#jianghu .agent-panel { border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface-raised); padding: var(--space-4); }
+#jianghu .agent-panel + .agent-panel { margin-top: var(--space-3); }
+#jianghu .agent-panel-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-1); }
+#jianghu .agent-panel h2, #jianghu .agent-panel h3 { margin: 0; font: 500 17px/24px var(--font-sans); }
+#jianghu .agent-panel h3 { font-size: 14px; }
+#jianghu .agent-counts, #jianghu .agent-activity { margin: var(--space-1) 0 var(--space-3); color: var(--ink-muted); font-size: 13px; }
+#jianghu .agent-task { margin: var(--space-1) 0; font-size: 15px; }
+#jianghu .agent-list { margin: 0; padding: 0; list-style: none; }
+#jianghu .agent-list li + li { border-top: 1px solid var(--line); }
+#jianghu .agent-list button { display: flex; align-items: center; justify-content: space-between; gap: 6px; width: 100%; text-align: left; }
+#jianghu .agent-list span { color: var(--ink-muted); font-size: 12px; }
+#jianghu .agent-list [data-state='needs_approval'] span { color: var(--vermilion); }
+#jianghu .agent-actions { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-top: var(--space-2); }
+#jianghu .approval-panel { padding: var(--space-3); background: var(--surface-sunken); border-radius: var(--radius-md); }
+#jianghu .approval-summary { margin: var(--space-1) 0 0; font-size: 13px; }
+#jianghu [data-outcome='approved'] { color: var(--on-vermilion); background: var(--vermilion); }
+#jianghu [data-outcome='approved']:hover { color: var(--on-vermilion); background: var(--vermilion); text-decoration: underline; }
+#jianghu kbd { color: var(--ink-muted); font: 400 11px/16px var(--font-mono); }
+#jianghu .world-announcement { color: var(--ink-muted); font: 400 13px/20px var(--font-sans); margin: var(--space-2) 0 0; }
+#jianghu .world-announcement:empty { margin: 0; }
+@container (max-width: 680px) {
+  #jianghu .world-layout { grid-template-columns: minmax(0, 1fr); padding-top: var(--space-3); }
+  #jianghu .world-scene .viewport { height: clamp(240px, 69cqw, 440px); }
+  #jianghu .world-scene .camera-controls { position: static; }
+  #jianghu .world-scene h2 { position: absolute; padding: 0; top: var(--space-3); left: var(--space-3); }
+}
+#jianghu .agent-list [data-selected] { background: var(--jade-soft); }
+
+@media (prefers-reduced-motion: no-preference) {
+  #jianghu .map-unit[data-oldest] .map-status { animation: raise-seal 320ms cubic-bezier(.23, 1, .32, 1) both; }
+}
+@keyframes raise-seal {
+  from { opacity: 0; transform: translateY(5px); }
+  to { opacity: 1; transform: translateY(0); }
+}

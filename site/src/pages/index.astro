@@ -1,162 +1,50 @@
 ---
-import Base from "../layouts/Base.astro";
-import CapabilitiesSection from "../components/CapabilitiesSection.tsx";
-import InstallWidget from "../components/InstallWidget.tsx";
-import "../styles/global.css";
+import landing from "../../../jianghu/mew.html?raw";
+import garden from "../../../jianghu/assets/mew-diorama.glb?url";
+import sprites from "../../../jianghu/vendor/tactics/a1.png?url";
+import spriteNotice from "../../../jianghu/vendor/tactics/NOTICE.md?raw";
+import fontNotice from "../../../jianghu/assets/instrument-sans-OFL.txt?raw";
+import seal from "../assets/mew-logo.svg?url";
+import "../../../jianghu/mew.css";
+
+const title = "mew";
+const description = "Mew is an agent harness designed for your work. Choose a model, give it instructions, and decide which tools it can use.";
+const socialImage = new URL("/og/mew.jpg", Astro.site);
+const notice = `<!--\n${spriteNotice}\n${fontNotice}-->`;
+const chrome = landing
+    .slice(landing.indexOf("<body>") + "<body>".length, landing.lastIndexOf("</body>"))
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, "")
+    .replace('./assets/mew-diorama.glb', garden)
+    .replace('./vendor/tactics/a1.png', sprites)
+    .replaceAll('https://mew.computer/docs/', '/docs/');
 ---
 
-<Base>
-    <main class="mx-auto px-6 py-16 pt-64 max-w-7xl">
-        <section id="top" class="mb-28 max-w-3xl">
-            <pre
-                class="font-mono leading-tight mb-4 mew-reveal"
-                aria-hidden="true"
-                style="transition-delay: 0ms">{`
- ╱|、
-(˚。7
-|、˜〵
-じしˍ,)ノ`}</pre>
-
-            <p
-                class="font-display text-5xl lg:text-7xl mt-1 mb-8 max-w-3xl mew-reveal"
-                style="transition-delay: 300ms"
-            >
-                The agent that's actually yours
-            </p>
-            <p class="text-lg mew-reveal" style="transition-delay: 600ms">
-                mew is the coding agent built to be taken apart. <br />When you want it to work differently, every part's tweakable. Change the model, the prompt, the tools, or the UI.
-            </p>
-            <div
-                class="mt-8 max-w-2xl mew-reveal"
-                style="transition-delay: 900ms"
-            >
-                <InstallWidget client:visible />
-                <p class="text-sm text-muted-foreground mt-3">
-                    Or read the <a
-                        href="/docs/getting-started/installation/"
-                        class="underline hover:text-foreground transition-colors"
-                        >installation docs</a
-                    >.
-                </p>
-            </div>
-        </section>
-
-        <div>
-            <CapabilitiesSection client:visible />
-        </div>
-
-        <section id="webui" class="md:mt-96 mt-32 max-w-3xl">
-            <h2
-                class="font-display text-5xl tracking-tight mb-8 mew-reveal"
-                style="transition-delay: 0ms"
-            >
-                Two windows, one agent.
-            </h2>
-            <p
-                class="text-lg text-foreground/80 leading-relaxed mb-6 mew-reveal"
-                style="transition-delay: 400ms"
-            >
-                The daemon that runs the terminal also serves a browser
-                interface. Start a turn in the TUI and pick it up from a
-                browser on the same network. One session. One history file.
-                No sync, no export, no second copy of anything.
-            </p>
-            <p
-                class="text-lg text-foreground/80 leading-relaxed mb-8 mew-reveal"
-                style="transition-delay: 600ms"
-            >
-                The web UI ships with mew, but it sits on top of an open
-                protocol. The TUI uses the same protocol. Build a third
-                frontend and it speaks to the same running agent, with full
-                access to tool execution and session history.
-            </p>
-            <div
-                class="bg-card border border-border rounded-lg overflow-hidden shadow-sm mew-reveal"
-                style="transition-delay: 800ms"
-            >
-                <div
-                    class="bg-tui-status flex items-center h-7 px-3 gap-2 text-[11px] font-mono text-muted-foreground"
-                >
-                    <span class="flex gap-1.5">
-                        <span class="w-2.5 h-2.5 rounded-full bg-rose-500/80"></span>
-                        <span class="w-2.5 h-2.5 rounded-full bg-amber-500/80"></span>
-                        <span class="w-2.5 h-2.5 rounded-full bg-emerald-500/80"></span>
-                    </span>
-                    <span class="ml-2">localhost:9847</span>
-                </div>
-                <div class="p-6 font-mono text-[13px] leading-snug">
-                    <div class="text-muted-foreground mb-2">
-                        <span class="text-cyan-500">assistant</span>
-                        <span class="ml-2">ran 3 tools · deepseek-v4-pro</span>
-                    </div>
-                    <div class="mb-1">Done. I added the test and the linter passes.</div>
-                    <div class="mt-3 flex gap-2 flex-wrap">
-                        <span
-                            class="px-2 py-1 rounded bg-emerald-500/10 text-emerald-500 text-xs font-mono">✓ edit</span>
-                        <span
-                            class="px-2 py-1 rounded bg-emerald-500/10 text-emerald-500 text-xs font-mono">✓ bash</span>
-                        <span
-                            class="px-2 py-1 rounded bg-primary/10 text-primary text-xs font-mono">allow?</span>
-                    </div>
-                </div>
-            </div>
-        </section>
-
-        <section id="why" class="md:mt-96 mt-32 max-w-3xl">
-            <h2
-                class="font-display text-5xl tracking-tight mb-8 mew-reveal"
-                style="transition-delay: 0ms"
-            >
-                Yours to take apart.
-            </h2>
-            <p
-                class="text-lg text-foreground/80 leading-relaxed mew-reveal"
-                style="transition-delay: 400ms"
-            >
-                mew is a tool you install, not a service you subscribe to. It
-                doesn't know your name, it doesn't cache your code, and it
-                talks straight to your model — local or remote. Every
-                provider, tool, and prompt is a plugin you can replace.
-                Sessions are plain JSONL on your disk, readable end to end.
-                MIT licensed and free. The bus factor is you.
-            </p>
-        </section>
-
-        <section id="install" class="md:mt-64 mt-32 max-w-3xl">
-            <h2
-                class="text-2xl font-semibold tracking-tight mb-8 mew-reveal"
-                style="transition-delay: 0ms"
-            >
-                Get it running.
-            </h2>
-            <div class="max-w-2xl mew-reveal" style="transition-delay: 400ms">
-                <InstallWidget client:visible />
-            </div>
-            <p
-                class="text-sm text-muted-foreground mt-4 mew-reveal"
-                style="transition-delay: 700ms"
-            >
-                Works with opencode-zen, z-ai, deepseek, anthropic, openai, or
-                anything with an HTTP endpoint and a compatible API shape.
-            </p>
-        </section>
-    </main>
-
-    <script>
-        const observer = new IntersectionObserver((entries) => {
-            entries.forEach((entry) => {
-                if (entry.isIntersecting) {
-                    requestAnimationFrame(() => {
-                        requestAnimationFrame(() => {
-                            entry.target.classList.add("mew-reveal-in");
-                        });
-                    });
-                    observer.unobserve(entry.target);
-                }
-            });
-        });
-        document.querySelectorAll(".mew-reveal").forEach((el) => {
-            observer.observe(el);
-        });
-    </script>
-</Base>
+<!doctype html>
+<html lang="en" data-theme="dark">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>{title}</title>
+        <meta name="description" content={description} />
+        <meta property="og:title" content={title} />
+        <meta property="og:description" content={description} />
+        <meta property="og:type" content="website" />
+        <meta property="og:url" content={Astro.url.href} />
+        <meta property="og:image" content={socialImage.href} />
+        <meta property="og:image:width" content="1200" />
+        <meta property="og:image:height" content="630" />
+        <meta property="og:image:alt" content="Mew’s headline beside the lantern-lit garden." />
+        <meta name="twitter:card" content="summary_large_image" />
+        <link rel="icon" type="image/svg+xml" href={seal} />
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600&text=%E5%96%B5&display=swap" />
+    </head>
+    <body>
+        <Fragment set:html={notice} />
+        <Fragment set:html={chrome} />
+        <script>
+            import "../../../jianghu/src/garden-main.ts";
+        </script>
+    </body>
+</html>
