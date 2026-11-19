@@ -17,10 +17,12 @@ import { createTiltShift } from './tilt-shift.ts';
 const story = document.querySelector<HTMLElement>('[data-mew-story]');
 const viewport = document.querySelector<HTMLElement>('[data-garden-stage]');
 const canvas = viewport?.querySelector('canvas');
+const poster = viewport?.querySelector<HTMLPictureElement>('[data-garden-poster]');
 const status = viewport?.querySelector<HTMLParagraphElement>('[data-status]');
 const toolbar = document.querySelector<HTMLElement>('[data-controls]');
 const sheet = viewport?.dataset.spriteSheet;
 const modelUrl = viewport?.dataset.gardenModel;
+const packedModelUrl = viewport?.dataset.gardenModelGzip;
 if (!viewport || !canvas || !status || !toolbar || !sheet || !modelUrl) throw new Error('Missing Mew garden elements.');
 
 const lifetime = new AbortController();
@@ -28,14 +30,28 @@ window.addEventListener('pagehide', (event) => {
   if (!event.persisted) lifetime.abort();
 }, { signal: lifetime.signal });
 
+async function loadGardenModel(url: string) {
+  const { signal } = lifetime;
+  if (packedModelUrl && typeof DecompressionStream === 'function') {
+    try {
+      const response = await fetch(packedModelUrl, { signal, priority: 'low' });
+      if (response.ok && response.body) {
+        return await new Response(response.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
+      }
+    } catch (error) {
+      if (signal.aborted) throw error;
+    }
+  }
+  const response = await fetch(url, { signal, priority: poster ? 'low' : 'auto' });
+  if (!response.ok) throw new Error(`Garden model request failed (${response.status}).`);
+  return response.arrayBuffer();
+}
+
 Promise.all([
   import('three'),
   import('three/addons/loaders/GLTFLoader.js'),
   loadAgentArtwork(sheet, gardenOutfits),
-  fetch(modelUrl, { signal: lifetime.signal }).then((response) => {
-    if (!response.ok) throw new Error(`Garden model request failed (${response.status}).`);
-    return response.arrayBuffer();
-  }),
+  loadGardenModel(modelUrl),
 ]).then(async ([T, { GLTFLoader }, artwork, modelBytes]) => {
   const { scene: model } = await new GLTFLoader().parseAsync(modelBytes, '');
   if (lifetime.signal.aborted) return;
@@ -123,11 +139,10 @@ Promise.all([
   }
 
   if (story) mountMewStory(story, view, garden.stops, toolbar);
+  const labels = story ? mountMewLabels(T, view, characters) : undefined;
   canvas.hidden = false;
-  toolbar.hidden = false;
-  status.hidden = true;
   view.start({
-    ...(story && mountMewLabels(T, view, characters)),
+    ...labels,
     beforeRender(now, delta) {
       const nextQuality = quality?.recordFrame(delta * 1000);
       if (nextQuality) {
@@ -177,13 +192,24 @@ Promise.all([
       if (tiltShift) tiltShift.render(scene, camera, zoom, 65);
       else renderer.render(scene, camera);
     },
+    afterRender() {
+      if (toolbar.hidden) {
+        toolbar.hidden = false;
+        status.hidden = true;
+        if (poster) poster.hidden = true;
+      }
+      labels?.afterRender();
+    },
     onInvalidate: water.invalidate,
     onSuspend() {
       skyFrame = undefined;
       quality?.resetTiming();
     },
     onContextChange(lost) {
-      status.hidden = !lost;
+      if (!lost) return;
+      toolbar.hidden = true;
+      if (poster) poster.hidden = false;
+      status.hidden = false;
       status.textContent = 'Waiting for the graphics connection…';
     },
     onDispose() {

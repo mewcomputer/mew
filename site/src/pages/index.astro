@@ -4,6 +4,8 @@ import garden from "../../../jianghu/assets/mew-diorama.glb?url";
 import sprites from "../../../jianghu/vendor/tactics/a1.png?url";
 import spriteNotice from "../../../jianghu/vendor/tactics/NOTICE.md?raw";
 import fontNotice from "../../../jianghu/assets/instrument-sans-OFL.txt?raw";
+import desktopPoster from "../assets/garden-poster.webp?url";
+import mobilePoster from "../assets/garden-poster-mobile.webp?url";
 import seal from "../assets/mew-logo.svg?url";
 import "../../../jianghu/mew.css";
 
@@ -15,7 +17,12 @@ const chrome = landing
     .slice(landing.indexOf("<body>") + "<body>".length, landing.lastIndexOf("</body>"))
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, "")
     .replace('./assets/mew-diorama.glb', garden)
+    .replace('data-garden-model=', `data-garden-model-gzip="/garden.glb.gz?v=${encodeURIComponent(garden)}" data-garden-model=`)
     .replace('./vendor/tactics/a1.png', sprites)
+    .replace('<canvas id="stage"', `<picture data-garden-poster>
+      <source media="(max-width: 860px)" srcset="${mobilePoster}">
+      <img src="${desktopPoster}" width="1280" height="720" alt="A lantern-lit walled garden at night" fetchpriority="high">
+    </picture><canvas id="stage"`)
     .replaceAll('https://mew.computer/docs/', '/docs/');
 ---
 

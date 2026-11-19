@@ -4229,3 +4229,17 @@ of steady frames. Both lower tiers keep the same depth-of-field profile.
 Verified 116 Jianghu tests, TypeScript, and the Astro build and smoke tests.
 Simulated sustained load at 390 × 844 in the browser and confirmed the
 canvas reached the lowest tier and recovered to full mobile resolution.
+
+### 2026-11-19: Garden still and smaller homepage model download
+
+The homepage shows a desktop or phone still from the default garden camera
+before JavaScript runs. The live garden takes over after its first frame.
+The still remains visible if the model fails to load.
+
+The static build also emits a lossless 736 KB gzip of the 4.08 MB garden
+model. Browsers with decompression support use it first and can fall back
+to the original GLB.
+
+Verified 116 Jianghu tests, the Jianghu build, and four Astro smoke tests,
+including exact model decompression. Checked both stills, the first-frame
+handoff with a five-second delay, and the failure fallback in the browser.

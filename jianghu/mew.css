@@ -66,6 +66,25 @@ button:focus-visible,a:focus-visible {
   z-index: 0;
 }
 
+[data-garden-poster] {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  overflow: hidden;
+  pointer-events: none;
+  background: #0a0e0d;
+}
+
+[data-garden-poster] img {
+  position: absolute;
+  /* Match the hero camera's shifted focal point and fit. */
+  left: 64%;
+  top: 60%;
+  transform: translate(-64%, -60%);
+  width: min(115.76vw, 177.78dvh);
+  height: auto;
+}
+
 #stage {
   touch-action: pan-y;
   cursor: grab;
@@ -87,6 +106,7 @@ button:focus-visible,a:focus-visible {
 
 .wash.left {
   background: linear-gradient(to right, var(--halo) 0%, var(--halo) 30%, transparent 58%);
+  opacity: 1;
 }
 
 .wash.right {
@@ -334,6 +354,12 @@ footer .foot a {
 }
 
 @media (max-width:860px) {
+  [data-garden-poster] img {
+    left: 50%;
+    top: 70%;
+    transform: translate(-50%, -70%);
+    width: min(100vw, 153.57dvh);
+  }
   .wash.left {
     background: linear-gradient(to bottom, var(--halo) 0%, var(--halo) 38%, transparent 62%);
     opacity: 1;
@@ -390,6 +416,7 @@ footer .foot a {
   position: absolute;
   right: var(--edge);
   bottom: 74px;
+  z-index: 2;
 }
 
 [hidden] {
