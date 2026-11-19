@@ -4504,3 +4504,8 @@ and all 12 site tests.
 
 Kept the sentence about choosing a model, instructions, and tools. Verified
 the built hero and all 12 site tests.
+
+### 2026-11-19: Name the homepage customization options
+
+The hero subtitle now names skills, personas, and experimental plugins.
+Verified the built subtitle and all 12 site tests.
