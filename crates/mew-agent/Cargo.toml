@@ -37,3 +37,4 @@ nix = { workspace = true }
 
 [dev-dependencies]
 mew-provider-fake = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

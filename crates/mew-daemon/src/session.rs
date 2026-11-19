@@ -574,6 +574,7 @@ pub struct SessionManager {
     pub(crate) project_pins: Arc<ProjectPinsStore>,
     pub(crate) active: Mutex<HashMap<String, Arc<Session>>>,
     python_sessions: Mutex<HashMap<String, mew_agent::PythonSession>>,
+    python_cache: std::sync::OnceLock<mew_agent::PythonWorkerCache>,
     loading: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub(crate) defaults_lock: Mutex<()>,
     pub remote_devices: std::sync::OnceLock<crate::remote::RemoteDeviceManager>,
@@ -596,12 +597,15 @@ impl SessionManager {
         if !may_use_code_mode {
             return;
         }
+        let cache = self
+            .python_cache
+            .get_or_init(|| mew_agent::PythonWorkerCache::new(agent.code_mode.max_idle_workers));
         let session = self
             .python_sessions
             .lock()
             .await
             .entry(session_id.to_owned())
-            .or_default()
+            .or_insert_with(|| cache.session())
             .clone();
         agent.set_python_session(session);
     }
@@ -621,6 +625,7 @@ impl SessionManager {
             project_pins,
             active: Mutex::new(HashMap::new()),
             python_sessions: Mutex::new(HashMap::new()),
+            python_cache: std::sync::OnceLock::new(),
             loading: Mutex::new(HashMap::new()),
             defaults_lock: Mutex::new(()),
             remote_devices: std::sync::OnceLock::new(),

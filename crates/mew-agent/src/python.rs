@@ -1,8 +1,9 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex, Weak};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use mew_tools::{Sensitivity, Tool, ToolCtx, ToolError};
@@ -12,6 +13,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 const WORKER: &str = include_str!("python_worker.py");
 const MAX_FRAME_BYTES: u64 = 16 * 1024 * 1024;
+pub(crate) const PYTHON_IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 pub(crate) struct PythonTool {
     pub isolated: bool,
@@ -64,9 +66,228 @@ pub(crate) struct PythonWorker {
     _scratch: tempfile::TempDir,
 }
 
+type SharedPythonState = tokio::sync::Mutex<PythonSessionState>;
+
+/// Retains a bounded number of idle Python workers across sessions.
+#[derive(Clone)]
+pub struct PythonWorkerCache {
+    idle: Arc<StdMutex<IdlePythonWorkers>>,
+}
+
+struct IdlePythonWorkers {
+    max: usize,
+    sessions: VecDeque<Weak<SharedPythonState>>,
+}
+
+impl PythonWorkerCache {
+    pub fn new(max_idle_workers: usize) -> Self {
+        Self {
+            idle: Arc::new(StdMutex::new(IdlePythonWorkers {
+                max: max_idle_workers,
+                sessions: VecDeque::new(),
+            })),
+        }
+    }
+
+    pub fn session(&self) -> PythonSession {
+        PythonSession::new(self.clone(), PYTHON_IDLE_TIMEOUT)
+    }
+}
+
+impl IdlePythonWorkers {
+    fn remove(&mut self, state: &Arc<SharedPythonState>) {
+        self.sessions
+            .retain(|entry| entry.strong_count() > 0 && entry.as_ptr() != Arc::as_ptr(state));
+    }
+
+    fn enforce(&mut self) -> Vec<PythonWorker> {
+        if self.sessions.len() <= self.max {
+            return Vec::new();
+        }
+        let states: Vec<_> = self.sessions.iter().filter_map(Weak::upgrade).collect();
+        // Active sessions hold their own lock, so only unlocked idle workers
+        // participate in the limit. Locking is always nonblocking here.
+        let mut idle: Vec<_> = states
+            .iter()
+            .enumerate()
+            .filter_map(|(index, state)| {
+                state
+                    .try_lock()
+                    .ok()
+                    .filter(|state| state.worker.is_some())
+                    .map(|guard| (index, guard))
+            })
+            .collect();
+        let excess = idle.len().saturating_sub(self.max);
+        let mut evicted = Vec::with_capacity(excess);
+        let mut workers = Vec::with_capacity(excess);
+        for (index, state) in idle.iter_mut().take(excess) {
+            if let Some(reaper) = state.reaper.take() {
+                reaper.abort();
+            }
+            if let Some(worker) = state.worker.take() {
+                workers.push(worker);
+            }
+            state.expired = Some(PythonExpiration::Capacity);
+            evicted.push(Arc::as_ptr(&states[*index]));
+        }
+        drop(idle);
+        self.sessions
+            .retain(|entry| entry.strong_count() > 0 && !evicted.contains(&entry.as_ptr()));
+        workers
+    }
+}
+
 /// A live Python environment shared by the runtime instances of one session.
-#[derive(Clone, Default)]
-pub struct PythonSession(Arc<tokio::sync::Mutex<Option<PythonWorker>>>);
+#[derive(Clone)]
+pub struct PythonSession {
+    state: Arc<SharedPythonState>,
+    cache: PythonWorkerCache,
+    idle_timeout: Duration,
+}
+
+enum PythonExpiration {
+    Idle,
+    Capacity,
+}
+
+struct PythonSessionState {
+    worker: Option<PythonWorker>,
+    last_used: tokio::time::Instant,
+    expired: Option<PythonExpiration>,
+    reaper: Option<tokio::task::AbortHandle>,
+}
+
+impl Drop for PythonSessionState {
+    fn drop(&mut self) {
+        if let Some(reaper) = self.reaper.take() {
+            reaper.abort();
+        }
+    }
+}
+
+impl Default for PythonSession {
+    fn default() -> Self {
+        PythonWorkerCache::new(mew_config::CodeModeConfig::default().max_idle_workers).session()
+    }
+}
+
+impl PythonSession {
+    fn new(cache: PythonWorkerCache, idle_timeout: Duration) -> Self {
+        Self {
+            state: Arc::new(tokio::sync::Mutex::new(PythonSessionState {
+                worker: None,
+                last_used: tokio::time::Instant::now(),
+                expired: None,
+                reaper: None,
+            })),
+            cache,
+            idle_timeout,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_idle_timeout(idle_timeout: Duration) -> Self {
+        Self::new(PythonWorkerCache::new(3), idle_timeout)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn idle_reaper(&self) -> Option<tokio::task::AbortHandle> {
+        self.state.lock().await.reaper.clone()
+    }
+
+    pub(crate) async fn lock(&self) -> PythonSessionGuard<'_> {
+        let state = self.state.lock().await;
+        self.cache.idle.lock().unwrap().remove(&self.state);
+        PythonSessionGuard {
+            state: Some(state),
+            session: self,
+        }
+    }
+}
+
+pub(crate) struct PythonSessionGuard<'a> {
+    state: Option<tokio::sync::MutexGuard<'a, PythonSessionState>>,
+    session: &'a PythonSession,
+}
+
+impl std::ops::Deref for PythonSessionGuard<'_> {
+    type Target = Option<PythonWorker>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state.as_ref().expect("session guard").worker
+    }
+}
+
+impl std::ops::DerefMut for PythonSessionGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.state.as_mut().expect("session guard").worker
+    }
+}
+
+impl Drop for PythonSessionGuard<'_> {
+    fn drop(&mut self) {
+        let mut state = self.state.take().expect("session guard");
+        state.last_used = tokio::time::Instant::now();
+        let mut cache = self.session.cache.idle.lock().unwrap();
+        cache.remove(&self.session.state);
+        if state.worker.is_some() {
+            cache
+                .sessions
+                .push_back(Arc::downgrade(&self.session.state));
+        }
+        if state.worker.is_none() {
+            if let Some(reaper) = state.reaper.take() {
+                reaper.abort();
+            }
+        } else if state.reaper.is_none() {
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                let deadline = state.last_used + self.session.idle_timeout;
+                let timeout = self.session.idle_timeout;
+                let weak_state = Arc::downgrade(&self.session.state);
+                let cache = Arc::downgrade(&self.session.cache.idle);
+                let reaper = runtime.spawn(async move {
+                    let mut deadline = deadline;
+                    loop {
+                        tokio::time::sleep_until(deadline).await;
+                        let Some(state_arc) = weak_state.upgrade() else {
+                            return;
+                        };
+                        let mut state = state_arc.lock().await;
+                        if state.worker.is_none() {
+                            state.reaper = None;
+                            return;
+                        }
+                        deadline = state.last_used + timeout;
+                        if tokio::time::Instant::now() >= deadline {
+                            let worker = state.worker.take();
+                            state.expired = Some(PythonExpiration::Idle);
+                            state.reaper = None;
+                            if let Some(cache) = cache.upgrade() {
+                                cache.lock().unwrap().remove(&state_arc);
+                            }
+                            drop(state);
+                            drop(worker);
+                            return;
+                        }
+                        if let Some(cache) = cache.upgrade() {
+                            let mut cache = cache.lock().unwrap();
+                            drop(state);
+                            let workers = cache.enforce();
+                            drop(cache);
+                            drop(workers);
+                        }
+                    }
+                });
+                state.reaper = Some(reaper.abort_handle());
+            }
+        }
+        drop(state);
+        let workers = cache.enforce();
+        drop(cache);
+        drop(workers);
+    }
+}
 
 impl PythonWorker {
     #[cfg(all(test, target_os = "linux"))]
@@ -407,18 +628,42 @@ impl crate::agent::Agent {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn execute_python(
         &self,
         ctx: &ToolCtx,
         input: Value,
         events: &tokio::sync::mpsc::Sender<crate::AgentEvent>,
     ) -> Result<mew_hooks::ToolOutput, ToolError> {
+        let worker = self.python_session.lock().await;
+        self.execute_python_with_guard(ctx, input, events, worker)
+            .await
+    }
+
+    pub(crate) async fn execute_python_with_guard(
+        &self,
+        ctx: &ToolCtx,
+        input: Value,
+        events: &tokio::sync::mpsc::Sender<crate::AgentEvent>,
+        mut worker: PythonSessionGuard<'_>,
+    ) -> Result<mew_hooks::ToolOutput, ToolError> {
+        if ctx.cancel.is_cancelled() {
+            return Err(ToolError::Execution("Python was cancelled".into()));
+        }
         let source = input
             .get("source")
             .and_then(Value::as_str)
             .ok_or_else(|| ToolError::InvalidInput("source must be a string".into()))?;
         let catalog = self.python_catalog();
-        let mut worker = self.python_session.0.lock().await;
+        if let Some(reason) = worker.state.as_mut().expect("session guard").expired.take() {
+            let reason = match reason {
+                PythonExpiration::Idle => "after being idle",
+                PythonExpiration::Capacity => "because the idle worker capacity was exceeded",
+            };
+            return Err(ToolError::Execution(format!(
+                "Python stopped {reason}; its session state, including variables and temporary scratch files, was lost. Run the code again in a fresh session."
+            )));
+        }
         if worker.is_none() {
             let options = PythonOptions {
                 executable: self
@@ -439,10 +684,17 @@ impl crate::agent::Agent {
         }
         let process = worker.as_mut().expect("worker started");
         let cell = ulid::Ulid::new().to_string();
-        if let Err(error) = process
-            .send(&serde_json::json!({"type":"exec","cell":cell,"source":source,"tools":catalog}))
-            .await
-        {
+        let request =
+            serde_json::json!({"type":"exec","cell":cell,"source":source,"tools":catalog});
+        let sent = tokio::select! {
+            biased;
+            _ = ctx.cancel.cancelled() => {
+                *worker = None;
+                return Err(ToolError::Execution("Python was cancelled; session state was lost".into()));
+            }
+            result = process.send(&request) => result,
+        };
+        if let Err(error) = sent {
             *worker = None;
             return Err(ToolError::Execution(format!(
                 "Python worker exited and session state was lost: {error}"

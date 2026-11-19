@@ -339,6 +339,16 @@ impl Agent {
                 isolated: self.code_mode.isolated,
             };
             let is_python = !nested && tc.tool_name == "python" && self.uses_code_mode();
+            // A pending approval is part of the Python call: keep its worker
+            // checked out so the idle cache cannot discard state meanwhile.
+            let python_guard = if is_python {
+                tokio::select! {
+                    _ = self.cancel_token.cancelled() => None,
+                    guard = self.python_session.lock() => Some(guard),
+                }
+            } else {
+                None
+            };
             let sensitivity = if is_python {
                 mew_tools::Tool::sensitivity(&python_tool)
             } else {
@@ -347,15 +357,25 @@ impl Agent {
                     .map(|t| t.sensitivity())
                     .unwrap_or(Sensitivity::Dangerous)
             };
-            let (decision, deny_reason) = self
-                .resolve_permission_decision(
+            let (decision, deny_reason) = {
+                let permission = self.resolve_permission_decision(
                     &tc.tool_name,
                     &hook_call,
                     sensitivity,
                     &self.cwd,
                     ev_tx,
-                )
-                .await;
+                );
+                if is_python && python_guard.is_none() {
+                    (PermissionDecision::Deny, Some("cancelled".into()))
+                } else if is_python {
+                    tokio::select! {
+                        _ = self.cancel_token.cancelled() => (PermissionDecision::Deny, Some("cancelled".into())),
+                        result = permission => result,
+                    }
+                } else {
+                    permission.await
+                }
+            };
 
             if decision == PermissionDecision::AllowSession {
                 if let Some(ref engine) = self.permission_engine {
@@ -364,9 +384,12 @@ impl Agent {
             }
 
             if decision == PermissionDecision::Deny {
-                let perm_error = match &deny_reason {
-                    Some(reason) => format!("permission denied: {reason}"),
-                    None => "permission denied".to_string(),
+                let perm_error = match (is_python, &deny_reason) {
+                    (true, Some(reason)) if reason == "cancelled" => {
+                        "Python was cancelled".to_string()
+                    }
+                    (_, Some(reason)) => format!("permission denied: {reason}"),
+                    (_, None) => "permission denied".to_string(),
                 };
                 let error_state = ToolState::Error(ToolStateError {
                     input: hook_call.input.clone(),
@@ -676,7 +699,13 @@ impl Agent {
 
             tracing::info!(tool = %tc.tool_name, call_id = %call_id, input = %input, "executing tool");
             let exec_result = if is_python {
-                self.execute_python(&ctx, input.clone(), ev_tx).await
+                self.execute_python_with_guard(
+                    &ctx,
+                    input.clone(),
+                    ev_tx,
+                    python_guard.expect("Python session checked out"),
+                )
+                .await
             } else {
                 tool.execute(ctx, input.clone()).await
             };

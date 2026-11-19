@@ -163,6 +163,47 @@ async fn output(agent: &Agent, call_id: &str) -> String {
 }
 
 #[tokio::test]
+async fn standalone_agent_respects_the_configured_python_idle_limit() {
+    let (_directory, root) = project("python cache");
+    let provider = ProjectProvider::new(
+        [
+            tool_turn(
+                "python",
+                "first",
+                serde_json::json!({"source":"saved = 42\ntext(saved)"}),
+            ),
+            tool_turn(
+                "python",
+                "evicted",
+                serde_json::json!({"source":"text(saved)"}),
+            ),
+            tool_turn(
+                "python",
+                "fresh",
+                serde_json::json!({"source":"text('saved' in globals())"}),
+            ),
+        ]
+        .concat(),
+    );
+    let mut cfg = config();
+    cfg.code_mode.mode = Some(mew_config::CodeMode::Full);
+    cfg.code_mode.isolated = false;
+    cfg.code_mode.max_idle_workers = 0;
+    let agent = build(&root, provider, &cfg, None, None);
+    run(&agent).await;
+    assert_eq!(output(&agent, "first").await, "42\n");
+    run(&agent).await;
+    {
+        let messages = agent.messages.lock().await;
+        assert!(messages.iter().flat_map(|message| &message.parts).any(|part| matches!(part,
+            Part::ToolCall(call) if call.call_id == "evicted" && matches!(&call.state, ToolState::Error(state) if state.error.contains("capacity") && state.error.contains("lost"))
+        )));
+    }
+    run(&agent).await;
+    assert_eq!(output(&agent, "fresh").await, "false\n");
+}
+
+#[tokio::test]
 async fn configured_mcp_tools_work_in_both_modes_and_respect_permissions() {
     let (_directory, root) = project("mcp fixture");
     let server = r#"

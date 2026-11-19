@@ -314,7 +314,7 @@ mod workspace;
 pub use agent::{AcceptedPrompt, Agent, PromptAdmissionError};
 pub use mew_subagents::SubagentOutcome;
 pub use prompt_cache::PromptCacheRetention;
-pub use python::PythonSession;
+pub use python::{PythonSession, PythonWorkerCache};
 pub use reasoning_truncator::{
     ReasoningTruncator, DEFAULT_REASONING_TRUNCATION_THRESHOLD, TRUNCATION_ACK_TEXT,
 };

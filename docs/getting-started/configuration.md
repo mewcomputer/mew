@@ -85,6 +85,7 @@ Choose a global mode and optional provider-qualified overrides in `config.toml`:
 [code_mode]
 mode = "off"       # optional: "off" or "full"
 isolated = true    # default
+max_idle_workers = 3  # default: retained top-level Python workers per daemon
 # python = "/path/to/venv/bin/python"
 
 [code_mode.models]
@@ -100,10 +101,24 @@ virtual environment's Python executable to make its installed packages
 available. The interpreter and its installed packages must be trusted.
 
 Python variables persist across calls in the same session, including when an
-idle session is unloaded and reattached. They do not survive daemon restarts,
+idle session is unloaded and reattached, while its worker remains cached. By
+default, Mew retains up to three idle top-level Python workers per daemon.
+When the limit is exceeded, it stops the least recently used idle worker.
+`max_idle_workers` changes that limit; `0` stops each worker as soon as its
+call finishes. Restart the daemon after changing the setting. Running Python
+calls, including calls waiting for approval, are not evicted. Active subagents
+have separate Python sessions and are not counted against this idle limit.
+
+Mew also stops a worker after one hour without a Python call, measured from the
+end of its last call. When a worker stops because of inactivity or cache
+capacity, the next Python call reports that session state was lost before
+running any code, as long as the daemon has not restarted in the meantime.
+Variables and temporary scratch files are lost; chat history and workspace
+files remain. Save results you want to keep to the workspace through Mew tools;
+live Python objects are not restored automatically. State also does not survive
+daemon restarts,
 session deletion, cancellation, a worker crash, or a ten-minute period without
-a worker response. Approval waits do not count toward that timeout. Subagents
-have separate Python sessions.
+a worker response. Approval waits do not count toward the ten-minute timeout.
 
 The model can call tools with `tools.read({"path": "file.txt"})`, inspect
 their definitions in `ALL_TOOLS`, and use `text(value)` to return output.

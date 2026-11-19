@@ -608,6 +608,11 @@ pub(crate) fn build_session_agent(
         .and_then(|w| w.path().parent().map(|p| p.join("subagent_tasks.json")));
     let mut agent = Agent::new(provider, dispatcher.clone(), writer, tools, session_id);
     agent.code_mode = cfg.code_mode.clone();
+    if cfg.code_mode.max_idle_workers != mew_config::CodeModeConfig::default().max_idle_workers {
+        agent.set_python_session(
+            mew_agent::PythonWorkerCache::new(cfg.code_mode.max_idle_workers).session(),
+        );
+    }
     agent.cwd = cwd.clone();
     agent.subagent_registry_path = subagent_registry_path;
     agent.set_model_info(model_id, provider_id);

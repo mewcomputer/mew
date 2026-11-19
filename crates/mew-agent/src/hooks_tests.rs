@@ -21,6 +21,13 @@ struct RecordingDispatcher {
     pub system_prompt_calls: Arc<StdMutex<Vec<String>>>,
     pub turn_end_calls: Arc<StdMutex<usize>>,
     message_replacement: StdMutex<Option<(mew_message::MessageId, String)>>,
+    before_gate: Option<Arc<BeforeGate>>,
+}
+
+#[derive(Default)]
+struct BeforeGate {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
 }
 
 impl RecordingDispatcher {
@@ -29,6 +36,7 @@ impl RecordingDispatcher {
             system_prompt_calls: Arc::new(StdMutex::new(Vec::new())),
             turn_end_calls: Arc::new(StdMutex::new(0)),
             message_replacement: StdMutex::new(None),
+            before_gate: None,
         }
     }
 }
@@ -95,9 +103,17 @@ impl Dispatcher for RecordingDispatcher {
 
     async fn on_tool_execute_before(
         &self,
-        _call: &ToolCall,
+        call: &ToolCall,
         input: serde_json::Value,
     ) -> mew_hooks::HookOutcome<serde_json::Value> {
+        if let Some(gate) = self
+            .before_gate
+            .as_ref()
+            .filter(|_| call.tool_name == "python")
+        {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
         mew_hooks::HookOutcome::Proceed(input)
     }
     async fn on_tool_execute_after(&self, _call: &ToolCall, output: ToolOutput) -> ToolOutput {
@@ -182,6 +198,80 @@ impl Tool for EchoTool {
 // ------------------------------------------------------------------
 // Tests
 // ------------------------------------------------------------------
+
+#[tokio::test]
+async fn cancellation_during_before_hook_does_not_send_python_code() {
+    let directory = tempfile::tempdir().unwrap();
+    let marker = directory.path().join("unexpected");
+    let gate = Arc::new(BeforeGate::default());
+    let mut dispatcher = RecordingDispatcher::new();
+    dispatcher.before_gate = Some(gate.clone());
+    let source = format!(
+        "open({:?}, 'w').write('unexpected')",
+        marker.to_string_lossy()
+    );
+    let provider = Arc::new(FakeProvider::new(FakeProvider::tool_call(
+        "python",
+        "py",
+        serde_json::json!({"source":source}),
+    )));
+    let mut agent = Agent::new(provider, Arc::new(dispatcher), None, vec![], None);
+    agent.code_mode.mode = Some(mew_config::CodeMode::Full);
+    agent.code_mode.isolated = false;
+    let (progress, _progress_rx) = tokio::sync::mpsc::channel(1);
+    let ctx = mew_tools::ToolCtx::new(
+        Arc::new(mew_tools::ToolCtxShared::default()),
+        "warm".into(),
+        Default::default(),
+        progress,
+    );
+    let (events, _events_rx) = tokio::sync::mpsc::channel(32);
+    assert_eq!(
+        agent
+            .execute_python(
+                &ctx,
+                serde_json::json!({"source":"saved=42\ntext(saved)"}),
+                &events
+            )
+            .await
+            .unwrap()
+            .output,
+        "42\n"
+    );
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let mut events = agent.run_with_parts("test".into(), vec![], Some(cancel.clone()));
+    let drain = tokio::spawn(async move {
+        while let Some(event) = events.recv().await {
+            if let AgentEvent::PermissionRequest { tx, .. } = event {
+                tx.send(PermissionDecision::AllowOnce).unwrap();
+            }
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(3), gate.entered.notified())
+        .await
+        .expect("hook was not reached");
+    cancel.cancel();
+    gate.release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(3), drain)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!marker.exists(), "cancelled Python code ran");
+    let (verify_events, _verify_rx) = tokio::sync::mpsc::channel(32);
+    assert_eq!(
+        agent
+            .execute_python(
+                &ctx,
+                serde_json::json!({"source":"text(saved)"}),
+                &verify_events
+            )
+            .await
+            .unwrap()
+            .output,
+        "42\n"
+    );
+}
 
 #[tokio::test]
 async fn test_on_turn_end_called_after_text_turn() {

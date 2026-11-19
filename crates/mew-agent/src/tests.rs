@@ -59,6 +59,8 @@ async fn code_mode_exposes_one_tool_and_keeps_python_state_between_calls() {
         assert!(requests[0]
             .system
             .contains("tools.read({\"path\": \"file.txt\"})"));
+        assert!(requests[0].system.contains("60 minutes of inactivity"));
+        assert!(requests[0].system.contains("idle worker limit"));
     }
     let messages = agent.messages.lock().await;
     let outputs: Vec<_> = messages

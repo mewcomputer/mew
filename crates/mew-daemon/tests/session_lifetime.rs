@@ -18,6 +18,28 @@ use tokio_tungstenite::WebSocketStream;
 
 type Ws = WebSocketStream<DuplexStream>;
 
+async fn python_result(agent: &Agent) -> String {
+    let mut events = agent.run("test".into());
+    let mut result = String::new();
+    while let Some(event) = events.recv().await {
+        match event {
+            mew_agent::AgentEvent::PermissionRequest { tx, .. } => {
+                tx.send(mew_hooks::PermissionDecision::AllowOnce).unwrap();
+            }
+            mew_agent::AgentEvent::PartUpdated {
+                part: mew_message::Part::ToolCall(call),
+                ..
+            } if call.call_id == "py" => match call.state {
+                mew_message::ToolState::Completed(state) => result = state.output,
+                mew_message::ToolState::Error(state) => result = state.error,
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    result
+}
+
 #[tokio::test]
 async fn python_state_survives_unloading_and_reattaching_the_same_session() {
     check_python_state_survives_unload(false).await;
@@ -89,6 +111,102 @@ async fn check_python_state_survives_unload(from_catalog: bool) {
         agent.set_model_info("gpt-6-luna", "codex");
     }
     assert_eq!(run(&agent).await, "42\n");
+}
+
+#[tokio::test]
+async fn idle_python_worker_expires_across_session_unload_and_reports_lost_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let workspace_file = directory.path().join("workspace.txt");
+    std::fs::write(&workspace_file, "keep").unwrap();
+    let builder: mew_daemon::AgentBuilder = Arc::new(move |params| {
+        let script = FakeProvider::tool_call(
+            "python",
+            "py",
+            serde_json::json!({"source":"saved = globals().get('saved', 40) + 1\ntext(saved)"}),
+        );
+        let mut agent = Agent::new(
+            Arc::new(FakeProvider::new(script)),
+            Arc::new(NopDispatcher),
+            Some(params.writer),
+            vec![],
+            None,
+        );
+        agent.code_mode.mode = Some(mew_config::CodeMode::Full);
+        agent.code_mode.isolated = false;
+        agent.max_turns = Some(1);
+        Ok((agent, Some("fake".into()), Some("fake".into())))
+    });
+    let server = DaemonServer::with_session_dir(builder, directory.path().join("sessions"));
+    let session = server.session_manager.create(None).await.unwrap();
+    let id = session.id.clone();
+    let agent = session.agent.lock().await.clone();
+    assert_eq!(python_result(&agent).await, "41\n");
+    drop(agent);
+    drop(session);
+    server.session_manager.remove(&id).await;
+
+    tokio::time::pause();
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_secs(24 * 60 * 60)).await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::resume();
+
+    let session = server.session_manager.attach(&id).await.unwrap();
+    let agent = session.agent.lock().await.clone();
+    let notice = python_result(&agent).await;
+    assert!(notice.contains("idle"), "{notice}");
+    assert!(
+        notice.contains("state") && notice.contains("lost"),
+        "{notice}"
+    );
+    assert_eq!(python_result(&agent).await, "41\n");
+    assert_eq!(std::fs::read_to_string(workspace_file).unwrap(), "keep");
+}
+
+#[tokio::test]
+async fn daemon_evicts_the_least_recently_used_idle_python_worker() {
+    let directory = tempfile::tempdir().unwrap();
+    let builder: mew_daemon::AgentBuilder = Arc::new(move |params| {
+        let script = FakeProvider::tool_call(
+            "python",
+            "py",
+            serde_json::json!({"source":"saved = globals().get('saved', 40) + 1\ntext(saved)"}),
+        );
+        let mut agent = Agent::new(
+            Arc::new(FakeProvider::new(script)),
+            Arc::new(NopDispatcher),
+            Some(params.writer),
+            vec![],
+            None,
+        );
+        agent.code_mode.mode = Some(mew_config::CodeMode::Full);
+        agent.code_mode.isolated = false;
+        agent.code_mode.max_idle_workers = 2;
+        agent.max_turns = Some(1);
+        Ok((agent, Some("fake".into()), Some("fake".into())))
+    });
+    let server = DaemonServer::with_session_dir(builder, directory.path().join("sessions"));
+    let a = server.session_manager.create(None).await.unwrap();
+    let b = server.session_manager.create(None).await.unwrap();
+    let c = server.session_manager.create(None).await.unwrap();
+    let a = a.agent.lock().await.clone();
+    let b = b.agent.lock().await.clone();
+    let c = c.agent.lock().await.clone();
+    assert_eq!(python_result(&a).await, "41\n");
+    assert_eq!(python_result(&b).await, "41\n");
+    assert_eq!(python_result(&a).await, "42\n");
+    assert_eq!(python_result(&c).await, "41\n");
+    let notice = python_result(&b).await;
+    assert!(
+        notice.contains("state") && notice.contains("lost"),
+        "{notice}"
+    );
+    assert_eq!(python_result(&a).await, "43\n");
+    assert_eq!(python_result(&b).await, "41\n");
 }
 
 fn daemon(ask_user: bool) -> (tempfile::TempDir, DaemonServer) {

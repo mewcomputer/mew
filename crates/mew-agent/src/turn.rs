@@ -880,6 +880,10 @@ impl Agent {
         };
         if code_mode {
             system.push_str("\n\n## Python tool mode\n\nThe only direct tool is `python`. Call other available tools inside Python using `tools.name(arguments)`, with the schemas in the Python tool description. For example, use `result = tools.read({\"path\": \"file.txt\"}); text(result[\"output\"])` to read a file. Tool calls return dictionaries with `output` and `error`; check errors before using results. Python variables persist between calls. Use `text(value)` or `print` to show results. When Python is isolated, access the workspace and network through the available tools, not Python's direct file or network APIs.");
+            system.push_str(&format!(
+                " After {} minutes of inactivity, or when the idle worker limit requires eviction, Python may stop and its variables and scratch files are lost. If the daemon remains running, the next Python call reports this before running.",
+                crate::python::PYTHON_IDLE_TIMEOUT.as_secs() / 60
+            ));
         }
         self.dispatcher.on_system_prompt(system).await
     }

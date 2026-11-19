@@ -72,6 +72,13 @@ pub struct CodeModeConfig {
     /// Python executable or virtual-environment interpreter. Defaults to python3.
     #[serde(default)]
     pub python: Option<PathBuf>,
+    /// Maximum number of Python workers retained while idle.
+    #[serde(default = "default_max_idle_python_workers")]
+    pub max_idle_workers: usize,
+}
+
+fn default_max_idle_python_workers() -> usize {
+    3
 }
 
 impl Default for CodeModeConfig {
@@ -81,6 +88,7 @@ impl Default for CodeModeConfig {
             isolated: true,
             models: HashMap::new(),
             python: None,
+            max_idle_workers: default_max_idle_python_workers(),
         }
     }
 }
@@ -923,6 +931,17 @@ mod tests {
         let config: super::Config = toml::from_str("").unwrap();
         assert_eq!(config.code_mode.for_model("codex", "gpt-6-luna"), None);
         assert!(config.code_mode.isolated);
+        assert_eq!(config.code_mode.max_idle_workers, 3);
+    }
+
+    #[test]
+    fn code_mode_idle_worker_limit_is_configurable() {
+        for limit in [0, 1, 8] {
+            let config: super::Config =
+                toml::from_str(&format!("[code_mode]\nmax_idle_workers = {limit}")).unwrap();
+            assert_eq!(config.code_mode.max_idle_workers, limit);
+        }
+        assert!(toml::from_str::<super::Config>("[code_mode]\nmax_idle_workers = -1").is_err());
     }
 
     #[test]

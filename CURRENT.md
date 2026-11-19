@@ -4510,3 +4510,16 @@ Linux and macOS Python isolation, live filesystem and grep.app servers, and a
 Codex-to-Python MCP run.
 Idle Python workers still retain state until their session is deleted or the
 daemon exits.
+
+### 2026-11-19: Bound idle Python workers
+
+Python workers now stop after one hour idle or when the daemon's idle-worker
+LRU exceeds its configurable limit, defaulting to three. Running calls and
+approval waits remain protected. The next Python call reports state loss before
+running, while chat history and workspace files remain intact.
+
+Verified real Python process termination, LRU recency and zero capacity,
+active approval waits, reaper cleanup, session reload, config parsing, and the
+agent, daemon session-lifetime, and documentation tests.
+The state-loss notice is retained for the lifetime of the daemon.
+Python-focused tests also passed on Linux with Bubblewrap.

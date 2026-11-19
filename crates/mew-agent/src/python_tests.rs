@@ -1,7 +1,632 @@
 use serde_json::{json, Value};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
-use crate::python::{PythonOptions, PythonWorker};
+use crate::python::{PythonOptions, PythonSession, PythonWorker, PythonWorkerCache};
+
+fn idle_agent(timeout: Duration) -> crate::Agent {
+    session_agent(PythonSession::with_idle_timeout(timeout))
+}
+
+fn session_agent(session: PythonSession) -> crate::Agent {
+    let mut agent = crate::Agent::new(
+        Arc::new(mew_provider_fake::FakeProvider::new(vec![])),
+        Arc::new(mew_hooks::NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    agent.code_mode.isolated = false;
+    agent.set_python_session(session);
+    agent
+}
+
+#[tokio::test]
+async fn python_idle_cache_evicts_the_least_recently_used_worker() {
+    let cache = PythonWorkerCache::new(3);
+    let first = session_agent(cache.session());
+    let second = session_agent(cache.session());
+    let third = session_agent(cache.session());
+    let fourth = session_agent(cache.session());
+    for (agent, value) in [(&first, 1), (&second, 2), (&third, 3)] {
+        execute(agent, &format!("saved={value}")).await.unwrap();
+    }
+    assert_eq!(execute(&first, "text(saved)").await.unwrap().output, "1\n");
+    execute(&fourth, "saved=4").await.unwrap();
+    let error = execute(&second, "text(saved)")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("capacity"), "{error}");
+    assert!(error.contains("state") && error.contains("lost"), "{error}");
+    for (agent, value) in [(&first, "1\n"), (&third, "3\n"), (&fourth, "4\n")] {
+        assert_eq!(execute(agent, "text(saved)").await.unwrap().output, value);
+    }
+    assert_eq!(
+        execute(&second, "text('saved' in globals())")
+            .await
+            .unwrap()
+            .output,
+        "false\n"
+    );
+}
+
+#[tokio::test]
+async fn zero_idle_capacity_stops_worker_after_each_call() {
+    let cache = PythonWorkerCache::new(0);
+    let agent = session_agent(cache.session());
+    assert_eq!(
+        execute(&agent, "saved=42\ntext(saved)")
+            .await
+            .unwrap()
+            .output,
+        "42\n"
+    );
+    let error = execute(&agent, "text(saved)")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("capacity") && error.contains("lost"),
+        "{error}"
+    );
+    assert_eq!(
+        execute(&agent, "text('saved' in globals())")
+            .await
+            .unwrap()
+            .output,
+        "false\n"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn idle_capacity_eviction_terminates_the_worker_process() {
+    let cache = PythonWorkerCache::new(1);
+    let first = session_agent(cache.session());
+    let second = session_agent(cache.session());
+    let pid = execute(&first, "import os\ntext(os.getpid())")
+        .await
+        .unwrap()
+        .output
+        .trim()
+        .parse()
+        .unwrap();
+    execute(&second, "text('second')").await.unwrap();
+    wait_for_process_exit(pid).await;
+    assert!(execute(&first, "text('unreachable')")
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("capacity"));
+}
+
+#[tokio::test]
+async fn repeated_idle_eviction_stops_each_old_reaper() {
+    let cache = PythonWorkerCache::new(1);
+    let mut agents = Vec::new();
+    let mut previous: Option<tokio::task::AbortHandle> = None;
+    for _ in 0..8 {
+        let session = cache.session();
+        let agent = session_agent(session.clone());
+        execute(&agent, "text('ready')").await.unwrap();
+        if let Some(previous) = previous.take() {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !previous.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("evicted worker left its idle timer running");
+        }
+        previous = session.idle_reaper().await;
+        assert!(previous.is_some());
+        agents.push(agent);
+    }
+    drop(agents);
+    let last = previous.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !last.is_finished() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("dropping the session left its idle timer running");
+}
+
+#[tokio::test]
+async fn idle_capacity_does_not_evict_a_worker_awaiting_approval() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = PythonWorkerCache::new(1);
+    let mut first = crate::Agent::new(
+        Arc::new(mew_provider_fake::FakeProvider::new(vec![])),
+        Arc::new(mew_hooks::NopDispatcher),
+        None,
+        vec![Arc::new(mew_tools::tools::write::Write)],
+        None,
+    );
+    first.code_mode.isolated = false;
+    first.cwd = dir.path().to_path_buf();
+    first.workspace_roots = vec![dir.path().to_path_buf()];
+    first.set_python_session(cache.session());
+    execute(&first, "saved=42").await.unwrap();
+    let first = Arc::new(first);
+    let (events, mut receiver) = tokio::sync::mpsc::channel(32);
+    let running = first.clone();
+    let call = tokio::spawn(async move {
+        let ctx = mew_tools::ToolCtx::new(
+            Arc::new(mew_tools::ToolCtxShared::default()),
+            "test".into(),
+            Default::default(),
+            tokio::sync::mpsc::channel(1).0,
+        );
+        running.execute_python(&ctx, json!({"source":"tools.write({'path':'approved.txt','content':'ok'})\ntext(saved)"}), &events).await
+    });
+    let approval = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(crate::AgentEvent::PermissionRequest { tx, .. }) = receiver.recv().await {
+                break tx;
+            }
+        }
+    })
+    .await
+    .expect("nested tool did not request permission");
+    let second = session_agent(cache.session());
+    execute(&second, "saved=2").await.unwrap();
+    approval
+        .send(mew_hooks::PermissionDecision::AllowOnce)
+        .unwrap();
+    assert_eq!(call.await.unwrap().unwrap().output, "42\n");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("approved.txt")).unwrap(),
+        "ok"
+    );
+    assert!(execute(&second, "text(saved)")
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("capacity"));
+    assert_eq!(execute(&first, "text(saved)").await.unwrap().output, "42\n");
+}
+
+async fn execute(
+    agent: &crate::Agent,
+    source: &str,
+) -> Result<mew_hooks::ToolOutput, mew_tools::ToolError> {
+    let ctx = mew_tools::ToolCtx::new(
+        Arc::new(mew_tools::ToolCtxShared::default()),
+        "test".into(),
+        Default::default(),
+        tokio::sync::mpsc::channel(1).0,
+    );
+    let (events, _receiver) = tokio::sync::mpsc::channel(32);
+    agent
+        .execute_python(&ctx, json!({"source":source}), &events)
+        .await
+}
+
+fn outer_approval_agent(session: PythonSession) -> crate::Agent {
+    let provider = Arc::new(mew_provider_fake::FakeProvider::new(
+        mew_provider_fake::FakeProvider::tool_call(
+            "python",
+            "outer",
+            json!({"source":"text(saved)"}),
+        ),
+    ));
+    let mut agent = crate::Agent::new(
+        provider,
+        Arc::new(mew_hooks::NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    agent.code_mode.mode = Some(mew_config::CodeMode::Full);
+    agent.code_mode.isolated = false;
+    agent.max_turns = Some(1);
+    agent.set_python_session(session);
+    agent
+}
+
+async fn pending_outer_approval(
+    agent: &crate::Agent,
+    cancel: tokio_util::sync::CancellationToken,
+) -> (
+    tokio::sync::mpsc::Receiver<crate::AgentEvent>,
+    tokio::sync::oneshot::Sender<mew_hooks::PermissionDecision>,
+) {
+    let mut events = agent.run_with_parts("continue".into(), vec![], Some(cancel));
+    let approval = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(crate::AgentEvent::PermissionRequest { call, tx }) = events.recv().await {
+                assert_eq!(call.tool_name, "python");
+                break tx;
+            }
+        }
+    })
+    .await
+    .expect("Python did not request permission");
+    (events, approval)
+}
+
+async fn outer_output(
+    events: &mut tokio::sync::mpsc::Receiver<crate::AgentEvent>,
+) -> Result<String, String> {
+    let mut result = None;
+    let mut ended = false;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(event) = events.recv().await {
+            if let crate::AgentEvent::PartUpdated {
+                part: mew_message::Part::ToolCall(call),
+                ..
+            } = event
+            {
+                if call.call_id == "outer" {
+                    match call.state {
+                        mew_message::ToolState::Completed(state) => result = Some(Ok(state.output)),
+                        mew_message::ToolState::Error(state) => result = Some(Err(state.error)),
+                        _ => {}
+                    }
+                }
+            } else if let crate::AgentEvent::ToolEnd { call_id, .. } = event {
+                ended |= call_id == "outer";
+            }
+        }
+    })
+    .await
+    .expect("turn did not finish");
+    assert!(ended, "Python tool did not emit ToolEnd");
+    result.expect("missing final Python result")
+}
+
+#[tokio::test]
+async fn outer_python_approval_protects_worker_from_capacity_eviction() {
+    let cache = PythonWorkerCache::new(1);
+    let first = outer_approval_agent(cache.session());
+    execute(&first, "saved=42").await.unwrap();
+    let (mut events, approval) = pending_outer_approval(&first, Default::default()).await;
+    let second = session_agent(cache.session());
+    execute(&second, "saved=2").await.unwrap();
+    approval
+        .send(mew_hooks::PermissionDecision::AllowOnce)
+        .unwrap();
+    assert_eq!(outer_output(&mut events).await.unwrap(), "42\n");
+    assert!(execute(&second, "text(saved)")
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("capacity"));
+}
+
+#[tokio::test]
+async fn outer_python_approval_protects_worker_from_idle_expiry() {
+    let first = outer_approval_agent(PythonSession::with_idle_timeout(Duration::from_secs(60)));
+    execute(&first, "saved=42").await.unwrap();
+    let (mut events, approval) = pending_outer_approval(&first, Default::default()).await;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(61)).await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::resume();
+    approval
+        .send(mew_hooks::PermissionDecision::AllowOnce)
+        .unwrap();
+    assert_eq!(outer_output(&mut events).await.unwrap(), "42\n");
+}
+
+#[tokio::test]
+async fn denied_or_cancelled_outer_python_approval_releases_worker() {
+    for cancel_request in [false, true] {
+        let cache = PythonWorkerCache::new(1);
+        let first = outer_approval_agent(cache.session());
+        execute(&first, "saved=42").await.unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (mut events, mut approval) = pending_outer_approval(&first, cancel.clone()).await;
+        if cancel_request {
+            cancel.cancel();
+            tokio::time::timeout(Duration::from_secs(2), approval.closed())
+                .await
+                .expect("cancel did not release approval");
+        } else {
+            approval.send(mew_hooks::PermissionDecision::Deny).unwrap();
+        }
+        let _ = outer_output(&mut events).await;
+        let second = session_agent(cache.session());
+        execute(&second, "saved=2").await.unwrap();
+        assert!(execute(&first, "text(saved)")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("capacity"));
+    }
+}
+
+#[tokio::test]
+async fn cancelling_python_call_waiting_for_session_lock_finishes_tool_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = PythonWorkerCache::new(1);
+    let session = cache.session();
+    let mut first = crate::Agent::new(
+        Arc::new(mew_provider_fake::FakeProvider::new(vec![])),
+        Arc::new(mew_hooks::NopDispatcher),
+        None,
+        vec![Arc::new(mew_tools::tools::write::Write)],
+        None,
+    );
+    first.code_mode.isolated = false;
+    first.cwd = dir.path().to_path_buf();
+    first.workspace_roots = vec![dir.path().to_path_buf()];
+    first.set_python_session(session.clone());
+    execute(&first, "saved=42").await.unwrap();
+    let first = Arc::new(first);
+    let (events, mut receiver) = tokio::sync::mpsc::channel(32);
+    let active = first.clone();
+    let first_call = tokio::spawn(async move {
+        let ctx = mew_tools::ToolCtx::new(
+            Arc::new(mew_tools::ToolCtxShared::default()),
+            "test".into(),
+            Default::default(),
+            tokio::sync::mpsc::channel(1).0,
+        );
+        active.execute_python(&ctx, json!({"source":"tools.write({'path':'approved.txt','content':'ok'})\ntext(saved)"}), &events).await
+    });
+    let approval = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(crate::AgentEvent::PermissionRequest { tx, .. }) = receiver.recv().await {
+                break tx;
+            }
+        }
+    })
+    .await
+    .expect("nested tool did not request permission");
+    let queued = outer_approval_agent(session);
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let mut queued_events = queued.run_with_parts("continue".into(), vec![], Some(cancel.clone()));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(crate::AgentEvent::ToolStart { call_id }) = queued_events.recv().await {
+                if call_id == "outer" {
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .expect("queued Python call did not start");
+    cancel.cancel();
+    let error = outer_output(&mut queued_events).await.unwrap_err();
+    assert!(error.contains("cancel"), "{error}");
+    approval
+        .send(mew_hooks::PermissionDecision::AllowOnce)
+        .unwrap();
+    assert_eq!(first_call.await.unwrap().unwrap().output, "42\n");
+    assert_eq!(execute(&first, "text(saved)").await.unwrap().output, "42\n");
+}
+
+#[tokio::test]
+async fn python_cancelled_before_dispatch_keeps_state_and_does_not_run_code() {
+    let directory = tempfile::tempdir().unwrap();
+    let marker = directory.path().join("must-not-exist");
+    let agent = idle_agent(Duration::from_secs(60));
+    execute(&agent, "saved=42").await.unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    cancel.cancel();
+    let ctx = mew_tools::ToolCtx::new(
+        Arc::new(mew_tools::ToolCtxShared::default()),
+        "test".into(),
+        cancel,
+        tokio::sync::mpsc::channel(1).0,
+    );
+    let (events, _receiver) = tokio::sync::mpsc::channel(32);
+    let source = format!("open({:?}, 'w').write('wrong')", marker.to_string_lossy());
+    assert!(agent
+        .execute_python(&ctx, json!({"source":source}), &events)
+        .await
+        .is_err());
+    assert!(!marker.exists(), "cancelled code ran");
+    assert_eq!(execute(&agent, "text(saved)").await.unwrap().output, "42\n");
+}
+
+#[tokio::test]
+async fn cancelled_python_call_does_not_consume_idle_state_loss_notice() {
+    let agent = idle_agent(Duration::from_secs(60));
+    execute(&agent, "saved=42").await.unwrap();
+    tokio::time::pause();
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(61)).await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::resume();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    cancel.cancel();
+    let ctx = mew_tools::ToolCtx::new(
+        Arc::new(mew_tools::ToolCtxShared::default()),
+        "test".into(),
+        cancel,
+        tokio::sync::mpsc::channel(1).0,
+    );
+    let (events, _receiver) = tokio::sync::mpsc::channel(32);
+    let error = agent
+        .execute_python(&ctx, json!({"source":"text(saved)"}), &events)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("cancel"), "{error}");
+    let error = execute(&agent, "text(saved)")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("idle") && error.contains("lost"), "{error}");
+}
+
+#[tokio::test]
+async fn idle_python_worker_stops_and_reports_lost_state_before_executing() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("should-not-exist");
+    let agent = idle_agent(Duration::from_secs(60));
+    let saved = execute(&agent, "saved = 42\ntext(saved)").await.unwrap();
+    assert_eq!(saved.output, "42\n");
+    let reattached = agent.clone();
+    tokio::time::pause();
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(61)).await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::resume();
+
+    let source = format!(
+        "open({:?}, 'w').write('unexpected')",
+        marker.to_string_lossy()
+    );
+    let error = execute(&reattached, &source).await.unwrap_err().to_string();
+    assert!(error.contains("idle"), "{error}");
+    assert!(error.contains("variables"), "{error}");
+    assert!(error.contains("scratch"), "{error}");
+    assert!(!marker.exists(), "the first call after expiry must not run");
+    assert_eq!(
+        execute(&reattached, "text('saved' in globals())")
+            .await
+            .unwrap()
+            .output,
+        "false\n"
+    );
+}
+
+#[tokio::test]
+async fn python_activity_extends_idle_lifetime() {
+    let agent = idle_agent(Duration::from_secs(60));
+    assert_eq!(
+        execute(&agent, "saved = 42\ntext(saved)")
+            .await
+            .unwrap()
+            .output,
+        "42\n"
+    );
+    tokio::time::pause();
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(40)).await;
+    tokio::time::resume();
+    assert_eq!(
+        execute(&agent, "text(saved + 1)").await.unwrap().output,
+        "43\n"
+    );
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(30)).await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::resume();
+    assert_eq!(execute(&agent, "text(saved)").await.unwrap().output, "42\n");
+}
+
+#[tokio::test]
+async fn python_does_not_expire_while_waiting_for_tool_approval() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut agent = crate::Agent::new(
+        Arc::new(mew_provider_fake::FakeProvider::new(vec![])),
+        Arc::new(mew_hooks::NopDispatcher),
+        None,
+        vec![Arc::new(mew_tools::tools::write::Write)],
+        None,
+    );
+    agent.code_mode.isolated = false;
+    agent.cwd = directory.path().to_path_buf();
+    agent.workspace_roots = vec![directory.path().to_path_buf()];
+    agent.set_python_session(PythonSession::with_idle_timeout(Duration::from_secs(60)));
+    assert_eq!(
+        execute(&agent, "saved=42\ntext(saved)")
+            .await
+            .unwrap()
+            .output,
+        "42\n"
+    );
+    let agent = Arc::new(agent);
+    let (events, mut receiver) = tokio::sync::mpsc::channel(32);
+    let active = agent.clone();
+    let call = tokio::spawn(async move {
+        let ctx = mew_tools::ToolCtx::new(
+            Arc::new(mew_tools::ToolCtxShared::default()),
+            "test".into(),
+            Default::default(),
+            tokio::sync::mpsc::channel(1).0,
+        );
+        active.execute_python(&ctx, json!({"source":"tools.write({'path':'approved.txt','content':'ok'})\ntext(saved)"}), &events).await
+    });
+    let approval = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(crate::AgentEvent::PermissionRequest { tx, .. }) = receiver.recv().await {
+                break tx;
+            }
+        }
+    })
+    .await
+    .expect("nested tool did not request permission");
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(61)).await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    approval
+        .send(mew_hooks::PermissionDecision::AllowOnce)
+        .unwrap();
+    tokio::time::resume();
+    assert_eq!(call.await.unwrap().unwrap().output, "42\n");
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("approved.txt")).unwrap(),
+        "ok"
+    );
+    assert_eq!(execute(&agent, "text(saved)").await.unwrap().output, "42\n");
+}
+
+#[cfg(unix)]
+async fn wait_for_process_exit(pid: i32) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None) {
+                Err(nix::errno::Errno::ESRCH) => break,
+                Ok(()) => tokio::time::sleep(Duration::from_millis(10)).await,
+                Err(error) => panic!("checking Python process failed: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("Python worker did not stop");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn idle_expiry_terminates_the_python_process() {
+    let agent = idle_agent(Duration::from_secs(60));
+    let output = execute(&agent, "import os\ntext(os.getpid())")
+        .await
+        .unwrap()
+        .output;
+    let pid = output.trim().parse().unwrap();
+    tokio::time::pause();
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(61)).await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::resume();
+    wait_for_process_exit(pid).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn dropping_the_session_stops_its_worker_without_waiting_for_idle_timeout() {
+    let agent = idle_agent(Duration::from_secs(3600));
+    let output = execute(&agent, "import os\ntext(os.getpid())")
+        .await
+        .unwrap()
+        .output;
+    let pid = output.trim().parse().unwrap();
+    drop(agent);
+    wait_for_process_exit(pid).await;
+}
 
 async fn worker(isolated: bool) -> PythonWorker {
     PythonWorker::start(&PythonOptions {
