@@ -1,26 +1,15 @@
 @import "../../../jianghu/mew-palette.css";
 
-@font-face {
-  font-family: Sentient;
-  src: url("../../../jianghu/assets/sentient.woff2") format("woff2");
-  font-weight: 200 700;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "Instrument Sans";
-  src: url("../../../jianghu/assets/instrument-sans.woff2") format("woff2");
-  font-weight: 400 500;
-  font-display: swap;
-}
+@import "../../../jianghu/mew-chrome.css";
 
 :root {
-  --mew-display: Sentient, Georgia, serif;
-  --sl-font: "Instrument Sans";
+  --sl-font: var(--sans);
   --sl-text-body: 1.0625rem;
   --sl-line-height: 1.7;
-  --sl-nav-height: 4rem;
-  --sl-nav-pad-x: clamp(1rem, 3vw, 2.5rem);
+  --sl-nav-height: var(--mew-header-height);
+  --sl-nav-pad-x: var(--edge);
+  --sl-nav-gap: 0.5rem;
+  --sl-menu-button-size: 2.5rem;
   --sl-content-width: 44rem;
   --sl-content-pad-x: clamp(1.25rem, 3vw, 2.5rem);
   --sl-sidebar-width: 16.5rem;
@@ -43,11 +32,15 @@
   --sl-color-accent-low: color-mix(in oklab, var(--jade) 13%, var(--surface));
   --sl-color-bg: var(--surface);
   --sl-color-bg-nav: var(--surface);
-  --sl-color-bg-sidebar: var(--surface);
+  --sl-color-bg-sidebar: var(--surface-raised);
   --sl-color-bg-inline-code: var(--surface-raised);
   --sl-color-hairline: var(--line);
   --sl-color-hairline-light: var(--line);
   --sl-color-hairline-shade: var(--line);
+}
+
+#starlight__sidebar {
+  background: var(--sl-color-bg-sidebar);
 }
 
 #starlight__sidebar .top-level > li + li {
@@ -64,11 +57,29 @@
 }
 
 #starlight__sidebar [aria-current="page"] {
-  background: var(--sl-color-accent-low);
+  background: color-mix(in oklab, var(--jade) 14%, var(--sl-color-bg-sidebar));
   color: var(--jade);
 }
 
+@media (min-width: 72rem) {
+  .right-sidebar {
+    border-inline-start: 0;
+  }
+}
+
 @media (max-width: 49.99rem) {
+  starlight-menu-button button {
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+    background: transparent;
+    color: var(--ink);
+    box-shadow: none;
+  }
+
+  starlight-menu-button[aria-expanded="true"] button {
+    background: var(--surface-raised);
+  }
+
   #starlight__sidebar a,
   #starlight__sidebar summary {
     min-height: 2.75rem;
@@ -80,7 +91,7 @@
 }
 
 .sl-markdown-content :is(h2, h3) {
-  font-family: var(--mew-display);
+  font-family: var(--display);
   font-weight: 400;
   letter-spacing: -0.025em;
 }

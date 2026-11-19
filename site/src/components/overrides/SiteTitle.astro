@@ -1,32 +1,4 @@
----
-import seal from "../../assets/mew-logo.svg?url";
----
-
-<a class="mew-docs-brand" href="/" aria-label="mew home">
-    <img src={seal} alt="" width="26" height="26" />
-    <span class="wordmark">mew</span>
-    <span class="section" aria-hidden="true">Docs</span>
+<a class="mew-wordmark" href="/" aria-label="mew home">
+    <span class="seal" aria-hidden="true">喵</span>
+    <span class="name">mew</span>
 </a>
-
-<style>
-    .mew-docs-brand {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.5rem;
-        color: var(--ink);
-        text-decoration: none;
-        white-space: nowrap;
-    }
-
-    .wordmark {
-        font: 400 1.5rem/1 var(--mew-display);
-    }
-
-    .section {
-        margin-inline-start: 0.25rem;
-        padding-inline-start: 0.75rem;
-        border-inline-start: 1px solid var(--line);
-        color: var(--ink-muted);
-        font-size: 0.875rem;
-    }
-</style>

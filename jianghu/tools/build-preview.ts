@@ -47,7 +47,7 @@ if (!output || !isPreviewMode(mode)) {
     if (fonts) {
       const [sentient, instrumentSans, fontLicense] = fonts;
       const css = styles.join('\n')
-        .replace('@import "./mew-palette.css";\n', '')
+        .replace(/^@import "\.\/mew-(?:palette|chrome)\.css";\n/gm, '')
         .replace('./assets/sentient.woff2', 'data:font/woff2;base64,' + sentient.toString('base64'))
         .replace('./assets/instrument-sans.woff2', 'data:font/woff2;base64,' + instrumentSans.toString('base64'));
       markup = markup.replace('<link rel="stylesheet" href="./mew.css">',

@@ -1,0 +1,77 @@
+---
+import config from "virtual:starlight/user-config";
+import Search from "@astrojs/starlight/components/Search.astro";
+import ThemeSelect from "@astrojs/starlight/components/ThemeSelect.astro";
+import SiteTitle from "./SiteTitle.astro";
+
+const github = config.social.find(({ icon }) => icon === "github");
+---
+
+<div class="mew-docs-header">
+    <SiteTitle />
+    <div class="actions print:hidden">
+        {github && <a class="github" href={github.href}>GitHub</a>}
+        <Search />
+        <div class="theme"><ThemeSelect /></div>
+        <a class="mew-button primary" href="/docs/getting-started/quick-start/">Get started</a>
+    </div>
+</div>
+
+<style>
+    .mew-docs-header,
+    .actions {
+        display: flex;
+        align-items: center;
+        gap: var(--mew-header-gap);
+    }
+
+    .mew-docs-header {
+        height: 100%;
+        justify-content: space-between;
+    }
+
+    .actions {
+        gap: clamp(0.75rem, 1.6vw, 1.75rem);
+    }
+
+    .github {
+        color: var(--ink);
+        text-decoration: none;
+    }
+
+    .github:hover {
+        text-decoration: underline;
+    }
+
+    .mew-button {
+        height: var(--mew-header-button-height);
+        white-space: nowrap;
+    }
+
+    .actions :global(button[data-open-modal]) {
+        width: auto;
+        background: transparent;
+    }
+
+    @media (max-width: 49.99rem) {
+        .mew-docs-header,
+        .actions {
+            gap: 0.5rem;
+        }
+
+        .github,
+        .theme {
+            display: none;
+        }
+
+        .actions :global(button[data-open-modal]) {
+            padding-inline: 0.625rem;
+        }
+    }
+
+    @media (max-width: 23rem) {
+        .mew-button {
+            display: none;
+        }
+    }
+</style>

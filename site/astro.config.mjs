@@ -12,6 +12,10 @@ export default defineConfig({
     starlight({
       title: "mew",
       customCss: ["./src/styles/starlight.css"],
+      head: [{
+        tag: "link",
+        attrs: { rel: "stylesheet", href: "https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600&text=%E5%96%B5&display=swap" },
+      }],
       social: [
         {
           label: "GitHub",
@@ -20,7 +24,7 @@ export default defineConfig({
         },
       ],
       components: {
-        SiteTitle: "./src/components/overrides/SiteTitle.astro",
+        Header: "./src/components/overrides/Header.astro",
         PageTitle: "./src/components/overrides/PageTitle.astro",
       },
       sidebar: [

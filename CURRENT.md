@@ -4263,3 +4263,13 @@ drawer and sidebar theme overrides.
 Verified a frozen install, all six site smoke tests, and the same set of
 docs routes. Checked both color modes, Pagefind results, and mobile
 navigation in the browser.
+
+### 2026-11-19: Shared lander and docs chrome
+
+The docs header shares the lander's wordmark, typography, horizontal
+spacing, and buttons. It uses Starlight's search, theme selector, and
+mobile menu. The sidebar and mobile navigation sit on the raised Mew
+surface, with the table of contents on the article surface.
+
+Verified seven site smoke tests, 116 Jianghu tests, both Jianghu build
+formats, and the desktop and phone layouts in light and dark mode.

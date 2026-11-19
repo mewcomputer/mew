@@ -19,7 +19,7 @@ export const pages = {
     sprites: false,
   },
   '--city': { html: 'city.html', css: [], entry: 'city-main', sprites: true },
-  '--mew': { html: 'mew.html', css: ['mew.css', 'mew-palette.css'], entry: 'garden-main', sprites: true },
+  '--mew': { html: 'mew.html', css: ['mew.css', 'mew-palette.css', 'mew-chrome.css'], entry: 'garden-main', sprites: true },
   '--garden': { html: 'garden.html', css: [], entry: 'garden-main', sprites: true },
 } as const;
 
