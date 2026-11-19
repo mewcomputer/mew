@@ -18,13 +18,10 @@
     "@tailwindcss/vite": "^4.3.1",
     "astro": "^7.0.3",
     "jianghu": "workspace:*",
-    "lucode-starlight": "^0.1.6",
-    "marked": "^18.0.5",
     "motion": "^12.40.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "starlight-dot-md": "^0.2.1",
-    "starlight-sidebar-topics": "^0.8.0",
     "tailwindcss": "^4.3.1"
   },
   "devDependencies": {

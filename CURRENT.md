@@ -4252,3 +4252,14 @@ still returns immediately.
 
 Verified the opacity transition and control availability in the browser,
 along with 116 Jianghu tests, TypeScript, and four Astro smoke tests.
+
+### 2026-11-19: Mew theme for Starlight docs
+
+The docs use Starlight's page frame and shared desktop and mobile menu
+with a Mew masthead, article titles, and the homepage's fonts and palette.
+Installation leads into Quick Start. Removed Lucode and the separate
+drawer and sidebar theme overrides.
+
+Verified a frozen install, all six site smoke tests, and the same set of
+docs routes. Checked both color modes, Pagefind results, and mobile
+navigation in the browser.
