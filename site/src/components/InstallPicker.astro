@@ -33,7 +33,13 @@ const commands = {
 </section>
 
 <script>
+    import { defaultInstallPlatform } from '../lib/install-platform.mts';
+
+    const platform = defaultInstallPlatform(navigator.platform, navigator.userAgent);
     for (const picker of document.querySelectorAll<HTMLElement>('[data-install-picker]')) {
+        const platformInput = picker.querySelector<HTMLInputElement>(`[name="install-platform"][value="${platform}"]`);
+        if (platformInput) platformInput.defaultChecked = true;
+
         const copy = picker.querySelector<HTMLButtonElement>('[data-copy-command]');
         const status = picker.querySelector<HTMLElement>('[data-copy-status]');
         if (!copy || !status) continue;

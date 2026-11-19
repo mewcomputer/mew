@@ -4414,3 +4414,10 @@ Linux choice shows the glibc requirement.
 
 Verified eight site smoke tests, the Jianghu build, the phone layout, and
 both clipboard commands in the browser.
+
+### 2026-11-19: Install picker defaults to the visitor's platform
+
+The homepage and install guide preselect Linux for desktop Linux browsers
+and use macOS as the fallback. Both platforms remain selectable. Verified
+ten site tests and switching on both pages in Chrome with macOS, Linux,
+and Android browser settings.
