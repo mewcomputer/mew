@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { mewOverview, mewTiltShift } from '../src/mew-story.ts';
-import { tiltShiftAperture } from '../src/tilt-shift.ts';
+import { tiltShiftAperture, tiltShiftBlurRadius } from '../src/tilt-shift.ts';
 
 test('tilt shift starts gently and increases as the camera zooms in', () => {
   assert.ok(tiltShiftAperture(1) > 0);
@@ -19,4 +19,12 @@ test('the homepage has visible tilt shift in the overview and strengthens it on 
   assert.ok(closeup > overview);
   assert.ok(tiltShiftAperture(2.5, mewTiltShift) <= 0.4);
   assert.equal(tiltShiftAperture(3, mewTiltShift), tiltShiftAperture(2.5, mewTiltShift));
+});
+
+test('the homepage softens out-of-focus detail more than the standalone scene', () => {
+  const overview = tiltShiftAperture(mewOverview.zoom, mewTiltShift);
+  const closeup = tiltShiftAperture(2.05, mewTiltShift);
+  assert.ok(tiltShiftBlurRadius(overview, mewTiltShift) > tiltShiftBlurRadius(0.4));
+  assert.ok(tiltShiftBlurRadius(closeup, mewTiltShift) > tiltShiftBlurRadius(overview, mewTiltShift));
+  assert.ok(tiltShiftBlurRadius(0.4, mewTiltShift) <= 6.5);
 });

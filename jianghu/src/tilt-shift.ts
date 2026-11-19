@@ -1,11 +1,16 @@
 import type * as Three from 'three';
 
-type TiltShiftProfile = { wideAperture: number; closeupZoom: number };
-const defaultProfile: TiltShiftProfile = { wideAperture: 0.18, closeupZoom: 4.2 };
+type TiltShiftProfile = { wideAperture: number; closeupZoom: number; maxBlurRadius: number };
+const maxAperture = 0.4;
+const defaultProfile: TiltShiftProfile = { wideAperture: 0.18, closeupZoom: 4.2, maxBlurRadius: 3.6 };
 
 export function tiltShiftAperture(zoom: number, { wideAperture, closeupZoom }: TiltShiftProfile = defaultProfile) {
   const closeup = Math.min(1, Math.max(0, (zoom - 0.75) / (closeupZoom - 0.75)));
-  return wideAperture + (0.4 - wideAperture) * closeup;
+  return wideAperture + (maxAperture - wideAperture) * closeup;
+}
+
+export function tiltShiftBlurRadius(aperture: number, { maxBlurRadius }: TiltShiftProfile = defaultProfile) {
+  return maxBlurRadius * (aperture / maxAperture);
 }
 
 export function createTiltShift(T: typeof Three, renderer: Three.WebGLRenderer, profile?: TiltShiftProfile) {
@@ -91,7 +96,7 @@ export function createTiltShift(T: typeof Three, renderer: Three.WebGLRenderer, 
       uniforms.focusPoint.value.set(0, 0, -orbitRadius).applyMatrix4(camera.projectionMatrix);
       const aperture = tiltShiftAperture(zoom, profile);
       uniforms.aperture.value = aperture;
-      uniforms.maxRadius.value = 9 * aperture * renderer.getPixelRatio();
+      uniforms.maxRadius.value = tiltShiftBlurRadius(aperture, profile) * renderer.getPixelRatio();
 
       renderer.setRenderTarget(target);
       try {

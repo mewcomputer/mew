@@ -4204,3 +4204,9 @@ and reaches the existing blur cap within its own zoom range.
 
 Verified 111 Jianghu tests, TypeScript, the Astro production build and smoke
 tests, and the overview and close-up in the browser.
+
+### 2026-11-19: Stronger depth blur on the Mew homepage
+
+Raised the homepage's maximum blur radius from 3.6 to 6.4 CSS pixels.
+Verified 112 Jianghu tests, TypeScript, the Astro build and smoke tests,
+and the wider blur in the hero and a close-up.
