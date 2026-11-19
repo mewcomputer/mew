@@ -70,10 +70,69 @@ async fn params(root: &Path, policy: Option<SessionPolicy>) -> mew_daemon::Agent
 }
 
 #[tokio::test]
+async fn daemon_agents_share_the_discovered_mcp_tools() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("fixture.txt"), "daemon mcp fixture").unwrap();
+    let script = r#"
+import json, pathlib, sys
+for line in sys.stdin:
+    req = json.loads(line)
+    if 'id' not in req: continue
+    if req['method'] == 'initialize':
+        result = {'protocolVersion':'2025-11-25','capabilities':{'tools':{}},'serverInfo':{'name':'test','version':'1'}}
+    elif req['method'] == 'tools/list':
+        result = {'tools':[{'name':'read','description':'Read a file','inputSchema':{'type':'object','properties':{'path':{'type':'string'}},'required':['path']}}]}
+    else:
+        result = {'content':[{'type':'text','text':pathlib.Path(req['params']['arguments']['path']).read_text()}]}
+    print(json.dumps({'jsonrpc':'2.0','id':req['id'],'result':result}),flush=True)
+"#;
+    std::fs::write(directory.path().join("server.py"), script).unwrap();
+    std::fs::write(
+        directory.path().join("mcp.json"),
+        r#"{"mcpServers":{"files":{"command":"python3","args":["-u","server.py"]}}}"#,
+    )
+    .unwrap();
+    let configs =
+        mew_mcp::load_servers(directory.path(), &directory.path().join("global")).unwrap();
+    let tools = mew_mcp::connect_tools(configs, directory.path()).await;
+    assert_eq!(tools.len(), 1);
+    let (cfg, catalog, _credential) = fixture();
+    let server = build_daemon_server_with_config(
+        tools,
+        cfg,
+        Some(catalog),
+        false,
+        "fixture",
+        Some("first".into()),
+        false,
+        PermissionMode::Standard,
+    )
+    .unwrap();
+    let (first, _, _) = (server.builder)(params(directory.path(), None).await).unwrap();
+    let (second, _, _) = (server.builder)(params(directory.path(), None).await).unwrap();
+    let first_tool = first.tools.get("mcp__files__read").unwrap();
+    let second_tool = second.tools.get("mcp__files__read").unwrap();
+    assert!(Arc::ptr_eq(first_tool, second_tool));
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    let ctx = mew_tools::ToolCtx::new(
+        Arc::new(mew_tools::ToolCtxShared::default()),
+        "call".into(),
+        Default::default(),
+        tx,
+    );
+    let result = first_tool
+        .execute(ctx, serde_json::json!({"path":"fixture.txt"}))
+        .await
+        .unwrap();
+    assert_eq!(result.output, "daemon mcp fixture");
+}
+
+#[tokio::test]
 async fn real_builder_restores_effective_policy_and_explicit_thinking_off() {
     let directory = tempfile::tempdir().unwrap();
     let (cfg, cat, _credential) = fixture();
     let server = build_daemon_server_with_config(
+        Vec::new(),
         cfg,
         Some(cat),
         false,
@@ -116,6 +175,7 @@ async fn saved_model_wins_a_changed_persona_pin_but_new_sessions_honor_the_pin()
     let (mut cfg, cat, _credential) = fixture();
     cfg.default_persona = "pinned".into();
     let server = build_daemon_server_with_config(
+        Vec::new(),
         cfg,
         Some(cat),
         false,
@@ -143,6 +203,7 @@ async fn unavailable_saved_policy_is_reported_without_falling_back() {
     let directory = tempfile::tempdir().unwrap();
     let (cfg, cat, _credential) = fixture();
     let server = build_daemon_server_with_config(
+        Vec::new(),
         cfg,
         Some(cat),
         false,
@@ -187,6 +248,7 @@ async fn model_switch_updates_all_runtime_metadata_and_thinking_off_clears_both_
     let directory = tempfile::tempdir().unwrap();
     let (cfg, cat, _credential) = fixture();
     let server = build_daemon_server_with_config(
+        Vec::new(),
         cfg,
         Some(cat),
         false,
@@ -243,6 +305,7 @@ async fn saved_thinking_off_preserves_a_models_explicit_disable_parameters() {
     let directory = tempfile::tempdir().unwrap();
     let (cfg, cat, _credential) = fixture();
     let server = build_daemon_server_with_config(
+        Vec::new(),
         cfg,
         Some(cat),
         false,
@@ -282,6 +345,7 @@ async fn fake_builder_and_manager_restore_policy_and_todos_from_actual_storage()
     let directory = tempfile::tempdir().unwrap();
     let cfg = mew_config::Config::default();
     let configured = build_daemon_server_with_config(
+        Vec::new(),
         cfg,
         None,
         true,
@@ -366,6 +430,7 @@ async fn thinking_selection_uses_the_active_provider_for_shared_model_ids() {
         catalog.models.insert("shared".into(), model);
     }
     let server = build_daemon_server_with_config(
+        Vec::new(),
         cfg,
         Some(catalog),
         false,

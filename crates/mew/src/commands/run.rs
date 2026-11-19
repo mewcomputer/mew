@@ -106,6 +106,9 @@ pub(crate) async fn build_and_run(
 
     let provider =
         build_provider(cfg, cat, &provider_id, &model_id, raw, None).context("build provider")?;
+    let mcp_tools = crate::setup::agent::discover_mcp_tools(&cwd)
+        .await
+        .context("load MCP servers")?;
 
     // Build the full session agent (provider, tools, personas, skills,
     // subagents, context files, pricing, etc.) via the shared builder.
@@ -123,6 +126,7 @@ pub(crate) async fn build_and_run(
         dispatcher.clone(),
         todos_path.clone(),
         &discovered,
+        &mcp_tools,
     )?;
 
     // Register plugin-discovered tools (no-op for NopDispatcher).

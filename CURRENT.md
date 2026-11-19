@@ -4486,3 +4486,14 @@ per-model and global settings take precedence; other models retain direct
 tools unless configured otherwise. Verified catalog, config, agent, subagent,
 daemon reload, and documentation tests. A live Codex run used Python with no
 explicit mode setting and returned the expected result.
+
+### 2026-11-19: MCP tools in Python code mode
+
+Mew now discovers configured stdio and streamable HTTP MCP servers at startup
+and makes their tools available in direct and Python modes through the existing
+permission path. Project settings override global entries. Shared connections
+handle concurrent sessions, cancellation, structured results, and images.
+
+Verified the MCP and Mew tests, documentation site tests, real filesystem and
+grep.app servers, and a live Codex-to-Python-to-grep.app run. Context7 connected
+and listed its tools, but its anonymous quota prevented a live tool call.

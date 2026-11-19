@@ -5384,9 +5384,11 @@ name = "mew-mcp"
 version = "0.2.0"
 dependencies = [
  "async-trait",
+ "mew-harness",
  "mew-hooks",
  "mew-message",
  "mew-tools",
+ "nix 0.29.0",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

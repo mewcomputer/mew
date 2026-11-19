@@ -41,7 +41,17 @@ pub(crate) async fn build_daemon_server(
         crate::setup::providers::load_catalog(&cfg).await
     };
 
+    let mcp_tools = if fake_provider {
+        Vec::new()
+    } else {
+        let cwd = std::env::current_dir().context("determine MCP workspace")?;
+        crate::setup::agent::discover_mcp_tools(&cwd)
+            .await
+            .context("load MCP servers")?
+    };
+
     build_daemon_server_with_config(
+        mcp_tools,
         cfg,
         cat,
         fake_provider,
@@ -52,7 +62,9 @@ pub(crate) async fn build_daemon_server(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_daemon_server_with_config(
+    mcp_tools: Vec<Arc<dyn mew_tools::Tool>>,
     cfg: mew_config::Config,
     cat: Option<mew_catalog::Catalog>,
     fake_provider: bool,
@@ -61,6 +73,7 @@ fn build_daemon_server_with_config(
     raw: bool,
     mode: mew_hooks::PermissionMode,
 ) -> Result<mew_daemon::DaemonServer> {
+    let mcp_tools = Arc::new(mcp_tools);
     let cfg = Arc::new(cfg);
     let cat = Arc::new(cat);
 
@@ -161,7 +174,7 @@ fn build_daemon_server_with_config(
                 provider,
                 Arc::new(mew_hooks::NopDispatcher),
                 Some(params.writer),
-                Vec::new(),
+                mcp_tools.as_ref().clone(),
                 session_id,
             );
             agent.cwd = cwd.clone();
@@ -205,6 +218,7 @@ fn build_daemon_server_with_config(
                 Arc::new(mew_hooks::NopDispatcher),
                 todos_path,
                 &[],
+                mcp_tools.as_slice(),
             )?
         };
         let variant = params
@@ -925,6 +939,7 @@ mod model_list_tests {
             .unwrap(),
         );
         let server = build_daemon_server_with_config(
+            Vec::new(),
             cfg,
             Some(catalog),
             false,

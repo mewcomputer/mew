@@ -17,6 +17,14 @@ use mew_ext_broker::{
 };
 use mew_hooks::Dispatcher;
 
+/// Connect MCP servers configured for the current process workspace.
+pub(crate) async fn discover_mcp_tools(
+    cwd: &std::path::Path,
+) -> Result<Vec<Arc<dyn mew_tools::Tool>>> {
+    let servers = mew_mcp::load_servers(cwd, &mew_config::config_dir())?;
+    Ok(mew_mcp::connect_tools(servers, cwd).await)
+}
+
 /// Apply catalog pricing and prompt-cache retention for the active model.
 pub(crate) fn apply_catalog_pricing(agent: &mut Agent, cat: Option<&Catalog>, model_id: &str) {
     let model = cat.and_then(|catalog| catalog.lookup(model_id));
@@ -549,6 +557,7 @@ pub(crate) fn build_session_agent(
     dispatcher: Arc<dyn Dispatcher>,
     todos_path: Option<std::path::PathBuf>,
     discovered_extensions: &[mew_ext_broker::DiscoveredExtension],
+    mcp_tools: &[Arc<dyn mew_tools::Tool>],
 ) -> Result<Agent> {
     let cwd = session_cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
@@ -585,6 +594,7 @@ pub(crate) fn build_session_agent(
         cfg.plan_path.clone(),
     );
     tools.extend(mew_tools::tools::browser::tools());
+    tools.extend(mcp_tools.iter().cloned());
 
     let flagged_files: Arc<tokio::sync::Mutex<Vec<FlaggedFile>>> =
         Arc::new(tokio::sync::Mutex::new(Vec::new()));
@@ -781,6 +791,7 @@ pub(crate) fn build_system_prompt_snapshot(
             Arc::new(mew_hooks::NopDispatcher),
             None,
             &discovered,
+            &[],
         )
     });
     let agent = agent?;

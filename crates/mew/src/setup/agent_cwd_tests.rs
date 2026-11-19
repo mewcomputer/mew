@@ -109,6 +109,7 @@ fn build(
         Arc::new(NopDispatcher),
         None,
         &[],
+        &[],
     )
     .unwrap()
 }
@@ -159,6 +160,117 @@ async fn output(agent: &Agent, call_id: &str) -> String {
             _ => None,
         })
         .expect("missing tool call")
+}
+
+#[tokio::test]
+async fn configured_mcp_tools_work_in_both_modes_and_respect_permissions() {
+    let (_directory, root) = project("mcp fixture");
+    let server = r#"
+import json, pathlib, sys
+for line in sys.stdin:
+    req = json.loads(line)
+    if 'id' not in req: continue
+    if req['method'] == 'initialize':
+        result = {'protocolVersion':'2025-11-25','capabilities':{'tools':{}},'serverInfo':{'name':'test','version':'1'}}
+    elif req['method'] == 'tools/list':
+        result = {'tools':[{'name':'read_file','description':'Read a file','inputSchema':{'type':'object','properties':{'path':{'type':'string'}},'required':['path']}}]}
+    else:
+        pathlib.Path('called').write_text('yes')
+        text = pathlib.Path(req['params']['arguments']['path']).read_text()
+        result = {'content':[{'type':'text','text':text}]}
+    print(json.dumps({'jsonrpc':'2.0','id':req['id'],'result':result}),flush=True)
+"#;
+    std::fs::write(root.join("server.py"), server).unwrap();
+    std::fs::write(
+        root.join("mcp.json"),
+        r#"{"mcpServers":{"files":{"command":"python3","args":["-u","server.py"]}}}"#,
+    )
+    .unwrap();
+    let configs = mew_mcp::load_servers(&root, &root.join("global")).unwrap();
+    let tools = mew_mcp::connect_tools(configs, &root).await;
+    assert_eq!(tools.len(), 1);
+
+    for code_mode in [false, true] {
+        let mut cfg = config();
+        cfg.code_mode.isolated = false;
+        cfg.code_mode.mode = Some(if code_mode {
+            mew_config::CodeMode::Full
+        } else {
+            mew_config::CodeMode::Off
+        });
+        let (name, input) = if code_mode {
+            (
+                "python",
+                serde_json::json!({"source":"r=tools.mcp__files__read_file({'path':'input.txt'}); text(r['error'] or r['output'])"}),
+            )
+        } else {
+            (
+                "mcp__files__read_file",
+                serde_json::json!({"path":"input.txt"}),
+            )
+        };
+        let provider = ProjectProvider::new(
+            [
+                tool_turn(name, "denied", input.clone()),
+                tool_turn(name, "allowed", input),
+            ]
+            .concat(),
+        );
+        let agent = build_session_agent(
+            &cfg,
+            None,
+            provider.clone(),
+            "fake",
+            "fake",
+            false,
+            PermissionMode::Standard,
+            None,
+            None,
+            Some(root.clone()),
+            Arc::new(NopDispatcher),
+            None,
+            &[],
+            &tools,
+        )
+        .unwrap();
+        for deny in [true, false] {
+            let mut events = agent.run("read the fixture".into());
+            let mut saw_mcp_permission = false;
+            while let Some(event) =
+                tokio::time::timeout(std::time::Duration::from_secs(10), events.recv())
+                    .await
+                    .unwrap()
+            {
+                if let AgentEvent::PermissionRequest { call, tx } = event {
+                    let is_mcp = call.tool_name == "mcp__files__read_file";
+                    saw_mcp_permission |= is_mcp;
+                    tx.send(if is_mcp && deny {
+                        PermissionDecision::Deny
+                    } else {
+                        PermissionDecision::AllowOnce
+                    })
+                    .unwrap();
+                }
+            }
+            assert!(saw_mcp_permission);
+            if deny {
+                assert!(!root.join("called").exists());
+            } else {
+                assert_eq!(output(&agent, "allowed").await.trim(), "mcp fixture");
+            }
+        }
+        std::fs::remove_file(root.join("called")).unwrap();
+        let requests = provider.requests.lock().unwrap();
+        if code_mode {
+            assert_eq!(requests[0].tools.len(), 1);
+            assert_eq!(requests[0].tools[0].name, "python");
+        } else {
+            assert!(requests[0]
+                .tools
+                .iter()
+                .any(|tool| tool.name == "mcp__files__read_file"));
+        }
+    }
 }
 
 #[tokio::test]
@@ -483,6 +595,7 @@ async fn model_switch_refreshes_project_templates_and_the_child_provider() {
         Some(root.clone()),
         Arc::new(NopDispatcher),
         None,
+        &[],
         &[],
     )
     .unwrap();

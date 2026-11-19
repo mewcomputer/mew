@@ -110,7 +110,7 @@ their definitions in `ALL_TOOLS`, and use `text(value)` to return output.
 `emit_image(result["images"][0])` returns a tool's image to a vision-capable
 model. Calls from Python threads are serialized through the tool dispatcher.
 Nested tool calls use the same permission checks as direct calls.
-Mew does not yet register MCP servers; see [MCP Servers](/docs/using-mew/mcp-servers/).
+Configured MCP tools are also available; see [MCP Servers](/docs/using-mew/mcp-servers/).
 
 With `isolated = true`, Mew runs Python in a macOS Seatbelt sandbox or a Linux
 Bubblewrap sandbox. Linux requires `bwrap` and working unprivileged user
@@ -277,6 +277,6 @@ the built-in default. The last-used model and provider are saved back to
 
 ## MCP servers
 
-MCP support is experimental library functionality. See
-[MCP Servers](/docs/using-mew/mcp-servers/) for the library and transport
-configuration.
+Configure stdio and streamable HTTP servers in `mcp.json`. See
+[MCP Servers](/docs/using-mew/mcp-servers/) for discovery, permissions, and
+the server trust boundary.
