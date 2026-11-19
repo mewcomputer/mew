@@ -573,6 +573,7 @@ pub struct SessionManager {
     pub(crate) session_dir: PathBuf,
     pub(crate) project_pins: Arc<ProjectPinsStore>,
     pub(crate) active: Mutex<HashMap<String, Arc<Session>>>,
+    python_sessions: Mutex<HashMap<String, mew_agent::PythonSession>>,
     loading: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub(crate) defaults_lock: Mutex<()>,
     pub remote_devices: std::sync::OnceLock<crate::remote::RemoteDeviceManager>,
@@ -584,6 +585,25 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
+    async fn restore_python_session(&self, session_id: &str, agent: &mut Agent) {
+        if agent.code_mode.mode == mew_config::CodeMode::Full
+            || agent
+                .code_mode
+                .models
+                .values()
+                .any(|mode| *mode == mew_config::CodeMode::Full)
+        {
+            let session = self
+                .python_sessions
+                .lock()
+                .await
+                .entry(session_id.to_owned())
+                .or_default()
+                .clone();
+            agent.set_python_session(session);
+        }
+    }
+
     pub fn new(
         builder: AgentBuilder,
         session_dir: PathBuf,
@@ -598,6 +618,7 @@ impl SessionManager {
             session_dir,
             project_pins,
             active: Mutex::new(HashMap::new()),
+            python_sessions: Mutex::new(HashMap::new()),
             loading: Mutex::new(HashMap::new()),
             defaults_lock: Mutex::new(()),
             remote_devices: std::sync::OnceLock::new(),
@@ -622,12 +643,13 @@ impl SessionManager {
         let writer = mew_session::Writer::open_at_with_meta(&self.session_dir, &session_id, meta)
             .await
             .context("open session writer")?;
-        let (agent, model, provider) = (self.builder)(AgentBuildParams {
+        let (mut agent, model, provider) = (self.builder)(AgentBuildParams {
             session_id: session_id.clone(),
             writer,
             cwd,
             policy,
         })?;
+        self.restore_python_session(&session_id, &mut agent).await;
         load_todos(&agent).await?;
         let mut session = Session::new(
             session_id.clone(),
@@ -786,7 +808,7 @@ impl SessionManager {
             .context("open session writer for resume")
             .map_err(AttachError::BuildAgent)?;
 
-        let (agent, model, provider) = (self.builder)(AgentBuildParams {
+        let (mut agent, model, provider) = (self.builder)(AgentBuildParams {
             session_id: session_id.to_string(),
             writer,
             cwd,
@@ -794,6 +816,7 @@ impl SessionManager {
         })
         .context("build agent for resume")
         .map_err(AttachError::BuildAgent)?;
+        self.restore_python_session(session_id, &mut agent).await;
         load_todos(&agent).await.map_err(AttachError::BuildAgent)?;
 
         // The writer has already migrated and repaired the log. Reuse the
@@ -919,6 +942,7 @@ impl SessionManager {
             session.browser_access.clear();
         }
         drop(active);
+        self.python_sessions.lock().await.remove(session_id);
         drop(_load);
         if let Err(error) = tokio::fs::remove_dir_all(tombstone).await {
             tracing::warn!(%session_id, %error, "could not clean up deleted session files");

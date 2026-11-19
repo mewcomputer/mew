@@ -207,17 +207,7 @@ impl Agent {
             let mut tool_defs: Vec<ToolDef> = self
                 .tools
                 .values()
-                .filter(|t| {
-                    let name = t.name();
-                    let browser_allowed =
-                        !name.starts_with("browser_") || self.browser_access.is_available();
-                    let allowed = self
-                        .active_tool_names
-                        .as_ref()
-                        .is_none_or(|names| names.contains(name));
-                    let not_denied = !self.denied_tool_names.contains(name);
-                    browser_allowed && allowed && not_denied
-                })
+                .filter(|t| self.tool_available(t.name()))
                 .map(|t| ToolDef {
                     name: t.name().to_string(),
                     description: t.description().to_string(),
@@ -225,6 +215,10 @@ impl Agent {
                 })
                 .collect();
             sort_tool_defs(&mut tool_defs);
+            let direct_tool_defs = tool_defs.clone();
+            if self.uses_code_mode() {
+                tool_defs = vec![self.python_tool_definition()];
+            }
 
             // Ingest any user guidance queued since the last request so it
             // steers the next provider request (even a tool-call continuation).
@@ -339,7 +333,7 @@ impl Agent {
                     .as_ref()
                     .filter(|models| !models.is_empty())
                     .zip(self.provider_builder.as_ref())
-                    .map(|(models, builder)| (models, builder, req.clone()));
+                    .map(|(models, builder)| (models.clone(), builder.clone(), req.clone()));
                 self.mark_prompt_request_sent();
                 let primary_error = match self.provider.stream(req).await {
                     Ok(stream) => return Ok(stream),
@@ -360,10 +354,21 @@ impl Agent {
                             reason: format!("trying fallback: {model}"),
                         }))
                         .await;
+                    let (provider_id, model_id) = model.split_once('/').unwrap_or((model, ""));
+                    let mut fallback_request = request.clone();
+                    let code_mode = self.code_mode.for_model(provider_id, model_id)
+                        == mew_config::CodeMode::Full;
+                    fallback_request.system = self.request_system_for_mode(code_mode).await;
+                    fallback_request.tools = if code_mode {
+                        vec![self.python_tool_definition()]
+                    } else {
+                        direct_tool_defs.clone()
+                    };
                     match (builder.0)(model) {
-                        Ok(provider) => match provider.stream(request.clone()).await {
+                        Ok(provider) => match provider.stream(fallback_request).await {
                             Ok(stream) => {
                                 self.provider = provider;
+                                self.set_model_info(model_id, provider_id);
                                 return Ok(stream);
                             }
                             Err(error) => last_error = error.to_string(),
@@ -773,12 +778,14 @@ impl Agent {
             tokio::spawn(async move {
                 dispatcher.on_turn_end(&messages).await;
             });
-            if assistant_msg.as_ref().is_some_and(|message| {
-                message.parts.iter().any(|part| {
-                    matches!(part, Part::ToolCall(call) if call.tool_name == "exit_tool"
+            if std::mem::take(&mut *self.python_exit.lock().await)
+                || assistant_msg.as_ref().is_some_and(|message| {
+                    message.parts.iter().any(|part| {
+                        matches!(part, Part::ToolCall(call) if call.tool_name == "exit_tool"
                         && matches!(call.state, ToolState::Completed(_)))
+                    })
                 })
-            }) {
+            {
                 return Ok(());
             }
         }
@@ -864,10 +871,17 @@ impl Agent {
     }
 
     async fn request_system(&self) -> String {
-        let system = match &self.persona_prompt {
+        self.request_system_for_mode(self.uses_code_mode()).await
+    }
+
+    async fn request_system_for_mode(&self, code_mode: bool) -> String {
+        let mut system = match &self.persona_prompt {
             Some(persona) => format!("{}\n\n{}", persona, self.system),
             None => self.system.clone(),
         };
+        if code_mode {
+            system.push_str("\n\n## Python tool mode\n\nThe only direct tool is `python`. Call other available tools inside Python using `tools.name(arguments)`, with the schemas in the Python tool description. For example, use `result = tools.read({\"path\": \"file.txt\"}); text(result[\"output\"])` to read a file. Tool calls return dictionaries with `output` and `error`; check errors before using results. Python variables persist between calls. Use `text(value)` or `print` to show results. When Python is isolated, access the workspace and network through the available tools, not Python's direct file or network APIs.");
+        }
         self.dispatcher.on_system_prompt(system).await
     }
 

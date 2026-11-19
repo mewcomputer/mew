@@ -53,6 +53,7 @@ sidebar_finished_ttl_secs = 180
 | `plan_path` | string | `"plans/"` | Each `write_plan` call creates a new file such as `plans/vale-nori.md`. Use the returned path with `edit_plan`. Set a different relative or absolute path to use a fixed file |
 | `providers` | table | (built-in) | Provider definitions keyed by provider ID |
 | `models` | array | `[]` | Custom model entries that override or extend the catalog |
+| `code_mode` | table | (off) | Run tools through a persistent Python session. See [Python code mode](#python-code-mode) |
 | `permissions` | table | (empty) | Permission rules and classifier config. See [Permissions](/docs/using-mew/permissions/) |
 | `secrets` | table | (empty) | Secret files and words for redaction |
 | `workspace` | table | (empty) | Workspace roots for file access and shell permission checks |
@@ -69,6 +70,59 @@ Personas and skills accept `polytoken:` as an alias for `mew:` in their
 frontmatter. This is for compatibility with personas authored for
 Polytoken. See [Personas](/docs/using-mew/personas/) for details.
 :::
+
+### Python code mode
+
+Code mode gives the model a single `python` tool. Python runs in a persistent
+session and calls Mew's available tools through `tools`. The default is `off`,
+which keeps the existing tool interface. Choose a default and optional
+provider-qualified overrides in `config.toml`:
+
+```toml
+[code_mode]
+mode = "off"       # "off" or "full"
+isolated = true    # default
+# python = "/path/to/venv/bin/python"
+
+[code_mode.models]
+"codex/gpt-6-luna" = "full"
+"opencode-go/hy4-flash-free" = "off"
+```
+
+Set `mode = "full"` to enable it for every model, then use `"off"` overrides
+for exceptions. `python` defaults to `python3` on the daemon's `PATH`. Use a
+virtual environment's Python executable to make its installed packages
+available. The interpreter and its installed packages must be trusted.
+
+Python variables persist across calls in the same session, including when an
+idle session is unloaded and reattached. They do not survive daemon restarts,
+session deletion, cancellation, a worker crash, or a ten-minute period without
+a worker response. Approval waits do not count toward that timeout. Subagents
+have separate Python sessions.
+
+The model can call tools with `tools.read({"path": "file.txt"})`, inspect
+their definitions in `ALL_TOOLS`, and use `text(value)` to return output.
+`emit_image(result["images"][0])` returns a tool's image to a vision-capable
+model. Calls from Python threads are serialized through the tool dispatcher.
+Nested tool calls use the same permission checks as direct calls.
+Mew does not yet register MCP servers; see [MCP Servers](/docs/using-mew/mcp-servers/).
+
+With `isolated = true`, Mew runs Python in a macOS Seatbelt sandbox or a Linux
+Bubblewrap sandbox. Linux requires `bwrap` and working unprivileged user
+namespaces. The worker can read the selected Python environment and system
+libraries and use a private scratch directory. Other workspace files and the
+network are inaccessible directly.
+Access through Mew tools remains governed by their permissions. This uses the
+host kernel and does not impose CPU or memory quotas. If isolation cannot start,
+the call fails instead of running without it.
+
+Some scientific packages fall back to serial execution when the sandbox
+restricts subprocesses or synchronization primitives.
+
+Setting `isolated = false` lets Python access the host directly, including files,
+network, and subprocesses, without passing those operations through Mew's tool
+permissions. Mew marks each unrestricted Python call as dangerous for the
+permission engine.
 
 ### Provider configuration
 

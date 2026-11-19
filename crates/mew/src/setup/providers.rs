@@ -909,6 +909,10 @@ impl mew_subagents::ModelResolver for MainModelResolver {
         )
         .map_err(|e| e.to_string())
     }
+
+    fn resolved_model(&self, model: &str) -> String {
+        self.resolve_tier_keyword(model)
+    }
 }
 
 impl MainModelResolver {

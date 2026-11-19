@@ -4465,3 +4465,16 @@ no gaps over 50 ms, compared with 474 frames and two such gaps before.
 Forced software rendering improved from 11 to 121 scroll frames on the
 same path and switched to the still. Also checked chapter scrolling,
 garden controls, and the install picker at a 390 px viewport.
+
+### 2026-11-19: Python code mode
+
+Added an opt-in Python tool mode with global and per-model settings. Python
+state survives calls and idle session reloads. Nested tools use the existing
+permission and agent dispatch paths. macOS Seatbelt and Linux Bubblewrap
+provide optional isolation; unrestricted Python is treated as dangerous.
+
+Verified the agent, config, subagent, and daemon session tests; macOS and
+Linux isolation including virtual environments and child cleanup; and a live
+Codex run that read a file through the tool bridge and fit a scikit-learn
+regression across Python calls. The sandbox made joblib run serially. The
+documentation site tests and workspace clippy also passed.

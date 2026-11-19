@@ -18,6 +18,64 @@ use tokio_tungstenite::WebSocketStream;
 
 type Ws = WebSocketStream<DuplexStream>;
 
+#[tokio::test]
+async fn python_state_survives_unloading_and_reattaching_the_same_session() {
+    let directory = tempfile::tempdir().unwrap();
+    let builder: mew_daemon::AgentBuilder = Arc::new(|params| {
+        let script = FakeProvider::tool_call(
+            "python",
+            "py",
+            serde_json::json!({"source":"saved = globals().get('saved', 40) + 1\ntext(saved)"}),
+        );
+        let mut agent = Agent::new(
+            Arc::new(FakeProvider::new(script)),
+            Arc::new(NopDispatcher),
+            Some(params.writer),
+            vec![],
+            None,
+        );
+        agent.code_mode = mew_config::CodeModeConfig {
+            mode: mew_config::CodeMode::Full,
+            isolated: false,
+            ..Default::default()
+        };
+        agent.max_turns = Some(1);
+        Ok((agent, Some("fake".into()), Some("fake".into())))
+    });
+    let server = DaemonServer::with_session_dir(builder, directory.path().join("sessions"));
+    let session = server.session_manager.create(None).await.unwrap();
+    let id = session.id.clone();
+    async fn run(agent: &Agent) -> String {
+        let mut events = agent.run("test".into());
+        let mut output = String::new();
+        while let Some(event) = events.recv().await {
+            match event {
+                mew_agent::AgentEvent::PermissionRequest { tx, .. } => {
+                    tx.send(mew_hooks::PermissionDecision::AllowOnce).unwrap();
+                }
+                mew_agent::AgentEvent::PartUpdated {
+                    part: mew_message::Part::ToolCall(call),
+                    ..
+                } if call.call_id == "py" => {
+                    if let Some(value) = call.state.output() {
+                        output = value.to_owned();
+                    }
+                }
+                _ => {}
+            }
+        }
+        output
+    }
+    let agent = session.agent.lock().await.clone();
+    assert_eq!(run(&agent).await, "41\n");
+    drop(agent);
+    drop(session);
+    server.session_manager.remove(&id).await;
+    let session = server.session_manager.attach(&id).await.unwrap();
+    let agent = session.agent.lock().await.clone();
+    assert_eq!(run(&agent).await, "42\n");
+}
+
 fn daemon(ask_user: bool) -> (tempfile::TempDir, DaemonServer) {
     let directory = tempfile::tempdir().unwrap();
     let builder: mew_daemon::AgentBuilder = Arc::new(move |params| {

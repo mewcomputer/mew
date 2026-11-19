@@ -166,6 +166,17 @@ impl Agent {
         assistant_msg: &mut Option<Message>,
         ev_tx: &mpsc::Sender<AgentEvent>,
     ) -> Vec<Part> {
+        self.execute_tool_calls(pending, assistant_msg, ev_tx, false)
+            .await
+    }
+
+    pub(crate) async fn execute_tool_calls(
+        &self,
+        pending: &[ToolCallPart],
+        assistant_msg: &mut Option<Message>,
+        ev_tx: &mpsc::Sender<AgentEvent>,
+        nested: bool,
+    ) -> Vec<Part> {
         let mut result_parts: Vec<Part> = Vec::with_capacity(pending.len());
 
         // Capture the assistant message id for result parts; if None
@@ -184,6 +195,47 @@ impl Agent {
             }
             let call_id = tc.call_id.clone();
             let part_id = tc.base.id;
+
+            if !nested && self.uses_code_mode() && tc.tool_name != "python" {
+                let state = ToolState::Error(ToolStateError {
+                    input: tc.input().clone(),
+                    error: "direct tool calls are unavailable in code mode".into(),
+                    time: ToolTime {
+                        start: Utc::now().timestamp_millis(),
+                        end: Some(Utc::now().timestamp_millis()),
+                    },
+                });
+                if let Some(ref mut msg) = assistant_msg {
+                    self.update_tool_call(msg, part_id, state.clone());
+                }
+                let _ = ev_tx
+                    .send(AgentEvent::PartUpdated {
+                        part_id,
+                        part: Part::ToolCall(ToolCallPart {
+                            base: tc.base.clone(),
+                            tool_name: tc.tool_name.clone(),
+                            call_id: call_id.clone(),
+                            state,
+                            raw_input: tc.raw_input.clone(),
+                        }),
+                    })
+                    .await;
+                let _ = ev_tx
+                    .send(AgentEvent::ToolEnd {
+                        call_id: call_id.clone(),
+                        success: false,
+                    })
+                    .await;
+                result_parts.push(Part::ToolResult(ToolResultPart {
+                    base: PartBase {
+                        id: ulid::Ulid::new(),
+                        message_id: assistant_id,
+                        session_id: self.session_id,
+                    },
+                    call_id,
+                }));
+                continue;
+            }
 
             if tc.tool_name == "subagent" && self.subagent_runner.is_some() {
                 self.execute_subagent_call(tc, assistant_msg, ev_tx, &mut result_parts)
@@ -283,11 +335,18 @@ impl Agent {
             };
 
             // Resolve permission paths from the same cwd used by the tool.
-            let sensitivity = self
-                .tools
-                .get(&tc.tool_name)
-                .map(|t| t.sensitivity())
-                .unwrap_or(Sensitivity::Dangerous);
+            let python_tool = crate::python::PythonTool {
+                isolated: self.code_mode.isolated,
+            };
+            let is_python = !nested && tc.tool_name == "python" && self.uses_code_mode();
+            let sensitivity = if is_python {
+                mew_tools::Tool::sensitivity(&python_tool)
+            } else {
+                self.tools
+                    .get(&tc.tool_name)
+                    .map(|t| t.sensitivity())
+                    .unwrap_or(Sensitivity::Dangerous)
+            };
             let (decision, deny_reason) = self
                 .resolve_permission_decision(
                     &tc.tool_name,
@@ -349,9 +408,10 @@ impl Agent {
                 continue;
             }
 
-            let tool = match self.tools.get(&tc.tool_name) {
-                Some(t) => t,
-                None => {
+            let tool: &dyn mew_tools::Tool = match (is_python, self.tools.get(&tc.tool_name)) {
+                (true, _) => &python_tool,
+                (false, Some(t)) => t.as_ref(),
+                (false, None) => {
                     let error_state = ToolState::Error(ToolStateError {
                         input: hook_call.input.clone(),
                         error: format!("unknown tool {:?}", tc.tool_name),
@@ -615,7 +675,11 @@ impl Agent {
             }
 
             tracing::info!(tool = %tc.tool_name, call_id = %call_id, input = %input, "executing tool");
-            let exec_result = tool.execute(ctx, input.clone()).await;
+            let exec_result = if is_python {
+                self.execute_python(&ctx, input.clone(), ev_tx).await
+            } else {
+                tool.execute(ctx, input.clone()).await
+            };
             let tool_output = match exec_result {
                 Ok(out) => {
                     tracing::info!(tool = %tc.tool_name, call_id = %call_id, output = %out.output, error = %out.error, "tool executed successfully");

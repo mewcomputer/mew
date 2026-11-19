@@ -504,6 +504,7 @@ pub(crate) fn switch_session_model(
     raw: bool,
 ) {
     agent.provider = provider;
+    agent.code_mode = cfg.code_mode.clone();
     agent.set_model_info(model_id, provider_id);
     apply_model_metadata(agent, cat, model_id);
     let dispatcher = agent.dispatcher.clone();
@@ -588,6 +589,7 @@ pub(crate) fn build_session_agent(
         .as_ref()
         .and_then(|w| w.path().parent().map(|p| p.join("subagent_tasks.json")));
     let mut agent = Agent::new(provider, dispatcher.clone(), writer, tools, session_id);
+    agent.code_mode = cfg.code_mode.clone();
     agent.cwd = cwd.clone();
     agent.subagent_registry_path = subagent_registry_path;
     agent.set_model_info(model_id, provider_id);

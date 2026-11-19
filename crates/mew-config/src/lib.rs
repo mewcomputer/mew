@@ -24,6 +24,8 @@ pub struct Config {
     #[serde(default)]
     pub models: Vec<CustomModel>,
     #[serde(default)]
+    pub code_mode: CodeModeConfig,
+    #[serde(default)]
     pub permissions: PermissionsConfig,
     #[serde(default)]
     pub secrets: SecretsConfig,
@@ -48,6 +50,48 @@ pub struct Config {
     /// nesting depth).
     #[serde(default)]
     pub orchestration: OrchestrationConfig,
+}
+
+/// Whether the model invokes mew tools through a persistent Python session.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeMode {
+    #[default]
+    Off,
+    Full,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodeModeConfig {
+    #[serde(default)]
+    pub mode: CodeMode,
+    #[serde(default = "default_true")]
+    pub isolated: bool,
+    #[serde(default)]
+    pub models: HashMap<String, CodeMode>,
+    /// Python executable or virtual-environment interpreter. Defaults to python3.
+    #[serde(default)]
+    pub python: Option<PathBuf>,
+}
+
+impl Default for CodeModeConfig {
+    fn default() -> Self {
+        Self {
+            mode: CodeMode::Off,
+            isolated: true,
+            models: HashMap::new(),
+            python: None,
+        }
+    }
+}
+
+impl CodeModeConfig {
+    pub fn for_model(&self, provider: &str, model: &str) -> CodeMode {
+        self.models
+            .get(&format!("{provider}/{model}"))
+            .copied()
+            .unwrap_or(self.mode)
+    }
 }
 
 /// TUI configuration.
@@ -251,6 +295,7 @@ impl Default for Config {
             providers,
             default_model: String::new(),
             models: Vec::new(),
+            code_mode: CodeModeConfig::default(),
             permissions: PermissionsConfig::default(),
             secrets: SecretsConfig::default(),
             plugins: HashMap::new(),
@@ -870,6 +915,51 @@ pub fn get_credential(ref_name: &str) -> Result<String, ConfigError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn code_mode_defaults_to_existing_tools_with_isolation_enabled() {
+        let config: super::Config = toml::from_str("").unwrap();
+        assert_eq!(
+            config.code_mode.for_model("codex", "gpt-6-luna"),
+            super::CodeMode::Off
+        );
+        assert!(config.code_mode.isolated);
+    }
+
+    #[test]
+    fn code_mode_model_overrides_are_provider_qualified() {
+        let config: super::Config = toml::from_str(
+            r#"
+[code_mode]
+mode = "full"
+isolated = false
+[code_mode.models]
+"codex/gpt-6-luna" = "off"
+"opencode-go/hy4-flash-free" = "full"
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.code_mode.for_model("codex", "gpt-6-luna"),
+            super::CodeMode::Off
+        );
+        assert_eq!(
+            config.code_mode.for_model("another", "gpt-6-luna"),
+            super::CodeMode::Full
+        );
+        assert_eq!(
+            config.code_mode.for_model("opencode-go", "hy4-flash-free"),
+            super::CodeMode::Full
+        );
+        assert!(!config.code_mode.isolated);
+    }
+
+    #[test]
+    fn code_mode_rejects_unknown_modes() {
+        assert!(toml::from_str::<super::Config>("[code_mode]\nmode = 'partial'").is_err());
+        assert!(
+            toml::from_str::<super::Config>("[code_mode.models]\n'codex/a' = 'partial'").is_err()
+        );
+    }
     use super::*;
 
     #[test]

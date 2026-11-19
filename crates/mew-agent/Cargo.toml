@@ -30,10 +30,10 @@ tracing = { workspace = true }
 futures = { workspace = true }
 chrono = { workspace = true }
 http = "1"
+tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true }
 
 [dev-dependencies]
 mew-provider-fake = { workspace = true }
-tempfile = "3"

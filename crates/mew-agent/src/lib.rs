@@ -300,6 +300,9 @@ mod child_guidance;
 mod events;
 pub mod manifest;
 mod prompt_cache;
+mod python;
+#[cfg(test)]
+mod python_tests;
 mod reasoning_truncator;
 pub mod runner;
 mod subagent_registry;
@@ -311,6 +314,7 @@ mod workspace;
 pub use agent::{AcceptedPrompt, Agent, PromptAdmissionError};
 pub use mew_subagents::SubagentOutcome;
 pub use prompt_cache::PromptCacheRetention;
+pub use python::PythonSession;
 pub use reasoning_truncator::{
     ReasoningTruncator, DEFAULT_REASONING_TRUNCATION_THRESHOLD, TRUNCATION_ACK_TEXT,
 };

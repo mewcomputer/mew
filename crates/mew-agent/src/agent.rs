@@ -195,6 +195,9 @@ pub struct Agent {
     pub dispatcher: Arc<dyn Dispatcher>,
     pub session: Option<SessionWriter>,
     pub tools: HashMap<String, Arc<dyn Tool>>,
+    pub code_mode: mew_config::CodeModeConfig,
+    pub(crate) python_session: crate::PythonSession,
+    pub(crate) python_exit: Arc<tokio::sync::Mutex<bool>>,
     pub messages: Arc<tokio::sync::Mutex<Vec<Message>>>,
     pub session_id: SessionId,
     pub cwd: PathBuf,
@@ -418,6 +421,9 @@ impl Agent {
             dispatcher,
             session: session.map(|w| Arc::new(tokio::sync::Mutex::new(w))),
             tools: tools_map,
+            code_mode: mew_config::CodeModeConfig::default(),
+            python_session: crate::PythonSession::default(),
+            python_exit: Arc::new(tokio::sync::Mutex::new(false)),
             messages: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             session_id: session_id.unwrap_or_default(),
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -513,6 +519,24 @@ impl Agent {
         }
         self.model_id = model_id.to_string();
         self.provider_id = provider_id.to_string();
+    }
+
+    pub(crate) fn uses_code_mode(&self) -> bool {
+        self.code_mode.for_model(&self.provider_id, &self.model_id) == mew_config::CodeMode::Full
+    }
+
+    pub fn set_python_session(&mut self, session: crate::PythonSession) {
+        self.python_session = session;
+    }
+
+    pub(crate) fn tool_available(&self, name: &str) -> bool {
+        self.tools.contains_key(name)
+            && (!name.starts_with("browser_") || self.browser_access.is_available())
+            && self
+                .active_tool_names
+                .as_ref()
+                .is_none_or(|names| names.contains(name))
+            && !self.denied_tool_names.contains(name)
     }
 
     pub fn set_permission_engine(
