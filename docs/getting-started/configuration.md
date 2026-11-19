@@ -53,7 +53,7 @@ sidebar_finished_ttl_secs = 180
 | `plan_path` | string | `"plans/"` | Each `write_plan` call creates a new file such as `plans/vale-nori.md`. Use the returned path with `edit_plan`. Set a different relative or absolute path to use a fixed file |
 | `providers` | table | (built-in) | Provider definitions keyed by provider ID |
 | `models` | array | `[]` | Custom model entries that override or extend the catalog |
-| `code_mode` | table | (off) | Run tools through a persistent Python session. See [Python code mode](#python-code-mode) |
+| `code_mode` | table | (catalog preference) | Run tools through a persistent Python session. See [Python code mode](#python-code-mode) |
 | `permissions` | table | (empty) | Permission rules and classifier config. See [Permissions](/docs/using-mew/permissions/) |
 | `secrets` | table | (empty) | Secret files and words for redaction |
 | `workspace` | table | (empty) | Workspace roots for file access and shell permission checks |
@@ -74,23 +74,28 @@ Polytoken. See [Personas](/docs/using-mew/personas/) for details.
 ### Python code mode
 
 Code mode gives the model a single `python` tool. Python runs in a persistent
-session and calls Mew's available tools through `tools`. The default is `off`,
-which keeps the existing tool interface. Choose a default and optional
-provider-qualified overrides in `config.toml`:
+session and calls Mew's available tools through `tools`. By default, Mew enables
+it for Codex models whose catalog entry specifies `code_mode_only`. Other models,
+and Codex models without that catalog hint, use the existing tool interface.
+The Codex catalog is loaded for OAuth users or from a project catalog override.
+
+Choose a global mode and optional provider-qualified overrides in `config.toml`:
 
 ```toml
 [code_mode]
-mode = "off"       # "off" or "full"
+mode = "off"       # optional: "off" or "full"
 isolated = true    # default
 # python = "/path/to/venv/bin/python"
 
 [code_mode.models]
 "codex/gpt-6-luna" = "full"
-"opencode-go/hy4-flash-free" = "off"
+"opencode-go/hy4-flash-free" = "full"
 ```
 
-Set `mode = "full"` to enable it for every model, then use `"off"` overrides
-for exceptions. `python` defaults to `python3` on the daemon's `PATH`. Use a
+The per-model setting takes priority, followed by the global setting and the
+catalog hint. Omit `mode` to follow the catalog. Set `mode = "full"` to enable
+it for every model, or `mode = "off"` to disable it globally, then use model
+overrides for exceptions. `python` defaults to `python3` on the daemon's `PATH`. Use a
 virtual environment's Python executable to make its installed packages
 available. The interpreter and its installed packages must be trusted.
 

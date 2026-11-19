@@ -31,6 +31,14 @@ pub(crate) fn apply_catalog_pricing(agent: &mut Agent, cat: Option<&Catalog>, mo
 }
 
 fn apply_model_metadata(agent: &mut Agent, cat: Option<&Catalog>, model_id: &str) {
+    agent.codex_code_mode_models = Arc::new(
+        cat.and_then(|catalog| catalog.providers.get("codex"))
+            .into_iter()
+            .flat_map(|models| models.values())
+            .filter(|model| model.codex_code_mode_only)
+            .map(|model| model.id.clone())
+            .collect(),
+    );
     agent.supports_vision = cat.is_none_or(|catalog| catalog.supports_vision(model_id));
     agent.context_window = cat.map_or(0, |catalog| catalog.context_window(model_id).max(0) as u32);
     agent.default_max_output_tokens = cat
@@ -793,6 +801,36 @@ mod tests {
         let provider = Arc::new(FakeProvider::new(vec![]));
         let dispatcher: Arc<dyn mew_hooks::Dispatcher> = Arc::new(mew_hooks::NopDispatcher);
         mew_agent::Agent::new(provider, dispatcher, None, vec![], None)
+    }
+
+    #[test]
+    fn model_metadata_installs_only_codex_code_mode_recommendations() {
+        let mut agent = make_agent();
+        let mut catalog = Catalog::empty();
+        catalog.merge_local(vec![
+            Model {
+                id: "recommended".into(),
+                provider: "codex".into(),
+                codex_code_mode_only: true,
+                ..Default::default()
+            },
+            Model {
+                id: "ordinary".into(),
+                provider: "codex".into(),
+                ..Default::default()
+            },
+            Model {
+                id: "other-provider".into(),
+                provider: "other".into(),
+                codex_code_mode_only: true,
+                ..Default::default()
+            },
+        ]);
+        apply_model_metadata(&mut agent, Some(&catalog), "recommended");
+        assert_eq!(agent.codex_code_mode_models.len(), 1);
+        assert!(agent.codex_code_mode_models.contains("recommended"));
+        apply_model_metadata(&mut agent, None, "recommended");
+        assert!(agent.codex_code_mode_models.is_empty());
     }
 
     #[test]

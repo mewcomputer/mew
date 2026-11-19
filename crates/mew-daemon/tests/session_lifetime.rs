@@ -20,8 +20,13 @@ type Ws = WebSocketStream<DuplexStream>;
 
 #[tokio::test]
 async fn python_state_survives_unloading_and_reattaching_the_same_session() {
+    check_python_state_survives_unload(false).await;
+    check_python_state_survives_unload(true).await;
+}
+
+async fn check_python_state_survives_unload(from_catalog: bool) {
     let directory = tempfile::tempdir().unwrap();
-    let builder: mew_daemon::AgentBuilder = Arc::new(|params| {
+    let builder: mew_daemon::AgentBuilder = Arc::new(move |params| {
         let script = FakeProvider::tool_call(
             "python",
             "py",
@@ -34,11 +39,15 @@ async fn python_state_survives_unloading_and_reattaching_the_same_session() {
             vec![],
             None,
         );
-        agent.code_mode = mew_config::CodeModeConfig {
-            mode: mew_config::CodeMode::Full,
-            isolated: false,
-            ..Default::default()
-        };
+        agent.code_mode.isolated = false;
+        agent.set_model_info("gpt-6-luna", "codex");
+        if from_catalog {
+            agent.set_model_info("gpt-6-luna", "other");
+            agent.codex_code_mode_models =
+                Arc::new(std::collections::HashSet::from(["gpt-6-luna".to_string()]));
+        } else {
+            agent.code_mode.mode = Some(mew_config::CodeMode::Full);
+        }
         agent.max_turns = Some(1);
         Ok((agent, Some("fake".into()), Some("fake".into())))
     });
@@ -66,13 +75,19 @@ async fn python_state_survives_unloading_and_reattaching_the_same_session() {
         }
         output
     }
-    let agent = session.agent.lock().await.clone();
+    let mut agent = session.agent.lock().await.clone();
+    if from_catalog {
+        agent.set_model_info("gpt-6-luna", "codex");
+    }
     assert_eq!(run(&agent).await, "41\n");
     drop(agent);
     drop(session);
     server.session_manager.remove(&id).await;
     let session = server.session_manager.attach(&id).await.unwrap();
-    let agent = session.agent.lock().await.clone();
+    let mut agent = session.agent.lock().await.clone();
+    if from_catalog {
+        agent.set_model_info("gpt-6-luna", "codex");
+    }
     assert_eq!(run(&agent).await, "42\n");
 }
 

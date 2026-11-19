@@ -356,8 +356,7 @@ impl Agent {
                         .await;
                     let (provider_id, model_id) = model.split_once('/').unwrap_or((model, ""));
                     let mut fallback_request = request.clone();
-                    let code_mode = self.code_mode.for_model(provider_id, model_id)
-                        == mew_config::CodeMode::Full;
+                    let code_mode = self.uses_code_mode_for(provider_id, model_id);
                     fallback_request.system = self.request_system_for_mode(code_mode).await;
                     fallback_request.tools = if code_mode {
                         vec![self.python_tool_definition()]

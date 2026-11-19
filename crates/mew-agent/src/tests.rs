@@ -36,7 +36,7 @@ async fn code_mode_exposes_one_tool_and_keeps_python_state_between_calls() {
         None,
     );
     agent.code_mode = mew_config::CodeModeConfig {
-        mode: mew_config::CodeMode::Full,
+        mode: Some(mew_config::CodeMode::Full),
         isolated: false,
         ..Default::default()
     };
@@ -90,7 +90,7 @@ async fn code_mode_dispatches_nested_tools_with_their_permission() {
         None,
     );
     agent.code_mode = mew_config::CodeModeConfig {
-        mode: mew_config::CodeMode::Full,
+        mode: Some(mew_config::CodeMode::Full),
         isolated: false,
         ..Default::default()
     };
@@ -130,7 +130,7 @@ fn code_mode_follows_the_selected_provider_and_model() {
         vec![],
         None,
     );
-    agent.code_mode.mode = mew_config::CodeMode::Off;
+    agent.code_mode.mode = Some(mew_config::CodeMode::Off);
     agent
         .code_mode
         .models
@@ -140,6 +140,39 @@ fn code_mode_follows_the_selected_provider_and_model() {
     agent.set_model_info("gpt-6-luna", "another");
     assert!(!agent.uses_code_mode());
     agent.set_model_info("other", "codex");
+    assert!(!agent.uses_code_mode());
+}
+
+#[test]
+fn codex_catalog_preference_yields_to_explicit_model_and_global_settings() {
+    let mut agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    agent.codex_code_mode_models =
+        Arc::new(std::collections::HashSet::from(["gpt-6-luna".to_string()]));
+    agent.set_model_info("gpt-6-luna", "codex");
+    assert!(agent.uses_code_mode());
+    agent.set_model_info("gpt-6-luna", "other");
+    assert!(!agent.uses_code_mode());
+    agent.set_model_info("unknown", "codex");
+    assert!(!agent.uses_code_mode());
+    agent.set_model_info("gpt-6-luna", "codex");
+    agent.code_mode.mode = Some(mew_config::CodeMode::Off);
+    assert!(!agent.uses_code_mode());
+    agent
+        .code_mode
+        .models
+        .insert("codex/gpt-6-luna".into(), mew_config::CodeMode::Full);
+    assert!(agent.uses_code_mode());
+    agent.code_mode.mode = Some(mew_config::CodeMode::Full);
+    agent
+        .code_mode
+        .models
+        .insert("codex/gpt-6-luna".into(), mew_config::CodeMode::Off);
     assert!(!agent.uses_code_mode());
 }
 
@@ -156,7 +189,7 @@ async fn code_mode_rejects_direct_tool_calls_from_the_provider() {
         vec![Arc::new(mew_tools::tools::echo::Echo)],
         None,
     );
-    agent.code_mode.mode = mew_config::CodeMode::Full;
+    agent.code_mode.mode = Some(mew_config::CodeMode::Full);
     let mut events = agent.run("run".into());
     while let Some(event) = events.recv().await {
         if let AgentEvent::PermissionRequest { tx, .. } = event {
@@ -190,7 +223,7 @@ async fn code_mode_denied_nested_write_does_not_touch_the_workspace() {
     agent.cwd = directory.path().to_path_buf();
     agent.workspace_roots = vec![directory.path().to_path_buf()];
     agent.code_mode = mew_config::CodeModeConfig {
-        mode: mew_config::CodeMode::Full,
+        mode: Some(mew_config::CodeMode::Full),
         isolated: false,
         ..Default::default()
     };
@@ -235,7 +268,7 @@ async fn code_mode_can_emit_an_image_from_a_nested_tool() {
     agent.workspace_roots = vec![directory.path().to_path_buf()];
     agent.supports_vision = true;
     agent.code_mode = mew_config::CodeModeConfig {
-        mode: mew_config::CodeMode::Full,
+        mode: Some(mew_config::CodeMode::Full),
         isolated: false,
         ..Default::default()
     };
@@ -277,7 +310,7 @@ async fn code_mode_rejects_tool_calls_left_over_from_a_previous_cell() {
     agent.cwd = directory.path().to_path_buf();
     agent.workspace_roots = vec![directory.path().to_path_buf()];
     agent.code_mode = mew_config::CodeModeConfig {
-        mode: mew_config::CodeMode::Full,
+        mode: Some(mew_config::CodeMode::Full),
         isolated: false,
         ..Default::default()
     };
@@ -312,7 +345,7 @@ async fn cancelling_during_python_startup_stops_the_turn_promptly() {
     )]));
     let mut agent = Agent::new(provider, Arc::new(NopDispatcher), None, vec![], None);
     agent.code_mode = mew_config::CodeModeConfig {
-        mode: mew_config::CodeMode::Full,
+        mode: Some(mew_config::CodeMode::Full),
         isolated: false,
         python: Some(interpreter),
         ..Default::default()
@@ -357,7 +390,7 @@ async fn code_mode_restarts_after_the_worker_disconnects_during_a_tool_call() {
         None,
     );
     agent.code_mode = mew_config::CodeModeConfig {
-        mode: mew_config::CodeMode::Full,
+        mode: Some(mew_config::CodeMode::Full),
         isolated: false,
         ..Default::default()
     };
@@ -394,7 +427,7 @@ async fn code_mode_routes_questions_and_todos_through_the_agent() {
         None,
     );
     agent.code_mode = mew_config::CodeModeConfig {
-        mode: mew_config::CodeMode::Full,
+        mode: Some(mew_config::CodeMode::Full),
         isolated: false,
         ..Default::default()
     };
@@ -4383,11 +4416,11 @@ async fn fallback_uses_its_own_code_mode_for_requests_and_execution() {
             None,
         );
         agent.set_model_info("primary", "test");
-        agent.code_mode.mode = if fallback_mode == mew_config::CodeMode::Full {
+        agent.code_mode.mode = Some(if fallback_mode == mew_config::CodeMode::Full {
             mew_config::CodeMode::Off
         } else {
             mew_config::CodeMode::Full
-        };
+        });
         agent.code_mode.isolated = false;
         agent
             .code_mode
@@ -4427,6 +4460,41 @@ async fn fallback_uses_its_own_code_mode_for_requests_and_execution() {
         let messages = agent.messages.lock().await;
         assert!(messages.iter().flat_map(|message| &message.parts).any(|part| matches!(part, Part::ToolCall(call) if call.call_id == "fallback-call" && matches!(&call.state, ToolState::Completed(_)))));
     }
+}
+
+#[tokio::test]
+async fn fallback_uses_codex_catalog_recommendation() {
+    let fallback = Arc::new(CapturingProvider::new(vec![
+        FakeProvider::tool_call(
+            "python",
+            "fallback-call",
+            serde_json::json!({"source":"text('from python')"}),
+        ),
+        FakeProvider::text_response("done"),
+    ]));
+    let mut agent = Agent::new(
+        Arc::new(ErroringProvider),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    agent.set_model_info("primary", "test");
+    agent.codex_code_mode_models =
+        Arc::new(std::collections::HashSet::from(["gpt-6-luna".to_string()]));
+    agent.code_mode.isolated = false;
+    agent.fallback_models = Some(vec!["codex/gpt-6-luna".into()]);
+    let provider = fallback.clone();
+    agent.set_provider_builder(Box::new(move |_| Ok(provider.clone())));
+    let mut events = agent.run("run".into());
+    while let Some(event) = events.recv().await {
+        if let AgentEvent::PermissionRequest { tx, .. } = event {
+            tx.send(mew_hooks::PermissionDecision::AllowOnce).unwrap();
+        }
+    }
+    assert_eq!(fallback.captured.lock().unwrap()[0].tools[0].name, "python");
+    let messages = agent.messages.lock().await;
+    assert!(messages.iter().flat_map(|message| &message.parts).any(|part| matches!(part, Part::ToolCall(call) if call.call_id == "fallback-call" && call.state.output() == Some("from python\n"))));
 }
 
 #[async_trait::async_trait]

@@ -4478,3 +4478,11 @@ Linux isolation including virtual environments and child cleanup; and a live
 Codex run that read a file through the tool bridge and fit a scikit-learn
 regression across Python calls. The sandbox made joblib run serially. The
 documentation site tests and workspace clippy also passed.
+
+### 2026-11-19: Follow Codex tool-mode metadata
+
+Codex models marked `code_mode_only` now default to Python code mode. Explicit
+per-model and global settings take precedence; other models retain direct
+tools unless configured otherwise. Verified catalog, config, agent, subagent,
+daemon reload, and documentation tests. A live Codex run used Python with no
+explicit mode setting and returned the expected result.

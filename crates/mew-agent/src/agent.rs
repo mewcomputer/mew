@@ -196,6 +196,7 @@ pub struct Agent {
     pub session: Option<SessionWriter>,
     pub tools: HashMap<String, Arc<dyn Tool>>,
     pub code_mode: mew_config::CodeModeConfig,
+    pub codex_code_mode_models: Arc<std::collections::HashSet<String>>,
     pub(crate) python_session: crate::PythonSession,
     pub(crate) python_exit: Arc<tokio::sync::Mutex<bool>>,
     pub messages: Arc<tokio::sync::Mutex<Vec<Message>>>,
@@ -422,6 +423,7 @@ impl Agent {
             session: session.map(|w| Arc::new(tokio::sync::Mutex::new(w))),
             tools: tools_map,
             code_mode: mew_config::CodeModeConfig::default(),
+            codex_code_mode_models: Arc::default(),
             python_session: crate::PythonSession::default(),
             python_exit: Arc::new(tokio::sync::Mutex::new(false)),
             messages: Arc::new(tokio::sync::Mutex::new(Vec::new())),
@@ -522,7 +524,14 @@ impl Agent {
     }
 
     pub(crate) fn uses_code_mode(&self) -> bool {
-        self.code_mode.for_model(&self.provider_id, &self.model_id) == mew_config::CodeMode::Full
+        self.uses_code_mode_for(&self.provider_id, &self.model_id)
+    }
+
+    pub(crate) fn uses_code_mode_for(&self, provider: &str, model: &str) -> bool {
+        self.code_mode.for_model(provider, model).map_or_else(
+            || provider == "codex" && self.codex_code_mode_models.contains(model),
+            |mode| mode == mew_config::CodeMode::Full,
+        )
     }
 
     pub fn set_python_session(&mut self, session: crate::PythonSession) {

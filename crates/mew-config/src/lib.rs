@@ -64,7 +64,7 @@ pub enum CodeMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodeModeConfig {
     #[serde(default)]
-    pub mode: CodeMode,
+    pub mode: Option<CodeMode>,
     #[serde(default = "default_true")]
     pub isolated: bool,
     #[serde(default)]
@@ -77,7 +77,7 @@ pub struct CodeModeConfig {
 impl Default for CodeModeConfig {
     fn default() -> Self {
         Self {
-            mode: CodeMode::Off,
+            mode: None,
             isolated: true,
             models: HashMap::new(),
             python: None,
@@ -86,11 +86,14 @@ impl Default for CodeModeConfig {
 }
 
 impl CodeModeConfig {
-    pub fn for_model(&self, provider: &str, model: &str) -> CodeMode {
+    pub fn for_model(&self, provider: &str, model: &str) -> Option<CodeMode> {
+        if self.models.is_empty() {
+            return self.mode;
+        }
         self.models
             .get(&format!("{provider}/{model}"))
             .copied()
-            .unwrap_or(self.mode)
+            .or(self.mode)
     }
 }
 
@@ -916,12 +919,9 @@ pub fn get_credential(ref_name: &str) -> Result<String, ConfigError> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn code_mode_defaults_to_existing_tools_with_isolation_enabled() {
+    fn code_mode_defaults_to_no_explicit_override_with_isolation_enabled() {
         let config: super::Config = toml::from_str("").unwrap();
-        assert_eq!(
-            config.code_mode.for_model("codex", "gpt-6-luna"),
-            super::CodeMode::Off
-        );
+        assert_eq!(config.code_mode.for_model("codex", "gpt-6-luna"), None);
         assert!(config.code_mode.isolated);
     }
 
@@ -940,15 +940,15 @@ isolated = false
         .unwrap();
         assert_eq!(
             config.code_mode.for_model("codex", "gpt-6-luna"),
-            super::CodeMode::Off
+            Some(super::CodeMode::Off)
         );
         assert_eq!(
             config.code_mode.for_model("another", "gpt-6-luna"),
-            super::CodeMode::Full
+            Some(super::CodeMode::Full)
         );
         assert_eq!(
             config.code_mode.for_model("opencode-go", "hy4-flash-free"),
-            super::CodeMode::Full
+            Some(super::CodeMode::Full)
         );
         assert!(!config.code_mode.isolated);
     }

@@ -586,22 +586,24 @@ pub struct SessionManager {
 
 impl SessionManager {
     async fn restore_python_session(&self, session_id: &str, agent: &mut Agent) {
-        if agent.code_mode.mode == mew_config::CodeMode::Full
+        let may_use_code_mode = agent.code_mode.mode == Some(mew_config::CodeMode::Full)
             || agent
                 .code_mode
                 .models
                 .values()
                 .any(|mode| *mode == mew_config::CodeMode::Full)
-        {
-            let session = self
-                .python_sessions
-                .lock()
-                .await
-                .entry(session_id.to_owned())
-                .or_default()
-                .clone();
-            agent.set_python_session(session);
+            || (agent.code_mode.mode.is_none() && !agent.codex_code_mode_models.is_empty());
+        if !may_use_code_mode {
+            return;
         }
+        let session = self
+            .python_sessions
+            .lock()
+            .await
+            .entry(session_id.to_owned())
+            .or_default()
+            .clone();
+        agent.set_python_session(session);
     }
 
     pub fn new(

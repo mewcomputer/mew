@@ -135,6 +135,7 @@ pub struct SimpleRunner {
     default_provider_id: String,
     default_model_id: String,
     code_mode: mew_config::CodeModeConfig,
+    codex_code_mode_models: Arc<std::collections::HashSet<String>>,
     tools: HashMap<String, Arc<dyn Tool>>,
     dispatcher: Arc<dyn Dispatcher>,
     cwd: PathBuf,
@@ -178,6 +179,7 @@ impl SimpleRunner {
             default_provider_id: String::new(),
             default_model_id: String::new(),
             code_mode: mew_config::CodeModeConfig::default(),
+            codex_code_mode_models: Arc::default(),
             tools: tools_map,
             dispatcher,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -198,6 +200,7 @@ impl SimpleRunner {
     /// Keep active children addressable when a parent replaces its runner.
     pub fn with_agent_registry(mut self, agent: &mut crate::Agent) -> Self {
         self.code_mode = agent.code_mode.clone();
+        self.codex_code_mode_models = agent.codex_code_mode_models.clone();
         self.default_provider_id = agent.provider_id.clone();
         self.default_model_id = agent.model_id.clone();
         self.active_children = agent
@@ -442,6 +445,7 @@ impl SubagentRunner for SimpleRunner {
         );
 
         agent.code_mode = self.code_mode.clone();
+        agent.codex_code_mode_models = self.codex_code_mode_models.clone();
         agent.set_model_info(&model_id, &provider_id);
 
         agent.cwd = self.cwd.clone();
@@ -1695,6 +1699,11 @@ mod tests {
 
     #[tokio::test]
     async fn code_mode_subagent_returns_the_nested_exit_result() {
+        check_code_mode_subagent(false).await;
+        check_code_mode_subagent(true).await;
+    }
+
+    async fn check_code_mode_subagent(from_catalog: bool) {
         let directory = tempfile::tempdir().unwrap();
         let unwanted = directory.path().join("after-exit");
         let source = format!("tools.exit_tool({{'final_answer':'the answer is 42'}})\nopen({:?}, 'w').write('wrong')", unwanted.to_string_lossy());
@@ -1715,11 +1724,14 @@ mod tests {
             vec![exit_tool()],
             None,
         );
-        parent.code_mode = mew_config::CodeModeConfig {
-            mode: mew_config::CodeMode::Full,
-            isolated: false,
-            ..Default::default()
-        };
+        parent.code_mode.isolated = false;
+        parent.set_model_info("gpt-6-luna", "codex");
+        if from_catalog {
+            parent.codex_code_mode_models =
+                Arc::new(std::collections::HashSet::from(["gpt-6-luna".to_string()]));
+        } else {
+            parent.code_mode.mode = Some(mew_config::CodeMode::Full);
+        }
         let runner = SimpleRunner::new(
             provider,
             vec![exit_tool()],
