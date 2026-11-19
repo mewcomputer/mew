@@ -17,7 +17,8 @@ use tungstenite::{client, Message};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
+/// Time allowed for an app-owned daemon to initialize before health checks fail.
+pub const DAEMON_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -45,7 +46,7 @@ impl Default for SupervisorConfig {
             daemon_binary: None,
             local_port: 0,
             remote_enabled: false,
-            startup_timeout: STARTUP_TIMEOUT,
+            startup_timeout: DAEMON_STARTUP_TIMEOUT,
             log_dir: None,
         }
     }

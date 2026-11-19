@@ -35,20 +35,28 @@ pub(crate) async fn build_daemon_server(
     mode: mew_hooks::PermissionMode,
 ) -> Result<mew_daemon::DaemonServer> {
     let cfg = mew_config::load().context("load config")?;
-    let cat = if fake_provider {
+    let cwd = if fake_provider {
         None
     } else {
-        crate::setup::providers::load_catalog(&cfg).await
+        Some(std::env::current_dir().context("determine MCP workspace")?)
     };
-
-    let mcp_tools = if fake_provider {
-        Vec::new()
-    } else {
-        let cwd = std::env::current_dir().context("determine MCP workspace")?;
-        crate::setup::agent::discover_mcp_tools(&cwd)
-            .await
-            .context("load MCP servers")?
+    let catalog = async {
+        if fake_provider {
+            None
+        } else {
+            crate::setup::providers::load_catalog(&cfg).await
+        }
     };
+    let mcp_discovery = async {
+        match cwd {
+            Some(cwd) => crate::setup::agent::discover_mcp_tools(&cwd)
+                .await
+                .context("load MCP servers"),
+            None => Ok(Vec::new()),
+        }
+    };
+    let (cat, mcp_tools) = tokio::join!(catalog, mcp_discovery);
+    let mcp_tools = mcp_tools?;
 
     build_daemon_server_with_config(
         mcp_tools,

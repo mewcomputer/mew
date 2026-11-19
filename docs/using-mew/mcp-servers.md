@@ -36,6 +36,8 @@ once at startup and shares them across sessions. Restart the daemon after
 changing the configuration or server tools. `mew run` discovers them at the
 start of each run. A server that fails to start, fails discovery, or takes
 longer than 15 seconds is skipped with a warning. Server stderr is suppressed.
+When Mew starts a daemon, the desktop and TUI wait up to 30 seconds for it to
+become ready, including server discovery.
 
 Mew trusts project configuration and starts configured stdio commands during
 discovery, before a tool permission is requested. Configure only servers you
@@ -51,11 +53,15 @@ duplicate names and names longer than 64 characters are skipped. In Python
 mode, inspect `ALL_TOOLS` to find their exact names. MCP tools can return text,
 structured data, and images.
 
-Mew treats MCP tools as mutating and applies the existing
+Mew treats MCP tools as dangerous and applies the existing
 [permission modes and rules](/docs/using-mew/permissions/) to each call,
-including calls from Python. `mew run` follows its existing noninteractive
+including calls from Python. In permissive mode, MCP calls still prompt.
+`mew run` follows its existing noninteractive
 behavior and automatically allows permission prompts. Cancellation is sent to
 the server on a best-effort basis; a server may continue work after cancellation.
+MCP calls time out after ten minutes. A cancelled stdio call causes Mew to
+restart that server before a later call. Failed calls are not automatically
+replayed, since they may have already changed external state.
 
 Configured secret words are redacted from text and structured tool results.
 Configure any sensitive values for redaction separately. MCP support currently

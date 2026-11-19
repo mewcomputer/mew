@@ -177,7 +177,7 @@ for line in sys.stdin:
     else:
         pathlib.Path('called').write_text('yes')
         text = pathlib.Path(req['params']['arguments']['path']).read_text()
-        result = {'content':[{'type':'text','text':text}]}
+        result = {'content':[{'type':'text','text':text}], 'structuredContent':{'value':text}}
     print(json.dumps({'jsonrpc':'2.0','id':req['id'],'result':result}),flush=True)
 "#;
     std::fs::write(root.join("server.py"), server).unwrap();
@@ -190,7 +190,12 @@ for line in sys.stdin:
     let tools = mew_mcp::connect_tools(configs, &root).await;
     assert_eq!(tools.len(), 1);
 
-    for code_mode in [false, true] {
+    for (code_mode, permission_mode) in [
+        (false, PermissionMode::Standard),
+        (true, PermissionMode::Standard),
+        (false, PermissionMode::Permissive),
+        (true, PermissionMode::Permissive),
+    ] {
         let mut cfg = config();
         cfg.code_mode.isolated = false;
         cfg.code_mode.mode = Some(if code_mode {
@@ -223,7 +228,7 @@ for line in sys.stdin:
             "fake",
             "fake",
             false,
-            PermissionMode::Standard,
+            permission_mode,
             None,
             None,
             Some(root.clone()),
@@ -271,6 +276,77 @@ for line in sys.stdin:
                 .any(|tool| tool.name == "mcp__files__read_file"));
         }
     }
+
+    // A child uses the same real server, and both result forms must inherit
+    // the parent's secret redaction policy.
+    use mew_subagents::{
+        SubagentDef, SubagentEvent, SubagentResult, SubagentRunOptions, SubagentRunner,
+    };
+    let provider = ProjectProvider::new(vec![FakeProvider::tool_call(
+        "python",
+        "py",
+        serde_json::json!({"source":"import json\nr=tools.mcp__files__read_file({'path':'input.txt'})\ntools.exit_tool({'final_answer':json.dumps(r)})"}),
+    )]);
+    let mut child_tools = tools.clone();
+    child_tools.push(Arc::new(mew_tools::tools::exit_tool::ExitTool));
+    let mut parent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        child_tools.clone(),
+        None,
+    );
+    parent.code_mode.mode = Some(mew_config::CodeMode::Full);
+    parent.code_mode.isolated = false;
+    parent.secrets = Arc::new(mew_tools::SecretSet {
+        words: vec!["mcp fixture".into()],
+        globs: vec![],
+    });
+    let runner =
+        mew_agent::runner::SimpleRunner::new(provider, child_tools, Arc::new(NopDispatcher))
+            .with_agent_registry(&mut parent)
+            .with_workspace(root.clone(), vec![root.clone()], None)
+            .with_session_root(root.clone());
+    let def = SubagentDef {
+        name: "child".into(),
+        description: "test".into(),
+        model: None,
+        tools: None,
+        max_turns: Some(10),
+        max_duration_secs: Some(30),
+        body: String::new(),
+        path: root.join("child.md"),
+        template: false,
+        can_spawn: false,
+        output_schema: None,
+    };
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let drain = tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            if let SubagentEvent::PermissionRequest { tx, .. } = event {
+                let _ = tx.send(PermissionDecision::AllowOnce);
+            }
+        }
+    });
+    let result = runner
+        .run(SubagentRunOptions {
+            def: &def,
+            prompt: "read the fixture".into(),
+            parent_call_id: "parent".into(),
+            parent_session_id: SessionId::new(),
+            event_tx: tx,
+            cancel: Default::default(),
+            model: None,
+            parent_depth: 0,
+        })
+        .await
+        .unwrap();
+    drain.await.unwrap();
+    let SubagentResult::Complete { text, .. } = result else {
+        panic!("child failed");
+    };
+    assert!(!text.contains("mcp fixture"), "{text}");
+    assert!(text.matches("[REDACTED]").count() >= 2, "{text}");
 }
 
 #[tokio::test]

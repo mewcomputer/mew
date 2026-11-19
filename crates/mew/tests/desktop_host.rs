@@ -351,6 +351,84 @@ fn attached_real_daemon_survives_the_host_eof() {
 }
 
 #[test]
+fn desktop_waits_for_slow_mcp_discovery() {
+    let root = fixture();
+    let server = r#"
+import json, sys, time
+for line in sys.stdin:
+    request = json.loads(line)
+    if request['method'] == 'initialize':
+        time.sleep(11)
+        result = {'protocolVersion':'2025-11-25', 'capabilities':{'tools':{}}, 'serverInfo':{'name':'slow','version':'1'}}
+    elif request['method'] == 'tools/list':
+        result = {'tools':[]}
+    else:
+        continue
+    print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':result}), flush=True)
+"#;
+    std::fs::write(
+        root.path().join("mcp.json"),
+        json!({"mcpServers":{"slow":{"command":"python3","args":["-u","-c",server]}}}).to_string(),
+    )
+    .unwrap();
+    let address = unused_address();
+    let mut host = Process::start(root.path(), address, false);
+    let ready = host
+        .output
+        .recv_timeout(Duration::from_secs(25))
+        .unwrap_or_else(|error| {
+            panic!(
+                "desktop did not start after MCP discovery: {error}; stderr: {}",
+                std::fs::read_to_string(&host.stderr).unwrap()
+            )
+        });
+    assert_eq!(ready["type"], "ready");
+    assert_eq!(ready["bootstrap"]["daemonUrl"], format!("ws://{address}"));
+    host.eof();
+}
+
+#[test]
+fn desktop_starts_when_one_mcp_server_never_initializes() {
+    let root = fixture();
+    let marker = root.path().join("discovered");
+    let healthy = r#"
+import json, pathlib, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    if request['method'] == 'initialize':
+        result = {'protocolVersion':'2025-11-25', 'capabilities':{'tools':{}}, 'serverInfo':{'name':'ready','version':'1'}}
+    elif request['method'] == 'tools/list':
+        pathlib.Path(sys.argv[1]).write_text('ready')
+        result = {'tools':[{'name':'ping','description':'ping','inputSchema':{'type':'object'}}]}
+    else:
+        continue
+    print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':result}), flush=True)
+"#;
+    std::fs::write(
+        root.path().join("mcp.json"),
+        json!({"mcpServers":{
+            "stalled":{"command":"python3","args":["-u","-c","import sys,time; sys.stdin.readline(); time.sleep(60)"]},
+            "ready":{"command":"python3","args":["-u","-c",healthy,marker.to_string_lossy()]}
+        }}).to_string(),
+    ).unwrap();
+    let address = unused_address();
+    let mut host = Process::start(root.path(), address, false);
+    let ready = host
+        .output
+        .recv_timeout(Duration::from_secs(30))
+        .unwrap_or_else(|error| {
+            panic!(
+                "desktop did not start after MCP timeout: {error}; stderr: {}",
+                std::fs::read_to_string(&host.stderr).unwrap()
+            )
+        });
+    assert_eq!(ready["type"], "ready");
+    assert_eq!(ready["bootstrap"]["daemonUrl"], format!("ws://{address}"));
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "ready");
+    host.eof();
+}
+
+#[test]
 fn startup_failure_emits_no_ready_record_or_listening_assets() {
     let root = fixture();
     let address = unused_address();

@@ -4497,3 +4497,16 @@ handle concurrent sessions, cancellation, structured results, and images.
 Verified the MCP and Mew tests, documentation site tests, real filesystem and
 grep.app servers, and a live Codex-to-Python-to-grep.app run. Context7 connected
 and listed its tools, but its anonymous quota prevented a live tool call.
+
+### 2026-11-19: Code mode and MCP review fixes
+
+Hardened MCP permissions, deadlines, cancellation and reconnection, and kept
+server discovery within frontend startup budgets. Subagents inherit secret
+redaction and forward Python-mode progress. Python now resolves configured
+executables on the daemon PATH and keeps threaded output within its cell.
+
+Verified agent, MCP, desktop startup, permissions, and documentation tests,
+Linux and macOS Python isolation, live filesystem and grep.app servers, and a
+Codex-to-Python MCP run.
+Idle Python workers still retain state until their session is deleted or the
+daemon exits.

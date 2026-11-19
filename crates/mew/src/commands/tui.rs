@@ -9,8 +9,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// How long to wait for a spawned daemon to become healthy before giving up.
-const DAEMON_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
+const DAEMON_STARTUP_TIMEOUT: Duration = mew_desktop_supervisor::DAEMON_STARTUP_TIMEOUT;
 const DAEMON_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+#[cfg(test)]
+#[test]
+fn daemon_startup_timeout_leaves_room_for_mcp_discovery() {
+    assert!(DAEMON_STARTUP_TIMEOUT >= mew_mcp::MCP_DISCOVERY_TIMEOUT + Duration::from_secs(10));
+}
 
 /// Run the TUI connected to a mew daemon. The daemon owns the agent;
 /// the TUI is a pure frontend that sends commands and projects shared client state.
