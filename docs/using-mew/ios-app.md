@@ -3,15 +3,9 @@ title: iOS App
 description: Connect to mew daemons from your iPhone over iroh.
 ---
 
-mew has an iOS app that connects to daemons on your machines over iroh
-(QUIC with holepunching and relays). Watch sessions, respond to
-permissions, send prompts — all from your phone.
-
-The app is in early development. It pairs with any number of daemons,
-shows a combined chat list with machine filters ordered by recent activity, attaches to
-sessions with recent history replay + live streaming, and supports
-sending prompts, canceling turns, answering permission and ask-user
-requests, and switching models.
+mew's experimental iOS app connects to daemons over iroh, which uses QUIC
+with hole punching and relays. The app groups chats from saved machines in
+one list. See the current connection and chat limits below before pairing.
 
 The app requires iOS 26 or later. For source build instructions, see
 [Mobile Core Development](/docs/development/dev-mobile/).
@@ -41,13 +35,26 @@ Use `./target/debug/mew` from that checkout for each command below.
 
 2. On your phone, open **Machines** from the Chats toolbar, then tap **+**.
 
-3. Scan the QR code, or paste a complete pairing invite into the text field.
-   The invite includes the credential needed to authorize your phone.
+3. Tap **Scan QR Code** and scan the code from `mew pair`. If you already
+   have the complete invite as text, paste it into the pairing field. For
+   a new device, the printed Node ID alone is insufficient. The QR code
+   includes the one-time credential.
 
-4. Name the daemon (e.g. "Homelab", "Work laptop").
+4. Optionally, give the daemon a name, such as "Homelab" or "Work laptop".
 
-5. Tap **Add**. The app connects over iroh and the daemon authorizes your
-   phone's identity. Later connections use that identity without another invite.
+5. Tap **Add** and wait for **Connected** in the Machines list. The daemon
+   authorizes your phone's identity and consumes the invite.
+
+:::caution[Current limits with remote pairing]
+After an invite-based pairing, the app can get stuck on **Reconnecting**
+when relaunched because it resends the consumed invite. On the same app
+installation, remove the saved machine from the **Machines** list and add
+it again using the daemon's Node ID. Local removal leaves the daemon's
+device authorization in place.
+
+This restores the connection. Starting a chat still fails with
+`remote connections must identify as client_kind=remote` in the current build.
+:::
 
 ### Pairing formats
 

@@ -4440,3 +4440,13 @@ Signed in through the browser with the published macOS nightly, verified OAuth
 status, received a real Codex reply, and signed out using an isolated config.
 The provider guide now shows the success messages and names a Codex model for
 the first prompt. All 12 site tests passed.
+
+### 2026-11-19: iOS pairing smoke test
+
+A clean iOS build stops in netdev and netwatch with the locked libc. In a
+temporary checkout, mio 1.2.4 and libc 0.2.189 let the current app build.
+Verified initial invite pairing in the iOS 26.4 simulator, reproduced the
+reconnect failure that follows invite consumption, and verified recovery by
+removing the saved machine and re-adding its Node ID. The remote daemon
+rejected new-chat creation because the app sends `client_kind=mobile`.
+Updated both iOS guides with the observed limits. All 12 site tests passed.

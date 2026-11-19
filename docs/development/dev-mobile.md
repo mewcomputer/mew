@@ -18,6 +18,13 @@ rustup target add aarch64-apple-ios aarch64-apple-ios-sim
 
 ## Build the mobile core for iOS
 
+:::caution
+The lockfile with `libc` 0.2.191 blocks a fresh iOS build. `netdev` 0.46.3
+uses `libc::in6_ifreq`, and `netwatch` 0.19.3 uses BSD routing symbols such
+as `RTM_GET2` and `RTF_IFSCOPE`. These bindings are unavailable on iOS.
+The macOS daemon build succeeds with the same lockfile.
+:::
+
 ```sh
 just ios-core
 ```
@@ -62,10 +69,12 @@ xcodebuild -scheme MewMobileCore \
 
 ```sh
 cd mew-ios
+xcrun simctl list devices available
 xcodebuild -project mew.xcodeproj -scheme mew \
-  -destination 'platform=iOS Simulator,name=iPhone 17' build
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
 ```
 
+Use the name of an available iOS 26 or later simulator from the list.
 Or open `mew.xcodeproj` in Xcode and build/run from the GUI.
 
 Use the checked-in Xcode project for builds and tests. `project.yml` does
