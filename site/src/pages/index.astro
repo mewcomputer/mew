@@ -11,7 +11,7 @@ import InstallPicker from "../components/InstallPicker.astro";
 import "../../../jianghu/mew.css";
 
 const title = "mew";
-const description = "Mew is an agent harness designed for your work. Choose a model, give it instructions, and decide which tools it can use.";
+const description = "Mew is a coding agent for your terminal. Use a model from your chosen provider and set permissions for file edits and shell commands.";
 const socialImage = new URL("/og/mew.jpg", Astro.site);
 const notice = `<!--\n${spriteNotice}\n${fontNotice}-->`;
 const [beforePicker, afterPicker] = landing
@@ -43,7 +43,7 @@ const [beforePicker, afterPicker] = landing
         <meta property="og:image" content={socialImage.href} />
         <meta property="og:image:width" content="1200" />
         <meta property="og:image:height" content="630" />
-        <meta property="og:image:alt" content="Mew’s headline beside the lantern-lit garden." />
+        <meta property="og:image:alt" content="Mew is a coding agent for your terminal. A lantern-lit garden sits to the right." />
         <meta name="twitter:card" content="summary_large_image" />
         <link rel="icon" type="image/svg+xml" href={seal} />
         <link rel="preconnect" href="https://fonts.googleapis.com" />

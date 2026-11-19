@@ -4465,3 +4465,12 @@ no gaps over 50 ms, compared with 474 frames and two such gaps before.
 Forced software rendering improved from 11 to 121 scroll frames on the
 same path and switched to the still. Also checked chapter scrolling,
 garden controls, and the install picker at a 390 px viewport.
+
+### 2026-11-19: Homepage copy pass
+
+Updated the hero and chapter copy with examples from the terminal client,
+including test output, diff review, personas, and approval prompts. Matched
+the metadata and social card to the new headline.
+
+All 12 site tests passed. Checked the hero and install link at 390 and
+1280 pixels and inspected the 1200 × 630 social card.

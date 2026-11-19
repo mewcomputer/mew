@@ -8,7 +8,7 @@ const readPage = (path) => readFile(new URL(path, dist), 'utf8');
 
 test('the built homepage serves the garden and leads readers to an existing docs page', async () => {
   const home = await readPage('index.html');
-  assert.ok(home.includes('<h1>Mew is an agent harness designed for your work.</h1>'));
+  assert.ok(home.includes('<h1>Mew is a coding agent for your terminal.</h1>'));
   assert.equal([...home.matchAll(/<section[^>]+data-focus=/g)].length, 7);
 
   for (const [attribute, expected] of [['data-garden-model', 'glTF'], ['data-sprite-sheet', '\u0089PNG']]) {
@@ -18,7 +18,7 @@ test('the built homepage serves the garden and leads readers to an existing docs
     assert.equal(asset.toString('latin1', 0, 4), expected, attribute);
   }
 
-  assert.match(home, /href="#start"[^>]*>Get started/);
+  assert.match(home, /href="#start"[^>]*>Install mew/);
   const docsLink = home.match(/href="(\/docs\/[^"]+)"[^>]*>Read the install guide/);
   assert.ok(docsLink, 'the picker links to the local installation guide');
   const docs = await readPage(docsLink[1].slice(1) + 'index.html');

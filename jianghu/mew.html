@@ -46,10 +46,10 @@
 <main data-mew-story>
   <section class="hero" id="top" data-focus="garden">
     <div class="intro">
-      <h1>Mew is an agent harness designed for your work.</h1>
-      <p class="lede">mew gives you a place to work with agents you can configure. Choose a model, give it instructions, and decide which tools it can use.</p>
+      <h1>Mew is a coding agent for your terminal.</h1>
+      <p class="lede">Run <code>mew</code> from a project directory with a model provider you’ve configured. It can read the repo, edit files, and run commands with the permissions you set.</p>
       <div class="ctas">
-        <a class="mew-button primary" href="https://mew.computer/docs/getting-started/installation/" data-install-link>Get started with mew <span aria-hidden="true">→</span></a>
+        <a class="mew-button primary" href="https://mew.computer/docs/getting-started/installation/" data-install-link>Install mew <span aria-hidden="true">→</span></a>
         <a class="mew-button" href="https://github.com/mewcomputer/mew">View on GitHub</a>
       </div>
       <p class="note">mew is experimental and under active development.</p>
@@ -60,52 +60,48 @@
   <section class="room" data-focus="hall" data-side="left">
     <div class="panel">
       <p class="num">01</p>
-      <h2>Give it a task.</h2>
-      <p>Ask mew to explore a codebase, investigate a problem, or make a change. It can search and read files, edit them, and run commands as the work takes shape.</p>
-      <p>You can follow along, answer questions, and change direction at any point.</p>
+      <h2>See what it ran</h2>
+      <p>Ask Mew to find where an error comes from. It can search for the message and follow it back to the call site. If it runs a test, the command and its output show up in the chat.</p>
     </div>
   </section>
 
   <section class="room" data-focus="pavilion" data-side="right">
     <div class="panel">
       <p class="num">02</p>
-      <h2>Bring in another agent.</h2>
-      <p>Give a subagent a focused task while mew continues working. Ask for an investigation, a review, or a second perspective on a plan. The subagent reports its result back to the conversation.</p>
-      <p>You can give subagents their own instructions and choose which models and tools they use.</p>
+      <h2>A second set of eyes</h2>
+      <p>Give a subagent a diff to review while Mew keeps working. The reviewer works in its own conversation and sends its findings back. You can give it its own instructions and model.</p>
     </div>
   </section>
 
   <section class="room" data-focus="gallery" data-side="left">
     <div class="panel">
       <p class="num">03</p>
-      <h2>Make an agent for the job.</h2>
-      <p>Personas let you give an agent a role and its own instructions. You might set up one for coding, one for research, or one that’s just there for conversation.</p>
-      <p>Each persona can use a different model and tool set. Give a coding persona access to the shell, or leave tools off entirely.</p>
+      <h2>From planner to builder</h2>
+      <p>Ask the planner persona to write a plan, then switch to the builder to work through it. For a persona of your own, put its instructions in <code>PERSONA.md</code> and set which model and tools it can use.</p>
     </div>
   </section>
 
   <section class="room" data-focus="wall" data-side="right">
     <div class="panel">
       <p class="num">04</p>
-      <h2>Choose when mew asks.</h2>
-      <p>Set permissions for the actions you want to review. You can configure rules for tools, commands, and paths, then choose a permission mode that suits the work.</p>
+      <h2>Approve a command once</h2>
+      <p>A permission prompt shows the command before it runs. You can allow that call, allow the tool for the session, or deny it. For a command you run often, set an allow rule in <code>config.toml</code>.</p>
     </div>
   </section>
 
   <section class="room" data-focus="gate" data-side="left">
     <div class="panel">
       <p class="num">05</p>
-      <h2>Give it context that carries forward.</h2>
-      <p>Add project instructions and reusable skills for the things you do often. Mew can load them into a conversation as needed.</p>
-      <p>Your sessions are saved locally, so you can return to a conversation and see what happened.</p>
+      <h2>The repo comes with instructions</h2>
+      <p>Put project instructions in <code>AGENTS.md</code>. A procedure like preparing a release can go in a <code>SKILL.md</code> that Mew loads when needed. Use <code>/sessions</code> to reopen a saved chat.</p>
     </div>
   </section>
 
   <section class="room" id="start" data-focus="tower" data-side="left">
     <div class="panel">
       <p class="num">06</p>
-      <h2>Start with a model and a task.</h2>
-      <p>Choose a supported provider, open a session, and tell mew what you want to work on.</p>
+      <h2>Install mew</h2>
+      <p>After installing, follow the guide to set up a model provider. Run <code>mew</code> from the repo you want to work in.</p>
       <!-- install-picker -->
       <div class="ctas">
         <a class="mew-button" href="https://mew.computer/docs/getting-started/installation/">Read the install guide</a>
