@@ -4488,3 +4488,8 @@ All 12 site tests passed. Checked the hero and install link at 390 and
 
 Restored the original descriptions and gave sections 4–6 new headings.
 Verified that the paragraphs match the original and all 12 site tests pass.
+
+### 2026-11-19: Add examples to the homepage copy
+
+Added one sentence each about tracing a failing test, asking before a push,
+and using a release skill. Verified the original wording and all 12 site tests.
