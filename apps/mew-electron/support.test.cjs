@@ -7,6 +7,7 @@ const { startSupport } = require('./support.cjs');
 
 const bootstrap = {
   daemonUrl: 'ws://127.0.0.1:25566',
+  websocketUrl: 'ws://127.0.0.1:34568/relay-fixture',
   themeMode: 'system',
   lightTheme: 'codex-light',
   darkTheme: 'codex-dark',
@@ -147,6 +148,12 @@ test('malformed startup output and invalid ready messages clean up before reject
     });
     await f.assertStopped();
   }
+});
+
+test('support binaries that omit the desktop relay must be updated', async (t) => {
+  const f = await fixture(t, `delete ready.bootstrap.websocketUrl; send(ready); setInterval(() => {}, 1000);`);
+  await assert.rejects(f.start(), /update.*support binary/i);
+  await f.assertStopped();
 });
 
 test('startup timeout, stdout EOF and nonzero exit reject and reap the subprocess', async (t) => {

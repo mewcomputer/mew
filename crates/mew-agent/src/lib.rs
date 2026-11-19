@@ -47,6 +47,8 @@ pub struct GoalState {
 pub enum AgentEvent {
     /// A raw provider event.
     Provider(ProviderEvent),
+    /// Accepted guidance continued a child after its previous final response.
+    ChildGuidanceContinuation,
     /// Request user approval for a tool call.
     PermissionRequest {
         call: HookToolCall,
@@ -161,6 +163,7 @@ pub struct FlaggedFileInfo {
 impl std::fmt::Debug for AgentEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            AgentEvent::ChildGuidanceContinuation => f.write_str("ChildGuidanceContinuation"),
             AgentEvent::Provider(ev) => f.debug_tuple("Provider").field(ev).finish(),
             AgentEvent::PermissionRequest { call, .. } => f
                 .debug_struct("PermissionRequest")
@@ -293,6 +296,7 @@ impl std::fmt::Debug for AgentEvent {
 }
 
 mod agent;
+mod child_guidance;
 mod events;
 pub mod manifest;
 mod prompt_cache;
@@ -304,7 +308,7 @@ mod tools;
 mod turn;
 mod workspace;
 
-pub use agent::Agent;
+pub use agent::{AcceptedPrompt, Agent, PromptAdmissionError};
 pub use mew_subagents::SubagentOutcome;
 pub use prompt_cache::PromptCacheRetention;
 pub use reasoning_truncator::{

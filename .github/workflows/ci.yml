@@ -72,7 +72,12 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --locked --all -- -D warnings
 
+      - name: Build binaries for the bridge round trip
+        run: cargo build --locked -p mew -p mew-web-bridge
+
       - name: cargo test
+        env:
+          MEW_REQUIRE_SUBPROCESS_E2E: 1
         run: cargo test --locked --all
 
   web-ci:

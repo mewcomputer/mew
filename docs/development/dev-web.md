@@ -9,8 +9,8 @@ the `mew-web-client` TypeScript library.
 ## Getting started
 
 ```sh
-just dev-ui           # starts Vite dev server with HMR
-just dev-ui -- --open  # also launches browser
+just dev-web          # starts the bridge and Vite with HMR
+just dev-web --open   # also launches the browser
 ```
 
 This auto-spawns `mew daemon` in the background and starts the Vite dev
@@ -155,6 +155,13 @@ just build-web  # builds Rust + TS, embeds dist into mew-web-bridge
 The built `mew-web` binary serves the React app from embedded assets at
 runtime. Vite hashes asset filenames, so files are served dynamically by
 path lookup rather than hardcoded `include_bytes!`.
+
+`mew-web` listens on loopback. It accepts WebSocket requests for its bound
+address and port, including the `localhost` alias, and checks browser origins
+against the same address and any explicit loopback origins. `just dev-web`
+allows the Vite server on port 5173. If you run the bridge and Vite separately,
+pass `--allow-origin http://localhost:5173` to the bridge and open Vite at that
+address. Repeat `--allow-origin` for each additional local development origin.
 
 ## Adding a new wire event end-to-end
 

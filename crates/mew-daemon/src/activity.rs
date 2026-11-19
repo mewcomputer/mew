@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::ClientSender;
 use mew_protocol::{JobActivity, ServerMessage, SubagentActivity};
-use tokio::sync::mpsc;
 
 #[derive(Default)]
 pub(crate) struct SessionActivity {
@@ -154,7 +154,7 @@ impl crate::session::Session {
         observers.insert(job_id, observer.abort_handle());
     }
 
-    pub(crate) async fn send_activity(&self, sender: &mpsc::UnboundedSender<ServerMessage>) {
+    pub(crate) async fn send_activity(&self, sender: &ClientSender) {
         // Activity publications hold this lock until their event is queued.
         // The snapshot therefore precedes or includes every concurrent update.
         let activity = self.activity.lock().await;
@@ -208,7 +208,7 @@ mod tests {
                 manifests: Vec::new(),
             })
             .await;
-        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let (sender, mut receiver) = ClientSender::channel(Default::default());
         session.send_activity(&sender).await;
         let ServerMessage::SessionActivitySnapshot { subagents, .. } =
             receiver.recv().await.unwrap()
@@ -234,7 +234,7 @@ mod tests {
     #[tokio::test]
     async fn snapshot_cannot_overtake_an_activity_publication() {
         let session = session();
-        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let (sender, mut receiver) = ClientSender::channel(Default::default());
         session
             .attach_client(sender.clone(), mew_protocol::ClientKind::Tui)
             .await;

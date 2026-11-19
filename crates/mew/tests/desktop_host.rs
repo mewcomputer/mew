@@ -52,8 +52,11 @@ struct Process {
 
 impl Process {
     fn start(root: &Path, address: SocketAddr, attached: bool) -> Self {
+        Self::start_with(command(root), root, address, attached)
+    }
+
+    fn start_with(mut command: Command, root: &Path, address: SocketAddr, attached: bool) -> Self {
         let stderr = root.join("host-stderr.log");
-        let mut command = command(root);
         command
             .arg("desktop-host")
             .env("MEW_DESKTOP_DAEMON_PORT", address.port().to_string())
@@ -173,6 +176,22 @@ fn host_serves_embedded_assets_preserves_themes_and_stops_owned_resources_on_eof
     assert_eq!(ready["type"], "ready");
     let bootstrap = &ready["bootstrap"];
     assert_eq!(bootstrap["daemonUrl"], format!("ws://{daemon}"));
+    let (relay, route) = bootstrap["websocketUrl"]
+        .as_str()
+        .unwrap()
+        .trim_start_matches("ws://")
+        .split_once('/')
+        .unwrap();
+    let relay: SocketAddr = relay.parse().unwrap();
+    assert_ne!(relay, daemon);
+    let mut socket = TcpStream::connect_timeout(&relay, Duration::from_secs(2)).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    write!(socket, "GET /{route} HTTP/1.1\r\nHost: {relay}\r\nOrigin: mew://app\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n").unwrap();
+    let mut status = String::new();
+    BufReader::new(socket).read_line(&mut status).unwrap();
+    assert!(status.starts_with("HTTP/1.1 101 "));
     assert_eq!(bootstrap["themeMode"], "system");
     assert_eq!(bootstrap["lightTheme"], "codex-light");
     assert_eq!(bootstrap["darkTheme"], "codex-dark");
@@ -213,6 +232,7 @@ fn host_serves_embedded_assets_preserves_themes_and_stops_owned_resources_on_eof
     process.eof();
     assert!(TcpStream::connect(daemon).is_err());
     assert!(TcpStream::connect(assets).is_err());
+    assert!(TcpStream::connect(relay).is_err());
     assert!(std::fs::read_to_string(&process.stderr).unwrap().is_empty());
     let mut restarted = Process::start(root.path(), daemon, false);
     let saved = restarted.read();
@@ -220,6 +240,40 @@ fn host_serves_embedded_assets_preserves_themes_and_stops_owned_resources_on_eof
     assert_eq!(saved["bootstrap"]["lightTheme"], "desktop-test");
     assert_eq!(saved["bootstrap"]["darkTheme"], "nord");
     restarted.eof();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn host_starts_its_daemon_with_the_maximum_inherited_descriptor_limit() {
+    use std::os::unix::process::CommandExt;
+
+    let root = fixture();
+    let daemon = unused_address();
+    let mut command = command(root.path());
+    // Node on macOS launches children with the soft limit raised to the hard
+    // limit, which can be RLIM_INFINITY.
+    unsafe {
+        command.pre_exec(|| {
+            let mut limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            limit.rlim_cur = limit.rlim_max;
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut process = Process::start_with(command, root.path(), daemon, false);
+
+    let ready = process.read();
+    assert_eq!(ready["type"], "ready");
+    assert_eq!(ready["bootstrap"]["daemonUrl"], format!("ws://{daemon}"));
+    process.eof();
 }
 
 #[test]

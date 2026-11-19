@@ -25,6 +25,8 @@ export default defineConfig({
       "/ws": {
         target: "ws://127.0.0.1:9847",
         ws: true,
+        // Use the bridge's Host while preserving the browser's Origin.
+        changeOrigin: true,
       },
     },
     watch: {

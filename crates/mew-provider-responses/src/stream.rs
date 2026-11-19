@@ -22,8 +22,7 @@ struct StreamState {
     tool_calls: std::collections::HashMap<String, ToolCallAccumulator>,
     /// Track which PartIds have been finalized (PartEnd emitted).
     finalized_parts: std::collections::HashSet<ulid::Ulid>,
-    /// Whether we've emitted MessageEnd.
-    message_end_emitted: bool,
+    saw_tool_call: bool,
 }
 
 impl StreamState {
@@ -34,7 +33,7 @@ impl StreamState {
             reasoning_part_ids: std::collections::HashMap::new(),
             tool_calls: std::collections::HashMap::new(),
             finalized_parts: std::collections::HashSet::new(),
-            message_end_emitted: false,
+            saw_tool_call: false,
         }
     }
 
@@ -117,7 +116,7 @@ impl Adapter {
                             message: format!("sse stream: {e}"),
                         }))
                         .await;
-                    break;
+                    return;
                 }
             };
 
@@ -185,17 +184,20 @@ impl Adapter {
                     // Part already finalized by the specific .done event.
                 }
 
-                "response.completed" => {
-                    Self::handle_response_completed(data, &mut tx, &mut state).await;
-                }
-
-                "response.incomplete" => {
-                    Self::handle_response_incomplete(data, &mut tx, &mut state).await;
+                "response.completed" | "response.incomplete" => {
+                    Self::handle_response_end(
+                        data,
+                        current_event == "response.completed",
+                        &mut tx,
+                        &mut state,
+                    )
+                    .await;
+                    return;
                 }
 
                 "response.failed" | "error" => {
                     Self::handle_error_event(data, &mut tx).await;
-                    state.message_end_emitted = true;
+                    return;
                 }
 
                 _ => {
@@ -209,18 +211,12 @@ impl Adapter {
             current_event.clear();
         }
 
-        // Stream-end fallback: if we ended without a terminal event,
-        // finalize all open parts and emit a synthetic MessageEnd.
-        if !state.message_end_emitted {
-            Self::finalize_open_parts(&mut tx, &mut state).await;
-            let _ = tx
-                .send(ProviderEvent::MessageEnd {
-                    finish: Finish::Stop,
-                    usage: Tokens::default(),
-                    cost: 0.0,
-                })
-                .await;
-        }
+        let _ = tx
+            .send(ProviderEvent::Error(MessageError {
+                kind: ErrorKind::Network,
+                message: "SSE stream ended before the response was complete".into(),
+            }))
+            .await;
     }
 
     async fn handle_output_item_added(
@@ -248,6 +244,7 @@ impl Adapter {
         };
 
         if event.item.typ == "function_call" {
+            state.saw_tool_call = true;
             let part = ToolCallPart {
                 base: PartBase {
                     id: ulid::Ulid::new(),
@@ -326,6 +323,7 @@ impl Adapter {
             #[serde(rename = "type")]
             typ: String,
             encrypted_content: Option<String>,
+            arguments: Option<String>,
         }
 
         let event: Event = match serde_json::from_str(data) {
@@ -333,7 +331,11 @@ impl Adapter {
             Err(_) => return,
         };
 
-        if event.item.typ == "reasoning" {
+        if event.item.typ == "function_call" {
+            if let Some(arguments) = event.item.arguments {
+                Self::finish_function_call(&event.item.id, &arguments, tx, state).await;
+            }
+        } else if event.item.typ == "reasoning" {
             if let (Some(encrypted), Some(&part_id)) = (
                 event.item.encrypted_content,
                 state.reasoning_part_ids.get(&event.item.id),
@@ -549,87 +551,118 @@ impl Adapter {
             Err(_) => return,
         };
 
-        if let Some(mut acc) = state.tool_calls.remove(&event.item_id) {
-            // If the done event has arguments, use those; otherwise use
-            // the accumulated buffer.
-            if !event.arguments.is_empty() {
-                acc.json = event.arguments;
-            }
-            acc.finalize();
-            if !state.is_part_finalized(acc.part.base.id) {
-                state.mark_finalized(acc.part.base.id);
-                let _ = tx
-                    .send(ProviderEvent::PartEnd {
-                        part_id: acc.part.base.id,
-                    })
-                    .await;
-            }
+        Self::finish_function_call(&event.item_id, &event.arguments, tx, state).await;
+    }
+
+    async fn finish_function_call(
+        item_id: &str,
+        arguments: &str,
+        tx: &mut mpsc::Sender<ProviderEvent>,
+        state: &mut StreamState,
+    ) {
+        let Some(acc) = state.tool_calls.get(item_id) else {
+            return;
+        };
+        let suffix = if arguments.is_empty() {
+            ""
+        } else if let Some(suffix) = arguments.strip_prefix(acc.json.as_str()) {
+            suffix
+        } else {
+            // An append-only argument stream cannot reconcile conflicting
+            // fragments. Keep the call unfinished so completion is rejected.
+            return;
+        };
+        let final_arguments = if arguments.is_empty() {
+            &acc.json
+        } else {
+            arguments
+        };
+        if acc.part.call_id.is_empty()
+            || acc.part.tool_name.is_empty()
+            || !final_arguments.trim_start().starts_with('{')
+            || serde_json::from_str::<serde::de::IgnoredAny>(final_arguments).is_err()
+        {
+            return;
+        }
+        if !suffix.is_empty() {
+            let _ = tx
+                .send(ProviderEvent::PartDelta {
+                    part_id: acc.part.base.id,
+                    field: "arguments",
+                    delta: suffix.to_owned(),
+                })
+                .await;
+        }
+        let mut acc = state
+            .tool_calls
+            .remove(item_id)
+            .expect("tracked function call");
+        acc.json.push_str(suffix);
+        acc.finalize();
+        if !state.is_part_finalized(acc.part.base.id) {
+            state.mark_finalized(acc.part.base.id);
+            let _ = tx
+                .send(ProviderEvent::PartEnd {
+                    part_id: acc.part.base.id,
+                })
+                .await;
         }
     }
 
-    async fn handle_response_completed(
+    async fn handle_response_end(
         data: &str,
+        completed: bool,
         tx: &mut mpsc::Sender<ProviderEvent>,
         state: &mut StreamState,
     ) {
-        let v: serde_json::Value = match serde_json::from_str(data) {
-            Ok(v) => v,
-            Err(_) => return,
+        let response: serde_json::Value = match serde_json::from_str::<serde_json::Value>(data) {
+            Ok(value) if value["response"].is_object() => value,
+            _ => {
+                let _ = tx
+                    .send(ProviderEvent::Error(MessageError {
+                        kind: ErrorKind::ProviderApi,
+                        message: "invalid terminal Responses event".into(),
+                    }))
+                    .await;
+                return;
+            }
         };
-
-        let usage = &v["response"]["usage"];
-        let input_tokens = usage["input_tokens"].as_u64().unwrap_or(0) as u32;
-        let output_tokens = usage["output_tokens"].as_u64().unwrap_or(0) as u32;
-
-        let _ = tx
-            .send(ProviderEvent::MessageEnd {
-                finish: Finish::Stop,
-                usage: Tokens {
-                    input: input_tokens,
-                    output: output_tokens,
-                    ..Default::default()
-                },
-                cost: 0.0,
-            })
-            .await;
-        state.message_end_emitted = true;
-    }
-
-    async fn handle_response_incomplete(
-        data: &str,
-        tx: &mut mpsc::Sender<ProviderEvent>,
-        state: &mut StreamState,
-    ) {
-        let v: serde_json::Value = match serde_json::from_str(data) {
-            Ok(v) => v,
-            Err(_) => return,
-        };
-
-        let reason = v["response"]["incomplete_details"]["reason"]
-            .as_str()
-            .unwrap_or("");
-        let finish = if reason == "content_filter" {
+        let finish = if completed {
+            if !state.tool_calls.is_empty() {
+                let _ = tx
+                    .send(ProviderEvent::Error(MessageError {
+                        kind: ErrorKind::ProviderApi,
+                        message: "response completed before function calls were finalized".into(),
+                    }))
+                    .await;
+                return;
+            }
+            if state.saw_tool_call {
+                Finish::ToolUse
+            } else {
+                Finish::Stop
+            }
+        } else if response["response"]["incomplete_details"]["reason"].as_str()
+            == Some("content_filter")
+        {
             Finish::Error
         } else {
             Finish::Length
         };
 
-        let usage = &v["response"]["usage"];
-        let input_tokens = usage["input_tokens"].as_u64().unwrap_or(0) as u32;
-        let output_tokens = usage["output_tokens"].as_u64().unwrap_or(0) as u32;
-
+        Self::finalize_open_parts(tx, state).await;
+        let usage = &response["response"]["usage"];
         let _ = tx
             .send(ProviderEvent::MessageEnd {
                 finish,
                 usage: Tokens {
-                    input: input_tokens,
-                    output: output_tokens,
+                    input: usage["input_tokens"].as_u64().unwrap_or(0) as u32,
+                    output: usage["output_tokens"].as_u64().unwrap_or(0) as u32,
                     ..Default::default()
                 },
                 cost: 0.0,
             })
             .await;
-        state.message_end_emitted = true;
     }
 
     async fn handle_error_event(data: &str, tx: &mut mpsc::Sender<ProviderEvent>) {
@@ -682,17 +715,6 @@ impl Adapter {
                 part_ids.push(rp.base.id);
             }
         }
-        // Finalize any tool calls.
-        let mut tool_calls: Vec<ToolCallAccumulator> =
-            state.tool_calls.drain().map(|(_, v)| v).collect();
-        for acc in &mut tool_calls {
-            acc.finalize();
-            if !state.is_part_finalized(acc.part.base.id) {
-                state.mark_finalized(acc.part.base.id);
-                part_ids.push(acc.part.base.id);
-            }
-        }
-
         for id in part_ids {
             let _ = tx.send(ProviderEvent::PartEnd { part_id: id }).await;
         }
@@ -892,11 +914,7 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\
             .any(|e| matches!(e, ProviderEvent::MessageEnd { .. })));
     }
 
-    #[tokio::test]
-    async fn test_stream_tool_call() {
-        let server = MockServer::start().await;
-
-        let sse_body = "\
+    const TOOL_CALL_SSE: &str = "\
 event: response.output_item.added\n\
 data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"bash\",\"status\":\"in_progress\"}}\n\
 \n\
@@ -913,12 +931,96 @@ event: response.completed\n\
 data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_2\",\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}}\n\
 \n";
 
+    #[tokio::test]
+    async fn stream_requires_terminal_evidence() {
+        let fragments = TOOL_CALL_SSE
+            .split("event: response.function_call_arguments.done")
+            .next()
+            .unwrap();
+        let item_finished = TOOL_CALL_SSE
+            .split("event: response.completed")
+            .next()
+            .unwrap();
+        let response_completed = TOOL_CALL_SSE
+            .split_once("event: response.completed")
+            .unwrap()
+            .1;
+        let unfinished_call = format!("{fragments}event: response.completed{response_completed}");
+
+        let call_started = TOOL_CALL_SSE
+            .split("event: response.function_call_arguments.delta")
+            .next()
+            .unwrap();
+        let malformed_arguments = format!(
+            "{call_started}event: response.function_call_arguments.done\ndata: {}\n\nevent: response.completed{response_completed}",
+            r#"{"item_id":"fc_1","arguments":"{"}"#,
+        );
+
+        for (name, body) in [
+            (
+                "malformed finalized arguments",
+                malformed_arguments.as_str(),
+            ),
+            ("EOF during arguments", fragments),
+            ("EOF after item completed", item_finished),
+            (
+                "response completion before arguments completed",
+                unfinished_call.as_str(),
+            ),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/responses"))
+                .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+                .mount(&server)
+                .await;
+            let adapter = Adapter::new(
+                "test".into(),
+                server.uri() + "/v1",
+                "test-model".into(),
+                "test-key".into(),
+            );
+            let events: Vec<_> = adapter
+                .stream(Request::default())
+                .await
+                .unwrap()
+                .collect()
+                .await;
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    ProviderEvent::PartStart {
+                        part: Part::ToolCall(_)
+                    }
+                )),
+                "{name}: {events:?}"
+            );
+            let terminal: Vec<_> = events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        ProviderEvent::MessageEnd { .. } | ProviderEvent::Error(_)
+                    )
+                })
+                .collect();
+            assert!(
+                matches!(terminal.as_slice(), [ProviderEvent::Error(_)]),
+                "{name}: {terminal:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stream_tool_call() {
+        let server = MockServer::start().await;
+
         Mock::given(method("POST"))
             .and(path("/v1/responses"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "text/event-stream")
-                    .set_body_string(sse_body),
+                    .set_body_string(TOOL_CALL_SSE),
             )
             .mount(&server)
             .await;
@@ -961,6 +1063,13 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_2\",\"status\
         assert!(matches!(events[1], ProviderEvent::PartDelta { .. }));
         assert!(matches!(events[2], ProviderEvent::PartDelta { .. }));
         assert!(matches!(events[3], ProviderEvent::PartEnd { .. }));
+        assert!(matches!(
+            events.last(),
+            Some(ProviderEvent::MessageEnd {
+                finish: Finish::ToolUse,
+                ..
+            })
+        ));
     }
 
     #[tokio::test]

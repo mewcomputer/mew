@@ -54,12 +54,12 @@ describe("native host", () => {
   });
 
   it("uses an explicit Electron browser mode without changing daemon or theme startup", async () => {
-    const bootstrap = { browserMode: "electron", daemonUrl: "ws://127.0.0.1:25566", themeMode: "system", lightTheme: "light", darkTheme: "dark", themes: [] };
+    const bootstrap = { browserMode: "electron", daemonUrl: "ws://127.0.0.1:25566", websocketUrl: "ws://127.0.0.1:34567/relay-fixture", themeMode: "system", lightTheme: "light", darkTheme: "dark", themes: [] };
     window.mewQuery = ({ onSuccess }) => onSuccess(JSON.stringify(bootstrap));
     await initializeHost();
     expect(isElectronHost()).toBe(true);
     expect(getHostBootstrap()).toEqual(bootstrap);
-    expect(getWebSocketUrl()).toBe(bootstrap.daemonUrl);
+    expect(getWebSocketUrl()).toBe(bootstrap.websocketUrl);
   });
 
   it("bridges typed preload events once and unsubscribes when the host resets", async () => {

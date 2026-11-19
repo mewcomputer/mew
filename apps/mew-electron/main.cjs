@@ -49,8 +49,8 @@ async function start() {
   if (!endpoint) throw new Error('Chromium did not publish its local browser endpoint.');
 
   const appUrl = 'mew://app/';
-  const daemonUrl = support.bootstrap.daemonUrl;
-  const { ports, unavailable } = browserProtection(support.appUrl, daemonUrl, endpoint);
+  const daemonUrl = new URL(support.bootstrap.websocketUrl);
+  const { ports, unavailable } = browserProtection(support.appUrl, support.bootstrap.daemonUrl, endpoint, daemonUrl);
   const hostSession = session.fromPartition('persist:mew-ui');
   hostSession.protocol.handle('mew', (request) => {
     if (!isAppUrl(request.url, appUrl) || !['GET', 'HEAD'].includes(request.method)) return new Response(null, { status: 403 });
@@ -65,7 +65,7 @@ async function start() {
   hostSession.on('will-download', (event) => event.preventDefault());
   hostSession.webRequest.onBeforeRequest((details, callback) => {
     const url = new URL(details.url);
-    const allowed = isAppUrl(details.url, appUrl) || url.href === new URL(daemonUrl).href || ['data:', 'blob:', 'devtools:'].includes(url.protocol);
+    const allowed = isAppUrl(details.url, appUrl) || url.href === daemonUrl.href || ['data:', 'blob:', 'devtools:'].includes(url.protocol);
     callback({ cancel: !allowed });
   });
   window = new BrowserWindow({
@@ -126,7 +126,7 @@ async function start() {
     { role: 'windowMenu' },
   ]));
   await window.loadURL(appUrl);
-  console.log(JSON.stringify({ host: 'electron', packaged: app.isPackaged, pid: process.pid, appUrl, daemonUrl }));
+  console.log(JSON.stringify({ host: 'electron', packaged: app.isPackaged, pid: process.pid, appUrl }));
 }
 
 start().catch((error) => {

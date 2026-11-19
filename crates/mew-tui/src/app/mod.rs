@@ -2730,6 +2730,7 @@ impl App {
             } => {
                 self.change_stats.apply_delta(&path, added, removed);
             }
+            AgentEvent::ChildGuidanceContinuation => {}
             AgentEvent::FlaggedFilesChanged { files } => {
                 self.flagged_files = files;
             }

@@ -40,16 +40,18 @@ export class MewClient {
     listeners = new Map();
     /** Promise resolved when the WebSocket opens. */
     openPromise = null;
-    /** Session id returned by `newSession`. */
+    connectionLifetime = null;
+    protocolVersion = 0;
     sessionId = null;
     confirmedSessions = new Set();
     browserFocusPreflight = null;
     /** Messages currently projected from the most recent history pages. */
     sessionHistoryMessages = [];
-    /** Session lifecycle requests share uncorrelated daemon errors. */
+    /** SessionReady has no request ID, so lifecycle requests share a queue. */
     sessionCommandTail = Promise.resolve();
-    scopedSessionFailures = false;
     pendingSessionCommands = 0;
+    scopedSessionFailures = false;
+    pendingPrompts = new Map();
     constructor(url, opts = {}) {
         this.url = url;
         this.socketFactory = opts.socketFactory ?? defaultSocketFactory;
@@ -61,14 +63,39 @@ export class MewClient {
     connect() {
         if (this.openPromise)
             return this.openPromise;
-        this.confirmedSessions.clear();
-        this.browserFocusPreflight = null;
-        this.scopedSessionFailures = false;
+        let ws;
+        try {
+            ws = this.socketFactory(this.url);
+        }
+        catch (error) {
+            return Promise.reject(error);
+        }
+        const lifetime = new AbortController();
+        this.ws = ws;
+        this.connectionLifetime = lifetime;
         this.openPromise = new Promise((resolve, reject) => {
-            let settled = false;
-            const ws = this.socketFactory(this.url);
-            this.ws = ws;
+            const cleanup = () => {
+                clearTimeout(timeout);
+                this.off("remote-ready", onReady);
+                this.off("errorMessage", onRemoteError);
+                lifetime.signal.removeEventListener("abort", onDisconnected);
+            };
+            const onReady = () => { cleanup(); resolve(); };
+            const onRemoteError = (message) => {
+                cleanup();
+                reject(new Error(message.message));
+                this.disconnect();
+            };
+            const onDisconnected = () => { cleanup(); reject(lifetime.signal.reason); };
+            const timeout = setTimeout(() => {
+                cleanup();
+                reject(new Error("The daemon connection did not open in time."));
+                this.disconnect();
+            }, 10000);
+            lifetime.signal.addEventListener("abort", onDisconnected, { once: true });
             ws.addEventListener("open", () => {
+                if (this.ws !== ws)
+                    return;
                 if (this.debug)
                     console.debug("[mew] open");
                 this.emit("open");
@@ -80,22 +107,11 @@ export class MewClient {
                     });
                     return;
                 }
-                settled = true;
-                resolve();
+                onReady();
             });
             if (this.clientKind === "remote") {
-                this.on("remote-ready", () => {
-                    if (!settled) {
-                        settled = true;
-                        resolve();
-                    }
-                });
-                this.on("errorMessage", (message) => {
-                    if (!settled) {
-                        settled = true;
-                        reject(new Error(message.message));
-                    }
-                });
+                this.on("remote-ready", onReady);
+                this.on("errorMessage", onRemoteError);
             }
             ws.addEventListener("message", (ev) => {
                 if (this.ws !== ws)
@@ -113,43 +129,48 @@ export class MewClient {
             ws.addEventListener("close", (ev) => {
                 if (this.debug)
                     console.debug("[mew] close", ev);
-                if (this.ws === ws) {
-                    this.confirmedSessions.clear();
-                    this.browserFocusPreflight = null;
-                    this.ws = null;
-                    this.openPromise = null;
-                }
-                if (!settled) {
-                    settled = true;
-                    reject(new Error(`ws closed before open: ${ev.code} ${ev.reason}`));
-                }
+                if (!this.endConnection(ws, `The daemon disconnected (${ev.code} ${ev.reason}).`))
+                    return;
                 this.emit("close", ev.code, ev.reason);
             });
             ws.addEventListener("error", (ev) => {
                 if (this.debug)
                     console.debug("[mew] error", ev);
-                if (this.ws === ws) {
-                    this.confirmedSessions.clear();
-                    this.browserFocusPreflight = null;
-                    this.ws = null;
-                    this.openPromise = null;
-                }
-                if (!settled) {
-                    settled = true;
-                    reject(ev);
-                }
+                if (!this.endConnection(ws, "The daemon connection failed."))
+                    return;
                 this.emit("error", ev);
+                this.emit("close", 1006, "The daemon connection failed.");
             });
         });
         return this.openPromise;
     }
-    /** Close the WebSocket. After calling this, the client cannot be reused. */
+    /** Close the current socket and discard its attachment confirmations. */
     disconnect(code = 1000, reason = "client disconnect") {
-        this.confirmedSessions.clear();
-        this.browserFocusPreflight = null;
-        this.ws?.close(code, reason);
+        const socket = this.ws;
+        if (!socket || !this.endConnection(socket, "The daemon disconnected."))
+            return;
+        socket.close(code, reason);
+        this.emit("close", code, reason);
+    }
+    endConnection(socket, message) {
+        if (this.ws !== socket)
+            return false;
         this.ws = null;
         this.openPromise = null;
+        this.confirmedSessions.clear();
+        this.browserFocusPreflight = null;
+        this.protocolVersion = 0;
+        this.scopedSessionFailures = false;
+        this.sessionHistoryMessages = [];
+        const wasSwitching = this.pendingSessionCommands > 0;
+        this.pendingSessionCommands = 0;
+        this.sessionCommandTail = Promise.resolve();
+        const lifetime = this.connectionLifetime;
+        this.connectionLifetime = null;
+        lifetime?.abort(new Error(message));
+        if (wasSwitching)
+            this.emit("session-command-state");
+        return true;
     }
     isConnected() {
         return this.ws !== null;
@@ -157,115 +178,113 @@ export class MewClient {
     hasConfirmedSession(sessionId) {
         return this.confirmedSessions.has(sessionId);
     }
+    /** Commands for the active session need its current socket's confirmation. */
+    isSessionAttached(sessionId) {
+        return this.sessionId === sessionId && this.hasConfirmedSession(sessionId);
+    }
+    /** True once the active attachment has no queued or in-flight lifecycle work. */
     isSessionStable(sessionId) {
-        return this.pendingSessionCommands === 0 && this.sessionId === sessionId && this.confirmedSessions.has(sessionId);
+        return this.pendingSessionCommands === 0 && this.isSessionAttached(sessionId);
     }
-    /** Serialize lifecycle requests because daemon errors have no request id. */
-    enqueueSessionCommand(command) {
-        this.pendingSessionCommands++;
-        const run = this.sessionCommandTail.then(command, command).finally(() => { this.pendingSessionCommands--; });
-        this.sessionCommandTail = run.then(() => undefined, () => undefined);
-        return run;
-    }
-    requestSession(message, expectedSession) {
-        const socket = this.ws;
-        if (!socket)
-            return Promise.reject(new Error("The daemon connection is closed."));
-        return new Promise((resolve, reject) => {
-            const cleanup = () => {
-                this.off("session-ready", onReady);
-                this.off("errorMessage", onError);
-                this.off("session-operation-failed", onFailure);
-                socket.removeEventListener("close", onClose);
-                socket.removeEventListener("error", onClose);
-            };
-            const onReady = (data) => {
-                if (this.ws !== socket || (expectedSession && data.session_id !== expectedSession))
-                    return;
-                cleanup();
-                this.sessionId = data.session_id;
-                this.sessionHistoryMessages = [];
-                resolve(data.session_id);
-            };
-            const onError = (message) => {
-                if (this.scopedSessionFailures)
-                    return;
-                cleanup();
-                reject(new Error(message.message));
-            };
-            const onFailure = (failure) => {
-                if (failure.operation !== (expectedSession ? "attach" : "create")
-                    || failure.session_id !== (expectedSession ?? null))
-                    return;
-                cleanup();
-                reject(new Error(failure.message));
-            };
-            const onClose = () => {
-                cleanup();
-                reject(new Error("The daemon connection closed before the session was ready."));
-            };
-            this.on("session-ready", onReady);
-            this.on("errorMessage", onError);
-            this.on("session-operation-failed", onFailure);
-            socket.addEventListener("close", onClose);
-            socket.addEventListener("error", onClose);
-            try {
-                this.send(message);
-            }
-            catch (error) {
-                cleanup();
-                reject(error);
-            }
+    requestSession(message) {
+        const connecting = this.connect();
+        const signal = this.connectionLifetime?.signal;
+        if (!signal)
+            return connecting.then(() => { throw new Error("No daemon connection."); });
+        const wasIdle = this.pendingSessionCommands++ === 0;
+        const run = this.sessionCommandTail.then(async () => {
+            await connecting;
+            signal.throwIfAborted();
+            const sessionId = message.type === "attach_session" ? message.session_id : null;
+            if (sessionId !== null && this.isSessionAttached(sessionId))
+                return sessionId;
+            return new Promise((resolve, reject) => {
+                const cleanup = () => {
+                    clearTimeout(timeout);
+                    signal.removeEventListener("abort", onDisconnect);
+                    this.off("session-ready", onReady);
+                    this.off("session-operation-failed", onFailure);
+                    this.off("errorMessage", onLegacyError);
+                };
+                const fail = (error) => { cleanup(); reject(error); };
+                const onReady = (data) => {
+                    if (sessionId !== null && data.session_id !== sessionId)
+                        return;
+                    cleanup();
+                    resolve(data.session_id);
+                };
+                const onFailure = (data) => {
+                    if (data.operation !== (sessionId === null ? "create" : "attach") || data.session_id !== sessionId)
+                        return;
+                    fail(new Error(data.message));
+                };
+                const onLegacyError = ({ message }) => {
+                    if (!this.scopedSessionFailures)
+                        fail(new Error(message));
+                };
+                const onDisconnect = () => fail(signal.reason);
+                const timeout = setTimeout(() => {
+                    fail(new Error("The daemon did not confirm the conversation request."));
+                    this.disconnect();
+                }, 10000);
+                signal.addEventListener("abort", onDisconnect, { once: true });
+                this.on("session-ready", onReady);
+                this.on("session-operation-failed", onFailure);
+                this.on("errorMessage", onLegacyError);
+                try {
+                    this.send(message);
+                }
+                catch (error) {
+                    fail(error);
+                }
+            });
+        }).finally(() => {
+            if (this.connectionLifetime?.signal !== signal)
+                return;
+            if (--this.pendingSessionCommands === 0)
+                this.emit("session-command-state");
         });
+        this.sessionCommandTail = run.then(() => undefined, () => undefined);
+        if (wasIdle)
+            this.emit("session-command-state");
+        return run;
     }
     /** Send `new_session`. Resolves with the daemon-assigned session id. */
     newSession(cwd = null) {
-        return this.enqueueSessionCommand(async () => {
-            await this.connect();
-            return this.requestSession({ type: "new_session", cwd, client_kind: this.clientKind });
-        });
+        return this.requestSession({ type: "new_session", cwd, client_kind: this.clientKind });
     }
     /** Send `prompt`. Streaming events are emitted via the registered handlers. */
     prompt(text, attachments = []) {
         this.send({ type: "prompt", text, attachments });
     }
-    /** Submit to the confirmed conversation and retain the draft until receipt. */
-    submitPrompt(sessionId, text, attachments = []) {
+    /** Resolve only when the daemon accepts the prompt in the specified session. */
+    async submitPrompt(sessionId, text, attachments = []) {
         const socket = this.ws;
-        if (!socket || this.sessionId !== sessionId || !this.confirmedSessions.has(sessionId)) {
-            return Promise.reject(new Error("This conversation is not attached to the daemon."));
-        }
+        if (!socket || !this.isSessionAttached(sessionId))
+            throw new Error("This conversation is not attached to the daemon.");
+        if (this.protocolVersion < 3)
+            throw new Error("Update the daemon to enable confirmed prompt submission.");
+        if (this.pendingPrompts.has(sessionId))
+            throw new Error("This conversation is already awaiting a prompt receipt.");
         const requestId = crypto.randomUUID();
         return new Promise((resolve, reject) => {
-            const cleanup = () => {
-                clearTimeout(timer);
-                this.off("prompt-receipt", onReceipt);
-                socket.removeEventListener("close", onUncertain);
-                socket.removeEventListener("error", onUncertain);
-            };
-            const onReceipt = (receipt) => {
-                if (receipt.session_id !== sessionId || receipt.request_id !== requestId)
-                    return;
-                cleanup();
-                if (receipt.status === "accepted")
+            const finish = (status, message) => {
+                this.pendingPrompts.delete(sessionId);
+                clearTimeout(pending.timeout);
+                if (status === "accepted")
                     resolve();
                 else
-                    reject(new Error(receipt.message || "The prompt was not accepted."));
+                    reject(new Error(message ?? (status === "unknown"
+                        ? "Submission could not be confirmed. Check the conversation before retrying."
+                        : "The daemon rejected the prompt.")));
             };
-            const onUncertain = () => {
-                cleanup();
-                reject(new Error("Could not confirm whether the prompt was sent. Check the conversation before retrying."));
-            };
-            const timer = setTimeout(onUncertain, 15000);
-            this.on("prompt-receipt", onReceipt);
-            socket.addEventListener("close", onUncertain);
-            socket.addEventListener("error", onUncertain);
+            const pending = { requestId, socket, finish, timeout: setTimeout(() => finish("unknown"), 15000) };
+            this.pendingPrompts.set(sessionId, pending);
             try {
                 this.send({ type: "submit_prompt", session_id: sessionId, request_id: requestId, text, attachments });
             }
             catch (error) {
-                cleanup();
-                reject(error);
+                finish("rejected", error instanceof Error ? error.message : undefined);
             }
         });
     }
@@ -361,12 +380,7 @@ export class MewClient {
      *  the daemon loads its persisted history from disk and sends a
      *  `session-history` event. Resolves with the session id. */
     attachSession(session_id) {
-        return this.enqueueSessionCommand(async () => {
-            await this.connect();
-            if (this.sessionId === session_id && this.confirmedSessions.has(session_id))
-                return session_id;
-            return this.requestSession({ type: "attach_session", session_id, client_kind: this.clientKind }, session_id);
-        });
+        return this.requestSession({ type: "attach_session", session_id, client_kind: this.clientKind });
     }
     /** Request older messages for the attached session using the cursor from a
      *  previous history page. */
@@ -380,6 +394,49 @@ export class MewClient {
     /** Request a recorded child transcript without changing the attached session. */
     readSubagentHistory(session_id, child_session_id, request_id) {
         this.send({ type: "read_subagent_history", session_id, child_session_id, request_id });
+    }
+    /** Send guidance to a running child of the attached conversation. */
+    async guideSubagent(sessionId, childSessionId, text, requestId = crypto.randomUUID()) {
+        if (!text.trim())
+            throw new Error("Write a message before sending guidance.");
+        return this.requestSubagentReceipt({ type: "guide_subagent", session_id: sessionId, child_session_id: childSessionId, request_id: requestId, text });
+    }
+    /** Read a receipt without sending new guidance. */
+    readSubagentMessageReceipt(sessionId, childSessionId, requestId) {
+        return this.requestSubagentReceipt({ type: "read_subagent_message_receipt", session_id: sessionId, child_session_id: childSessionId, request_id: requestId });
+    }
+    async requestSubagentReceipt(message) {
+        const { session_id, child_session_id, request_id } = message;
+        if (!this.isSessionAttached(session_id))
+            throw new Error("The parent conversation is not attached.");
+        const signal = this.connectionLifetime?.signal;
+        return new Promise((resolve, reject) => {
+            const cleanup = () => {
+                clearTimeout(timeout);
+                signal?.removeEventListener("abort", unconfirmed);
+                this.off("subagent-message-receipt", onReceipt);
+            };
+            const unconfirmed = () => {
+                cleanup();
+                resolve({ type: "subagent_message_receipt", session_id, child_session_id, request_id, status: "unknown" });
+            };
+            const onReceipt = (receipt) => {
+                if (receipt.session_id !== session_id || receipt.child_session_id !== child_session_id || receipt.request_id !== request_id)
+                    return;
+                cleanup();
+                resolve(receipt);
+            };
+            const timeout = setTimeout(unconfirmed, 10000);
+            signal?.addEventListener("abort", unconfirmed, { once: true });
+            this.on("subagent-message-receipt", onReceipt);
+            try {
+                this.send(message);
+            }
+            catch (error) {
+                cleanup();
+                reject(error);
+            }
+        });
     }
     /** List all sessions known to the daemon (active + persisted idle).
      *  The daemon responds with a `session-list` event. */
@@ -396,6 +453,45 @@ export class MewClient {
     /** Delete a session from disk and remove it from the active list. */
     deleteSession(session_id) {
         this.send({ type: "delete_session", session_id });
+    }
+    /** Delete a conversation and wait for its matching daemon confirmation. */
+    deleteSessionConfirmed(sessionId) {
+        const requestId = crypto.randomUUID();
+        const signal = this.connectionLifetime?.signal;
+        return new Promise((resolve, reject) => {
+            const cleanup = () => {
+                clearTimeout(timeout);
+                signal?.removeEventListener("abort", onDisconnect);
+                this.off("session-deletion-result", onReply);
+            };
+            const fail = (error) => { cleanup(); reject(error); };
+            const unconfirmed = () => fail(new Error("Deletion could not be confirmed. Refresh sessions before retrying."));
+            const onDisconnect = () => unconfirmed();
+            const onReply = (result) => {
+                if (result.session_id !== sessionId || result.request_id !== requestId)
+                    return;
+                if (result.error != null) {
+                    fail(new Error(result.error));
+                    return;
+                }
+                cleanup();
+                this.confirmedSessions.delete(sessionId);
+                if (this.sessionId === sessionId) {
+                    this.sessionId = null;
+                    this.sessionHistoryMessages = [];
+                }
+                resolve();
+            };
+            const timeout = setTimeout(unconfirmed, 10000);
+            this.on("session-deletion-result", onReply);
+            signal?.addEventListener("abort", onDisconnect, { once: true });
+            try {
+                this.send({ type: "delete_session_confirmed", session_id: sessionId, request_id: requestId });
+            }
+            catch (error) {
+                fail(error);
+            }
+        });
     }
     /** Rename a session (set a custom title). Persists to disk and broadcasts. */
     renameSession(session_id, title) {
@@ -553,13 +649,28 @@ export class MewClient {
     }
     /** Ping the daemon; resolves with the daemon version once a pong arrives. */
     ping() {
-        return new Promise((resolve) => {
-            const handler = (data) => {
-                this.off("pong", handler);
+        return new Promise((resolve, reject) => {
+            const signal = this.connectionLifetime?.signal;
+            const cleanup = () => {
+                clearTimeout(timeout);
+                this.off("pong", onPong);
+                signal?.removeEventListener("abort", onDisconnect);
+            };
+            const onPong = (data) => {
+                cleanup();
                 resolve(data.version);
             };
-            this.on("pong", handler);
-            this.send({ type: "ping" });
+            const fail = (error) => { cleanup(); reject(error); };
+            const onDisconnect = () => fail(signal?.reason);
+            const timeout = setTimeout(() => fail(new Error("The daemon did not respond to its protocol check.")), 3000);
+            signal?.addEventListener("abort", onDisconnect, { once: true });
+            this.on("pong", onPong);
+            try {
+                this.send({ type: "ping" });
+            }
+            catch (error) {
+                fail(error);
+            }
         });
     }
     /** List known projects (recent session cwds). */
@@ -682,13 +793,6 @@ export class MewClient {
     // -------------------------------------------------------------------------
     dispatch(msg) {
         switch (msg.type) {
-            case "prompt_receipt":
-                this.emit("prompt-receipt", msg);
-                break;
-            case "session_operation_failed":
-                this.scopedSessionFailures = true;
-                this.emit("session-operation-failed", msg);
-                break;
             case "daemon_settings":
                 this.emit("daemon-settings", { request_id: msg.request_id, defaults: msg.defaults, devices: msg.devices });
                 break;
@@ -698,6 +802,7 @@ export class MewClient {
             case "session_ready":
                 this.sessionId = msg.session_id;
                 this.confirmedSessions.add(msg.session_id);
+                this.sessionHistoryMessages = [];
                 this.emit("session-ready", {
                     session_id: msg.session_id,
                     cwd: msg.cwd,
@@ -706,6 +811,21 @@ export class MewClient {
                     permission_mode: msg.permission_mode,
                 });
                 break;
+            case "session_operation_failed":
+                this.scopedSessionFailures = true;
+                this.emit("session-operation-failed", msg);
+                break;
+            case "session_deletion_result":
+                this.emit("session-deletion-result", msg);
+                break;
+            case "prompt_receipt": {
+                const pending = this.pendingPrompts.get(msg.session_id);
+                if (pending && pending.socket === this.ws && pending.requestId === msg.request_id) {
+                    pending.finish(msg.status, msg.message);
+                }
+                this.emit("prompt-receipt", msg);
+                break;
+            }
             case "remote_ready":
                 this.emit("remote-ready", { scope: msg.scope });
                 break;
@@ -823,6 +943,9 @@ export class MewClient {
             case "session_history":
                 this.sessionHistoryMessages = msg.messages;
                 this.emit("session-history", { messages: msg.messages });
+                if (this.sessionId && this.isSessionAttached(this.sessionId)) {
+                    this.emit("session-history-page", { session_id: this.sessionId, messages: msg.messages, replace: true });
+                }
                 break;
             case "job_output":
                 this.emit("job-output", { session_id: msg.session_id, job_id: msg.job_id, request_id: msg.request_id, offset: msg.offset, next_offset: msg.next_offset, output: msg.output, done: msg.done, incomplete: msg.incomplete });
@@ -833,12 +956,19 @@ export class MewClient {
             case "subagent_history":
                 this.emit("subagent-history", { session_id: msg.session_id, child_session_id: msg.child_session_id, request_id: msg.request_id, messages: msg.messages, error: msg.error });
                 break;
+            case "subagent_message_receipt":
+                this.emit("subagent-message-receipt", msg);
+                break;
             case "session_history_page": {
-                const messages = msg.replace
-                    ? msg.messages
-                    : [...msg.messages, ...this.sessionHistoryMessages];
-                this.sessionHistoryMessages = messages;
-                this.emit("session-history", { messages });
+                if (!this.isSessionAttached(msg.session_id))
+                    break;
+                this.emit("session-history-page", msg);
+                if (this.listeners.get("session-history")?.size) {
+                    this.sessionHistoryMessages = msg.replace
+                        ? msg.messages
+                        : [...msg.messages, ...this.sessionHistoryMessages];
+                    this.emit("session-history", { messages: this.sessionHistoryMessages });
+                }
                 break;
             }
             case "model_list":
@@ -970,10 +1100,28 @@ export class MewClient {
             case "error_event":
                 this.emit("errorEvent", { message: msg.message });
                 break;
-            case "pong":
+            case "pong": {
                 this.scopedSessionFailures ||= msg.scoped_session_failures ?? false;
-                this.emit("pong", { version: msg.version, protocol_version: msg.protocol_version ?? 0, browser_focus_preflight: msg.browser_focus_preflight ?? false });
+                this.protocolVersion = msg.protocol_version ?? 0;
+                const socket = this.ws;
+                for (const [sessionId, pending] of this.pendingPrompts) {
+                    if (!socket || pending.socket === socket)
+                        continue;
+                    if (this.protocolVersion < 3) {
+                        pending.finish("unknown");
+                        continue;
+                    }
+                    pending.socket = socket;
+                    try {
+                        this.send({ type: "read_prompt_receipt", session_id: sessionId, request_id: pending.requestId });
+                    }
+                    catch {
+                        pending.finish("unknown");
+                    }
+                }
+                this.emit("pong", { version: msg.version, protocol_version: this.protocolVersion, browser_focus_preflight: msg.browser_focus_preflight ?? false });
                 break;
+            }
             case "project_list":
                 this.emit("project-list", { projects: msg.projects });
                 break;
@@ -1013,7 +1161,7 @@ export class MewClient {
             console.debug("[mew] ->", msg);
         this.ws.send(JSON.stringify(msg));
     }
-    /** Return the active session id, or null if `newSession` hasn't succeeded. */
+    /** Return the last confirmed session ID, which can outlive its connection. */
     getSessionId() {
         return this.sessionId;
     }

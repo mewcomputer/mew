@@ -47,10 +47,10 @@ build-ui: build-js
 # Idempotent — incremental cargo builds are cheap. `pnpm install` only
 # re-runs if lockfile or package.json changed.
 build-web:
-    pnpm install
+    pnpm install --frozen-lockfile
     pnpm --filter @mew/web-client build
     pnpm --filter mew-web-ui build
-    cargo build -p mew-web-bridge -p mew
+    cargo build --locked -p mew-web-bridge -p mew
 
 # Run the web harness in the foreground. The bridge auto-spawns
 # `mew daemon` on the default Unix socket if it isn't already running.
@@ -71,7 +71,11 @@ dev-web *flags:
     #!/usr/bin/env bash
     set -euo pipefail
     cd "{{justfile_directory()}}"
-    bridge_args=()
+    bridge_args=(
+        --allow-origin http://127.0.0.1:5173
+        --allow-origin http://localhost:5173
+        --allow-origin 'http://[::1]:5173'
+    )
     do_open=false
     for arg in "$@"; do
         case "$arg" in
@@ -163,7 +167,7 @@ _open-url url:
 # Dev mode: run Vite's dev server with hot-module reload. The browser
 # connects to Vite (default :5173), which proxies WebSocket connections
 # to the mew-web bridge (which in turn relays to the daemon). Start the
-# bridge separately in another terminal: `just dev-web --spawn false`.
+# bridge with `--allow-origin http://localhost:5173` and open the Vite URL at localhost.
 dev-ui:
     pnpm --filter mew-web-ui dev
 
@@ -339,10 +343,9 @@ ci: build-ui fmt clippy arch-check theme-codegen-check test-all e2e
 # End-to-end check: build binaries and run subprocess e2e tests.
 # The e2e test in mew-web-bridge spawns real `mew` and `mew-web`
 # subprocesses and verifies the full stack round-trip. Requires
-# `cargo build` first; the test gracefully skips if the binaries
-# aren't present.
+# the CLI and bridge binaries from build-web.
 e2e: build-web
-    cargo test -p mew-web-bridge --test bin_e2e
+    MEW_REQUIRE_SUBPROCESS_E2E=1 cargo test --locked -p mew-web-bridge --test bin_e2e
 
 mew *args: build
     cargo run -p mew -- "$@"

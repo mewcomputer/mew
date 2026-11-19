@@ -517,7 +517,9 @@ impl Adapter {
         let mut current_text_part: Option<TextPart> = None;
         let mut current_reasoning_part: Option<ReasoningPart> = None;
         let mut current_tool_call: Option<ToolCallAccumulator> = None;
-        let mut message_end_emitted = false;
+        let mut completed_tool_calls = None;
+        let mut finish = None;
+        let mut usage = Tokens::default();
 
         loop {
             let line: String = match lines.next_line().await {
@@ -530,7 +532,7 @@ impl Adapter {
                             message: format!("sse stream: {e}"),
                         }))
                         .await;
-                    break;
+                    return;
                 }
             };
 
@@ -570,6 +572,9 @@ impl Adapter {
                     .await;
                 }
                 "content_block_stop" => {
+                    if let Some(call) = &current_tool_call {
+                        *completed_tool_calls.get_or_insert(true) &= call.is_complete();
+                    }
                     Self::handle_content_block_stop(
                         &mut tx,
                         &mut current_text_part,
@@ -578,41 +583,52 @@ impl Adapter {
                     )
                     .await;
                 }
-                "message_delta" => {
-                    Self::handle_message_delta(data, &mut tx).await;
-                    message_end_emitted = true;
+                "message_delta" => Self::handle_message_delta(data, &mut finish, &mut usage),
+                "message_stop" => {
+                    let valid_stop = current_tool_call.is_none()
+                        && (finish != Some(Finish::ToolUse) || completed_tool_calls == Some(true))
+                        && serde_json::from_str::<serde_json::Value>(data)
+                            .is_ok_and(|event| event["type"] == "message_stop");
+                    let Some(finish) = finish.filter(|_| valid_stop) else {
+                        break;
+                    };
+                    Self::handle_content_block_stop(
+                        &mut tx,
+                        &mut current_text_part,
+                        &mut current_reasoning_part,
+                        &mut current_tool_call,
+                    )
+                    .await;
+                    let _ = tx
+                        .send(ProviderEvent::MessageEnd {
+                            finish,
+                            usage,
+                            cost: 0.0,
+                        })
+                        .await;
+                    return;
                 }
-                "message_stop" => {}
                 "error" => {
-                    if let Ok(err_resp) = serde_json::from_str::<ErrorEvent>(data) {
-                        let _ = tx
-                            .send(ProviderEvent::Error(MessageError {
-                                kind: ErrorKind::ProviderApi,
-                                message: format!("anthropic error: {}", err_resp.error.message),
-                            }))
-                            .await;
-                    }
+                    let message = serde_json::from_str::<ErrorEvent>(data)
+                        .map_or_else(|_| "unknown error".into(), |event| event.error.message);
+                    let _ = tx
+                        .send(ProviderEvent::Error(MessageError {
+                            kind: ErrorKind::ProviderApi,
+                            message: format!("anthropic error: {message}"),
+                        }))
+                        .await;
+                    return;
                 }
                 _ => {}
             }
         }
 
-        if !message_end_emitted {
-            Self::finalize_open_parts(
-                &mut tx,
-                &mut current_text_part,
-                &mut current_reasoning_part,
-                &mut current_tool_call,
-            )
+        let _ = tx
+            .send(ProviderEvent::Error(MessageError {
+                kind: ErrorKind::Network,
+                message: "SSE stream ended before a valid message_stop".into(),
+            }))
             .await;
-            let _ = tx
-                .send(ProviderEvent::MessageEnd {
-                    finish: Finish::Stop,
-                    usage: Tokens::default(),
-                    cost: 0.0,
-                })
-                .await;
-        }
     }
 
     async fn handle_content_block_start(
@@ -851,57 +867,18 @@ impl Adapter {
         }
     }
 
-    async fn handle_message_delta(data: &str, tx: &mut mpsc::Sender<ProviderEvent>) {
-        let v: serde_json::Value = match serde_json::from_str(data) {
-            Ok(v) => v,
-            Err(_) => return,
+    fn handle_message_delta(data: &str, finish: &mut Option<Finish>, usage: &mut Tokens) {
+        let Ok(delta) = serde_json::from_str::<serde_json::Value>(data) else {
+            return;
         };
-
-        let stop_reason = v["delta"]["stop_reason"].as_str().unwrap_or("");
-        let input_tokens = v["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32;
-        let output_tokens = v["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32;
-
-        let finish = map_finish_reason(stop_reason);
-        let _ = tx
-            .send(ProviderEvent::MessageEnd {
-                finish,
-                usage: Tokens {
-                    input: input_tokens,
-                    output: output_tokens,
-                    ..Default::default()
-                },
-                cost: 0.0,
-            })
-            .await;
-    }
-
-    async fn finalize_open_parts(
-        tx: &mut mpsc::Sender<ProviderEvent>,
-        current_text_part: &mut Option<TextPart>,
-        current_reasoning_part: &mut Option<ReasoningPart>,
-        current_tool_call: &mut Option<ToolCallAccumulator>,
-    ) {
-        if let Some(tp) = current_text_part.take() {
-            let _ = tx
-                .send(ProviderEvent::PartEnd {
-                    part_id: tp.base.id,
-                })
-                .await;
+        if let Some(stop_reason) = delta["delta"]["stop_reason"].as_str() {
+            *finish = Some(map_finish_reason(stop_reason));
         }
-        if let Some(rp) = current_reasoning_part.take() {
-            let _ = tx
-                .send(ProviderEvent::PartEnd {
-                    part_id: rp.base.id,
-                })
-                .await;
+        if let Some(input) = delta["usage"]["input_tokens"].as_u64() {
+            usage.input = input as u32;
         }
-        if let Some(mut acc) = current_tool_call.take() {
-            acc.finalize();
-            let _ = tx
-                .send(ProviderEvent::PartEnd {
-                    part_id: acc.part.base.id,
-                })
-                .await;
+        if let Some(output) = delta["usage"]["output_tokens"].as_u64() {
+            usage.output = output as u32;
         }
     }
 }
@@ -925,6 +902,13 @@ struct ToolCallAccumulator {
 }
 
 impl ToolCallAccumulator {
+    fn is_complete(&self) -> bool {
+        !self.part.tool_name.is_empty()
+            && (self.json.is_empty()
+                || (self.json.trim_start().starts_with('{')
+                    && serde_json::from_str::<serde::de::IgnoredAny>(&self.json).is_ok()))
+    }
+
     fn finalize(&mut self) {
         if !self.json.is_empty() {
             if let Ok(input) = serde_json::from_str(&self.json) {
@@ -1407,6 +1391,68 @@ mod tests {
     // -----------------------------------------------------------------------
     // SSE fixture replay tests
     // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn stream_requires_terminal_evidence() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let tool_call = include_str!("testdata/tool-call-empty-input.sse");
+        let before_delta = tool_call.split("event: message_delta").next().unwrap();
+        let before_stop = tool_call.split("event: message_stop").next().unwrap();
+
+        let malformed_arguments = tool_call.replace(
+            "event: content_block_stop",
+            concat!(
+                "event: content_block_delta\ndata: ",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{"}}"#,
+                "\n\nevent: content_block_stop",
+            ),
+        );
+
+        for body in [before_delta, before_stop, malformed_arguments.as_str()] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/messages"))
+                .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+                .mount(&server)
+                .await;
+            let adapter = Adapter::new(
+                "test".into(),
+                server.uri(),
+                "test-model".into(),
+                "test-key".into(),
+            );
+            let events: Vec<_> = adapter
+                .stream(Request::default())
+                .await
+                .unwrap()
+                .collect()
+                .await;
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    ProviderEvent::PartStart {
+                        part: Part::ToolCall(_)
+                    }
+                )),
+                "{events:?}"
+            );
+            let terminal: Vec<_> = events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        ProviderEvent::MessageEnd { .. } | ProviderEvent::Error(_)
+                    )
+                })
+                .collect();
+            assert!(
+                matches!(terminal.as_slice(), [ProviderEvent::Error(_)]),
+                "{terminal:?}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn test_fixture_text_only() {

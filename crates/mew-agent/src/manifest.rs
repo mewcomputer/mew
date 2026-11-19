@@ -12,21 +12,22 @@
 //! `cl100k_base`. Usage tokens (`input_tokens`, etc.) are `None` until
 //! backfilled after the API response.
 
-use mew_message::{Message, MessageId, Part, Segment, SegmentKind, TurnManifest};
+use std::hash::{DefaultHasher, Hash, Hasher};
+
+use mew_message::{Message, MessageId, Part, Segment, SegmentKind, ToolState, TurnManifest};
 use mew_provider::Request;
 use ulid::Ulid;
 
-/// Cache of token counts per message ID. Messages are immutable once
-/// appended to history, so their token count is stable and can be
-/// reused across turns. Cleared on compaction.
-type TokenCountCache = std::sync::Mutex<std::collections::HashMap<MessageId, u32>>;
+/// Cache one token count and input fingerprint per message ID.
+pub(crate) type TokenCountCache =
+    std::sync::Mutex<std::collections::HashMap<MessageId, (u64, u32)>>;
 
 /// Count tokens in `text` using the tokenizer for `model_id`.
 ///
 /// Tries `tiktoken::encoding_for_model(model_id)` first (supports DeepSeek,
 /// Qwen, Llama, Mistral, and OpenAI models). Falls back to `cl100k_base`
 /// (the most common encoding) for unknown models. Returns 0 on total failure.
-fn count_tokens(text: &str, model_id: &str) -> u32 {
+pub(crate) fn count_tokens(text: &str, model_id: &str) -> u32 {
     let enc =
         tiktoken::encoding_for_model(model_id).or_else(|| tiktoken::get_encoding("cl100k_base"));
     match enc {
@@ -221,7 +222,9 @@ fn build_tools_segment(req: &Request, model_id: &str) -> Segment {
         .iter()
         .map(|t| {
             let schema_str = serde_json::to_string(&t.schema).unwrap_or_default();
-            let tokens = count_tokens(&format!("{} {}", t.name, schema_str), model_id);
+            let tokens = count_tokens(&t.name, model_id)
+                .saturating_add(count_tokens(&t.description, model_id))
+                .saturating_add(count_tokens(&schema_str, model_id));
             seg(t.name.clone(), SegmentKind::Tools, tokens)
         })
         .collect();
@@ -235,9 +238,7 @@ fn build_tools_segment(req: &Request, model_id: &str) -> Segment {
 
 /// Build the History segment from the request's message list.
 ///
-/// Uses `cache` to avoid re-tokenizing messages that were already counted
-/// in a prior turn. Messages are immutable once appended, so their token
-/// count is stable.
+/// Reuses earlier counts when the content that contributed tokens is unchanged.
 fn build_history_segment(req: &Request, model_id: &str, cache: &TokenCountCache) -> Segment {
     let message_segments: Vec<Segment> = req
         .messages
@@ -282,10 +283,13 @@ fn build_message_segment(msg: &Message, model_id: &str, cache: &TokenCountCache)
         SegmentKind::Message
     };
 
-    // Check cache for this message's total token count.
+    let fingerprint = token_fingerprint(msg, model_id);
     let cached = {
         let guard = cache.lock().unwrap();
-        guard.get(&msg.id).copied()
+        guard
+            .get(&msg.id)
+            .filter(|(previous, _)| *previous == fingerprint)
+            .map(|(_, total)| *total)
     };
     let (part_children, total_tokens) = {
         if let Some(cached) = cached {
@@ -310,7 +314,7 @@ fn build_message_segment(msg: &Message, model_id: &str, cache: &TokenCountCache)
                 .map(|p| build_part_segment(p, model_id))
                 .collect();
             let total: u32 = children.iter().map(|s| s.tokens).sum();
-            cache.lock().unwrap().insert(msg.id, total);
+            cache.lock().unwrap().insert(msg.id, (fingerprint, total));
             (children, total)
         }
     };
@@ -323,6 +327,45 @@ fn build_message_segment(msg: &Message, model_id: &str, cache: &TokenCountCache)
         tokens_scaled: 0,
         children: part_children,
     }
+}
+
+/// Hooks and tool updates can change a message without changing its ID.
+fn token_fingerprint(message: &Message, model_id: &str) -> u64 {
+    let mut hash = DefaultHasher::new();
+    model_id.hash(&mut hash);
+    for part in &message.parts {
+        std::mem::discriminant(part).hash(&mut hash);
+        match part {
+            Part::Text(text) => text.text.hash(&mut hash),
+            Part::Reasoning(reasoning) => reasoning.text.hash(&mut hash),
+            Part::File(file) => {
+                let image = file.mime.starts_with("image/");
+                image.hash(&mut hash);
+                if !image {
+                    file.filename
+                        .as_deref()
+                        .unwrap_or(&file.url)
+                        .hash(&mut hash);
+                }
+            }
+            Part::ToolCall(call) => {
+                call.tool_name.hash(&mut hash);
+                call.state.input().hash(&mut hash);
+                std::mem::discriminant(&call.state).hash(&mut hash);
+                match &call.state {
+                    ToolState::Completed(state) => {
+                        state.output.hash(&mut hash);
+                        state.images.len().hash(&mut hash);
+                    }
+                    ToolState::Error(state) => state.error.hash(&mut hash),
+                    _ => {}
+                }
+            }
+            Part::ToolResult(_) => {}
+            Part::Compaction(compaction) => compaction.summary.hash(&mut hash),
+        }
+    }
+    hash.finish()
 }
 
 /// Extract label and kind from a Part without tokenizing.
@@ -356,32 +399,30 @@ fn tool_call_label(tc: &mew_message::ToolCallPart) -> String {
 
 /// Build a Part segment.
 fn build_part_segment(part: &Part, model_id: &str) -> Segment {
-    let (label, kind, text) = match part {
-        Part::Text(tp) => ("text".to_string(), SegmentKind::Part, tp.text.clone()),
-        Part::Reasoning(rp) => ("reasoning".to_string(), SegmentKind::Part, rp.text.clone()),
-        Part::File(fp) => (
-            "file".to_string(),
-            SegmentKind::Part,
-            fp.filename.clone().unwrap_or_default(),
-        ),
-        Part::ToolCall(tc) => {
-            // Use state.input() (parsed JSON), not raw_input (#[serde(skip)]).
-            let input_str = serde_json::to_string(tc.state.input()).unwrap_or_default();
-            (
-                tool_call_label(tc),
-                SegmentKind::Part,
-                format!("{} {}", tc.tool_name, input_str),
-            )
+    let (label, kind) = part_label_kind(part);
+    let tokens = match part {
+        Part::Text(text) => count_tokens(&text.text, model_id),
+        Part::Reasoning(reasoning) => count_tokens(&reasoning.text, model_id),
+        Part::File(file) if file.mime.starts_with("image/") => 1024,
+        Part::File(file) => count_tokens(file.filename.as_deref().unwrap_or(&file.url), model_id),
+        Part::ToolCall(call) => {
+            let input = serde_json::to_string(call.state.input()).unwrap_or_default();
+            let output_tokens = match &call.state {
+                ToolState::Completed(state) => count_tokens(&state.output, model_id)
+                    .saturating_add((state.images.len() as u32).saturating_mul(1024)),
+                ToolState::Error(state) => count_tokens(&state.error, model_id),
+                _ => 0,
+            };
+            count_tokens(&call.tool_name, model_id)
+                .saturating_add(count_tokens(&input, model_id))
+                .saturating_add(output_tokens)
         }
-        Part::ToolResult(_) => ("tool result".to_string(), SegmentKind::Part, String::new()),
-        Part::Compaction(_) => (
-            "compaction".to_string(),
-            SegmentKind::CompactionSummary,
-            String::new(),
-        ),
+        Part::ToolResult(_) => 0,
+        Part::Compaction(compaction) => {
+            count_tokens(compaction.summary.as_deref().unwrap_or_default(), model_id)
+        }
     };
 
-    let tokens = count_tokens(&text, model_id);
     let mut s = seg(label, kind, tokens);
     s.source_id = Some(part.id());
     s

@@ -7,6 +7,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
 use tracing::warn;
 
+mod desktop;
+pub use desktop::DesktopRelay;
+
 /// The built React app, or an empty directory when its assets are unavailable.
 static UI_DIST: Dir<'static> = include_dir!("$MEW_WEB_UI_DIST");
 

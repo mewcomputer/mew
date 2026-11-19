@@ -160,6 +160,26 @@ test("connect can be retried after the socket fails before opening", async () =>
   assert.equal(client.isConnected(), true);
 });
 
+test("a session request cannot hang behind an unopened socket", { timeout: 1000 }, async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const waiting = assert.rejects(client.attachSession("old"), /did not open/i);
+  const stalled = latest();
+  context.mock.timers.tick(10000);
+  await waiting;
+  assert.equal(client.isConnected(), false);
+
+  const replacement = client.attachSession("new");
+  const socket = latest();
+  assert.notEqual(socket, stalled);
+  socket.open();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(socket.sent, [{ type: "attach_session", session_id: "new", client_kind: "web" }]);
+  socket.peerSend({ type: "session_ready", session_id: "new" });
+  assert.equal(await replacement, "new");
+});
+
 test("connect creates a fresh socket after an established socket closes", async () => {
   const { factory, latest } = makeFactory();
   const client = new MewClient("ws://test/", { socketFactory: factory });
@@ -216,13 +236,27 @@ test("unscoped commands cannot reach a different session while an attach is pend
   socket.open();
   await connected;
   socket.peerSend({ type: "session_ready", session_id: "a" });
+  const commandStates: boolean[] = [];
+  client.on("session-command-state", () => commandStates.push(
+    client.isSessionStable(client.getSessionId()!),
+  ));
+  assert.equal(client.isSessionStable("a"), true);
   const attaching = client.attachSession("b");
+  const queued = client.attachSession("c");
+  assert.equal(client.isSessionAttached("a"), true);
+  assert.equal(client.isSessionStable("a"), false);
   await new Promise((resolve) => setImmediate(resolve));
   await assert.rejects(client.slashCommand("/clear"), /switching conversations/i);
   assert.throws(() => client.cancel(), /switching conversations/i);
   assert.ok(!socket.sent.some((message) => message.type === "slash_command" || message.type === "cancel"));
   socket.peerSend({ type: "session_ready", session_id: "b" });
   await attaching;
+  assert.equal(client.isSessionStable("b"), false);
+  await new Promise((resolve) => setImmediate(resolve));
+  socket.peerSend({ type: "session_ready", session_id: "c" });
+  await queued;
+  assert.equal(client.isSessionStable("c"), true);
+  assert.deepEqual(commandStates, [false, true]);
   client.disconnect();
 });
 
@@ -332,6 +366,7 @@ test("scoped prompts wait for the matching receipt and reject a different sessio
   const socket = latest();
   socket.open();
   await connected;
+  socket.peerSend({ type: "pong", version: "test", protocol_version: 3 });
   socket.peerSend({ type: "session_ready", session_id: "first" });
   await assert.rejects(client.submitPrompt("other", "wrong workspace"), /attached|session/i);
   const pending = client.submitPrompt("first", "hello");
@@ -355,23 +390,21 @@ test("scoped prompts wait for the matching receipt and reject a different sessio
   client.disconnect();
 });
 
-test("a disconnected prompt reports an uncertain submission rather than resending", async () => {
+test("a disconnected prompt without a replacement socket reports uncertainty at its deadline", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
   const { factory, latest } = makeFactory();
   const client = new MewClient("ws://test/", { socketFactory: factory });
   const connected = client.connect();
   const first = latest();
   first.open();
   await connected;
+  first.peerSend({ type: "pong", version: "test", protocol_version: 3 });
   first.peerSend({ type: "session_ready", session_id: "first" });
   const pending = client.submitPrompt("first", "may have arrived");
+  const rejected = assert.rejects(pending, /could not be confirmed/i);
   first.peerClose(1006, "dropped");
-  await assert.rejects(pending, /could not confirm|may have/i);
-  const reconnect = client.connect();
-  const second = latest();
-  second.open();
-  await reconnect;
-  assert.deepEqual(second.sent, []);
-  client.disconnect();
+  context.mock.timers.tick(15000);
+  await rejected;
 });
 
 test("connect can recover if an established socket emits an error", async () => {
@@ -420,9 +453,11 @@ test("history pages prepend older messages and can be requested by cursor", asyn
   await connectP;
 
   const history: string[][] = [];
+  const cursors: (number | undefined)[] = [];
   client.on("session-history", ({ messages }) => {
     history.push(messages.map((message) => message.id));
   });
+  client.on("session-history-page", (page) => cursors.push(page.next_cursor));
   const message = (id: string) => ({
     id,
     session_id: "sess_1",
@@ -431,6 +466,7 @@ test("history pages prepend older messages and can be requested by cursor", asyn
     time: { created: 0 },
   });
 
+  latest().peerSend({ type: "session_ready", session_id: "sess_1" });
   latest().peerSend({
     type: "session_history_page",
     session_id: "sess_1",
@@ -448,12 +484,28 @@ test("history pages prepend older messages and can be requested by cursor", asyn
   client.loadSessionHistory("sess_1", 1, 24);
 
   assert.deepEqual(history, [["new"], ["old", "new"]]);
+  assert.deepEqual(cursors, [1, undefined]);
   assert.deepEqual(latest().sent, [{
     type: "load_session_history",
     session_id: "sess_1",
     before: 1,
     limit: 24,
   }]);
+});
+
+test("history from a previously attached session cannot replace the current session", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connected = client.connect();
+  latest().open();
+  await connected;
+  const updates: string[] = [];
+  client.on("session-history-page", (page) => updates.push(page.session_id));
+  latest().peerSend({ type: "session_ready", session_id: "old" });
+  latest().peerSend({ type: "session_ready", session_id: "current" });
+  latest().peerSend({ type: "session_history_page", session_id: "old", messages: [], next_cursor: 1, replace: true });
+  latest().peerSend({ type: "session_history_page", session_id: "current", messages: [], next_cursor: 1, replace: true });
+  assert.deepEqual(updates, ["current"]);
 });
 
 test("manual persona selection waits for the daemon's confirmed persona", async () => {
@@ -538,6 +590,104 @@ test("serializes overlapping session requests so errors stay with their request"
   assert.equal(await newP, "sess_new");
 });
 
+test("a disconnect rejects session commands from that socket and does not block its replacement", { timeout: 2000 }, async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connected = client.connect();
+  const first = latest();
+  first.open();
+  await connected;
+  const attach = assert.rejects(client.attachSession("old"), /disconnected|connection changed/i);
+  const queuedCreate = assert.rejects(client.newSession(), /disconnected|connection changed/i);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(first.sent, [{ type: "attach_session", session_id: "old", client_kind: "web" }]);
+  first.peerClose(1006);
+  await Promise.all([attach, queuedCreate]);
+
+  const replacement = client.connect();
+  latest().open();
+  await replacement;
+  const created = client.newSession();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(latest().sent, [{ type: "new_session", cwd: null, client_kind: "web" }]);
+  first.peerSend({ type: "session_ready", session_id: "stale" });
+  latest().peerSend({ type: "session_ready", session_id: "new" });
+  assert.equal(await created, "new");
+});
+
+test("a scoped attach ignores unrelated errors and requires its own confirmation", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connected = client.connect();
+  latest().open();
+  await connected;
+  latest().peerSend({ type: "pong", version: "test", protocol_version: 3, scoped_session_failures: true });
+  const first = client.attachSession("old");
+  await new Promise((resolve) => setImmediate(resolve));
+  latest().peerSend({ type: "error", message: "unrelated operation failed" });
+  latest().peerSend({ type: "session_ready", session_id: "wrong" });
+  latest().peerSend({ type: "session_ready", session_id: "old" });
+  assert.equal(await first, "old");
+  assert.equal(await client.attachSession("old"), "old");
+  assert.equal(latest().sent.length, 1);
+
+  const missing = assert.rejects(client.attachSession("missing"), /could not find chat/);
+  await new Promise((resolve) => setImmediate(resolve));
+  latest().peerSend({ type: "session_operation_failed", operation: "attach", session_id: "missing", message: "could not find chat" });
+  await missing;
+});
+
+test("a scoped prompt requires a current attachment and settles only on its own receipt", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connected = client.connect();
+  latest().open();
+  await connected;
+  latest().peerSend({ type: "pong", version: "test", protocol_version: 3 });
+  latest().peerSend({ type: "session_ready", session_id: "old" });
+  latest().peerSend({ type: "session_ready", session_id: "active" });
+  await assert.rejects(client.submitPrompt("old", "wrong owner"), /attached/i);
+  const attachments = [{ path: "draft.png", mime: "image/png" }];
+  const submitting = client.submitPrompt("active", "hello", attachments);
+  const prompt = latest().sent[0];
+  assert.ok(prompt?.type === "submit_prompt");
+  assert.deepEqual({ ...prompt, request_id: "id" }, { type: "submit_prompt", session_id: "active", request_id: "id", text: "hello", attachments });
+  await assert.rejects(client.submitPrompt("active", "duplicate"), /awaiting/i);
+
+  latest().peerSend({ type: "prompt_receipt", session_id: "old", request_id: prompt.request_id, status: "accepted" });
+  latest().peerSend({ type: "prompt_receipt", session_id: "active", request_id: "unrelated", status: "accepted" });
+  latest().peerSend({ type: "prompt_receipt", session_id: "active", request_id: prompt.request_id, status: "rejected", message: "session is busy" });
+  await assert.rejects(submitting, /session is busy/);
+});
+
+for (const status of ["accepted", "unknown"] as const) {
+  test(`an interrupted prompt reads its ${status} receipt without resubmitting`, async () => {
+    const { factory, latest } = makeFactory();
+    const client = new MewClient("ws://test/", { socketFactory: factory });
+    const connected = client.connect();
+    const first = latest();
+    first.open();
+    await connected;
+    first.peerSend({ type: "pong", version: "test", protocol_version: 3 });
+    first.peerSend({ type: "session_ready", session_id: "active" });
+    const submitting = client.submitPrompt("active", "one turn");
+    const outcome = status === "accepted" ? submitting : assert.rejects(submitting, /could not be confirmed/i);
+    const prompt = first.sent[0];
+    assert.ok(prompt?.type === "submit_prompt");
+    first.peerClose(1006);
+    assert.equal(client.isSessionAttached("active"), false);
+
+    const replacement = client.connect();
+    latest().open();
+    await replacement;
+    first.peerSend({ type: "prompt_receipt", session_id: "active", request_id: prompt.request_id, status: "accepted" });
+    latest().peerSend({ type: "pong", version: "test", protocol_version: 3 });
+    assert.deepEqual(latest().sent, [{ type: "read_prompt_receipt", session_id: "active", request_id: prompt.request_id }]);
+    latest().peerSend({ type: "prompt_receipt", session_id: "active", request_id: prompt.request_id, status });
+    await outcome;
+  });
+}
+
 test("prompt sends prompt with text and attachments", async () => {
   const { factory, latest } = makeFactory();
   const client = new MewClient("ws://test/", { socketFactory: factory });
@@ -551,6 +701,111 @@ test("prompt sends prompt with text and attachments", async () => {
   assert.equal(sent[0]!.type, "prompt");
   assert.equal((sent[0] as any).text, "hello");
   assert.equal((sent[0] as any).attachments.length, 1);
+});
+
+test("confirmed deletion resolves only for the matching session and request", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connected = client.connect();
+  latest().open();
+  await connected;
+  const removed = client.deleteSessionConfirmed("target");
+  const request = latest().sent[0];
+  assert.ok(request?.type === "delete_session_confirmed");
+  assert.equal(request.session_id, "target");
+  latest().peerSend({ type: "session_deletion_result", session_id: "other", request_id: request.request_id, error: null });
+  latest().peerSend({ type: "session_deletion_result", session_id: "target", request_id: "unrelated", error: null });
+  latest().peerSend({ type: "session_deletion_result", session_id: "target", request_id: request.request_id, error: "conversation is still running" });
+  await assert.rejects(removed, /conversation is still running/);
+
+  const retry = client.deleteSessionConfirmed("target");
+  const retried = latest().sent[1];
+  assert.ok(retried?.type === "delete_session_confirmed");
+  assert.notEqual(retried.request_id, request.request_id);
+  latest().peerSend({ type: "session_deletion_result", session_id: "target", request_id: retried.request_id, error: null });
+  await retry;
+});
+
+test("a dropped deletion remains uncertain and sends no commands on the replacement socket", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connected = client.connect();
+  latest().open();
+  await connected;
+  const failed = assert.rejects(client.deleteSessionConfirmed("target"), /could not be confirmed/i);
+  latest().peerClose(1006);
+  await failed;
+  const replacement = client.connect();
+  latest().open();
+  await replacement;
+  latest().peerSend({ type: "pong", version: "test", protocol_version: 3 });
+  assert.deepEqual(latest().sent, []);
+});
+
+test("direct guidance requires the attached parent and accepts only its exact child receipt", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory, clientKind: "desktop" });
+  const connected = client.connect();
+  latest().open();
+  await connected;
+  latest().peerSend({ type: "session_ready", session_id: "other-parent" });
+  latest().peerSend({ type: "session_ready", session_id: "parent" });
+  await assert.rejects(client.guideSubagent("other-parent", "child", "wrong parent"), /attached/i);
+  const accepted = client.guideSubagent("parent", "child", "direct guidance");
+  const command = latest().sent[0];
+  assert.ok(command?.type === "guide_subagent");
+  assert.deepEqual({ ...command, request_id: "id" }, {
+    type: "guide_subagent", session_id: "parent", child_session_id: "child", request_id: "id", text: "direct guidance",
+  });
+  const receipt = {
+    type: "subagent_message_receipt", session_id: "parent", child_session_id: "child", request_id: command.request_id, status: "accepted",
+  } as const;
+  latest().peerSend({ ...receipt, session_id: "other-parent", status: "rejected" });
+  latest().peerSend({ ...receipt, child_session_id: "other-child", status: "rejected" });
+  latest().peerSend({ ...receipt, request_id: "other-request", status: "rejected" });
+  latest().peerSend(receipt);
+  assert.equal((await accepted).status, "accepted");
+});
+
+test("a disconnected guidance receipt can be checked after the exact parent reattaches", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connected = client.connect();
+  latest().open();
+  await connected;
+  latest().peerSend({ type: "session_ready", session_id: "parent" });
+  const submitted = client.guideSubagent("parent", "child", "keep this draft");
+  latest().peerClose(1006);
+  const uncertain = await submitted;
+  assert.equal(uncertain.status, "unknown");
+  const replacement = client.connect();
+  latest().open();
+  await replacement;
+  await assert.rejects(client.readSubagentMessageReceipt("parent", "child", uncertain.request_id), /attached/i);
+  latest().peerSend({ type: "session_ready", session_id: "parent" });
+  const requested = client.readSubagentMessageReceipt("parent", "child", uncertain.request_id);
+  assert.deepEqual(latest().sent, [{
+    type: "read_subagent_message_receipt", session_id: "parent", child_session_id: "child", request_id: uncertain.request_id,
+  }]);
+  latest().peerSend({ ...uncertain, status: "accepted" });
+  assert.equal((await requested).status, "accepted");
+});
+
+test("guidance timeout returns the original request as uncertain", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connected = client.connect();
+  latest().open();
+  await connected;
+  latest().peerSend({ type: "session_ready", session_id: "parent" });
+  const result = client.guideSubagent("parent", "child", "review this", "original-request");
+  context.mock.timers.tick(10000);
+  assert.deepEqual(await result, {
+    type: "subagent_message_receipt", session_id: "parent", child_session_id: "child",
+    request_id: "original-request", status: "unknown",
+  });
+  assert.equal(latest().sent.length, 1);
 });
 
 test("provider events are dispatched to listeners", async () => {

@@ -229,6 +229,23 @@ describe("InputArea", () => {
     expect(screen.getByText("reading.txt")).toBeTruthy();
   });
 
+  it("keeps attachments and text if the session loses readiness during file conversion", async () => {
+    const onSend = vi.fn();
+    const onCancel = () => {};
+    const { container, rerender } = render(<InputArea onSend={onSend} onCancel={onCancel} connected />);
+    const input = container.querySelector("textarea")!;
+    fireEvent.change(input, { target: { value: "resume after reconnect" } });
+    fireEvent.change(container.querySelector('input[type="file"]')!, { target: { files: [new File(["data"], "keep.txt", { type: "text/plain" })] } });
+    const send = screen.getByRole("button", { name: "Send prompt" });
+    fireEvent.click(send);
+    expect(send.getAttribute("aria-busy")).toBe("true");
+    rerender(<InputArea onSend={onSend} onCancel={onCancel} connected={false} />);
+    await waitFor(() => expect(send.getAttribute("aria-busy")).toBe("false"));
+    expect(onSend).not.toHaveBeenCalled();
+    expect(input.value).toBe("resume after reconnect");
+    expect(screen.getByText("keep.txt")).toBeTruthy();
+  });
+
   it("prevents double-submit while sending", async () => {
     const { container, onSend } = renderInputArea();
     const textarea = container.querySelector("textarea")!;

@@ -17,6 +17,4 @@ directories = { workspace = true }
 etcetera = { workspace = true }
 ulid = { workspace = true }
 chrono = { workspace = true }
-
-[dev-dependencies]
 tempfile = "3"

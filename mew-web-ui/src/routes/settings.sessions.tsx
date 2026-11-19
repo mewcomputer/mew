@@ -1,7 +1,7 @@
 import { createFileRoute, useRouter } from "@tanstack/react-router";
 import { useState, useMemo, useEffect } from "react";
 import { useSessionStore } from "@/stores/session";
-import { getClient } from "@/lib/client";
+import { getClient, SESSION_ID_KEY } from "@/lib/client";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,21 +15,28 @@ export const Route = createFileRoute("/settings/sessions")({
 function SessionsRouteComponent() {
   const router = useRouter();
   const sessionId = useSessionStore((s) => s.sessionId);
+  const connected = useSessionStore((s) => s.connectionState === "connected");
   const sessions = useSessionStore((s) => s.availableSessions);
   const titles = useSessionStore((s) => s.sessionTitles);
   const summaries = useSessionStore((s) => s.sessionSummaries);
   const [query, setQuery] = useState("");
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [deletingSession, setDeletingSession] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState<string | null>(null);
   const [titleDraft, setTitleDraft] = useState("");
 
-  // Refresh session list on mount.
   useEffect(() => {
+    if (!connected) return;
     const client = getClient();
-    client.listSessions().then((list) => {
+    void client.listSessions().then((list) => {
       useSessionStore.getState().setAvailableSessions(list);
+    }).catch((error: unknown) => {
+      if (client.isConnected()) {
+        useSessionStore.getState().onError(error instanceof Error ? error.message : "Could not load sessions.");
+      }
     });
-  }, []);
+  }, [connected]);
 
   const filtered = useMemo(() => {
     const q = query.toLowerCase();
@@ -47,17 +54,26 @@ function SessionsRouteComponent() {
     );
   }, [sessions, titles, query]);
 
-  const handleDelete = (sid: string) => {
-    getClient().deleteSession(sid);
-    // Remove from store immediately.
-    useSessionStore.getState().setAvailableSessions(
-      sessions.filter((s) => s.session_id !== sid),
-    );
-    setConfirmDelete(null);
-
-    // If we deleted the current session, go home.
-    if (sid === sessionId) {
-      router.navigate({ to: "/" });
+  const handleDelete = async (sid: string) => {
+    if (!connected || deletingSession !== null) return;
+    setDeletingSession(sid);
+    setDeleteError(null);
+    try {
+      await getClient().deleteSessionConfirmed(sid);
+      const store = useSessionStore.getState();
+      store.setAvailableSessions(store.availableSessions.filter((session) => session.session_id !== sid));
+      if (localStorage.getItem(SESSION_ID_KEY) === sid) localStorage.removeItem(SESSION_ID_KEY);
+      setConfirmDelete(null);
+      if (store.sessionId === sid) {
+        store.reset();
+        useSessionStore.setState({ sessionId: null, confirmedSessionId: null });
+        const route = router.state.location.pathname;
+        if (route === "/settings/sessions" || route === `/session/${sid}`) void router.navigate({ to: "/" });
+      }
+    } catch (error) {
+      setDeleteError(error instanceof Error ? error.message : "The daemon returned an unexpected error.");
+    } finally {
+      setDeletingSession(null);
     }
   };
 
@@ -120,6 +136,11 @@ function SessionsRouteComponent() {
           <div className="text-[10px] text-muted-foreground">
             {filtered.length} of {sessions.length} sessions
           </div>
+          {deleteError && confirmDelete && (
+            <p role="alert" className="text-sm text-destructive">
+              Could not delete {titles.get(confirmDelete) ?? confirmDelete}. {deleteError}
+            </p>
+          )}
 
           {/* Session list */}
           {filtered.length === 0 && (
@@ -133,6 +154,7 @@ function SessionsRouteComponent() {
               const title = titles.get(s.session_id) ?? s.session_id.slice(0, 12) + "…";
               const isCurrent = s.session_id === sessionId;
               const isConfirming = confirmDelete === s.session_id;
+              const isDeleting = deletingSession === s.session_id;
               const isEditing = editingTitle === s.session_id;
               return (
                 <div
@@ -240,14 +262,20 @@ function SessionsRouteComponent() {
                             size="sm"
                             className="h-7 text-[10px]"
                             onClick={() => handleDelete(s.session_id)}
+                            disabled={!connected || deletingSession !== null}
+                            aria-busy={isDeleting}
                           >
-                            Delete
+                            {isDeleting ? "Deleting…" : "Delete"}
                           </Button>
                           <Button
                             variant="ghost"
                             size="sm"
                             className="h-7 text-[10px]"
-                            onClick={() => setConfirmDelete(null)}
+                            onClick={() => {
+                              setConfirmDelete(null);
+                              setDeleteError(null);
+                            }}
+                            disabled={isDeleting}
                           >
                             Cancel
                           </Button>
@@ -257,7 +285,11 @@ function SessionsRouteComponent() {
                           variant="ghost"
                           size="icon-sm"
                           className="text-muted-foreground hover:text-destructive"
-                          onClick={() => setConfirmDelete(s.session_id)}
+                          onClick={() => {
+                            setConfirmDelete(s.session_id);
+                            setDeleteError(null);
+                          }}
+                          disabled={!connected || deletingSession !== null}
                           title="Delete session"
                         >
                           <Trash2 className="h-3.5 w-3.5" />

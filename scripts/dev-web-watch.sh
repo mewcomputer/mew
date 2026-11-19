@@ -48,14 +48,22 @@ cleanup_daemon() {
 
 run_bridge() {
   cleanup_daemon
-  cargo run -p mew-web-bridge --bin mew-web -- ${bridge_args[@]+"${bridge_args[@]}"}
+  cargo run -p mew-web-bridge --bin mew-web -- \
+    --allow-origin http://127.0.0.1:5173 \
+    --allow-origin http://localhost:5173 \
+    --allow-origin 'http://[::1]:5173' \
+    "$@"
 }
 
 export -f cleanup_daemon run_bridge
+bridge_command="bash -c 'run_bridge \"\$@\"' bash"
+for arg in "${bridge_args[@]}"; do
+  printf -v bridge_command '%s %q' "$bridge_command" "$arg"
+done
 
 # Watch Rust sources and rerun the bridge each time something changes.
 cargo watch \
   -w crates \
   -x 'build --bin mew' \
   -x 'build -p mew-web-bridge --bin mew-web' \
-  -s 'bash -c run_bridge'
+  -s "$bridge_command"

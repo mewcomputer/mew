@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
@@ -8,10 +8,12 @@ use mew_hooks::Dispatcher;
 use mew_message::{SessionId, ToolState, TurnManifest};
 use mew_provider::Provider;
 use mew_subagents::{
-    ModelResolver, SubagentDef, SubagentError, SubagentEvent, SubagentOutcome, SubagentResult,
-    SubagentRunOptions, SubagentRunner,
+    ChildGuidanceError, ModelResolver, SubagentDef, SubagentError, SubagentEvent, SubagentOutcome,
+    SubagentResult, SubagentRunOptions, SubagentRunner,
 };
 use mew_tools::Tool;
+
+use crate::child_guidance::ChildGuidance;
 
 /// If the given tool state has completed successfully, return the output
 /// string. Used by the runner to pull the final answer out of an `exit_tool`
@@ -90,6 +92,42 @@ async fn extract_manifests(agent: &crate::Agent) -> Vec<TurnManifest> {
         .collect()
 }
 
+#[derive(Default)]
+pub(crate) struct ActiveChildren {
+    state: Mutex<ChildRegistry>,
+}
+
+type ChildKey = (SessionId, SessionId);
+
+#[derive(Default)]
+struct ChildRegistry {
+    active: HashMap<ChildKey, Arc<ChildGuidance>>,
+    // Keep unresolved receipts queryable after the child ends, including
+    // a transcript write still draining after cancellation.
+    retired: VecDeque<(ChildKey, Arc<ChildGuidance>)>,
+}
+
+struct ActiveChild<'a> {
+    registry: &'a ActiveChildren,
+    key: ChildKey,
+}
+
+impl Drop for ActiveChild<'_> {
+    fn drop(&mut self) {
+        let mut state = self.registry.state.lock().unwrap();
+        let Some(guidance) = state.active.remove(&self.key) else {
+            return;
+        };
+        if guidance.close() {
+            const MAX_RETIRED_CHILDREN: usize = 32;
+            if state.retired.len() == MAX_RETIRED_CHILDREN {
+                state.retired.pop_front();
+            }
+            state.retired.push_back((self.key, guidance));
+        }
+    }
+}
+
 /// Simple subagent runner that spawns a child agent for each invocation.
 #[derive(Clone)]
 pub struct SimpleRunner {
@@ -119,6 +157,7 @@ pub struct SimpleRunner {
     max_concurrent_subagents: u32,
     /// Fallback wall-clock cap for defs that don't set `max_duration_secs`.
     default_max_duration_secs: u64,
+    active_children: Arc<ActiveChildren>,
 }
 
 impl SimpleRunner {
@@ -146,7 +185,17 @@ impl SimpleRunner {
             max_subagent_depth: 1,
             max_concurrent_subagents: 4,
             default_max_duration_secs: mew_subagents::DEFAULT_MAX_DURATION_SECS,
+            active_children: Arc::default(),
         }
+    }
+
+    /// Keep active children addressable when a parent replaces its runner.
+    pub fn with_agent_registry(mut self, agent: &mut crate::Agent) -> Self {
+        self.active_children = agent
+            .child_guidance_registry
+            .get_or_insert_with(|| self.active_children.clone())
+            .clone();
+        self
     }
 
     /// Builder method to attach a model resolver for per-subagent overrides.
@@ -260,6 +309,55 @@ impl SimpleRunner {
 
 #[async_trait]
 impl SubagentRunner for SimpleRunner {
+    async fn guide_child(
+        &self,
+        parent_session_id: SessionId,
+        child_session_id: SessionId,
+        request_id: &str,
+        text: String,
+    ) -> Result<(), ChildGuidanceError> {
+        if text.trim().is_empty() {
+            return Err(ChildGuidanceError::Rejected(
+                "Child guidance is empty.".into(),
+            ));
+        }
+        if request_id.is_empty() || request_id.len() > 128 {
+            return Err(ChildGuidanceError::Rejected(
+                "Invalid child guidance request ID.".into(),
+            ));
+        }
+        let guidance = self
+            .active_children
+            .state
+            .lock()
+            .unwrap()
+            .active
+            .get(&(parent_session_id, child_session_id))
+            .cloned()
+            .ok_or(ChildGuidanceError::NotRunning)?;
+        guidance.guide(request_id, text).await
+    }
+
+    fn child_guidance_receipt(
+        &self,
+        parent_session_id: SessionId,
+        child_session_id: SessionId,
+        request_id: &str,
+    ) -> Option<Result<(), ChildGuidanceError>> {
+        let state = self.active_children.state.lock().unwrap();
+        let key = (parent_session_id, child_session_id);
+        state
+            .active
+            .get(&key)
+            .or_else(|| {
+                state
+                    .retired
+                    .iter()
+                    .find_map(|(child_key, guidance)| (*child_key == key).then_some(guidance))
+            })?
+            .receipt(request_id)
+    }
+
     async fn run(&self, opts: SubagentRunOptions<'_>) -> Result<SubagentResult, SubagentError> {
         let def = opts.def;
         let prompt = opts.prompt;
@@ -377,11 +475,26 @@ impl SubagentRunner for SimpleRunner {
         // Set max_turns if specified, else apply the built-in default.
         // The turn count is the secondary safeguard; the wall-clock cap is
         // the primary one (catches stuck subagents in tight tool loops).
-        agent.max_turns = Some(def.max_turns.unwrap_or(mew_subagents::DEFAULT_MAX_TURNS));
+        let turn_limit = def.max_turns.unwrap_or(mew_subagents::DEFAULT_MAX_TURNS);
+        agent.max_turns = Some(turn_limit);
 
         let max_duration_secs = def
             .max_duration_secs
             .unwrap_or(self.default_max_duration_secs);
+
+        let key = (parent_session_id, session_id);
+        let guidance = Arc::new(ChildGuidance::default());
+        agent.child_guidance = Some(guidance.clone());
+        self.active_children
+            .state
+            .lock()
+            .unwrap()
+            .active
+            .insert(key, guidance);
+        let active = ActiveChild {
+            registry: &self.active_children,
+            key,
+        };
 
         let display_name = mew_subagents::pick_display_name(session_id.0);
         let _ = event_tx
@@ -391,16 +504,15 @@ impl SubagentRunner for SimpleRunner {
             })
             .await;
 
-        // Run the prompt through the agent.
-        let mut rx = agent.run_with_parts(prompt, vec![], Some(cancel.clone()));
+        // Cancel this child without cancelling its parent when its deadline expires.
+        let child_cancel = cancel.child_token();
+        let mut rx = agent.run_with_parts(prompt, vec![], Some(child_cancel.clone()));
         let mut result_text = String::new();
         let mut message_open = false;
-        let mut text_parts = std::collections::HashSet::new();
+        let mut text_parts = HashSet::new();
         let mut turns_used: u32 = 0;
         let mut last_error: Option<String> = None;
-        let started_at = std::time::Instant::now();
         let max_duration = std::time::Duration::from_secs(max_duration_secs);
-        let mut hit_time_limit = false;
         // Live copy of every tool-call part the subagent has emitted. We
         // track these so we can (a) parse streamed arguments into `input`
         // ourselves (mirroring the agent's reconcile) and (b) read the
@@ -420,230 +532,237 @@ impl SubagentRunner for SimpleRunner {
         let mut schema_invalid = false;
         let mut schema_error: Option<String> = None;
 
-        'runs: loop {
-            while let Some(event) = rx.recv().await {
-                match event {
-                    crate::AgentEvent::Provider(mew_provider::ProviderEvent::PartStart {
-                        part,
-                    }) => {
-                        if !message_open {
-                            result_text.clear();
-                            text_parts.clear();
-                            message_open = true;
-                        }
-                        match part {
-                            mew_message::Part::Text(text) => {
-                                text_parts.insert(text.base.id);
-                                result_text.push_str(&text.text);
+        let finished = tokio::time::timeout(max_duration, async {
+            'runs: loop {
+                while let Some(event) = rx.recv().await {
+                    match event {
+                        crate::AgentEvent::ChildGuidanceContinuation => result_text.clear(),
+                        crate::AgentEvent::Provider(mew_provider::ProviderEvent::PartStart {
+                            part,
+                        }) => {
+                            if !message_open {
+                                result_text.clear();
+                                text_parts.clear();
+                                message_open = true;
                             }
-                            mew_message::Part::ToolCall(tc) => {
-                                tool_parts.insert(tc.base.id, tc.clone());
-                                let _ = event_tx
-                                    .send(SubagentEvent::ToolStart {
-                                        call_id: tc.call_id,
-                                        tool_name: tc.tool_name,
-                                    })
-                                    .await;
-                            }
-                            _ => {}
-                        }
-                    }
-                    crate::AgentEvent::Provider(mew_provider::ProviderEvent::PartDelta {
-                        part_id,
-                        field: "arguments",
-                        delta,
-                    }) => {
-                        if let Some(tc) = tool_parts.get_mut(&part_id) {
-                            tc.raw_input.push_str(&delta);
-                        }
-                    }
-                    crate::AgentEvent::Provider(mew_provider::ProviderEvent::PartDelta {
-                        part_id,
-                        field,
-                        delta,
-                    }) if matches!(field, "text" | "") && text_parts.contains(&part_id) => {
-                        result_text.push_str(&delta);
-                        let _ = event_tx
-                            .send(SubagentEvent::TextDelta { text: delta })
-                            .await;
-                    }
-                    crate::AgentEvent::Provider(mew_provider::ProviderEvent::PartEnd {
-                        part_id,
-                    }) => {
-                        // Reconcile streamed arguments into `state.input` and
-                        // surface `progress_update` messages.
-                        if let Some(tc) = tool_parts.get_mut(&part_id) {
-                            if !tc.raw_input.is_empty() {
-                                if let Ok(value) =
-                                    serde_json::from_str::<serde_json::Value>(&tc.raw_input)
-                                {
-                                    tc.state.set_input(value);
+                            match part {
+                                mew_message::Part::Text(text) => {
+                                    text_parts.insert(text.base.id);
+                                    result_text.push_str(&text.text);
                                 }
-                            }
-                            if tc.tool_name == "progress_update" {
-                                let message = tc
-                                    .state
-                                    .input()
-                                    .get("message")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                if !message.is_empty() {
+                                mew_message::Part::ToolCall(tc) => {
+                                    tool_parts.insert(tc.base.id, tc.clone());
                                     let _ = event_tx
-                                        .send(SubagentEvent::Progress {
-                                            call_id: tc.call_id.clone(),
-                                            tool_name: tc.tool_name.clone(),
-                                            message,
+                                        .send(SubagentEvent::ToolStart {
+                                            call_id: tc.call_id,
+                                            tool_name: tc.tool_name,
                                         })
                                         .await;
                                 }
+                                _ => {}
                             }
                         }
-                    }
-                    crate::AgentEvent::Provider(mew_provider::ProviderEvent::MessageEnd {
-                        ..
-                    }) => {
-                        message_open = false;
-                        turns_used += 1;
-                        if let Some(limit) =
-                            def.max_turns.or(Some(mew_subagents::DEFAULT_MAX_TURNS))
-                        {
-                            if turns_used >= limit {
-                                // Hit the cap. Stop accumulating text after this
-                                // turn; return what we have.
-                                break;
+                        crate::AgentEvent::Provider(mew_provider::ProviderEvent::PartDelta {
+                            part_id,
+                            field: "arguments",
+                            delta,
+                        }) => {
+                            if let Some(tc) = tool_parts.get_mut(&part_id) {
+                                tc.raw_input.push_str(&delta);
                             }
                         }
-                        if started_at.elapsed() >= max_duration {
-                            hit_time_limit = true;
-                            break;
+                        crate::AgentEvent::Provider(mew_provider::ProviderEvent::PartDelta {
+                            part_id,
+                            field,
+                            delta,
+                        }) if matches!(field, "text" | "") && text_parts.contains(&part_id) => {
+                            result_text.push_str(&delta);
+                            let _ = event_tx
+                                .send(SubagentEvent::TextDelta { text: delta })
+                                .await;
                         }
-                    }
-                    crate::AgentEvent::ToolEnd { call_id, success } => {
-                        let _ = event_tx
-                            .send(SubagentEvent::ToolEnd {
-                                call_id: call_id.clone(),
-                                success,
-                            })
-                            .await;
-                    }
-                    crate::AgentEvent::PartUpdated {
-                        part: mew_message::Part::ToolCall(tc),
-                        ..
-                    } => {
-                        // Keep our copy of the part in sync with the agent's.
-                        // This catches the Completed state for exit_tool; for
-                        // progress_update we already handled it at PartEnd.
-                        tool_parts.insert(tc.base.id, tc.clone());
-                        if tc.tool_name == "exit_tool" {
-                            if let Some(answer) = extract_completed_output(&tc.state) {
-                                exit_answer = Some(answer);
+                        crate::AgentEvent::Provider(mew_provider::ProviderEvent::PartEnd {
+                            part_id,
+                        }) => {
+                            // Reconcile streamed arguments into `state.input` and
+                            // surface `progress_update` messages.
+                            if let Some(tc) = tool_parts.get_mut(&part_id) {
+                                if !tc.raw_input.is_empty() {
+                                    if let Ok(value) =
+                                        serde_json::from_str::<serde_json::Value>(&tc.raw_input)
+                                    {
+                                        tc.state.set_input(value);
+                                    }
+                                }
+                                if tc.tool_name == "progress_update" {
+                                    let message = tc
+                                        .state
+                                        .input()
+                                        .get("message")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    if !message.is_empty() {
+                                        let _ = event_tx
+                                            .send(SubagentEvent::Progress {
+                                                call_id: tc.call_id.clone(),
+                                                tool_name: tc.tool_name.clone(),
+                                                message,
+                                            })
+                                            .await;
+                                    }
+                                }
                             }
                         }
+                        crate::AgentEvent::Provider(mew_provider::ProviderEvent::MessageEnd {
+                            ..
+                        }) => {
+                            message_open = false;
+                            turns_used += 1;
+                        }
+                        crate::AgentEvent::ToolEnd { call_id, success } => {
+                            let _ = event_tx
+                                .send(SubagentEvent::ToolEnd {
+                                    call_id: call_id.clone(),
+                                    success,
+                                })
+                                .await;
+                        }
+                        crate::AgentEvent::PartUpdated {
+                            part: mew_message::Part::ToolCall(tc),
+                            ..
+                        } => {
+                            // Keep our copy of the part in sync with the agent's.
+                            // This catches the Completed state for exit_tool; for
+                            // progress_update we already handled it at PartEnd.
+                            tool_parts.insert(tc.base.id, tc.clone());
+                            if tc.tool_name == "exit_tool" {
+                                if let Some(answer) = extract_completed_output(&tc.state) {
+                                    exit_answer = Some(answer);
+                                }
+                            }
+                        }
+                        crate::AgentEvent::AskUser {
+                            call_id,
+                            questions,
+                            tx,
+                        } => {
+                            let _ = event_tx
+                                .send(SubagentEvent::AskUser {
+                                    source: mew_message::SubagentQuestionSource {
+                                        parent_call_id: opts.parent_call_id.clone(),
+                                        child_session_id: session_id.to_string(),
+                                        name: def.name.clone(),
+                                        display_name: Some(display_name.to_string()),
+                                    },
+                                    call_id,
+                                    questions,
+                                    tx,
+                                })
+                                .await;
+                        }
+                        crate::AgentEvent::SubagentAskUser {
+                            source,
+                            call_id,
+                            questions,
+                            tx,
+                        } => {
+                            let _ = event_tx
+                                .send(SubagentEvent::AskUser {
+                                    source,
+                                    call_id,
+                                    questions,
+                                    tx,
+                                })
+                                .await;
+                        }
+                        crate::AgentEvent::WorkspacePermissionRequest { path, tx } => {
+                            let _ = event_tx
+                                .send(SubagentEvent::WorkspacePermissionRequest { path, tx })
+                                .await;
+                        }
+                        crate::AgentEvent::PermissionRequest { call, tx }
+                        | crate::AgentEvent::SubagentPermissionRequest { call, tx, .. } => {
+                            let _ = event_tx
+                                .send(SubagentEvent::PermissionRequest {
+                                    tool_name: call.tool_name,
+                                    call_id: call.call_id,
+                                    input: call.input,
+                                    tx,
+                                })
+                                .await;
+                        }
+                        crate::AgentEvent::Error(msg) => {
+                            last_error = Some(msg);
+                        }
+                        _ => {}
                     }
-                    crate::AgentEvent::AskUser {
-                        call_id,
-                        questions,
-                        tx,
-                    } => {
-                        let _ = event_tx
-                            .send(SubagentEvent::AskUser {
-                                source: mew_message::SubagentQuestionSource {
-                                    parent_call_id: opts.parent_call_id.clone(),
-                                    child_session_id: session_id.to_string(),
-                                    name: def.name.clone(),
-                                    display_name: Some(display_name.to_string()),
-                                },
-                                call_id,
-                                questions,
-                                tx,
-                            })
-                            .await;
-                    }
-                    crate::AgentEvent::SubagentAskUser {
-                        source,
-                        call_id,
-                        questions,
-                        tx,
-                    } => {
-                        let _ = event_tx
-                            .send(SubagentEvent::AskUser {
-                                source,
-                                call_id,
-                                questions,
-                                tx,
-                            })
-                            .await;
-                    }
-                    crate::AgentEvent::WorkspacePermissionRequest { path, tx } => {
-                        let _ = event_tx
-                            .send(SubagentEvent::WorkspacePermissionRequest { path, tx })
-                            .await;
-                    }
-                    crate::AgentEvent::PermissionRequest { call, tx }
-                    | crate::AgentEvent::SubagentPermissionRequest { call, tx, .. } => {
-                        let _ = event_tx
-                            .send(SubagentEvent::PermissionRequest {
-                                tool_name: call.tool_name,
-                                call_id: call.call_id,
-                                input: call.input,
-                                tx,
-                            })
-                            .await;
-                    }
-                    crate::AgentEvent::Error(msg) => {
-                        last_error = Some(msg);
-                        break;
-                    }
-                    _ => {}
                 }
-            }
 
-            if cancel.is_cancelled() {
+                if cancel.is_cancelled() {
+                    break 'runs;
+                }
+                // The agent closes the stream after persisting terminal tool results.
+                let effective_text = exit_answer.as_deref().unwrap_or(&result_text);
+                let remaining_turns = turn_limit.saturating_sub(turns_used);
+                let can_correct = !correction_used && last_error.is_none() && remaining_turns > 0;
+                if let Some(schema) = &def.output_schema {
+                    match validate_against_schema(schema, effective_text) {
+                        SchemaCheck::Valid => {}
+                        SchemaCheck::InvalidOutput(err) if can_correct => {
+                            correction_used = true;
+                            result_text.clear();
+                            text_parts.clear();
+                            message_open = false;
+                            exit_answer = None;
+                            let correction = format!(
+                                "Your final output did not satisfy the required output schema.\n\
+                                 Validation error: {err}\n\n\
+                                 Reply with only a JSON value that validates against this \
+                                 schema — no prose, no code fences:\n{}",
+                                serde_json::to_string_pretty(schema).unwrap_or_default()
+                            );
+                            agent.max_turns = Some(remaining_turns);
+                            rx = agent.run_with_parts(
+                                correction,
+                                vec![],
+                                Some(child_cancel.clone()),
+                            );
+                            continue 'runs;
+                        }
+                        SchemaCheck::InvalidSchema(err) => {
+                            // A broken def schema can never validate; flag it
+                            // without burning a corrective turn.
+                            schema_invalid = true;
+                            schema_error = Some(err);
+                        }
+                        SchemaCheck::InvalidOutput(_) => {
+                            schema_invalid = true;
+                        }
+                    }
+                }
                 break 'runs;
             }
-            // The run's stream ended (normally, or via a cap/exit/error
-            // break). Validate the effective final output against the def's
-            // output schema, if any, and give the child one corrective turn.
-            let effective_text = exit_answer.clone().unwrap_or_else(|| result_text.clone());
-            // Same effective limit the loop breaks on (MessageEnd), so a run
-            // that exhausted its budget never gets a corrective turn.
-            let turn_limit = def.max_turns.unwrap_or(mew_subagents::DEFAULT_MAX_TURNS);
-            let hit_turn_cap = turns_used >= turn_limit;
-            let can_correct =
-                !correction_used && last_error.is_none() && !hit_time_limit && !hit_turn_cap;
-            if let Some(schema) = &def.output_schema {
-                match validate_against_schema(schema, &effective_text) {
-                    SchemaCheck::Valid => {}
-                    SchemaCheck::InvalidOutput(err) if can_correct => {
-                        correction_used = true;
-                        result_text.clear();
-                        text_parts.clear();
-                        message_open = false;
-                        exit_answer = None;
-                        let correction = format!(
-                            "Your final output did not satisfy the required output schema.\n\
-                             Validation error: {err}\n\n\
-                             Reply with only a JSON value that validates against this \
-                             schema — no prose, no code fences:\n{}",
-                            serde_json::to_string_pretty(schema).unwrap_or_default()
-                        );
-                        rx = agent.run_with_parts(correction, vec![], Some(cancel.clone()));
-                        continue 'runs;
-                    }
-                    SchemaCheck::InvalidSchema(err) => {
-                        // A broken def schema can never validate; flag it
-                        // without burning a corrective turn.
-                        schema_invalid = true;
-                        schema_error = Some(err);
-                    }
-                    SchemaCheck::InvalidOutput(_) => {
-                        schema_invalid = true;
-                    }
-                }
+        })
+        .await;
+        if finished.is_err() {
+            child_cancel.cancel();
+            // Consume buffered events while the agent saves its partial reply
+            // and closes pending tools. A stuck dependency gets a bounded grace period.
+            if tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while rx.recv().await.is_some() {}
+            })
+            .await
+            .is_err()
+            {
+                tracing::warn!(child_session_id = %session_id, "subagent did not stop after its deadline");
             }
-            break 'runs;
+            last_error = Some(format!(
+                "subagent exceeded max_duration_secs ({max_duration_secs}s)"
+            ));
         }
+
+        drop(active);
 
         if let Some(answer) = exit_answer {
             result_text = answer;
@@ -675,10 +794,7 @@ impl SubagentRunner for SimpleRunner {
             return Ok(SubagentResult::Error { reason });
         }
 
-        let hit_turn_limit = def
-            .max_turns
-            .map(|limit| turns_used >= limit)
-            .unwrap_or(false);
+        let hit_turn_limit = turns_used >= turn_limit;
 
         // Apply the schema warning before the Finished event so both
         // observers of the run agree on the final output.
@@ -713,7 +829,7 @@ impl SubagentRunner for SimpleRunner {
             text: result_text,
             turns_used,
             hit_turn_limit,
-            hit_time_limit,
+            hit_time_limit: false,
             session_unavailable,
             manifests: child_manifests,
         })
@@ -732,7 +848,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use futures::{stream, StreamExt};
-    use mew_provider::{EventStream, ProviderError};
+    use mew_provider::{EventStream, ProviderError, ProviderEvent};
     use std::path::PathBuf;
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
@@ -899,34 +1015,257 @@ mod tests {
         Arc::new(mew_tools::tools::exit_tool::ExitTool)
     }
 
-    /// Run a subagent with the given script and def, returning the result.
-    /// Each script entry is (delay_before, events). Drains the
-    /// `SubagentEvent` channel concurrently so the runner can produce
-    /// without blocking on the (unread) UI side.
-    async fn run_subagent(
-        script: Vec<(Duration, Vec<mew_provider::ProviderEvent>)>,
-        def: SubagentDef,
-    ) -> SubagentResult {
-        let provider = Arc::new(ScriptedProvider::new(script));
-        let runner = SimpleRunner::new(provider, vec![], Arc::new(mew_hooks::NopDispatcher));
-        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let drain = tokio::spawn(async move { while let Some(_ev) = rx.recv().await {} });
-        let result = runner
-            .run(SubagentRunOptions {
+    fn tool_turn(label: &str) -> Vec<mew_provider::ProviderEvent> {
+        let mut events = turn(label);
+        events.truncate(events.len() - 1);
+        events.extend(mew_provider_fake::FakeProvider::tool_call(
+            "echo",
+            label,
+            serde_json::json!({"input": label}),
+        ));
+        events
+    }
+
+    struct ControlledProvider {
+        requests: tokio::sync::mpsc::Sender<mew_provider::Request>,
+        responses: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Vec<ProviderEvent>>>,
+    }
+
+    #[async_trait]
+    impl Provider for ControlledProvider {
+        fn name(&self) -> &str {
+            "controlled"
+        }
+
+        async fn stream(
+            &self,
+            request: mew_provider::Request,
+        ) -> Result<EventStream, ProviderError> {
+            self.requests
+                .send(request)
+                .await
+                .map_err(|error| ProviderError::Message(error.to_string()))?;
+            let events =
+                self.responses.lock().await.recv().await.ok_or_else(|| {
+                    ProviderError::Message("fixture response stream closed".into())
+                })?;
+            Ok(Box::pin(stream::iter(events)))
+        }
+    }
+
+    #[tokio::test]
+    async fn child_guidance_is_durable_at_its_next_request_and_retry_is_idempotent() {
+        for (boundary, previous_answer) in [
+            (tool_turn("continue"), "continue"),
+            (turn("clean stop"), "clean stop"),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let parent = SessionId::new();
+            let (requests, mut incoming) = tokio::sync::mpsc::channel(2);
+            let (responses, reply) = tokio::sync::mpsc::channel(2);
+            let provider = Arc::new(ControlledProvider {
+                requests,
+                responses: tokio::sync::Mutex::new(reply),
+            });
+            let mut parent_agent = crate::Agent::new(
+                provider.clone(),
+                Arc::new(mew_hooks::NopDispatcher),
+                None,
+                vec![],
+                Some(parent),
+            );
+            let runner = SimpleRunner::new(
+                provider.clone(),
+                vec![Arc::new(mew_tools::tools::echo::Echo)],
+                Arc::new(mew_hooks::NopDispatcher),
+            )
+            .with_agent_registry(&mut parent_agent)
+            .with_session_root(directory.path().to_path_buf());
+            let def = make_def(Some(5), Some(30));
+            let (event_tx, mut events) = tokio::sync::mpsc::channel(16);
+
+            let child = runner.run(SubagentRunOptions {
                 def: &def,
-                prompt: "prompt".into(),
-                parent_call_id: "call_0".into(),
-                parent_session_id: SessionId::new(),
-                event_tx: tx,
-                cancel,
+                prompt: "start task".into(),
+                parent_call_id: "child_call".into(),
+                parent_session_id: parent,
+                event_tx,
+                cancel: Default::default(),
                 model: None,
                 parent_depth: 0,
+            });
+            let parent_interaction = async {
+                let Some(SubagentEvent::Started {
+                    child_session_id, ..
+                }) = events.recv().await
+                else {
+                    panic!("expected child start");
+                };
+                let child_id: SessionId = child_session_id.parse().unwrap();
+                incoming.recv().await.expect("initial provider request");
+
+                let wrong_parent = runner
+                    .guide_child(
+                        SessionId::new(),
+                        child_id,
+                        "wrong-parent",
+                        "ignore me".into(),
+                    )
+                    .await;
+                assert!(wrong_parent.is_err());
+                assert!(runner
+                    .guide_child(parent, child_id, "empty", " ".into())
+                    .await
+                    .is_err());
+
+                let replacement =
+                    SimpleRunner::new(provider, vec![], Arc::new(mew_hooks::NopDispatcher))
+                        .with_agent_registry(&mut parent_agent);
+                let mut guidance = Box::pin(replacement.guide_child(
+                    parent,
+                    child_id,
+                    "guide-1",
+                    "Keep the API stable.".into(),
+                ));
+                assert!(futures::poll!(&mut guidance).is_pending());
+                let mut duplicate = Box::pin(runner.guide_child(
+                    parent,
+                    child_id,
+                    "guide-1",
+                    "Do not replace the original guidance".into(),
+                ));
+                assert!(futures::poll!(&mut duplicate).is_pending());
+                assert!(runner
+                    .guide_child(parent, child_id, "guide-2", "another guide".into())
+                    .await
+                    .is_err());
+                let child_root = directory.path().join(parent.to_string()).join("subagents");
+                assert!(!mew_session::Reader::has_prompt_receipt(
+                    &child_root,
+                    &child_session_id,
+                    "guide-1"
+                )
+                .await
+                .unwrap());
+
+                responses.send(boundary).await.unwrap();
+                let next = incoming.recv().await.expect("tool continuation");
+                guidance.await.unwrap();
+                duplicate.await.unwrap();
+                assert!(runner
+                    .guide_child(parent, child_id, "guide-1", "same request again".into())
+                    .await
+                    .is_ok());
+                let last = next.messages.last().unwrap();
+                assert!(last.parts.iter().any(|part| {
+                    matches!(part, mew_message::Part::Text(text) if text.text == "Keep the API stable.")
+                }));
+                let raw = mew_session::Reader::load_subagent_from(
+                    directory.path(),
+                    &parent.to_string(),
+                    &child_session_id,
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    raw.iter().filter(|message| message.id == last.id).count(),
+                    1
+                );
+                assert!(raw.iter().flat_map(|message| &message.parts).any(|part| {
+                    matches!(part, mew_message::Part::Text(text) if text.text == previous_answer)
+                }));
+                assert!(mew_session::Reader::has_prompt_receipt(
+                    &child_root,
+                    &child_session_id,
+                    "guide-1"
+                )
+                .await
+                .unwrap());
+
+                responses.send(turn("finished")).await.unwrap();
+                while events.recv().await.is_some() {}
+                assert!(runner
+                    .guide_child(parent, child_id, "late", "too late".into())
+                    .await
+                    .is_err());
+            };
+            let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+                tokio::join!(child, parent_interaction)
             })
             .await
             .unwrap();
-        drain.abort();
-        result
+            assert!(matches!(
+                result.unwrap(),
+                SubagentResult::Complete { turns_used: 2, text, .. } if text == "finished"
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_child_finishing_before_its_next_request_rejects_pending_guidance() {
+        let directory = tempfile::tempdir().unwrap();
+        let parent = SessionId::new();
+        let (requests, mut incoming) = tokio::sync::mpsc::channel(2);
+        let (responses, reply) = tokio::sync::mpsc::channel(2);
+        let provider = Arc::new(ControlledProvider {
+            requests,
+            responses: tokio::sync::Mutex::new(reply),
+        });
+        let runner = SimpleRunner::new(provider, vec![], Arc::new(mew_hooks::NopDispatcher))
+            .with_session_root(directory.path().to_path_buf());
+        let def = make_def(Some(1), Some(30));
+        let (event_tx, mut events) = tokio::sync::mpsc::channel(16);
+        let child = runner.run(SubagentRunOptions {
+            def: &def,
+            prompt: "start task".into(),
+            parent_call_id: "child_call".into(),
+            parent_session_id: parent,
+            event_tx,
+            cancel: Default::default(),
+            model: None,
+            parent_depth: 0,
+        });
+        let parent_interaction = async {
+            let Some(SubagentEvent::Started {
+                child_session_id, ..
+            }) = events.recv().await
+            else {
+                panic!("expected child start");
+            };
+            incoming.recv().await.expect("initial provider request");
+            let mut guidance = Box::pin(runner.guide_child(
+                parent,
+                child_session_id.parse().unwrap(),
+                "late-guide",
+                "Keep this as a draft".into(),
+            ));
+            assert!(futures::poll!(&mut guidance).is_pending());
+            responses.send(turn("finished")).await.unwrap();
+            assert!(matches!(
+                guidance.await, Err(ChildGuidanceError::Rejected(message)) if message.contains("ended before")
+            ));
+            let child_root = directory.path().join(parent.to_string()).join("subagents");
+            assert!(!mew_session::Reader::has_prompt_receipt(
+                &child_root,
+                &child_session_id,
+                "late-guide",
+            )
+            .await
+            .unwrap());
+            assert!(
+                incoming.try_recv().is_err(),
+                "guidance must not start another request"
+            );
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(child, parent_interaction)
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            result.unwrap(),
+            SubagentResult::Complete { turns_used: 1, .. }
+        ));
     }
 
     #[tokio::test]
@@ -937,8 +1276,10 @@ mod tests {
                 if let Some(secs) = override_secs {
                     def.max_duration_secs = Some(secs);
                 }
-                let provider =
-                    Arc::new(ScriptedProvider::new(vec![(Duration::ZERO, turn("done"))]));
+                let provider = Arc::new(ScriptedProvider::new(vec![(
+                    Duration::from_millis(20),
+                    turn("done"),
+                )]));
                 let runner =
                     SimpleRunner::new(provider, vec![], Arc::new(mew_hooks::NopDispatcher))
                         .with_session_root(root.path().to_path_buf())
@@ -959,11 +1300,19 @@ mod tests {
                     .await
                     .unwrap();
                 drain.abort();
-                assert!(
-                    matches!(result, SubagentResult::Complete { hit_time_limit, .. } if hit_time_limit == expected_timeout),
-                    "{} override={override_secs:?}: {result:?}",
-                    def.name
-                );
+                if expected_timeout {
+                    assert!(
+                        matches!(&result, SubagentResult::Error { reason } if reason.contains("max_duration_secs")),
+                        "{} override={override_secs:?}: {result:?}",
+                        def.name,
+                    );
+                } else {
+                    assert!(
+                        matches!(&result, SubagentResult::Complete { .. }),
+                        "{} override={override_secs:?}: {result:?}",
+                        def.name,
+                    );
+                }
             }
         }
     }
@@ -980,11 +1329,16 @@ mod tests {
     #[tokio::test]
     async fn test_turn_limit_trips_before_time_limit() {
         // 5 turns available, generous time budget.
-        let script: Vec<_> = (0..5)
-            .map(|i| (Duration::from_millis(0), turn(&format!("t{i}"))))
-            .collect();
+        let scripts = vec![
+            tool_turn("t0"),
+            tool_turn("t1"),
+            turn("t2"),
+            turn("t3"),
+            turn("t4"),
+        ];
         let def = make_def(Some(3), Some(60));
-        let result = run_subagent(script, def).await;
+        let (result, provider) = run_provider_turns(scripts, def).await;
+        assert_eq!(*provider.calls.lock().unwrap(), 3);
         match result {
             SubagentResult::Complete {
                 turns_used,
@@ -1001,40 +1355,86 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_time_limit_trips_when_each_turn_sleeps() {
-        // max_turns is huge, but each turn takes 50ms and the cap is 0s —
-        // any non-zero elapsed time at MessageEnd trips it.
-        let script: Vec<_> = (0..20)
-            .map(|i| (Duration::from_millis(50), turn(&format!("t{i}"))))
-            .collect();
-        let def = make_def(Some(1000), Some(0));
-        let result = run_subagent(script, def).await;
-        match result {
-            SubagentResult::Complete {
-                turns_used,
-                hit_turn_limit,
-                hit_time_limit,
+    async fn deadline_stops_a_stalled_stream_and_persists_partial_output_before_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let parent_id = SessionId::new();
+        let mut early_events = turn("partial output");
+        let terminal_events = early_events.split_off(2);
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            (Duration::ZERO, early_events),
+            (Duration::from_secs(30), terminal_events),
+        ]));
+        let runner = SimpleRunner::new(provider, vec![], Arc::new(mew_hooks::NopDispatcher))
+            .with_session_root(directory.path().to_path_buf());
+        let def = make_def(Some(1000), Some(1));
+        let (event_tx, mut events) = tokio::sync::mpsc::channel(64);
+        let cancel = tokio_util::sync::CancellationToken::new();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            runner.run(SubagentRunOptions {
+                def: &def,
+                prompt: "prompt".into(),
+                parent_call_id: "call_0".into(),
+                parent_session_id: parent_id,
+                event_tx,
+                cancel: cancel.clone(),
+                model: None,
+                parent_depth: 0,
+            }),
+        )
+        .await
+        .expect("the child deadline must expire before a provider completion event")
+        .unwrap();
+
+        assert!(
+            !cancel.is_cancelled(),
+            "child timeout must leave its parent running"
+        );
+        let SubagentResult::Error { reason } = result else {
+            panic!("a timed-out child must fail, got {result:?}");
+        };
+        assert!(reason.contains("max_duration_secs"));
+        let mut finished = None;
+        while let Some(event) = events.recv().await {
+            if let SubagentEvent::Finished {
+                child_session_id,
+                outcome,
                 ..
-            } => {
-                assert!(
-                    (1..20).contains(&turns_used),
-                    "should bail mid-run, got {turns_used}"
-                );
-                assert!(!hit_turn_limit, "should not have hit the turn cap (1000)");
-                assert!(hit_time_limit, "should have hit the time cap (0s)");
+            } = event
+            {
+                assert!(finished.replace((child_session_id, outcome)).is_none());
             }
-            other => panic!("expected Complete, got {other:?}"),
         }
+        let (child_id, outcome) = finished.expect("a terminal event");
+        assert!(
+            matches!(outcome, SubagentOutcome::Failed { reason: event_reason } if event_reason == reason)
+        );
+        let history = mew_session::Reader::load_subagent_from(
+            directory.path(),
+            &parent_id.to_string(),
+            &child_id,
+        )
+        .await
+        .unwrap();
+        assert!(
+            history.iter().any(|message| {
+                message.assistant.as_ref().and_then(|meta| meta.error.as_ref())
+                .is_some_and(|error| error.kind == mew_message::ErrorKind::Aborted)
+            && message.parts.iter().any(|part| {
+                matches!(part, mew_message::Part::Text(text) if text.text == "partial output")
+            })
+            }),
+            "the cancelled partial response must be on disk before publishing the result"
+        );
     }
 
     #[tokio::test]
     async fn test_neither_limit_trips_on_short_run() {
         // 2 turns, plenty of both budgets.
-        let script: Vec<_> = (0..2)
-            .map(|i| (Duration::from_millis(0), turn(&format!("t{i}"))))
-            .collect();
+        let scripts = vec![tool_turn("t0"), turn("t1")];
         let def = make_def(Some(500), Some(60));
-        let result = run_subagent(script, def).await;
+        let (result, _) = run_provider_turns(scripts, def).await;
         match result {
             SubagentResult::Complete {
                 turns_used,
@@ -1056,11 +1456,9 @@ mod tests {
     async fn test_defaults_apply_when_def_omits_both_caps() {
         // No caps on the def. The runner should apply built-in defaults
         // (500 turns, 600s) — neither will trip on a short script.
-        let script: Vec<_> = (0..2)
-            .map(|i| (Duration::from_millis(0), turn(&format!("t{i}"))))
-            .collect();
+        let scripts = vec![tool_turn("t0"), turn("t1")];
         let def = make_def(None, None);
-        let result = run_subagent(script, def).await;
+        let (result, _) = run_provider_turns(scripts, def).await;
         match result {
             SubagentResult::Complete {
                 turns_used,
@@ -1779,19 +2177,24 @@ mod tests {
         }
     }
 
-    async fn run_typed(
+    async fn run_provider_turns(
         scripts: Vec<Vec<mew_provider::ProviderEvent>>,
         def: SubagentDef,
     ) -> (SubagentResult, Arc<SequentialProvider>) {
         let provider = Arc::new(SequentialProvider::new(scripts));
+        // These fixtures exercise outcomes rather than transcript storage. Use a
+        // non-directory session root to keep the full turn-cap run in memory.
+        let no_transcripts = tempfile::NamedTempFile::new().unwrap();
         let runner = SimpleRunner::new(
             provider.clone(),
             vec![
+                Arc::new(mew_tools::tools::echo::Echo),
                 Arc::new(mew_tools::tools::progress_update::ProgressUpdate),
                 exit_tool(),
             ],
             Arc::new(mew_hooks::NopDispatcher),
-        );
+        )
+        .with_session_root(no_transcripts.path().to_path_buf());
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
         let cancel = tokio_util::sync::CancellationToken::new();
         let drain = tokio::spawn(async move { while let Some(_ev) = rx.recv().await {} });
@@ -1822,7 +2225,8 @@ mod tests {
             serde_json::json!({"message": "checking"}),
         ));
         let def = typed_def(serde_json::json!({"type": "object", "required": ["answer"]}));
-        let (result, provider) = run_typed(vec![progress, turn("{\"answer\":42}")], def).await;
+        let (result, provider) =
+            run_provider_turns(vec![progress, turn("{\"answer\":42}")], def).await;
         assert!(
             matches!(result, SubagentResult::Complete { text, .. } if text == "{\"answer\":42}")
         );
@@ -1846,7 +2250,7 @@ mod tests {
         finishing.pop();
         finishing.extend(exit_tool_script("exit", "{\"answer\":42}"));
         let def = typed_def(serde_json::json!({"type": "object", "required": ["answer"]}));
-        let (result, provider) = run_typed(vec![progress, finishing], def).await;
+        let (result, provider) = run_provider_turns(vec![progress, finishing], def).await;
         assert!(
             matches!(result, SubagentResult::Complete { text, .. } if text == "{\"answer\":42}")
         );
@@ -1870,8 +2274,7 @@ mod tests {
             *field = "";
         }
         first.extend(second);
-        let result =
-            run_subagent(vec![(Duration::ZERO, first)], make_def(Some(10), Some(60))).await;
+        let (result, _) = run_provider_turns(vec![first], make_def(Some(10), Some(60))).await;
         assert!(
             matches!(result, SubagentResult::Complete { text, .. } if text == "initial first second")
         );
@@ -1904,8 +2307,7 @@ mod tests {
             },
         ];
         events.extend(turn("final answer"));
-        let result =
-            run_subagent(vec![(Duration::ZERO, events)], make_def(Some(10), Some(60))).await;
+        let (result, _) = run_provider_turns(vec![events], make_def(Some(10), Some(60))).await;
         assert!(matches!(result, SubagentResult::Complete { text, .. } if text == "final answer"));
     }
 
@@ -1923,7 +2325,7 @@ mod tests {
             "last",
             serde_json::json!({"message": "still working"}),
         );
-        let (result, _) = run_typed(vec![first, last], make_def(Some(2), Some(60))).await;
+        let (result, _) = run_provider_turns(vec![first, last], make_def(Some(2), Some(60))).await;
         assert!(
             matches!(result, SubagentResult::Complete { text, hit_turn_limit: true, .. } if text.is_empty())
         );
@@ -1943,7 +2345,7 @@ mod tests {
             usage: mew_message::Tokens::default(),
             cost: 0.0,
         }];
-        let (result, _) = run_typed(vec![first, last], make_def(Some(10), Some(60))).await;
+        let (result, _) = run_provider_turns(vec![first, last], make_def(Some(10), Some(60))).await;
         assert!(
             matches!(&result, SubagentResult::Error { reason } if reason == "no assistant message received"),
             "unexpected result: {result:?}"
@@ -1953,7 +2355,7 @@ mod tests {
     #[tokio::test]
     async fn test_output_schema_valid_first_try_passes_untouched() {
         let def = typed_def(serde_json::json!({"type": "object", "required": ["answer"]}));
-        let (result, provider) = run_typed(vec![turn("{\"answer\": 42}")], def).await;
+        let (result, provider) = run_provider_turns(vec![turn("{\"answer\": 42}")], def).await;
         match result {
             SubagentResult::Complete { text, .. } => {
                 assert_eq!(text, "{\"answer\": 42}");
@@ -1971,7 +2373,7 @@ mod tests {
     async fn test_output_schema_corrective_turn_fixes_output() {
         let def = typed_def(serde_json::json!({"type": "object", "required": ["answer"]}));
         let (result, provider) =
-            run_typed(vec![turn("not json at all"), turn("{\"answer\": 42}")], def).await;
+            run_provider_turns(vec![turn("not json at all"), turn("{\"answer\": 42}")], def).await;
         match result {
             SubagentResult::Complete { text, .. } => {
                 assert_eq!(text, "{\"answer\": 42}");
@@ -1988,7 +2390,8 @@ mod tests {
     #[tokio::test]
     async fn test_output_schema_second_failure_returns_raw_with_warning() {
         let def = typed_def(serde_json::json!({"type": "object", "required": ["answer"]}));
-        let (result, provider) = run_typed(vec![turn("junk one"), turn("junk two")], def).await;
+        let (result, provider) =
+            run_provider_turns(vec![turn("junk one"), turn("junk two")], def).await;
         match result {
             SubagentResult::Complete { text, .. } => {
                 assert!(
@@ -2013,7 +2416,7 @@ mod tests {
     async fn test_output_schema_tolerates_json_fence() {
         let def = typed_def(serde_json::json!({"type": "object", "required": ["answer"]}));
         let fenced = "```json\n{\"answer\": 1}\n```";
-        let (result, provider) = run_typed(vec![turn(fenced)], def).await;
+        let (result, provider) = run_provider_turns(vec![turn(fenced)], def).await;
         match result {
             SubagentResult::Complete { text, .. } => {
                 assert!(!text.starts_with("warning: schema_invalid"));
@@ -2028,7 +2431,7 @@ mod tests {
         // A schema that won't compile can never validate; the runner must
         // not burn a corrective turn on it.
         let def = typed_def(serde_json::json!({"type": "nonsense"}));
-        let (result, provider) = run_typed(vec![turn("{\"answer\": 1}")], def).await;
+        let (result, provider) = run_provider_turns(vec![turn("{\"answer\": 1}")], def).await;
         match result {
             SubagentResult::Complete { text, .. } => {
                 assert!(
@@ -2053,14 +2456,15 @@ mod tests {
     async fn test_default_turn_cap_prevents_corrective_turn() {
         // def without max_turns: exhausting the DEFAULT_MAX_TURNS budget must
         // suppress the corrective turn (no budget left to correct with).
-        let script: Vec<mew_provider::ProviderEvent> = (0..mew_subagents::DEFAULT_MAX_TURNS)
-            .flat_map(|i| turn(&format!("turn {i}")))
+        let scripts = (1..mew_subagents::DEFAULT_MAX_TURNS)
+            .map(|i| tool_turn(&format!("turn {i}")))
+            .chain(std::iter::once(turn("not valid JSON")))
             .collect();
         let def = SubagentDef {
             output_schema: Some(serde_json::json!({"type": "object", "required": ["answer"]})),
             ..make_def(None, Some(60))
         };
-        let (result, provider) = run_typed(vec![script], def).await;
+        let (result, provider) = run_provider_turns(scripts, def).await;
         match result {
             SubagentResult::Complete { text, .. } => {
                 assert!(
@@ -2072,8 +2476,60 @@ mod tests {
         }
         assert_eq!(
             *provider.calls.lock().unwrap(),
-            1,
+            mew_subagents::DEFAULT_MAX_TURNS as usize,
             "exhausted turn budget must not grant a corrective turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn exit_tool_can_finish_on_the_last_allowed_response() {
+        let responses = vec![exit_tool_script("exit", "final answer")];
+        let (result, provider) = run_provider_turns(responses, make_def(Some(1), Some(60))).await;
+
+        assert!(matches!(result, SubagentResult::Complete {
+                text, turns_used: 1, hit_turn_limit: true, ..
+            } if text == "final answer"));
+        assert_eq!(*provider.calls.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn schema_correction_uses_only_the_remaining_turn_budget() {
+        let def = SubagentDef {
+            max_turns: Some(2),
+            ..typed_def(serde_json::json!({"type": "object", "required": ["answer"]}))
+        };
+        let responses = vec![
+            turn("invalid initial answer"),
+            tool_turn("still working"),
+            turn(r#"{"answer":42}"#),
+        ];
+        let (result, provider) = run_provider_turns(responses, def).await;
+
+        assert!(matches!(result, SubagentResult::Complete {
+                text, turns_used: 2, hit_turn_limit: true, ..
+            } if text.starts_with("warning: schema_invalid")));
+        assert_eq!(*provider.calls.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn empty_final_text_is_a_successful_empty_answer() {
+        let responses = vec![tool_turn("earlier narration"), turn("")];
+        let (result, _) = run_provider_turns(responses, make_def(Some(3), Some(60))).await;
+
+        assert!(
+            matches!(result, SubagentResult::Complete { text, turns_used: 2, .. } if text.is_empty())
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_failure_at_the_turn_cap_is_reported_as_failure() {
+        let mut response = turn("partial text");
+        if let Some(mew_provider::ProviderEvent::MessageEnd { finish, .. }) = response.last_mut() {
+            *finish = mew_message::Finish::Error;
+        }
+        let (result, _) = run_provider_turns(vec![response], make_def(Some(1), Some(60))).await;
+        assert!(
+            matches!(result, SubagentResult::Error { reason } if reason.contains("failed response"))
         );
     }
 

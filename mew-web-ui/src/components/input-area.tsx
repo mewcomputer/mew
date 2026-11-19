@@ -50,6 +50,7 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
     const { isMobile } = useSidebar();
     const sessionId = useSessionStore((state) => state.sessionId) ?? "new";
     const draftOwner = draftId ?? sessionId;
+    const activeDraft = useRef<{ owner: string } | null>(null);
     const [, refreshDraft] = useState(0);
     const { text, files } = composerDrafts.get(draftOwner) ?? EMPTY_DRAFT;
     const setText = (value: string | ((previous: string) => string)) => {
@@ -72,11 +73,16 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
     const fileInputRef = useRef<HTMLInputElement>(null);
 
     useLayoutEffect(() => {
+      activeDraft.current = { owner: draftOwner };
+      return () => { activeDraft.current = null; };
+    }, [draftOwner, connected]);
+
+    useLayoutEffect(() => {
       const input = textareaRef.current;
       if (!input) return;
       input.style.height = "auto";
       input.style.height = `${Math.min(input.scrollHeight, isMobile ? 120 : 160)}px`;
-    }, [text, sessionId, isMobile]);
+    }, [text, draftOwner, isMobile]);
 
     useEffect(() => {
       setSendError(null);
@@ -88,7 +94,7 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
 
     useEffect(() => {
       if (connected) textareaRef.current?.focus();
-    }, [connected, sessionId]);
+    }, [connected, draftOwner]);
 
     const hasStreaming = useSessionStore((s) => s.streamingPartId !== null);
     const selectPersona = useSessionStore((s) => s.selectPersona);
@@ -224,6 +230,7 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
 
       setIsSending(true);
       setSendError(null);
+      const source = activeDraft.current;
       try {
         // Convert File objects to Attachment[] (data URLs for wire protocol).
         let attachments: Attachment[] | undefined;
@@ -233,18 +240,18 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
           );
         }
 
-        if ((useSessionStore.getState().sessionId ?? "new") !== sessionId) return;
+        if (activeDraft.current !== source) return;
         const pending = onSend(trimmed, attachments);
         if (pending !== undefined) await pending;
         pushPromptHistory(trimmed);
         setText((current) => current === text ? "" : current);
         if (files.length > 0) setFiles((current) => current.filter((file) => !files.includes(file)));
-        if ((useSessionStore.getState().sessionId ?? "new") === sessionId) {
+        if (activeDraft.current?.owner === draftOwner) {
           setHistoryIndex(null);
           closeMenu();
         }
       } catch (e) {
-        if (draftId === "new" || (useSessionStore.getState().sessionId ?? "new") === sessionId) {
+        if (activeDraft.current?.owner === draftOwner) {
           setSendError(e instanceof Error ? e.message : "Could not send the message.");
         }
       } finally {

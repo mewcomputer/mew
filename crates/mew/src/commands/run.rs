@@ -85,7 +85,12 @@ pub(crate) async fn build_and_run(
     let (provider_id, model_id) = resolve_model(cfg, cat, provider_flag, model_flag);
 
     let session_id = ulid::Ulid::new().to_string();
-    let session_writer = SessionWriter::open(&session_id)
+    let sessions = mew_session::session_dir();
+    let _lease = mew_session::try_writer_lease(&sessions, &session_id)
+        .await
+        .context("acquire session writer")?
+        .context("session is open in another process")?;
+    let session_writer = SessionWriter::open_at(&sessions, &session_id)
         .await
         .context("open session")?;
     let todos_path = session_writer.path().parent().map(|p| p.join("todos.json"));
@@ -266,6 +271,7 @@ pub(crate) async fn build_and_run(
             mew_agent::AgentEvent::FileDelta { .. } => {
                 // Diff stats are accumulated daemon-side; no-op in CLI mode.
             }
+            mew_agent::AgentEvent::ChildGuidanceContinuation => {}
             mew_agent::AgentEvent::FlaggedFilesChanged { .. } => {
                 // Flagged files visibility is web-UI only.
             }

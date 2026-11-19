@@ -5,24 +5,33 @@ use ulid::Ulid;
 
 use mew_hooks::ChatParams;
 use mew_message::{
-    AssistantMeta, CompactionPart, ErrorKind, Message, MessageError, Part, PartBase, Role,
-    TextPart, Time, Tokens, ToolResultPart, ToolState, ToolStateError, ToolTime,
+    CompactionPart, ErrorKind, Finish, Message, MessageError, Part, PartBase, Role, TextPart, Time,
+    ToolResultPart, ToolState, ToolStateError, ToolTime,
 };
 use mew_provider::{ProviderEvent, Request, ToolDef};
+use mew_subagents::ChildGuidanceError;
 use mew_tools::tools::flag_important::FlagMode;
 
-use crate::agent::Agent;
+use crate::agent::{AcceptedPrompt, Agent, PromptAdmissionError, TurnInput};
 use crate::{AgentEvent, GoalStatus};
 
 impl Agent {
-    pub(crate) async fn run_loop(
-        &mut self,
+    pub(crate) fn build_prompt_message(
+        &self,
         prompt: String,
         attachments: Vec<Part>,
-        ev_tx: mpsc::Sender<AgentEvent>,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<Message, PromptAdmissionError> {
+        if !self.supports_vision
+            && attachments
+                .iter()
+                .any(|part| matches!(part, Part::File(file) if file.mime.starts_with("image/")))
+        {
+            return Err(PromptAdmissionError::UnsupportedImage);
+        }
+
         let msg_id = Ulid::new();
-        let mut parts = vec![Part::Text(TextPart {
+        let mut parts = Vec::with_capacity(attachments.len() + 1);
+        parts.push(Part::Text(TextPart {
             base: PartBase {
                 id: Ulid::new(),
                 message_id: msg_id,
@@ -30,30 +39,16 @@ impl Agent {
             },
             text: prompt,
             synthetic: false,
-        })];
-        // Fix attachment IDs to reference this message, then append.
-        let mut has_image = false;
+        }));
         for mut attachment in attachments {
-            if let Part::File(ref mut fp) = attachment {
-                fp.base.message_id = msg_id;
-                fp.base.session_id = self.session_id;
-                if fp.mime.starts_with("image/") {
-                    has_image = true;
-                }
+            if let Part::File(ref mut file) = attachment {
+                file.base.message_id = msg_id;
+                file.base.session_id = self.session_id;
             }
             parts.push(attachment);
         }
 
-        // Reject image attachments if the model doesn't support vision.
-        if has_image && !self.supports_vision {
-            let _ = ev_tx
-                .send(AgentEvent::Error(
-                    "image attachments not supported by the current model".into(),
-                ))
-                .await;
-            return Ok(());
-        }
-        let user_msg = Message {
+        Ok(Message {
             id: msg_id,
             session_id: self.session_id,
             role: Role::User,
@@ -63,9 +58,28 @@ impl Agent {
                 completed: None,
             },
             assistant: None,
-        };
+        })
+    }
 
-        self.append_message(user_msg).await;
+    pub(crate) async fn run_loop(
+        &mut self,
+        input: TurnInput,
+        ev_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        match input {
+            TurnInput::Accepted(AcceptedPrompt(message)) => {
+                self.messages.lock().await.push(*message);
+            }
+            TurnInput::New { text, attachments } => {
+                match self.build_prompt_message(text, attachments) {
+                    Ok(message) => self.append_message(message).await,
+                    Err(error) => {
+                        let _ = ev_tx.send(AgentEvent::Error(error.to_string())).await;
+                        return Ok(());
+                    }
+                }
+            }
+        }
         self.inject_orphaned_subagent_tasks().await;
         self.turn_loop(ev_tx).await
     }
@@ -167,6 +181,7 @@ impl Agent {
         ev_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut turn_count: u32 = 0;
+        let mut continuing_for_guidance = false;
         loop {
             if self.cancel_token.is_cancelled() {
                 let _ = ev_tx.send(AgentEvent::Error("aborted".into())).await;
@@ -175,12 +190,16 @@ impl Agent {
             if let Some(max) = self.max_turns {
                 if turn_count >= max {
                     tracing::info!(turn_count, max, "max turns reached");
-                    let _ = ev_tx
-                        .send(AgentEvent::Error(format!(
-                            "max turns exceeded ({} turns)",
-                            turn_count
-                        )))
-                        .await;
+                    // Child runners report their turn limit after draining the
+                    // final response and its tool results.
+                    if self.child_guidance.is_none() {
+                        let _ = ev_tx
+                            .send(AgentEvent::Error(format!(
+                                "max turns exceeded ({} turns)",
+                                turn_count
+                            )))
+                            .await;
+                    }
                     return Ok(());
                 }
             }
@@ -218,21 +237,10 @@ impl Agent {
                 *flag = false;
                 was
             };
-            let (messages, _removed_count) =
-                self.prepare_and_compact_messages(force, Some(&ev_tx)).await;
-
             // A configured retention window may make a deferred refresh safe
             // without compaction. Unknown retention remains conservative.
             self.apply_deferred_system_rebuild_if_safe();
-
-            let base_system = match &self.persona_prompt {
-                Some(persona) => format!("{}\n\n{}", persona, self.system),
-                None => self.system.clone(),
-            };
-            let system = self.dispatcher.on_system_prompt(base_system).await;
-
-            // Notify plugins that a model turn is about to start.
-            self.dispatcher.on_pre_model_turn(&messages, &system).await;
+            let system = self.request_system().await;
 
             // Chat params / headers: give plugins a chance to modify them
             // before the request goes out. Defaults are "use the provider's
@@ -272,9 +280,9 @@ impl Agent {
                 .on_chat_headers(http::HeaderMap::new())
                 .await;
 
-            let req = Request {
+            let mut req = Request {
                 model: String::new(),
-                messages,
+                messages: self.prepare_messages().await,
                 tools: tool_defs,
                 system,
                 reasoning: self.reasoning.clone(),
@@ -292,124 +300,109 @@ impl Agent {
                 supports_vision: self.supports_vision,
             };
 
-            let req_for_fallback = req.clone();
-
-            // Capture the manifest before dispatch — this is the single
-            // best point: Request is fully assembled, all data is still
-            // structured, and we haven't entered the stream loop yet.
-            *self.pending_manifest.lock().unwrap() = Some(crate::manifest::build_manifest(
-                &req,
-                &self.model_id,
-                self.context_window,
-                &self.token_count_cache,
-            ));
-
-            self.mark_prompt_request_sent();
-            let mut stream = match self.provider.stream(req).await {
-                Ok(s) => s,
-                Err(e) => {
-                    // Try fallback models before giving up. Each fallback
-                    // is a "provider/model" string; the provider_builder
-                    // callback (set by the main loop) constructs a new
-                    // provider for it. If any fallback succeeds, we swap
-                    // it in as the active provider and retry the request.
-                    let mut resolved_stream: Option<_> = None;
-                    if let Some(ref fb) = self.fallback_models {
-                        if !fb.is_empty() {
-                            if let Some(ref builder) = self.provider_builder {
-                                let mut last_err = e.to_string();
-                                for model_str in fb.iter() {
-                                    tracing::warn!(
-                                        primary_error = %last_err,
-                                        fallback = %model_str,
-                                        "primary provider failed; trying fallback model"
-                                    );
-                                    let _ = ev_tx
-                                        .send(AgentEvent::Error(format!(
-                                            "provider error ({}); trying fallback: {model_str}",
-                                            last_err
-                                        )))
-                                        .await;
-                                    match (builder.0)(model_str) {
-                                        Ok(new_provider) => {
-                                            self.provider = new_provider;
-                                            match self
-                                                .provider
-                                                .stream(req_for_fallback.clone())
-                                                .await
-                                            {
-                                                Ok(s) => {
-                                                    resolved_stream = Some(s);
-                                                    break;
-                                                }
-                                                Err(e2) => {
-                                                    last_err = e2.to_string();
-                                                    tracing::warn!(
-                                                        fallback = %model_str,
-                                                        error = %last_err,
-                                                        "fallback provider also failed"
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        Err(build_err) => {
-                                            tracing::warn!(
-                                                fallback = %model_str,
-                                                error = %build_err,
-                                                "could not build fallback provider"
-                                            );
-                                            last_err = build_err;
-                                        }
-                                    }
-                                }
-                                if resolved_stream.is_none() {
-                                    let _ = ev_tx
-                                        .send(AgentEvent::Error(format!(
-                                            "all fallback models exhausted: {}",
-                                            last_err
-                                        )))
-                                        .await;
-                                    return Err(Box::<dyn std::error::Error + Send + Sync>::from(
-                                        last_err,
-                                    ));
-                                }
-                            }
+            let mut manifest = match self.fit_request_context(&mut req, force).await {
+                Ok((manifest, _)) => manifest,
+                Err(message) => {
+                    if continuing_for_guidance {
+                        if let Some((admission, _)) =
+                            self.child_guidance.as_ref().and_then(|queue| queue.claim())
+                        {
+                            admission.finish(Err(ChildGuidanceError::Rejected(message)));
                         }
+                    } else {
+                        let _ = ev_tx.send(AgentEvent::Error(message)).await;
                     }
-                    match resolved_stream {
-                        Some(s) => s,
-                        None => {
-                            let _ = ev_tx
-                                .send(AgentEvent::Error(format!("provider stream: {}", e)))
-                                .await;
-                            return Err(Box::new(e));
-                        }
+                    return Ok(());
+                }
+            };
+            let guided = self.admit_child_guidance(&mut req, &mut manifest).await;
+            if continuing_for_guidance && !guided {
+                // The previous clean response already completed the original
+                // task. A rejected guide needs no extra provider call.
+                return Ok(());
+            }
+            if continuing_for_guidance {
+                let _ = ev_tx.send(AgentEvent::ChildGuidanceContinuation).await;
+                continuing_for_guidance = false;
+            }
+            render_compaction_summary(&mut req.messages);
+            self.dispatcher
+                .on_pre_model_turn(&req.messages, &req.system)
+                .await;
+
+            *self.pending_manifest.lock().unwrap() = Some(manifest);
+
+            let cancel = self.cancel_token.clone();
+            let opening = async {
+                let fallback = self
+                    .fallback_models
+                    .as_ref()
+                    .filter(|models| !models.is_empty())
+                    .zip(self.provider_builder.as_ref())
+                    .map(|(models, builder)| (models, builder, req.clone()));
+                self.mark_prompt_request_sent();
+                let primary_error = match self.provider.stream(req).await {
+                    Ok(stream) => return Ok(stream),
+                    Err(error) => error,
+                };
+                let Some((models, builder, request)) = fallback else {
+                    return Err(format!("provider stream: {primary_error}"));
+                };
+
+                let mut last_error = primary_error.to_string();
+                for (index, model) in models.iter().enumerate() {
+                    tracing::warn!(error = %last_error, fallback = %model, "trying fallback provider");
+                    let _ = ev_tx
+                        .send(AgentEvent::Provider(ProviderEvent::RetryWait {
+                            attempt: index as u32 + 1,
+                            max_attempts: models.len() as u32,
+                            delay_secs: 0,
+                            reason: format!("trying fallback: {model}"),
+                        }))
+                        .await;
+                    match (builder.0)(model) {
+                        Ok(provider) => match provider.stream(request.clone()).await {
+                            Ok(stream) => {
+                                self.provider = provider;
+                                return Ok(stream);
+                            }
+                            Err(error) => last_error = error.to_string(),
+                        },
+                        Err(error) => last_error = error,
                     }
                 }
+                Err(format!("all fallback models exhausted: {last_error}"))
+            };
+            let mut stream = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    let _ = ev_tx.send(AgentEvent::Error("aborted".into())).await;
+                    return Ok(());
+                }
+                result = opening => match result {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        let _ = ev_tx.send(AgentEvent::Error(error)).await;
+                        return Ok(());
+                    }
+                },
             };
 
             let mut assistant_msg: Option<Message> = None;
 
-            // Stream provider events until the stream ends or we are cancelled.
-            loop {
+            let finish = loop {
                 tokio::select! {
                     biased;
                     _ = self.cancel_token.cancelled() => {
                         if let Some(ref mut msg) = assistant_msg {
-                            let now = Utc::now().timestamp_millis();
-                            msg.time.completed = Some(now);
-                            msg.assistant = Some(AssistantMeta {
-                                provider_id: String::new(),
-                                model_id: String::new(),
-                                cost: 0.0,
-                                tokens: Tokens::default(),
-                                finish: None,
-                                error: Some(MessageError {
+                            msg.parts.retain(|part| !matches!(part, Part::ToolCall(_)));
+                            msg.time.completed = Some(Utc::now().timestamp_millis());
+                            if let Some(meta) = &mut msg.assistant {
+                                meta.error = Some(MessageError {
                                     kind: ErrorKind::Aborted,
                                     message: "aborted".into(),
-                                }),
-                                manifest: None,
-                            });
+                                });
+                            }
                             self.append_message(msg.clone()).await;
                         }
                         let _ = ev_tx.send(AgentEvent::Error("aborted".into())).await;
@@ -417,8 +410,26 @@ impl Agent {
                     }
                     ev = stream.next() => {
                         match ev {
-                            None => break,
-                            Some(ev) => {
+                            None => {
+                                let error = ProviderEvent::Error(MessageError {
+                                    kind: ErrorKind::ProviderApi,
+                                    message: "provider stream ended before completion".into(),
+                                });
+                                self.handle_provider_event(&error, &mut assistant_msg, &ev_tx).await;
+                                self.dispatcher.on_provider_event(&error).await;
+                                return Ok(());
+                            }
+                            Some(mut ev) => {
+                                if let ProviderEvent::MessageEnd { usage, cost, .. } = &mut ev {
+                                    if !cost.is_finite() || *cost <= 0.0 {
+                                        *cost = (f64::from(usage.input) * self.input_price
+                                            + f64::from(usage.output) * self.output_price
+                                            + f64::from(usage.reasoning) * self.reasoning_price
+                                            + f64::from(usage.cache_read) * self.cache_read_price
+                                            + f64::from(usage.cache_write) * self.cache_write_price)
+                                            / 1_000_000.0;
+                                    }
+                                }
                                 self.handle_provider_event(
                                     &ev,
                                     &mut assistant_msg,
@@ -444,6 +455,7 @@ impl Agent {
                                             cost,
                                         )
                                         .await;
+                                    break *finish;
                                 }
                                 if matches!(ev, ProviderEvent::Error(_)) {
                                     return Ok(());
@@ -452,9 +464,16 @@ impl Agent {
                         }
                     }
                 }
-            }
+            };
 
-            // Stream ended naturally.
+            if finish == Finish::Error {
+                let _ = ev_tx
+                    .send(AgentEvent::Error(
+                        "provider reported a failed response".into(),
+                    ))
+                    .await;
+                return Ok(());
+            }
             if assistant_msg.is_none() {
                 let _ = ev_tx
                     .send(AgentEvent::Error("no assistant message received".into()))
@@ -505,35 +524,21 @@ impl Agent {
                 }
             }
 
-            if self.cancel_token.is_cancelled() {
-                if let Some(ref mut msg) = assistant_msg {
-                    let now = Utc::now().timestamp_millis();
-                    msg.time.completed = Some(now);
-                    msg.assistant = Some(AssistantMeta {
-                        provider_id: String::new(),
-                        model_id: String::new(),
-                        cost: 0.0,
-                        tokens: Tokens::default(),
-                        finish: None,
-                        error: Some(MessageError {
-                            kind: ErrorKind::Aborted,
-                            message: "aborted".into(),
-                        }),
-                        manifest: None,
-                    });
-                    self.append_message(msg.clone()).await;
-                }
-                let _ = ev_tx.send(AgentEvent::Error("aborted".into())).await;
-                return Ok(());
-            }
-
             let msg = assistant_msg.as_ref().ok_or_else(|| {
                 Box::<dyn std::error::Error + Send + Sync>::from(
                     "assistant message missing after stream ended".to_string(),
                 )
             })?;
-            let pending = self.pending_tool_calls(msg);
+            let pending = if finish == Finish::ToolUse {
+                self.pending_tool_calls(msg)
+            } else {
+                Vec::new()
+            };
             if pending.is_empty() {
+                if self.cancel_token.is_cancelled() {
+                    let _ = ev_tx.send(AgentEvent::Error("aborted".into())).await;
+                    return Ok(());
+                }
                 let messages = self.messages.lock().await.clone();
                 self.dispatcher.on_turn_end(&messages).await;
 
@@ -571,7 +576,7 @@ impl Agent {
                                             session_id: self.session_id,
                                         },
                                         text: format!(
-                                            "<goal_continuation count=\"{count}\">\n\
+                                            "{GOAL_CONTINUATION_TAG} count=\"{count}\">\n\
                                              Continue working toward the objective below. \
                                              Avoid repeating work that is already done. \
                                              Choose the next concrete action.\n\n\
@@ -660,6 +665,17 @@ impl Agent {
                         continue;
                     }
                 }
+                if finish == Finish::Stop
+                    && self.max_turns.is_none_or(|max| turn_count < max)
+                    && self
+                        .child_guidance
+                        .as_ref()
+                        .is_some_and(|queue| queue.has_waiting_guide())
+                {
+                    continuing_for_guidance = true;
+                    continue;
+                }
+
                 return Ok(());
             }
 
@@ -677,18 +693,12 @@ impl Agent {
                 if let Some(ref mut msg) = assistant_msg {
                     let now = Utc::now().timestamp_millis();
                     msg.time.completed = Some(now);
-                    msg.assistant = Some(AssistantMeta {
-                        provider_id: String::new(),
-                        model_id: String::new(),
-                        cost: 0.0,
-                        tokens: Tokens::default(),
-                        finish: None,
-                        error: Some(MessageError {
+                    if let Some(meta) = &mut msg.assistant {
+                        meta.error = Some(MessageError {
                             kind: ErrorKind::Aborted,
                             message: "aborted".into(),
-                        }),
-                        manifest: None,
-                    });
+                        });
+                    }
                     let assistant_id = msg.id;
                     for tc in &pending {
                         let already_has_result = result_parts.iter().any(
@@ -792,55 +802,199 @@ impl Agent {
         }
     }
 
-    /// Apply the `on_chat_message` hook and strip empty text parts, then
-    /// compact the prefix if forced or if the estimated token count exceeds
-    /// the configured threshold. Returns the prepared messages and the number
-    /// of messages removed by compaction.
-    pub(crate) async fn prepare_and_compact_messages(
-        &mut self,
-        force: bool,
-        ev_tx: Option<&mpsc::Sender<AgentEvent>>,
-    ) -> (Vec<Message>, usize) {
+    async fn admit_child_guidance(
+        &self,
+        request: &mut Request,
+        manifest: &mut mew_message::TurnManifest,
+    ) -> bool {
+        use crate::child_guidance::CHILD_ENDED;
+
+        let Some(guidance) = &self.child_guidance else {
+            return false;
+        };
+        let Some((admission, text)) = guidance.claim() else {
+            return false;
+        };
+        if self.cancel_token.is_cancelled() {
+            admission.finish(Err(ChildGuidanceError::Rejected(CHILD_ENDED.into())));
+            return false;
+        }
+        let message = match self.build_prompt_message(text, vec![]) {
+            Ok(message) => message,
+            Err(error) => {
+                admission.finish(Err(ChildGuidanceError::Rejected(error.to_string())));
+                return false;
+            }
+        };
+        request
+            .messages
+            .push(self.dispatcher.on_chat_message(message.clone()).await);
+        let guided_manifest = self.request_manifest(request);
+        let result = if self.cancel_token.is_cancelled() || guidance.is_closed() {
+            Err(ChildGuidanceError::Rejected(CHILD_ENDED.into()))
+        } else if self.context_window > 0
+            && estimated_request_tokens(request, &guided_manifest) > self.context_window
+        {
+            Err(ChildGuidanceError::Rejected(
+                "Child guidance would exceed its model's context window.".into(),
+            ))
+        } else {
+            self.persist_prompt(&message, &admission.request_id)
+                .await
+                .map_err(|error| match error {
+                    PromptAdmissionError::Persistence(
+                        mew_session::SessionError::TranscriptCommitUnknown { .. },
+                    ) => ChildGuidanceError::Unknown(format!(
+                        "Could not confirm whether the child guidance was saved: {error}"
+                    )),
+                    _ => ChildGuidanceError::Rejected(format!(
+                        "Could not save child guidance: {error}"
+                    )),
+                })
+        };
+        let accepted = result.is_ok();
+        if accepted {
+            self.messages.lock().await.push(message);
+            *manifest = guided_manifest;
+        } else if let Some(rejected) = request.messages.pop() {
+            self.token_count_cache.lock().unwrap().remove(&rejected.id);
+        }
+        admission.finish(result);
+        accepted
+    }
+
+    async fn request_system(&self) -> String {
+        let system = match &self.persona_prompt {
+            Some(persona) => format!("{}\n\n{}", persona, self.system),
+            None => self.system.clone(),
+        };
+        self.dispatcher.on_system_prompt(system).await
+    }
+
+    async fn prepare_messages(&self) -> Vec<Message> {
         let mut messages = self.messages.lock().await.clone();
-
-        // Apply on_chat_message hook to each message.
-        for msg in &mut messages {
-            *msg = self.dispatcher.on_chat_message(msg.clone()).await;
+        for message in &mut messages {
+            *message = self.dispatcher.on_chat_message(message.clone()).await;
         }
-
         strip_empty_text_parts(&mut messages);
+        messages
+    }
 
-        let estimated = self.estimated_tokens(&messages);
-        let threshold = (self.context_window as f64 * self.compaction_threshold) as u32;
-        let should_compact = force || (self.context_window > 0 && estimated > threshold);
-        let compaction_start = compaction_start(&messages, self.keep_turns);
-        let has_removable_history =
-            !messages.is_empty() && (self.keep_turns == 0 || compaction_start > 0);
-
-        if !should_compact || !has_removable_history {
-            return (messages, 0);
+    async fn fit_request_context(
+        &mut self,
+        request: &mut Request,
+        force: bool,
+    ) -> Result<(mew_message::TurnManifest, usize), String> {
+        let manifest = self.request_manifest(request);
+        let estimated = estimated_request_tokens(request, &manifest);
+        let threshold = ((self.context_window as f64 * self.compaction_threshold) as u32)
+            .min(self.context_window);
+        let over_budget = |estimated| self.context_window > 0 && estimated > self.context_window;
+        if !force && (self.context_window == 0 || estimated <= threshold) {
+            return Ok((manifest, 0));
         }
 
-        tracing::info!(
-            estimated,
-            threshold,
-            context_window = self.context_window,
-            force,
-            compaction_start,
-            "compacting context"
-        );
-        self.dispatcher.on_pre_compaction(&messages).await;
-        let mut compacted = messages.split_off(compaction_start);
-        compacted.retain(|message| !is_compaction_message(message));
-        let tail_start_id = compacted.first().map(|message| message.id);
+        let before = &request.messages;
+        let mut start = compaction_start(before, self.keep_turns);
+        let latest_user = before.iter().rposition(|message| {
+            message.role == Role::User
+                && message.parts.iter().any(|part| match part {
+                    Part::Text(text) => !text.synthetic && !text.text.trim().is_empty(),
+                    Part::File(_) => true,
+                    _ => false,
+                })
+        });
+        if let Some(index) = latest_user.filter(|&index| {
+            before[index]
+                .parts
+                .iter()
+                .any(|part| matches!(part, Part::File(_)))
+        }) {
+            start = start.min(index);
+        }
+        if self
+            .goal
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|goal| goal.status == GoalStatus::Active)
+        {
+            if let Some(index) = before.iter().rposition(|message| {
+                message.role == Role::User && message.parts.iter().any(|part| {
+                    matches!(part, Part::Text(text) if text.synthetic && text.text.starts_with(GOAL_CONTINUATION_TAG))
+                })
+            }) {
+                start = start.min(index);
+            }
+        }
+        let dropped = before[..start]
+            .iter()
+            .filter(|message| !is_compaction_message(message))
+            .count();
+        if start == 0 || (dropped == 0 && !force) {
+            return if over_budget(estimated) {
+                Err(context_window_error(self.context_window))
+            } else {
+                Ok((manifest, 0))
+            };
+        }
+
+        let summary = self.compaction_summary(&before[..start], latest_user);
+        let compacted = self
+            .compacted_messages(&before[start..], force, dropped, summary)
+            .await;
+        let previous = std::mem::replace(&mut request.messages, compacted);
+        let mut candidate = self.request_manifest(request);
+        let compacted_estimate = estimated_request_tokens(request, &candidate);
+        if over_budget(compacted_estimate) || (!force && compacted_estimate >= estimated) {
+            request.messages = previous;
+            return if over_budget(estimated) {
+                Err(context_window_error(self.context_window))
+            } else {
+                Ok((manifest, 0))
+            };
+        }
+
+        let system = self.system.clone();
+        self.apply_deferred_system_rebuild_after_compaction();
+        if self.system != system {
+            request.system = self.request_system().await;
+            candidate = self.request_manifest(request);
+            if self.context_window > 0
+                && estimated_request_tokens(request, &candidate) > self.context_window
+            {
+                return Err(context_window_error(self.context_window));
+            }
+        }
+
+        self.dispatcher.on_pre_compaction(&previous).await;
+        self.commit_compaction(&request.messages).await?;
+        self.dispatcher.on_post_compaction(&request.messages).await;
+        tracing::info!(dropped, estimated, "compacted older context");
+        Ok((candidate, dropped))
+    }
+
+    fn request_manifest(&self, request: &Request) -> mew_message::TurnManifest {
+        crate::manifest::build_manifest(
+            request,
+            &self.model_id,
+            self.context_window,
+            &self.token_count_cache,
+        )
+    }
+
+    async fn compacted_messages(
+        &self,
+        tail: &[Message],
+        force: bool,
+        removed: usize,
+        summary: String,
+    ) -> Vec<Message> {
+        let tail_start_id = tail
+            .iter()
+            .find(|message| !is_compaction_message(message))
+            .map(|message| message.id);
         let compact_id = Ulid::new();
-        // Compaction is a synthetic system marker, not a user message —
-        // mirrors the way other hidden agent state (e.g. capability notices)
-        // is delivered. The assistant message in the wire never sees this
-        // because context_from_history filters out anything tagged with a
-        // CompactionPart, and the TUI renders it as a tool-call-style
-        // collapsible block instead of a chat row.
-        let removed_count = messages.len();
         let compact_msg = Message {
             id: compact_id,
             session_id: self.session_id,
@@ -854,8 +1008,8 @@ impl Agent {
                 auto: !force,
                 overflow: false,
                 tail_start_id,
-                summary: None,
-                removed_count: Some(removed_count as u32),
+                summary: Some(summary),
+                removed_count: Some(removed as u32),
             })],
             time: Time {
                 created: Utc::now().timestamp_millis(),
@@ -863,16 +1017,20 @@ impl Agent {
             },
             assistant: None,
         };
-        messages = compacted;
-        messages.insert(0, compact_msg.clone());
+        let mut messages = vec![compact_msg];
+        messages.extend(
+            tail.iter()
+                .filter(|message| !is_compaction_message(message))
+                .cloned(),
+        );
 
         // Re-inject flagged files so they survive compaction.
-        let flagged = self.flagged_files.lock().await;
+        let flagged = self.flagged_files.lock().await.clone();
         if !flagged.is_empty() {
             let now = Utc::now().timestamp_millis();
             for f in flagged.iter().rev() {
                 let note_text = match f.mode {
-                    FlagMode::Included => match std::fs::read_to_string(&f.path) {
+                    FlagMode::Included => match tokio::fs::read_to_string(&f.path).await {
                         Ok(content) => format!(
                             "Flagged file (preserved across compaction) — {}:\n\n{}",
                             f.path.display(),
@@ -917,39 +1075,140 @@ impl Agent {
                 );
             }
         }
-        drop(flagged);
+        messages
+    }
 
-        *self.messages.lock().await = messages.clone();
-        self.token_count_cache.lock().unwrap().clear();
-
-        if let Some(session) = &self.session {
-            let mut session = session.lock().await;
-            if let Err(e) = session.write_message(&compact_msg).await {
-                tracing::warn!(error = %e, "failed to persist compaction marker");
+    fn compaction_summary(&self, dropped: &[Message], latest_user: Option<usize>) -> String {
+        let mut remaining = if self.context_window == 0 {
+            2048
+        } else {
+            (self.context_window / 10).min(2048)
+        };
+        let mut excerpts = Vec::new();
+        for (index, message) in dropped.iter().enumerate().rev() {
+            let text_parts: Vec<_> = message
+                .parts
+                .iter()
+                .filter_map(|part| match part {
+                    Part::Text(text)
+                        if message.role == Role::User
+                            && !text.synthetic
+                            && !text.text.trim().is_empty() =>
+                    {
+                        Some(text.text.as_str())
+                    }
+                    Part::Compaction(compaction) => compaction
+                        .summary
+                        .as_deref()?
+                        .strip_prefix(CARRIED_USER_MESSAGES),
+                    _ => None,
+                })
+                .filter(|text| !text.is_empty())
+                .collect();
+            if text_parts.is_empty() {
+                continue;
+            }
+            let tokens = text_parts.iter().fold(0u32, |tokens, text| {
+                tokens
+                    .saturating_add(crate::manifest::count_tokens(text, &self.model_id))
+                    .saturating_add(2)
+            });
+            if tokens <= remaining || Some(index) == latest_user {
+                remaining = remaining.saturating_sub(tokens);
+                excerpts.push(text_parts.join("\n\n"));
             }
         }
 
-        self.apply_deferred_system_rebuild_after_compaction();
+        // A marker's persisted summary contains verbatim user excerpts.
+        // The transcript remains the source for older material.
+        excerpts.reverse();
+        format!("{CARRIED_USER_MESSAGES}{}", excerpts.join("\n\n---\n\n"))
+    }
 
-        if let Some(ev_tx) = ev_tx {
-            let _ = ev_tx
-                .send(AgentEvent::Error(format!(
-                    "context compacted: {} messages removed ({} estimated tokens)",
-                    removed_count, estimated
-                )))
-                .await;
+    async fn commit_compaction(&self, messages: &[Message]) -> Result<(), String> {
+        if let Some(session) = &self.session {
+            let marker = messages
+                .iter()
+                .find(|message| is_compaction_message(message))
+                .expect("compacted history includes a marker");
+            session
+                .lock()
+                .await
+                .write_message(marker)
+                .await
+                .map_err(|error| format!("Could not save context compaction: {error}"))?;
         }
-
-        self.dispatcher.on_post_compaction(&messages).await;
-
-        (messages, removed_count)
+        *self.messages.lock().await = messages.to_vec();
+        self.token_count_cache.lock().unwrap().clear();
+        Ok(())
     }
 
     /// Compact the context immediately, regardless of token threshold.
     /// Returns the number of messages removed.
     pub async fn compact_context(&mut self) -> usize {
-        let (_, removed) = self.prepare_and_compact_messages(true, None).await;
-        removed
+        let mut request = Request {
+            messages: self.prepare_messages().await,
+            system: self.request_system().await,
+            ..Request::default()
+        };
+        self.fit_request_context(&mut request, true)
+            .await
+            .map_or(0, |(_, removed)| removed)
+    }
+}
+
+fn estimated_request_tokens(request: &Request, manifest: &mew_message::TurnManifest) -> u32 {
+    let output = request
+        .params
+        .as_ref()
+        .and_then(|params| params.max_tokens)
+        .unwrap_or_default()
+        .max(0) as u32;
+    // Account for per-message and per-tool framing outside the textual counts.
+    let framing = (request.messages.len() + request.tools.len()).saturating_mul(4) as u32;
+    manifest
+        .segments
+        .iter()
+        .fold(output.saturating_add(framing), |total, segment| {
+            total.saturating_add(segment.tokens)
+        })
+}
+
+fn context_window_error(window: u32) -> String {
+    format!(
+        "The request and reserved response are estimated to exceed the {window}-token context window. Shorten the prompt or attachments, reduce the response limit, or switch to a larger model."
+    )
+}
+
+pub(crate) const CONTEXT_CLEARED_TEXT: &str =
+    "Context cleared. The model starts fresh; prior turns are no longer visible to it.";
+const GOAL_CONTINUATION_TAG: &str = "<goal_continuation";
+const CARRIED_USER_MESSAGES: &str = "Earlier context was compacted. This record contains a limited selection of earlier user messages. The full conversation remains in the transcript.\n\n";
+
+fn render_compaction_summary(messages: &mut [Message]) {
+    for message in messages {
+        let Some(summary) = message.parts.iter().find_map(|part| match part {
+            Part::Compaction(part) => part
+                .summary
+                .as_ref()
+                .filter(|summary| summary.starts_with(CARRIED_USER_MESSAGES)),
+            _ => None,
+        }) else {
+            continue;
+        };
+        // User excerpts keep their original instruction priority. The
+        // transcript stores only the marker, so resumed requests render the
+        // same text without exposing an extra chat row.
+        message.role = Role::User;
+        message.parts.push(Part::Text(TextPart {
+            base: PartBase {
+                id: message.id,
+                message_id: message.id,
+                session_id: message.session_id,
+            },
+            text: summary.clone(),
+            synthetic: true,
+        }));
     }
 }
 
@@ -1154,7 +1413,14 @@ pub(crate) fn repair_orphaned_tool_calls(
 /// marker's `tail_start_id` identifies the first surviving message, so resume
 /// can keep the complete JSONL log while presenting the same compacted prefix
 /// that was used before shutdown.
-pub(crate) fn context_from_history(history: Vec<Message>) -> Vec<Message> {
+pub(crate) fn context_from_history(mut history: Vec<Message>) -> Vec<Message> {
+    if let Some(cleared) = history.iter().rposition(|message| {
+        message.role == Role::User
+            && matches!(message.parts.as_slice(), [Part::Text(text)]
+                if text.synthetic && text.text == CONTEXT_CLEARED_TEXT)
+    }) {
+        history.drain(..=cleared);
+    }
     let Some((marker_index, tail_start_id)) =
         history
             .iter()

@@ -503,8 +503,21 @@ async fn real_daemon_pages_survive_switching_and_revoke_on_disconnect_and_delete
         },
     )
     .await;
-    flush(&mut deleting).await;
+    assert!(flush(&mut deleting).await.iter().any(
+        |event| matches!(event, ServerMessage::Error { message } if message.contains("work in progress"))
+    ));
     drop(deleted);
+    send(
+        &mut reconnect,
+        ClientMessage::DeleteSession {
+            session_id: deleted_id.clone(),
+        },
+    )
+    .await;
+    assert!(!flush(&mut reconnect)
+        .await
+        .iter()
+        .any(|event| matches!(event, ServerMessage::Error { .. })));
     send(
         &mut reconnect,
         ClientMessage::RegisterBrowserPage {

@@ -98,7 +98,7 @@ These tools only register when their prerequisites are met:
 | Tool | Condition | Description |
 |------|-----------|-------------|
 | `skill` | At least one skill discovered | Load a skill's full instructions into context. See [Skills](/docs/using-mew/skills/). |
-| `mcp__*` | MCP servers configured | Tools from connected MCP servers. See [MCP Servers](/docs/using-mew/mcp-servers/). |
+| `mcp__*` | Experimental library support | Tools exposed through the [MCP library](/docs/using-mew/mcp-servers/). |
 
 ## Secret redaction
 

@@ -23,6 +23,7 @@ clap = { version = "4", features = ["derive", "env"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 include_dir = "0.7"
+ulid = { workspace = true }
 
 [dev-dependencies]
 mew-agent = { workspace = true }

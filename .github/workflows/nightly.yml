@@ -68,7 +68,7 @@ jobs:
           pnpm --filter mew-web-ui build
 
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }} -p mew
+        run: cargo build --locked --release --target ${{ matrix.target }} -p mew
 
       - name: Package binary
         run: |

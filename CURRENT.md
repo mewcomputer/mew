@@ -4165,7 +4165,6 @@ generated-theme checks passed with commit hooks enabled. See
 `apps/mew-electron/README.md` and the updated migration/checklist
 notes for commands, evidence boundaries and the remaining first-release work.
 
-
 ## 2026-11-17: Electron and shared web UI integration
 
 Merged the Electron desktop shell branch with current main, preserving the native
@@ -4183,6 +4182,104 @@ workspace suite, workspace clippy and formatting, architecture and theme checks,
 51 TypeScript client tests, 218 UI tests, 30 Electron host tests, production web
 and site builds, and three bridge subprocess tests. The Electron signed-package
 test is opt-in and was not rerun.
+
+## 2026-11-18 Session recovery and transport hardening
+
+Serialize session metadata changes and replace the metadata file atomically.
+Recover complete JSONL messages after interrupted appends. Scoped submissions
+now persist input and request identity before acknowledgement, and daemon and
+one-shot writers share a per-session ownership lock.
+
+Restore the active response prefix on attach, index transcript records for
+bounded page reads, and reserve a history slot alongside the live socket queue.
+Web and Electron reattach before enabling submission, reconcile uncertain
+receipts, load older pages, and apply deletion only on a matching confirmation.
+The browser bridge and native desktop relay enforce local origin boundaries.
+
+Budget provider requests against their assembled context and retain a bounded
+set of explicit user excerpts across compaction. Preserve the clear boundary
+on restart. Lock workspace dependencies and build embedded React assets before
+the release binary.
+
+Verified focused storage, agent, daemon, transport, and web-client suites,
+the desktop-host subprocess suite, and the actual daemon/bridge round trip.
+Also verified React production assets and the Electron support and policy
+tests. The packaged Electron guest and CEF window flows remain separate
+release checks.
+
+## 2026-11-18 Provider and child turn completion
+
+Race provider startup and fallback against cancellation. Keep fallback
+attempts visible as retry status. A provider must confirm tool use and
+complete its function arguments before tools can run. On interruption,
+save the partial reply and report failure. Send the saved response cost
+through the live event and telemetry paths.
+
+Apply the child deadline while waiting for events and during a schema retry.
+Cancel the child and allow bounded cleanup before reporting a timeout.
+Verified 212 agent tests and 98 provider adapter tests, including the
+interrupted-stream fixtures and the successful tool continuations.
+
+## 2026-11-18 Durable context reset
+
+Commit the clear marker before resetting live model context. A failed
+transcript commit preserves the current context and returns an error.
+The TUI waits for the daemon's reset event before clearing its display.
+Verified the persistence failure and restart cases, 115 daemon tests,
+12 session tests, and all 30 TUI dispatch tests.
+
+## 2026-11-18 Guidance for running subagents
+
+Scope guidance and receipts to an attached parent, its direct child, and a
+request ID. Save guidance at the child's next provider request boundary.
+A successful final reply can continue with guidance within the same turn and
+time limits. Keep both replies in the transcript and return the guided result
+to the parent. Look up saved receipts after the child finishes.
+
+Verified 215 agent tests, the focused guidance tests after the retirement fix,
+127 protocol tests, and 117 daemon tests.
+
+## 2026-11-18 Subagent conversations in Electron
+
+Open an agent's transcript from the Agents pane and send guidance to a running
+child. Keep drafts scoped to the parent and child. Check uncertain receipts
+after reattachment and reuse the request ID when retrying unchanged text.
+Load the transcript renderer on demand. Finished children can be viewed while
+listed, and reopening them for follow-up still needs saved child policy.
+
+Verified 51 SDK tests, 220 React tests, TypeScript checks, and the production
+renderer build. Electron host tests and real guest isolation passed. The
+native package and pinned browser input tests require agent-browser 0.34 or
+newer. The installed version was 0.31.2.
+
+## 2026-11-18 Foundation integration with main
+
+Merge the session and transport changes with main's attachment safeguards,
+guest restrictions, pinned dependencies, and CEF setup. Regenerate the tracked
+SDK. Keep the parent's subagent result limited to the final reply. Drain the
+last allowed turn through tool completion and give schema correction the
+remaining turn budget.
+
+Require CI's daemon and bridge round trip, and isolate the fixture's state and
+daemon status file. Verified 242 agent tests, 12 session tests, 63 SDK tests,
+230 React tests, the production renderer and site builds, and all five
+bridge subprocess tests. Real Electron guest isolation and browser input
+passed with agent-browser 0.34.0.
+
+Close only open inherited descriptors during daemon startup. Mark the
+supervisor's inherited descriptors close-on-exec to preserve launch errors.
+A Node-spawned desktop host reached readiness with an unlimited macOS
+descriptor limit, owned its daemon, and shut down cleanly at EOF.
+
+Verified the signed Electron debug bundle with a deterministic provider. The
+app reopened its parent connection, checked the guidance receipt, and the
+running child received the message once across a forced disconnect.
+
+Make plugin fixtures honor the Cargo target directory and build their examples
+with the lockfile. The full macOS workspace suite passed 2,856 tests with five
+ignored. Workspace Clippy, formatting, architecture, and theme checks passed.
+Local macOS checks used the library built from the pinned Ghostty revision
+after the local Zig linker failed.
 
 ### 2026-11-19: Garden homepage, docs palette, and share image
 
@@ -4286,6 +4383,12 @@ HTTPS. Verified all published asset checksums, installed the public tap on
 Apple Silicon in an isolated Homebrew prefix, and installed the nightly
 with the shell script in a temporary directory. Seven site smoke tests passed.
 
+### 2026-11-19 Electron guidance in the public docs
+
+Preserved both sets of journal entries when merging main. The subagents guide
+now covers opening a child transcript, sending guidance, and checking delivery
+after reconnecting. Verified the frozen install, production site build, all
+seven site smoke tests, and the new section in the rendered guide.
 ### 2026-11-19: Automatic nightly Homebrew updates
 
 The Nightly workflow now publishes a versioned Homebrew snapshot after

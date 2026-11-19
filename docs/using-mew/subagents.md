@@ -150,8 +150,9 @@ Subagent runs are bounded by two caps:
   many turns, even if it hasn't produced a final answer. The result is
   marked as possibly incomplete.
 - **Time cap** (`max_duration_secs`, default 600 seconds / 10 minutes):
-  elapsed time is checked after each provider message, and the subagent stops
-  when the limit is reached. A stalled message can exceed the limit.
+  the deadline covers model requests, tools, and schema correction. At the
+  deadline the runner cancels the subagent and allows a brief interval to save
+  partial output.
 
 Both can be overridden per subagent in the frontmatter. The default time cap can
 also be changed with `[orchestration] default_max_duration_secs`; an explicit
@@ -197,6 +198,21 @@ results and errors. It refreshes saved turns while open; an unfinished turn may
 not yet be recorded. Press `r` to refresh manually, use arrow/page keys or the
 wheel to scroll, and Escape to close. An open viewer retains the final outcome.
 Trace replies cannot switch the parent conversation or replace its transcript.
+
+## Guide a running subagent in Electron
+
+In the parent conversation, open the **Agents** pane and select a subagent to
+read its transcript. While the subagent is running, enter a message and choose
+**Send guidance**. **Guidance saved** means the message was saved for the
+subagent's next model request. Use the refresh button to load its latest saved
+messages.
+
+If the connection drops before delivery is confirmed, Electron keeps your draft
+and checks for a receipt when it reconnects. Retrying the same text uses the
+original request ID so the subagent receives it at most once.
+
+You can read a finished subagent's transcript while it remains listed.
+To give it more work, ask the parent to start a new subagent.
 
 ## Subagent sessions
 

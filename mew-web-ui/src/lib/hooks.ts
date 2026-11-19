@@ -1,5 +1,4 @@
-import { useEffect, useState, type RefObject } from "react";
-import { useRouter } from "@tanstack/react-router";
+import { useCallback, useEffect, useState, useSyncExternalStore, type RefObject } from "react";
 import { useSessionStore } from "../stores/session";
 import { getClient, SESSION_ID_KEY } from "./client";
 
@@ -33,27 +32,24 @@ export function useMewConnection() {
       try {
         await client.connect();
         if (cancelled) return;
+        const version = await client.ping();
+        if (cancelled) return;
         attempt = 0;
+        useSessionStore.getState().setDaemonVersion(version);
         useSessionStore.getState().setConnectionState("connected");
         useSessionStore.getState().setConnectionError(null);
-        client
-          .ping()
-          .then((version) => useSessionStore.getState().setDaemonVersion(version))
-          .catch(() => {
-            /* daemon may not support ping yet — ignore */
-          });
       } catch (error) {
-        console.error("[mew] connect failed:", error);
         if (cancelled) return;
-        attempt += 1;
+        client.disconnect();
+        if (!reconnectTimer) attempt += 1;
         useSessionStore.getState().setConnectionError(connectionErrorMessage(error));
         scheduleRetry();
       }
     };
 
     const handleClose = () => {
-      if (cancelled) return;
-      attempt = Math.max(attempt + 1, 1);
+      if (cancelled || reconnectTimer) return;
+      attempt += 1;
       useSessionStore.getState().setConnectionError("The daemon connection closed.");
       scheduleRetry();
     };
@@ -92,37 +88,46 @@ export function useComposerFocusShortcut(inputRef: RefObject<HTMLTextAreaElement
   }, [inputRef]);
 }
 
-/** Attach to a session by ID, with cleanup. */
+/** Attach the selected session again after each confirmed connection. */
 export function useSessionAttach(sessionId: string) {
-  const router = useRouter();
+  const client = getClient();
   const connected = useSessionStore((state) => state.connectionState === "connected");
-  const attachedSession = useSessionStore((state) => state.sessionId);
-  const [settled, setSettled] = useState(true);
+  const [failure, setFailure] = useState<{ sessionId: string; message: string } | null>(null);
+  const subscribe = useCallback((notify: () => void) => {
+    client.on("session-command-state", notify);
+    client.on("session-ready", notify);
+    client.on("close", notify);
+    return () => {
+      client.off("session-command-state", notify);
+      client.off("session-ready", notify);
+      client.off("close", notify);
+    };
+  }, [client]);
+  const getSnapshot = useCallback(() => connected && client.isSessionStable(sessionId), [client, connected, sessionId]);
+  const ready = useSyncExternalStore(subscribe, getSnapshot);
 
   useEffect(() => {
+    setFailure(null);
     if (!connected) return;
-    const client = getClient();
     const store = useSessionStore.getState();
-    let active = true;
-    localStorage.setItem(SESSION_ID_KEY, sessionId);
-    store.clearAlertsForSession(sessionId);
+    let current = true;
 
-    // New-session flows receive SessionReady before navigation. The client
-    // is already attached in that case, even if React has not observed the
-    // store update yet; attaching again races the daemon and can surface a
-    // misleading "session not found" error.
+    const confirm = () => {
+      if (!current) return;
+      localStorage.setItem(SESSION_ID_KEY, sessionId);
+      store.clearAlertsForSession(sessionId);
+    };
     if (client.isSessionStable(sessionId)) {
-      if (store.sessionId !== sessionId) store.setSessionId(sessionId);
-      setSettled(true);
+      confirm();
       return;
     }
-
-    setSettled(false);
     if (store.sessionId !== sessionId) store.reset();
-    client.attachSession(sessionId).catch(() => {
-      if (active && client.isConnected()) router.navigate({ to: "/" });
-    }).finally(() => { if (active) setSettled(true); });
-    return () => { active = false; };
-  }, [sessionId, router, connected, attachedSession]);
-  return connected && attachedSession === sessionId && settled && getClient().isSessionStable(sessionId);
+    void client.attachSession(sessionId).then(confirm).catch((error: unknown) => {
+      if (!current || !client.isConnected()) return;
+      setFailure({ sessionId, message: error instanceof Error ? error.message : "Could not open the conversation." });
+    });
+    return () => { current = false; };
+  }, [client, connected, sessionId]);
+
+  return { ready, error: connected && failure?.sessionId === sessionId ? failure.message : null };
 }

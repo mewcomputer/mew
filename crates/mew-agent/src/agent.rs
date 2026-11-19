@@ -20,6 +20,27 @@ use ulid::Ulid;
 
 use crate::{prompt_cache::PromptCacheState, AgentEvent, PromptCacheRetention, SessionWriter};
 
+/// A user prompt durably recorded before its turn starts.
+pub struct AcceptedPrompt(pub(crate) Box<Message>);
+
+#[derive(Debug, thiserror::Error)]
+pub enum PromptAdmissionError {
+    #[error("image attachments not supported by the current model")]
+    UnsupportedImage,
+    #[error("could not save prompt: session has no transcript")]
+    MissingTranscript,
+    #[error("could not save prompt: {0}")]
+    Persistence(#[from] mew_session::SessionError),
+}
+
+pub(crate) enum TurnInput {
+    New {
+        text: String,
+        attachments: Vec<Part>,
+    },
+    Accepted(AcceptedPrompt),
+}
+
 /// Session-scoped classifier decision cache. Keyed by
 /// `(tool_name, serialized_input)`; values are the classifier's parsed
 /// decisions. Cleared on `/clear`.
@@ -305,6 +326,8 @@ pub struct Agent {
     /// starting a new turn. If the turn ends first, the guidance is picked up
     /// by the next turn. Shared via `Arc` so the running turn's clone sees it.
     pub pending_guidance: Arc<tokio::sync::Mutex<VecDeque<String>>>,
+    pub(crate) child_guidance: Option<Arc<crate::child_guidance::ChildGuidance>>,
+    pub(crate) child_guidance_registry: Option<Arc<crate::runner::ActiveChildren>>,
     /// Active persona name (for display/status). `None` = no persona.
     pub persona_name: Option<String>,
     /// Active persona's autonomous hint for the Auto/Auto+ permission
@@ -360,11 +383,8 @@ pub struct Agent {
     /// `MessageEnd`. Uses `Arc<Mutex>` because `Agent` derives `Clone`
     /// and `handle_provider_event`/`start_assistant_message` take `&self`.
     pub pending_manifest: Arc<std::sync::Mutex<Option<mew_message::TurnManifest>>>,
-    /// Cache of token counts per message ID, to avoid re-tokenizing
-    /// immutable history messages on every turn. Keyed by `MessageId` (Ulid).
-    /// Cleared on compaction (message list replacement).
-    pub token_count_cache:
-        Arc<std::sync::Mutex<std::collections::HashMap<mew_message::MessageId, u32>>>,
+    /// Token counts for prompt history whose content has not changed.
+    pub token_count_cache: Arc<crate::manifest::TokenCountCache>,
     /// Active session goal. When `Some` with `GoalStatus::Active`, the turn
     /// loop injects a continuation prompt at end of turn and loops back
     /// instead of returning. Shared via `Arc<Mutex>` so the `propose_goal`,
@@ -459,6 +479,8 @@ impl Agent {
             base_system: String::new(),
             personas: Vec::new(),
             pending_guidance: Arc::new(tokio::sync::Mutex::new(VecDeque::new())),
+            child_guidance: None,
+            child_guidance_registry: None,
             persona_name: None,
             autonomous_hint: None,
             fallback_models: None,
@@ -486,6 +508,8 @@ impl Agent {
         {
             self.prompt_cache_state = Arc::new(std::sync::Mutex::new(PromptCacheState::default()));
             self.prompt_generation = 0;
+            self.token_count_cache =
+                Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         }
         self.model_id = model_id.to_string();
         self.provider_id = provider_id.to_string();
@@ -1108,13 +1132,15 @@ impl Agent {
         self.token_count_cache.lock().unwrap().clear();
     }
 
-    /// Return a clone of this agent's persisted session metadata, if any.
+    /// Read this agent's persisted session metadata, if any.
     pub async fn session_meta(&self) -> Option<mew_session::Meta> {
-        if let Some(session) = &self.session {
-            let guard = session.lock().await;
-            Some(guard.meta().clone())
-        } else {
-            None
+        let session = self.session.as_ref()?;
+        match session.lock().await.meta().await {
+            Ok(meta) => meta,
+            Err(error) => {
+                tracing::warn!(%error, "could not read session metadata");
+                None
+            }
         }
     }
 
@@ -1122,10 +1148,9 @@ impl Agent {
         *self.force_compact.lock().await = true;
     }
 
-    /// Clear the in-memory conversation context and append a clear marker to
-    /// the session log. The session file is the immutable event log and keeps
-    /// everything; only what the model sees this turn is reset. Resume
-    /// reconstructs forward from the marker.
+    /// Commit a clear marker to the session log, then reset live context.
+    /// The full transcript remains available, and resume reconstructs the
+    /// model's context from the marker.
     ///
     /// Permission caches are tied to the *session* lifetime (the JSONL log),
     /// not the *context* (what the model sees this turn), so they survive
@@ -1137,12 +1162,7 @@ impl Agent {
     /// Clearing the latter doesn't invalidate the user's prior grants
     /// within the former. Pinned by
     /// `tests::test_clear_context_preserves_permission_caches`.
-    pub async fn clear_context(&self) {
-        self.messages.lock().await.clear();
-        // Clear the classifier cache too — a fresh context should get
-        // fresh classifier decisions, not stale ones from before the clear.
-        self.clear_classifier_cache();
-
+    pub async fn clear_context(&self) -> Result<(), mew_session::SessionError> {
         if let Some(session) = &self.session {
             let now = chrono::Utc::now().timestamp_millis();
             let msg_id = Ulid::new();
@@ -1156,7 +1176,7 @@ impl Agent {
                         message_id: msg_id,
                         session_id: self.session_id,
                     },
-                    text: "Context cleared. The model starts fresh; prior turns are no longer visible to it.".into(),
+                    text: crate::turn::CONTEXT_CLEARED_TEXT.into(),
                     synthetic: true,
                 })],
                 time: Time {
@@ -1165,28 +1185,11 @@ impl Agent {
                 },
                 assistant: None,
             };
-            if let Err(e) = session.lock().await.write_message(&marker).await {
-                tracing::warn!(error = %e, "failed to write clear marker to session");
-            }
+            session.lock().await.write_context_marker(&marker).await?;
         }
-    }
-
-    pub(crate) fn estimated_tokens(&self, messages: &[Message]) -> u32 {
-        let mut chars: usize = self.system.chars().count();
-        for msg in messages {
-            for part in &msg.parts {
-                if let Part::Text(tp) = part {
-                    chars += tp.text.chars().count();
-                } else if let Part::Reasoning(rp) = part {
-                    chars += rp.text.chars().count();
-                } else if let Part::ToolCall(tc) = part {
-                    if let Some(output) = tc.state.output() {
-                        chars += output.chars().count();
-                    }
-                }
-            }
-        }
-        (chars / 4) as u32
+        self.messages.lock().await.clear();
+        self.clear_classifier_cache();
+        Ok(())
     }
 
     /// Resolve the configured plan path against the session working directory.
@@ -1213,6 +1216,56 @@ impl Agent {
         &self,
         prompt: String,
         attachments: Vec<Part>,
+        cancel_token: Option<CancellationToken>,
+    ) -> mpsc::Receiver<AgentEvent> {
+        self.start_turn(
+            TurnInput::New {
+                text: prompt,
+                attachments,
+            },
+            cancel_token,
+        )
+    }
+
+    pub async fn accept_prompt(
+        &self,
+        prompt: String,
+        attachments: Vec<Part>,
+        request_id: &str,
+    ) -> Result<AcceptedPrompt, PromptAdmissionError> {
+        let message = self.build_prompt_message(prompt, attachments)?;
+        self.persist_prompt(&message, request_id).await?;
+        Ok(AcceptedPrompt(Box::new(message)))
+    }
+
+    pub(crate) async fn persist_prompt(
+        &self,
+        message: &Message,
+        request_id: &str,
+    ) -> Result<(), PromptAdmissionError> {
+        let session = self
+            .session
+            .as_ref()
+            .ok_or(PromptAdmissionError::MissingTranscript)?;
+        session
+            .lock()
+            .await
+            .write_prompt(message, request_id)
+            .await?;
+        Ok(())
+    }
+
+    pub fn run_accepted_prompt(
+        &self,
+        prompt: AcceptedPrompt,
+        cancel_token: CancellationToken,
+    ) -> mpsc::Receiver<AgentEvent> {
+        self.start_turn(TurnInput::Accepted(prompt), Some(cancel_token))
+    }
+
+    fn start_turn(
+        &self,
+        input: TurnInput,
         cancel_token: Option<CancellationToken>,
     ) -> mpsc::Receiver<AgentEvent> {
         // Auto-flag the plan file as important if it exists. This guarantees
@@ -1257,7 +1310,7 @@ impl Agent {
         agent.cancel_token = cancel_token.unwrap_or_default();
 
         tokio::spawn(async move {
-            if let Err(e) = agent.run_loop(prompt, attachments, tx).await {
+            if let Err(e) = agent.run_loop(input, tx).await {
                 tracing::error!("agent loop ended with error: {}", e);
             }
         });
@@ -1603,7 +1656,7 @@ impl Agent {
     /// Nesting depth of this session (top-level sessions are 0).
     pub(crate) async fn session_depth(&self) -> u32 {
         if let Some(session) = &self.session {
-            session.lock().await.meta().depth
+            session.lock().await.depth()
         } else {
             0
         }

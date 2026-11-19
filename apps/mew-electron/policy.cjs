@@ -62,10 +62,11 @@ function endpointPort(url) {
   return url.port || (['https:', 'wss:'].includes(url.protocol) ? '443' : '80');
 }
 
-function browserProtection(appUrl, daemonUrl, debugUrl) {
+function browserProtection(appUrl, daemonUrl, debugUrl, relayUrl) {
   const daemon = new URL(daemonUrl);
   const daemonPort = endpointPort(daemon);
   const ports = new Set([endpointPort(new URL(appUrl)), daemonPort, endpointPort(new URL(debugUrl))]);
+  if (relayUrl) ports.add(endpointPort(new URL(relayUrl)));
   const unavailable = ['80', '443'].includes(daemonPort)
     ? `The browser is unavailable while the daemon uses port ${daemonPort}. Connect to a daemon on another port to use browser tabs.`
     : null;

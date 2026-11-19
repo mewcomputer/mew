@@ -71,7 +71,7 @@ jobs:
           pnpm --filter mew-web-ui build
 
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }} -p mew
+        run: cargo build --locked --release --target ${{ matrix.target }} -p mew
 
       - name: Package binary
         run: |
@@ -172,8 +172,8 @@ jobs:
 
       - name: Build desktop client, daemon, and CEF helper
         run: |
-          cargo build --release -p mew -p mew-desktop
-          cargo build --release \
+          cargo build --locked --release -p mew -p mew-desktop
+          cargo build --locked --release \
             -p mew-cef-host --bin mew-cef-host-helper --no-default-features
 
       - name: Package desktop app

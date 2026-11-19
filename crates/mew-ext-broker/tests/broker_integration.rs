@@ -41,26 +41,30 @@ fn find_example_binary(name: &str) -> PathBuf {
     }
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     // mew-ext-broker is at crates/mew-ext-broker, so parent.parent is workspace root
-    let target = manifest
+    let workspace_root = manifest
         .parent()
         .and_then(|p| p.parent())
-        .unwrap_or(&manifest)
-        .join("target")
-        .join("debug")
-        .join("examples")
-        .join(name);
+        .unwrap_or(&manifest);
+    let target_dir = env::var_os("CARGO_TARGET_DIR").map_or_else(
+        || workspace_root.join("target"),
+        |dir| workspace_root.join(dir),
+    );
+    let target = target_dir.join("debug").join("examples").join(name);
 
     if target.exists() {
         return target;
     }
 
     // Build it
-    let workspace_root = manifest
-        .parent()
-        .and_then(|p| p.parent())
-        .unwrap_or(&manifest);
     let status = Command::new("cargo")
-        .args(["build", "--example", name, "-p", "mew-hooks-runtime"])
+        .args([
+            "build",
+            "--locked",
+            "--example",
+            name,
+            "-p",
+            "mew-hooks-runtime",
+        ])
         .current_dir(workspace_root)
         .status()
         .expect("cargo build example");

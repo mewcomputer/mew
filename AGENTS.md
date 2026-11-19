@@ -280,8 +280,9 @@ deterministic human display name and emits progress through
 
 The default subagent time limit is 600 seconds, configurable through
 `[orchestration] default_max_duration_secs` or per subagent with
-`max_duration_secs`. The runner checks elapsed time after each provider
-message, so a stalled message can exceed the limit. The parent's result is the
+`max_duration_secs`. The deadline covers model requests, tools, and schema
+correction. On expiry the runner cancels the child and gives it a bounded
+interval to save partial output. The parent's result is the
 `exit_tool` payload, or the final assistant message when that tool is not used;
 earlier narration and progress updates do not become the parent's result.
 Subagents should put their complete deliverable, including requested JSON, in

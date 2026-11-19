@@ -381,7 +381,7 @@ async fn test_clear_context_empties_messages() {
     agent.load_messages(vec![msg]).await;
     assert_eq!(agent.messages.lock().await.len(), 1);
 
-    agent.clear_context().await;
+    agent.clear_context().await.unwrap();
     assert_eq!(agent.messages.lock().await.len(), 0);
 }
 
@@ -420,7 +420,7 @@ async fn test_clear_context_preserves_permission_caches() {
         "session-allow should hit before /clear"
     );
 
-    agent.clear_context().await;
+    agent.clear_context().await.unwrap();
     assert_eq!(
         agent.messages.lock().await.len(),
         0,
@@ -446,7 +446,7 @@ async fn test_clear_context_preserves_permission_caches() {
     agent.workspace_allowances.lock().await.insert(dir.clone());
     assert!(agent.workspace_allowances.lock().await.contains(&dir));
 
-    agent.clear_context().await;
+    agent.clear_context().await.unwrap();
 
     assert!(
         agent.workspace_allowances.lock().await.contains(&dir),
@@ -469,7 +469,7 @@ async fn test_clear_context_writes_marker_to_session() {
         None,
     );
 
-    agent.clear_context().await;
+    agent.clear_context().await.unwrap();
 
     let msgs = mew_session::Reader::load_from(tmp.path(), &session_id)
         .await
@@ -484,6 +484,108 @@ async fn test_clear_context_writes_marker_to_session() {
         is_synthetic_marker,
         "marker should carry a synthetic text part"
     );
+}
+
+#[tokio::test]
+async fn clear_context_stays_cleared_after_session_reload() {
+    let directory = tempfile::tempdir().unwrap();
+    let id = ulid::Ulid::new().to_string();
+    let writer = mew_session::Writer::open_at(directory.path(), &id)
+        .await
+        .unwrap();
+    let agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        Some(writer),
+        vec![],
+        None,
+    );
+    let old = context_message(Role::User, "Discard this old instruction.".into());
+    let retained = context_message(Role::User, "Use the new instructions.".into());
+    agent.append_message(old.clone()).await;
+    agent.clear_context().await.unwrap();
+    agent.append_message(retained.clone()).await;
+
+    let history = mew_session::Reader::load_from(directory.path(), &id)
+        .await
+        .unwrap();
+    assert_eq!(
+        history.first(),
+        Some(&old),
+        "the transcript remains complete"
+    );
+    let resumed = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    resumed.load_messages(history).await;
+    assert_eq!(*resumed.messages.lock().await, vec![retained]);
+}
+
+#[tokio::test]
+async fn failed_clear_preserves_live_and_reloaded_context() {
+    let directory = tempfile::tempdir().unwrap();
+    let id = ulid::Ulid::new().to_string();
+    let writer = mew_session::Writer::open_at(directory.path(), &id)
+        .await
+        .unwrap();
+    let transcript = writer.path().clone();
+    let saved = transcript.with_extension("saved");
+    let agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        Some(writer),
+        vec![],
+        None,
+    );
+    let original = context_message(Role::User, "Keep this instruction.".into());
+    agent.append_message(original.clone()).await;
+    tokio::fs::rename(&transcript, &saved).await.unwrap();
+    tokio::fs::create_dir(&transcript).await.unwrap();
+
+    assert!(agent.clear_context().await.is_err());
+    assert_eq!(*agent.messages.lock().await, vec![original.clone()]);
+
+    tokio::fs::remove_dir(&transcript).await.unwrap();
+    tokio::fs::rename(&saved, &transcript).await.unwrap();
+    let history = mew_session::Reader::load_from(directory.path(), &id)
+        .await
+        .unwrap();
+    assert_eq!(history, vec![original]);
+}
+
+#[tokio::test]
+async fn clear_succeeds_when_the_transcript_commits_but_metadata_cannot_update() {
+    let directory = tempfile::tempdir().unwrap();
+    let id = ulid::Ulid::new().to_string();
+    let writer = mew_session::Writer::open_at(directory.path(), &id)
+        .await
+        .unwrap();
+    let metadata = writer.path().with_file_name("meta.json");
+    let agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        Some(writer),
+        vec![],
+        None,
+    );
+    let original = context_message(Role::User, "Clear this instruction.".into());
+    agent.append_message(original.clone()).await;
+    tokio::fs::remove_file(&metadata).await.unwrap();
+
+    agent.clear_context().await.unwrap();
+    assert!(agent.messages.lock().await.is_empty());
+    let history = mew_session::Reader::load_from(directory.path(), &id)
+        .await
+        .unwrap();
+    assert_eq!(history.first(), Some(&original));
+    assert!(matches!(
+        history.last().map(|message| message.parts.as_slice()),
+        Some([Part::Text(marker)]) if marker.synthetic && marker.text == crate::turn::CONTEXT_CLEARED_TEXT
+    ));
 }
 
 #[tokio::test]
@@ -502,10 +604,8 @@ async fn test_flagged_files_re_injected_after_compaction() {
         vec![],
         None,
     );
-    // Tiny context window so compaction triggers; keep only the most recent
-    // turn so older history is dropped and the flagged file is the surviving
-    // signal.
-    agent.context_window = 10;
+    // Forced compaction leaves room for the current prompt and included plan.
+    agent.context_window = 256;
     agent.keep_turns = 1;
 
     // Pre-populate history so compaction has something to compact away.
@@ -668,6 +768,107 @@ async fn test_compaction_keeps_tool_call_with_result() {
     }));
 }
 
+fn context_message(role: Role, text: String) -> Message {
+    let id = ulid::Ulid::new();
+    let session_id = ulid::Ulid::new();
+    Message {
+        id,
+        session_id,
+        role,
+        parts: vec![Part::Text(TextPart {
+            base: PartBase {
+                id: ulid::Ulid::new(),
+                message_id: id,
+                session_id,
+            },
+            text,
+            synthetic: false,
+        })],
+        time: Time {
+            created: 0,
+            completed: None,
+        },
+        assistant: None,
+    }
+}
+
+#[tokio::test]
+async fn rejects_request_when_persona_tools_and_output_reserve_leave_no_room() {
+    let provider = Arc::new(CapturingProvider::new(vec![FakeProvider::text_response(
+        "ok",
+    )]));
+    let mut tool = EchoTool::mutating();
+    tool.schema["description"] = serde_json::json!("additional schema detail ".repeat(30));
+    let mut agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![Arc::new(tool)],
+        None,
+    );
+    agent.set_model_info("gpt-4o", "fixture");
+    agent.context_window = 128;
+    agent.default_max_output_tokens = 32;
+    agent.persona_prompt = Some("additional persona guidance ".repeat(20));
+
+    let mut events = agent.run("hello".into());
+    let mut overflow = false;
+    while let Some(event) = events.recv().await {
+        if matches!(event, AgentEvent::Error(message) if message.contains("context window")) {
+            overflow = true;
+        }
+    }
+
+    assert!(overflow);
+    assert!(provider.captured.lock().unwrap().is_empty());
+    assert_eq!(agent.messages.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn compaction_carries_recent_user_constraints_without_retaining_large_history() {
+    let provider = Arc::new(CapturingProvider::new(vec![FakeProvider::text_response(
+        "ok",
+    )]));
+    let mut agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    agent.set_model_info("gpt-4o", "fixture");
+    agent.context_window = 1024;
+    agent.default_max_output_tokens = 256;
+    agent.keep_turns = 1;
+    let historical = context_message(Role::User, "old bulk paste ".repeat(400));
+    let constraint = context_message(Role::User, "Keep the public API stable.".into());
+    let assistant = context_message(Role::Assistant, "Understood.".into());
+    agent
+        .load_messages(vec![historical, constraint, assistant])
+        .await;
+
+    let mut events = agent.run("Proceed with the migration.".into());
+    while events.recv().await.is_some() {}
+
+    let captured = provider.captured.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    let text: Vec<_> = captured[0]
+        .messages
+        .iter()
+        .filter(|message| message.role == Role::User)
+        .flat_map(|message| message.parts.iter())
+        .filter_map(|part| match part {
+            Part::Text(part) => Some(part.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(text
+        .iter()
+        .any(|text| text.contains("Keep the public API stable.")));
+    assert!(text.iter().all(|text| !text.contains("old bulk paste")));
+    assert_eq!(text.last(), Some(&"Proceed with the migration."));
+}
+
 #[tokio::test]
 async fn test_compaction_marker_preserves_prefix_across_turns_and_resume() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -738,15 +939,18 @@ async fn test_compaction_marker_preserves_prefix_across_turns_and_resume() {
             .any(|part| matches!(part, Part::Compaction(_)))
     }));
 
+    let resumed_provider = Arc::new(CapturingProvider::new(vec![FakeProvider::text_response(
+        "resumed",
+    )]));
     let resumed = Agent::new(
-        std::sync::Arc::new(FakeProvider::new(vec![])),
+        resumed_provider.clone(),
         std::sync::Arc::new(NopDispatcher),
         None,
         vec![],
         None,
     );
     resumed.load_messages(raw).await;
-    let resumed_messages = resumed.messages.lock().await;
+    let resumed_messages = resumed.messages.lock().await.clone();
     assert!(!resumed_messages.iter().any(|message| message.id == old_id));
     assert!(resumed_messages.iter().any(|message| {
         message
@@ -759,6 +963,16 @@ async fn test_compaction_marker_preserves_prefix_across_turns_and_resume() {
             .parts
             .iter()
             .any(|part| matches!(part, Part::Text(text) if text.text == "first prompt"))
+    }));
+    let mut events = resumed.run("resumed prompt".into());
+    while events.recv().await.is_some() {}
+    let captured = resumed_provider.captured.lock().unwrap();
+    assert!(captured[0].messages.iter().any(|message| {
+        message.role == Role::User
+            && message
+                .parts
+                .iter()
+                .any(|part| matches!(part, Part::Text(text) if text.text.contains("old context")))
     }));
 }
 
@@ -1016,6 +1230,104 @@ async fn test_text_turn() {
     assert_eq!(msgs.len(), 2);
     assert_eq!(msgs[0].role, Role::User);
     assert_eq!(msgs[1].role, Role::Assistant);
+}
+
+#[tokio::test]
+async fn unconfirmed_tool_calls_are_discarded_and_the_partial_reply_is_saved() {
+    for finish in [None, Some(Finish::Length), Some(Finish::Error)] {
+        let directory = tempfile::tempdir().unwrap();
+        let session_id = ulid::Ulid::new();
+        let session_key = session_id.to_string();
+        let writer = mew_session::Writer::open_at(directory.path(), &session_key)
+            .await
+            .unwrap();
+        let mut script = FakeProvider::text_response("partial reply");
+        script.pop();
+        let mut tool = FakeProvider::tool_call("echo", "unconfirmed", serde_json::json!({}));
+        let mut terminal = tool.pop().unwrap();
+        script.extend(tool);
+        if let Some(finish) = finish {
+            let ProviderEvent::MessageEnd { finish: kind, .. } = &mut terminal else {
+                panic!("expected completion");
+            };
+            *kind = finish;
+            script.push(terminal);
+        }
+        let provider = Arc::new(CapturingProvider::new(vec![script]));
+        let agent = Agent::new(
+            provider.clone(),
+            Arc::new(NopDispatcher),
+            Some(writer),
+            vec![Arc::new(EchoTool {
+                schema: serde_json::json!({"type": "object"}),
+                sensitivity: Sensitivity::ReadOnly,
+            })],
+            Some(session_id),
+        );
+
+        let mut events = agent.run("call echo".into());
+        let mut terminal_error = None;
+        while let Some(event) = events.recv().await {
+            match event {
+                AgentEvent::ToolStart { .. } => panic!("unconfirmed tool executed for {finish:?}"),
+                AgentEvent::Error(error) => terminal_error = Some(error),
+                _ => {}
+            }
+        }
+        assert_eq!(provider.captured.lock().unwrap().len(), 1);
+        if finish != Some(Finish::Length) {
+            assert!(
+                terminal_error.is_some(),
+                "missing terminal error for {finish:?}"
+            );
+        }
+        let transcript = mew_session::Reader::load_from(directory.path(), &session_key)
+            .await
+            .unwrap();
+        assert_eq!(transcript.len(), 2);
+        let assistant = transcript.last().unwrap();
+        assert!(matches!(&assistant.parts[..], [Part::Text(part)] if part.text == "partial reply"));
+        if finish != Some(Finish::Length) {
+            assert!(assistant.assistant.as_ref().unwrap().error.is_some());
+        }
+    }
+}
+
+#[tokio::test]
+async fn response_usage_reports_the_same_cost_as_the_saved_message() {
+    for (reported, expected) in [(0.0, 0.000_03), (0.125, 0.125)] {
+        let mut script = FakeProvider::text_response("response");
+        let Some(ProviderEvent::MessageEnd { usage, cost, .. }) = script.last_mut() else {
+            panic!("expected completion");
+        };
+        *usage = Tokens {
+            input: 10,
+            output: 5,
+            ..Tokens::default()
+        };
+        *cost = reported;
+        let mut agent = Agent::new(
+            Arc::new(CapturingProvider::new(vec![script])),
+            Arc::new(NopDispatcher),
+            None,
+            vec![],
+            None,
+        );
+        agent.input_price = 2.0;
+        agent.output_price = 2.0;
+
+        let mut events = agent.run("hi".into());
+        let mut emitted_cost = None;
+        while let Some(event) = events.recv().await {
+            if let AgentEvent::Provider(ProviderEvent::MessageEnd { cost, .. }) = event {
+                emitted_cost = Some(cost);
+            }
+        }
+        let messages = agent.messages.lock().await;
+        let stored_cost = messages.last().unwrap().assistant.as_ref().unwrap().cost;
+        assert!((stored_cost - expected).abs() < 1e-12);
+        assert_eq!(emitted_cost, Some(stored_cost));
+    }
 }
 
 #[tokio::test]
@@ -3649,6 +3961,58 @@ impl Provider for ErroringProvider {
 }
 
 #[tokio::test]
+async fn cancellation_interrupts_primary_and_fallback_provider_startup() {
+    #[derive(Default)]
+    struct WaitingProvider(tokio::sync::Notify);
+
+    #[async_trait]
+    impl Provider for WaitingProvider {
+        fn name(&self) -> &str {
+            "waiting"
+        }
+
+        async fn stream(&self, _req: Request) -> Result<EventStream, ProviderError> {
+            self.0.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    for fallback in [false, true] {
+        let waiting = Arc::new(WaitingProvider::default());
+        let provider: Arc<dyn Provider> = if fallback {
+            Arc::new(ErroringProvider)
+        } else {
+            waiting.clone()
+        };
+        let mut agent = Agent::new(provider, Arc::new(NopDispatcher), None, vec![], None);
+        if fallback {
+            let fallback_provider = waiting.clone();
+            agent.fallback_models = Some(vec!["test/waiting".into()]);
+            agent.set_provider_builder(Box::new(move |_| Ok(fallback_provider.clone())));
+        }
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut events = agent.run_with_parts("hello".into(), vec![], Some(cancel.clone()));
+        tokio::time::timeout(std::time::Duration::from_secs(3), waiting.0.notified())
+            .await
+            .expect("provider startup did not begin");
+        cancel.cancel();
+        let errors = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let mut errors = Vec::new();
+            while let Some(event) = events.recv().await {
+                if let AgentEvent::Error(error) = event {
+                    errors.push(error);
+                }
+            }
+            errors
+        })
+        .await
+        .expect("cancelled provider startup did not finish");
+        assert_eq!(errors, ["aborted"]);
+    }
+}
+
+#[tokio::test]
 async fn test_fallback_model_retries_on_stream_error() {
     use mew_message::SessionId;
 
@@ -3674,23 +4038,26 @@ async fn test_fallback_model_retries_on_stream_error() {
 
     let mut rx = agent.run("hello".into());
     let mut got_text = String::new();
-    let mut had_error = false;
+    let mut tried_fallback = false;
     while let Some(ev) = rx.recv().await {
         match ev {
             crate::AgentEvent::Provider(ProviderEvent::PartDelta { delta, .. }) => {
                 got_text.push_str(&delta);
             }
-            crate::AgentEvent::Error(msg) if msg.contains("trying fallback") => {
-                had_error = true;
+            AgentEvent::Provider(ProviderEvent::RetryWait { reason, .. })
+                if reason.contains("trying fallback") =>
+            {
+                tried_fallback = true;
             }
-            crate::AgentEvent::Provider(ProviderEvent::MessageEnd { .. }) => break,
-            crate::AgentEvent::Error(_) => {}
+            AgentEvent::Error(error) => {
+                panic!("successful fallback emitted a terminal error: {error}")
+            }
             _ => {}
         }
     }
     assert!(
-        had_error,
-        "should have emitted a 'trying fallback' error event"
+        tried_fallback,
+        "should have emitted a 'trying fallback' status"
     );
     assert!(
         got_text.contains("fallback response"),

@@ -5,32 +5,36 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::fs::File;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tokio::io::AsyncReadExt;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::sync::{oneshot, Mutex};
 use tokio_util::sync::CancellationToken;
 
 use mew_agent::{Agent, GoalDecision};
 use mew_hooks::PermissionDecision;
+use mew_message::{Message, ProviderEventWire};
 use mew_protocol::{ServerMessage, SessionInfo, SessionState};
 
+use crate::history::{HistoryIndex, HistorySnapshot};
 use crate::projects::ProjectPinsStore;
 
 pub struct PendingRequest<T> {
     pub sender: oneshot::Sender<T>,
     pub message: ServerMessage,
 }
-use crate::{AgentBuildParams, AgentBuilder, ModelLister, ModelSwitcher};
+use crate::{AgentBuildParams, AgentBuilder, ClientSender, ModelLister, ModelSwitcher};
 
 /// Error returned when attaching to a session fails.
 #[derive(Debug)]
 pub enum AttachError {
     NotFound,
     NotTopLevel,
+    InUse,
     BuildAgent(anyhow::Error),
 }
 
@@ -39,6 +43,7 @@ impl fmt::Display for AttachError {
         match self {
             AttachError::NotFound => write!(f, "session not found"),
             AttachError::NotTopLevel => write!(f, "only top-level sessions can be attached"),
+            AttachError::InUse => write!(f, "session is open in another daemon"),
             AttachError::BuildAgent(e) => write!(f, "failed to build agent: {e}"),
         }
     }
@@ -65,21 +70,17 @@ pub struct Session {
     /// The single agent for this session. Cloned for each turn; mutated in
     /// place for model switches.
     pub agent: Mutex<Agent>,
+    history_index: Mutex<Arc<HistoryIndex>>,
     pub browser_access: mew_tools::browser::BrowserAccess,
     /// Ensures only one turn or model switch runs at a time.
     pub turn_lock: Mutex<()>,
+    pub(crate) provider_replay: Mutex<ProviderReplay>,
     pub(crate) activity: Mutex<crate::activity::SessionActivity>,
     pub(crate) job_observers: Mutex<HashMap<String, tokio::task::AbortHandle>>,
     pub(crate) prompt_receipts:
         Mutex<HashMap<String, (mew_protocol::PromptStatus, Option<String>)>>,
     /// Broadcast targets: (client_id, sender, kind) per attached client.
-    pub clients: Mutex<
-        Vec<(
-            u64,
-            mpsc::UnboundedSender<ServerMessage>,
-            mew_protocol::ClientKind,
-        )>,
-    >,
+    pub clients: Mutex<Vec<(u64, ClientSender, mew_protocol::ClientKind)>>,
     /// Pending permission / workspace-permission / subagent-permission requests.
     pub pending_permissions: Mutex<HashMap<String, PendingRequest<PermissionDecision>>>,
     /// Pending ask-user requests.
@@ -103,14 +104,17 @@ pub struct Session {
     pub summary_running: AtomicBool,
     /// Sessions root directory (for meta persistence).
     pub session_dir: PathBuf,
+    // Keep the lease until the runtime and its current operations release it.
+    writer_lease: Option<File>,
 }
 
 impl Session {
-    pub(crate) async fn subagent_history(
-        &self,
-        child_session_id: &str,
-    ) -> Result<Vec<mew_message::Message>> {
-        ulid::Ulid::from_string(child_session_id).context("invalid child session ID")?;
+    pub(crate) async fn subagent_transcript_root(&self, child_session_id: &str) -> Result<PathBuf> {
+        anyhow::ensure!(
+            ulid::Ulid::from_string(child_session_id)
+                .is_ok_and(|id| id.to_string() == child_session_id),
+            "invalid child session ID"
+        );
         let recorded_parent = self.agent.lock().await.session_id.to_string();
         let mut parent = None;
         // Both parent folder conventions require recorded child membership.
@@ -139,6 +143,14 @@ impl Session {
             meta.id == child_session_id && meta.parent_session_id.as_deref() == Some(&parent),
             "child metadata does not match the attached parent"
         );
+        Ok(children)
+    }
+
+    pub(crate) async fn subagent_history(
+        &self,
+        child_session_id: &str,
+    ) -> Result<Vec<mew_message::Message>> {
+        let children = self.subagent_transcript_root(child_session_id).await?;
         let mut transcript =
             tokio::fs::File::open(children.join(child_session_id).join("session.jsonl"))
                 .await
@@ -220,42 +232,38 @@ impl Session {
         .await;
     }
 
-    pub(crate) async fn send_todos(&self, sender: &mpsc::UnboundedSender<ServerMessage>) {
+    pub(crate) async fn send_todos(&self, sender: &ClientSender) {
         let todos = self.agent.lock().await.todos.clone();
         let list = todos.lock().await;
         let _ = sender.send(ServerMessage::TodosUpdated {
             todos: wire_todos(&list.items),
         });
     }
-    /// Read the complete transcript, including history removed from model context
-    /// and current message state that has not yet been persisted.
-    pub(crate) async fn history(&self) -> Result<Vec<mew_message::Message>> {
-        let agent = self.agent.lock().await;
-        let Some(writer) = &agent.session else {
-            return Ok(agent.messages.lock().await.clone());
+    /// Snapshot transcript positions through the current stable log boundary.
+    pub(crate) async fn history(&self) -> Result<HistorySnapshot> {
+        let (writer, messages) = {
+            let agent = self.agent.lock().await;
+            (agent.session.clone(), agent.messages.clone())
         };
-        // Serialize with writes so the reader never sees a partial JSONL record.
-        let writer = writer.lock().await;
-        let mut history = mew_session::Reader::load_from(&self.session_dir, &self.id)
+        let Some(writer) = writer else {
+            return Ok(HistorySnapshot::new(None, Arc::default(), messages).await);
+        };
+
+        let mut index = self.history_index.lock().await;
+        let (mut file, metadata) = {
+            let writer = writer.lock().await;
+            let file = tokio::fs::File::open(writer.path())
+                .await
+                .context("open session transcript")?;
+            let metadata = file.metadata().await.context("stat session transcript")?;
+            (file, metadata)
+        };
+        HistoryIndex::refresh(&mut index, &mut file, &metadata)
             .await
             .context("read session transcript")?;
-        drop(writer);
-        let positions = history
-            .iter()
-            .enumerate()
-            .map(|(index, message)| (message.id, index))
-            .collect::<HashMap<_, _>>();
-        let messages = agent.messages.lock().await;
-        for message in messages.iter() {
-            if let Some(&index) = positions.get(&message.id) {
-                if history[index] != *message {
-                    history[index] = message.clone();
-                }
-            } else {
-                history.push(message.clone());
-            }
-        }
-        Ok(history)
+        let snapshot = index.clone();
+        drop(index);
+        Ok(HistorySnapshot::new(Some(file), snapshot, messages).await)
     }
 
     pub(crate) async fn policy(&self, agent: &Agent) -> mew_session::SessionPolicy {
@@ -286,7 +294,9 @@ impl Session {
             id,
             browser_access: agent.browser_access.clone(),
             agent: Mutex::new(agent),
+            history_index: Mutex::default(),
             turn_lock: Mutex::new(()),
+            provider_replay: Mutex::new(ProviderReplay::default()),
             activity: Mutex::new(crate::activity::SessionActivity::default()),
             job_observers: Mutex::new(HashMap::new()),
             prompt_receipts: Mutex::new(HashMap::new()),
@@ -303,6 +313,7 @@ impl Session {
             is_running: Mutex::new(false),
             summary_running: AtomicBool::new(false),
             session_dir,
+            writer_lease: None,
         }
     }
 
@@ -331,7 +342,7 @@ impl Session {
     /// Attach a client sender. Returns (client_id, was_first_client).
     pub async fn attach_client(
         &self,
-        sender: mpsc::UnboundedSender<ServerMessage>,
+        sender: ClientSender,
         client_kind: mew_protocol::ClientKind,
     ) -> (u64, bool) {
         let mut clients = self.clients.lock().await;
@@ -344,7 +355,7 @@ impl Session {
     /// Confirm ownership before exposing the client to implicit session events.
     pub(crate) async fn attach_client_ready(
         &self,
-        sender: mpsc::UnboundedSender<ServerMessage>,
+        sender: ClientSender,
         client_kind: mew_protocol::ClientKind,
         ready: ServerMessage,
     ) -> (u64, bool) {
@@ -365,6 +376,17 @@ impl Session {
 
     pub async fn client_count(&self) -> usize {
         self.clients.lock().await.len()
+    }
+
+    async fn has_running_jobs(&self) -> bool {
+        let agent = self.agent.lock().await;
+        let jobs = agent.shell_jobs.lock().await;
+        for job in jobs.values() {
+            if !job.state.lock().await.is_terminal() {
+                return true;
+            }
+        }
+        false
     }
 
     /// Return the clients already attached to this session, excluding one
@@ -401,6 +423,19 @@ impl Session {
 
     /// Broadcast a message to all attached clients. Removes any sender that fails.
     pub async fn broadcast(&self, mut msg: ServerMessage) {
+        let _provider_publication = match &msg {
+            ServerMessage::Provider { event } => {
+                let mut replay = self.provider_replay.lock().await;
+                replay.record(event);
+                Some(replay)
+            }
+            ServerMessage::ErrorEvent { .. } => {
+                let mut replay = self.provider_replay.lock().await;
+                replay.clear();
+                Some(replay)
+            }
+            _ => None,
+        };
         let mut activity = if matches!(
             &msg,
             ServerMessage::SubagentStart { .. }
@@ -418,7 +453,7 @@ impl Session {
             }
         }
         let mut clients = self.clients.lock().await;
-        clients.retain(|(_, sender, _)| sender.send(msg.clone()).is_ok());
+        clients.retain(|(_, sender, _)| sender.send_ref(&msg).is_ok());
     }
 
     /// Cancel the current turn, if any. Also drains pending requests so the
@@ -456,6 +491,65 @@ impl Session {
         let asks = self.pending_ask_user.lock().await.len();
         let goals = self.pending_goal_proposals.lock().await.len();
         (asks + goals) as u32
+    }
+}
+
+/// The events needed to render the current provider response from its start.
+/// Drop the replay once that response is available through ordinary history.
+#[derive(Default)]
+pub(crate) struct ProviderReplay(Vec<ProviderEventWire>);
+
+impl ProviderReplay {
+    fn record(&mut self, event: &ProviderEventWire) {
+        match event {
+            ProviderEventWire::MessageEnd { .. } | ProviderEventWire::Error(_) => self.clear(),
+            ProviderEventWire::RetryWait { .. } => {}
+            ProviderEventWire::PartDelta {
+                part_id,
+                field,
+                delta,
+            } => {
+                if let Some(ProviderEventWire::PartDelta {
+                    part_id: previous_id,
+                    field: previous_field,
+                    delta: previous_delta,
+                }) = self.0.last_mut()
+                {
+                    if previous_id == part_id && previous_field == field {
+                        previous_delta.push_str(delta);
+                        return;
+                    }
+                }
+                self.0.push(event.clone());
+            }
+            _ => self.0.push(event.clone()),
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    pub(crate) fn present_in(&self, history: &[Message]) -> bool {
+        let first_part = self.0.iter().find_map(|event| match event {
+            ProviderEventWire::PartStart { part } => Some(part.id()),
+            _ => None,
+        });
+        // The agent may have persisted MessageEnd before the event reached the
+        // daemon's publisher. The history page already contains that reply.
+        first_part.is_some_and(|id| {
+            history
+                .iter()
+                .any(|message| message.parts.iter().any(|part| part.id() == id))
+        })
+    }
+
+    pub(crate) fn send(&self, client: &ClientSender) {
+        for event in &self.0 {
+            let _ = client.send(ServerMessage::Provider {
+                event: event.clone(),
+            });
+        }
     }
 }
 
@@ -519,7 +613,13 @@ impl SessionManager {
     pub async fn create(&self, cwd: Option<PathBuf>) -> Result<Arc<Session>> {
         let policy = self.read_session_defaults().await?;
         let session_id = format!("sess_{}", ulid::Ulid::new());
-        let writer = mew_session::Writer::open_at(&self.session_dir, &session_id)
+        let lease = mew_session::try_writer_lease(&self.session_dir, &session_id)
+            .await
+            .context("acquire session writer")?
+            .context("session is open in another daemon")?;
+        let mut meta = mew_session::Meta::new(&session_id);
+        meta.cwd = cwd.as_ref().map(|path| path.to_string_lossy().into_owned());
+        let writer = mew_session::Writer::open_at_with_meta(&self.session_dir, &session_id, meta)
             .await
             .context("open session writer")?;
         let (agent, model, provider) = (self.builder)(AgentBuildParams {
@@ -529,18 +629,36 @@ impl SessionManager {
             policy,
         })?;
         load_todos(&agent).await?;
-        let session = Arc::new(Session::new(
+        let mut session = Session::new(
             session_id.clone(),
             agent,
             model.clone(),
             provider.clone(),
             self.session_dir.clone(),
-        ));
+        );
+        session.writer_lease = Some(lease);
+        let session = Arc::new(session);
         session
             .save_policy(&session.policy(&*session.agent.lock().await).await)
             .await?;
         self.active.lock().await.insert(session_id, session.clone());
         Ok(session)
+    }
+
+    pub(crate) async fn update_metadata(
+        &self,
+        session_id: &str,
+        change: impl FnOnce(&mut mew_session::Meta) + Send + 'static,
+    ) -> Result<mew_session::Meta> {
+        anyhow::ensure!(
+            std::path::Path::new(session_id)
+                .file_name()
+                .is_some_and(|name| name == session_id),
+            "invalid session id"
+        );
+        mew_session::Meta::update(&self.session_dir, session_id, change)
+            .await?
+            .context("session not found")
     }
 
     /// Persisted defaults apply only when creating a chat, never when resuming one.
@@ -604,6 +722,13 @@ impl SessionManager {
             return Ok(session);
         }
 
+        if !std::path::Path::new(session_id)
+            .file_name()
+            .is_some_and(|name| name == session_id)
+        {
+            return Err(AttachError::NotFound);
+        }
+
         // Acquire a per-session load lock to prevent TOCTOU races.
         let load_lock = {
             let mut loading = self.loading.lock().await;
@@ -619,6 +744,21 @@ impl SessionManager {
             return Ok(session);
         }
 
+        // Avoid creating lock files for unknown session IDs. Re-read metadata
+        // under the lease before building the runtime to exclude idle deletion.
+        match tokio::fs::symlink_metadata(self.session_dir.join(session_id)).await {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => return Err(AttachError::NotFound),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(AttachError::NotFound);
+            }
+            Err(error) => return Err(AttachError::BuildAgent(error.into())),
+        }
+        let lease = mew_session::try_writer_lease(&self.session_dir, session_id)
+            .await
+            .context("acquire session writer")?
+            .ok_or(AttachError::InUse)?;
+
         // Read meta to check depth and created_at.
         let meta = match mew_session::Meta::read(&self.session_dir, session_id).await {
             Ok(Some(m)) => m,
@@ -631,6 +771,9 @@ impl SessionManager {
 
         if meta.depth != 0 {
             return Err(AttachError::NotTopLevel);
+        }
+        if meta.id != session_id {
+            return Err(AttachError::NotFound);
         }
 
         let cwd = meta.cwd.clone().map(PathBuf::from);
@@ -653,19 +796,34 @@ impl SessionManager {
         .map_err(AttachError::BuildAgent)?;
         load_todos(&agent).await.map_err(AttachError::BuildAgent)?;
 
-        let messages = mew_session::Reader::load_from(&self.session_dir, session_id)
+        // The writer has already migrated and repaired the log. Reuse the
+        // same scan for model context, transcript pages, and receipt recovery.
+        let path = self.session_dir.join(session_id).join("session.jsonl");
+        let mut file = tokio::fs::File::open(path)
+            .await
+            .context("open session history")
+            .map_err(AttachError::BuildAgent)?;
+        let (history_index, messages, accepted_requests) = HistoryIndex::load(&mut file)
             .await
             .context("load session history")
             .map_err(AttachError::BuildAgent)?;
         agent.load_messages(messages).await;
 
-        let session = Arc::new(Session::new(
+        let mut session = Session::new(
             session_id.to_string(),
             agent,
             model.clone(),
             provider.clone(),
             self.session_dir.clone(),
-        ));
+        );
+        session.writer_lease = Some(lease);
+        *session.history_index.get_mut() = Arc::new(history_index);
+        session.prompt_receipts.get_mut().extend(
+            accepted_requests
+                .into_iter()
+                .map(|id| (id, (mew_protocol::PromptStatus::Accepted, None))),
+        );
+        let session = Arc::new(session);
         session
             .save_policy(&session.policy(&*session.agent.lock().await).await)
             .await
@@ -685,6 +843,89 @@ impl SessionManager {
         self.loading.lock().await.remove(session_id);
     }
 
+    pub(crate) async fn delete(
+        &self,
+        session_id: &str,
+        requesting_client: Option<&Arc<Session>>,
+        requesting_browser: Option<&std::sync::Weak<Session>>,
+    ) -> Result<()> {
+        let id = session_id.strip_prefix("sess_").unwrap_or(session_id);
+        anyhow::ensure!(
+            ulid::Ulid::from_string(id).is_ok_and(|value| value.to_string() == id),
+            "invalid session id"
+        );
+
+        let load_lock = self
+            .loading
+            .lock()
+            .await
+            .entry(session_id.to_string())
+            .or_default()
+            .clone();
+        let _load = load_lock.lock().await;
+        let dir = self.session_dir.join(session_id);
+        match tokio::fs::symlink_metadata(&dir).await {
+            Ok(metadata) => anyhow::ensure!(metadata.is_dir(), "session path is not a directory"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error).context("inspect session directory"),
+        }
+        let mut active = self.active.lock().await;
+        let _lease = if let Some(session) = active.get(session_id) {
+            let requester_is_attached =
+                requesting_client.is_some_and(|owner| Arc::ptr_eq(owner, session));
+            anyhow::ensure!(
+                session.client_count().await <= usize::from(requester_is_attached),
+                "another client is attached to this session"
+            );
+            let requester_owns_browser = requesting_browser
+                .is_some_and(|owner| std::ptr::eq(owner.as_ptr(), Arc::as_ptr(session)));
+            // Lookups and queued work hold their own references. Keep the
+            // registry locked until the directory leaves its registered path.
+            let owners =
+                1 + usize::from(requester_is_attached) + usize::from(requester_owns_browser);
+            anyhow::ensure!(
+                Arc::strong_count(session) <= owners && !session.has_running_jobs().await,
+                "session still has work in progress"
+            );
+            None
+        } else {
+            drop(active);
+            let lease = mew_session::try_writer_lease(&self.session_dir, session_id)
+                .await
+                .context("acquire session writer for deletion")?
+                .context("session is open in another daemon")?;
+            // The local load lock prevents another local attach until the
+            // directory leaves its registered path.
+            active = self.active.lock().await;
+            Some(lease)
+        };
+        let Some(meta) = mew_session::Meta::read(&self.session_dir, session_id).await? else {
+            if !tokio::fs::try_exists(&dir).await? {
+                return Ok(());
+            }
+            return Err(anyhow::anyhow!("session metadata is missing"));
+        };
+        anyhow::ensure!(
+            meta.depth == 0 && meta.id == session_id,
+            "not a top-level session"
+        );
+        let tombstone = self
+            .session_dir
+            .join(format!(".deleted-{}", ulid::Ulid::new()));
+        tokio::fs::rename(&dir, &tombstone)
+            .await
+            .context("move session directory out of the registry")?;
+        if let Some(session) = active.remove(session_id) {
+            session.browser_access.clear();
+        }
+        drop(active);
+        drop(_load);
+        if let Err(error) = tokio::fs::remove_dir_all(tombstone).await {
+            tracing::warn!(%session_id, %error, "could not clean up deleted session files");
+        }
+        Ok(())
+    }
+
     /// Unload an unused runtime, or stop reaping if it was replaced or reattached.
     /// A connection that looked up the session but has not registered yet, or a
     /// queued/running operation, owns another strong reference. Check ownership
@@ -699,18 +940,7 @@ impl SessionManager {
         }
         // Background jobs outlive their parent turn. Read their state before
         // locking clients, since completion publication takes state then clients.
-        let has_running_jobs = {
-            let agent = session.agent.lock().await;
-            let jobs = agent.shell_jobs.lock().await;
-            let mut running = false;
-            for job in jobs.values() {
-                if !job.state.lock().await.is_terminal() {
-                    running = true;
-                    break;
-                }
-            }
-            running
-        };
+        let has_running_jobs = session.has_running_jobs().await;
         let clients = session.clients.lock().await;
         if !clients.is_empty() {
             return true;
@@ -733,19 +963,17 @@ impl SessionManager {
     pub async fn list(&self) -> Vec<SessionInfo> {
         let mut infos = Vec::new();
         let workspace_roots = crate::workspace_roots();
-        let active = self.active.lock().await;
+        let active: Vec<_> = self.active.lock().await.values().cloned().collect();
 
         // Active sessions.
-        for (id, session) in active.iter() {
+        for session in active {
+            let id = &session.id;
             let agent = session.agent.lock().await;
             // Skip empty sessions (no messages yet).
             let message_count = agent.messages.try_lock().map(|m| m.len()).unwrap_or(0);
             if message_count == 0 {
                 continue;
             }
-            // Read meta from disk: usage/context_tokens are persisted there
-            // by the turn's MessageEnd intercepts, and the writer's
-            // in-memory copy lags behind.
             let meta = match mew_session::Meta::read(&self.session_dir, id).await {
                 Ok(Some(meta)) => Some(meta),
                 _ => agent.session_meta().await,
@@ -793,8 +1021,6 @@ impl SessionManager {
                 first_message,
             });
         }
-        drop(active);
-
         // Idle sessions from disk.
         if let Ok(entries) = tokio::fs::read_dir(&self.session_dir).await {
             let mut entries = entries;
@@ -804,23 +1030,21 @@ impl SessionManager {
                     continue;
                 }
                 let id = match path.file_name().and_then(|s| s.to_str()) {
-                    Some(id) => id.to_string(),
-                    None => continue,
+                    Some(id) if !id.starts_with('.') => id.to_string(),
+                    _ => continue,
                 };
                 if self.active.lock().await.contains_key(&id) {
                     continue;
                 }
                 match mew_session::Meta::read(&self.session_dir, &id).await {
                     Ok(Some(meta)) if meta.depth == 0 => {
-                        // Auto-delete sessions with no messages.
+                        // Empty sessions don't need a sidebar entry.
                         let jsonl_path = path.join("session.jsonl");
                         let has_messages = match tokio::fs::metadata(&jsonl_path).await {
                             Ok(m) => m.len() > 0,
                             Err(_) => false,
                         };
                         if !has_messages {
-                            tracing::debug!(session_id = %id, "auto-deleting empty session");
-                            let _ = tokio::fs::remove_dir_all(&path).await;
                             continue;
                         }
                         let policy = match mew_session::SessionPolicy::read(&self.session_dir, &id)
@@ -933,15 +1157,6 @@ impl SessionManager {
 
     /// Get the cwd for a session (from active agent's meta or disk).
     pub async fn session_cwd(&self, session_id: &str) -> Option<PathBuf> {
-        let active = self.active.lock().await;
-        if let Some(session) = active.get(session_id) {
-            let agent = session.agent.lock().await;
-            let meta = agent.session_meta().await;
-            drop(agent);
-            drop(active);
-            return meta.and_then(|m| m.cwd.map(PathBuf::from));
-        }
-        drop(active);
         match mew_session::Meta::read(&self.session_dir, session_id).await {
             Ok(Some(meta)) => meta.cwd.map(PathBuf::from),
             _ => None,
@@ -982,12 +1197,10 @@ fn first_user_message_text(messages: &Mutex<Vec<mew_message::Message>>) -> Optio
 /// Only reads the first few lines to find it — efficient for large sessions.
 async fn first_user_message_from_disk(session_dir: &std::path::Path) -> Option<String> {
     let jsonl_path = session_dir.join("session.jsonl");
-    let data = tokio::fs::read_to_string(&jsonl_path).await.ok()?;
-    for line in data.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        if let Ok(msg) = serde_json::from_str::<mew_message::Message>(line) {
+    let mut reader = BufReader::new(tokio::fs::File::open(jsonl_path).await.ok()?);
+    let mut line = Vec::new();
+    while reader.read_until(b'\n', &mut line).await.ok()? > 0 {
+        if let Ok(msg) = serde_json::from_slice::<mew_message::Message>(&line) {
             if msg.role == mew_message::Role::User {
                 for part in &msg.parts {
                     if let mew_message::Part::Text(tp) = part {
@@ -998,6 +1211,7 @@ async fn first_user_message_from_disk(session_dir: &std::path::Path) -> Option<S
                 }
             }
         }
+        line.clear();
     }
     None
 }
@@ -1093,7 +1307,7 @@ mod tests {
                 !unloaded,
                 "reaping must retain the idle parent's running job"
             );
-            let (sender, _receiver) = mpsc::unbounded_channel();
+            let (sender, _receiver) = ClientSender::channel(CancellationToken::new());
             let (client_id, _) = session
                 .attach_client(sender, mew_protocol::ClientKind::Tui)
                 .await;

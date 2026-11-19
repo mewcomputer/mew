@@ -17,7 +17,7 @@ vi.mock("../components/input-area", () => ({ InputArea: () => null }));
 
 import { Route } from "../routes/index";
 
-afterEach(() => { cleanup(); localStorage.clear(); vi.clearAllMocks(); fixtures.router.state.location.pathname = "/"; });
+afterEach(() => { cleanup(); localStorage.clear(); vi.resetAllMocks(); fixtures.router.state.location = { pathname: "/" }; });
 
 it("does not reopen an older session after the user navigates elsewhere", async () => {
   let finish!: (id: string) => void;
@@ -27,7 +27,28 @@ it("does not reopen an older session after the user navigates elsewhere", async 
   const Component = Route.options.component!;
   render(<Component />);
   await waitFor(() => expect(fixtures.client.attachSession).toHaveBeenCalledWith("previous"));
-  fixtures.router.state.location.pathname = "/session/selected";
+  fixtures.router.state.location = { pathname: "/" };
   await act(async () => { finish("previous"); await Promise.resolve(); });
   expect(fixtures.router.navigate).not.toHaveBeenCalled();
+});
+
+it("retries reopening the last session if the socket closes before attach is confirmed", async () => {
+  let rejectAttach!: (error: Error) => void;
+  fixtures.client.attachSession
+    .mockReturnValueOnce(new Promise<string>((_, reject) => { rejectAttach = reject; }))
+    .mockResolvedValueOnce("previous");
+  localStorage.setItem("mew.sessionId", "previous");
+  useSessionStore.setState({ connectionState: "connected" });
+  const Component = Route.options.component!;
+  render(<Component />);
+  await waitFor(() => expect(fixtures.client.attachSession).toHaveBeenCalledTimes(1));
+
+  await act(async () => {
+    useSessionStore.setState({ connectionState: "reconnecting" });
+    rejectAttach(new Error("Connection closed"));
+  });
+  await act(async () => useSessionStore.setState({ connectionState: "connected" }));
+
+  expect(fixtures.client.attachSession).toHaveBeenCalledTimes(2);
+  expect(fixtures.router.navigate).toHaveBeenCalledWith({ to: "/session/$sessionId", params: { sessionId: "previous" } });
 });

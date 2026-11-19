@@ -18,32 +18,20 @@ use futures::{SinkExt, StreamExt};
 use mew_protocol::{ClientMessage, ServerMessage};
 use tempfile::{NamedTempFile, TempDir};
 use tokio::net::TcpStream;
-use tokio_tungstenite::tungstenite::{client::ClientRequestBuilder, Message};
+use tokio_tungstenite::tungstenite::{
+    client::{ClientRequestBuilder, IntoClientRequest},
+    http::{header, StatusCode},
+    Error as WebSocketError, Message,
+};
 use tokio_tungstenite::{client_async, WebSocketStream};
 
 type Ws = WebSocketStream<TcpStream>;
 
-/// Locate the binaries. `cargo build` puts them in `target/debug/`
-/// relative to CARGO_MANIFEST_DIR's parent (the workspace root).
+/// Locate the CLI next to the bridge Cargo built for this test profile.
 fn binary_paths() -> Option<(PathBuf, PathBuf)> {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir.parent()?.parent()?;
-    let target = if cfg!(debug_assertions) {
-        workspace_root.join("target").join("debug")
-    } else {
-        workspace_root.join("target").join("release")
-    };
-    let mew = target.join("mew");
-    let mew_web = target.join(if cfg!(windows) {
-        "mew-web.exe"
-    } else {
-        "mew-web"
-    });
-    if mew.exists() && mew_web.exists() {
-        Some((mew, mew_web))
-    } else {
-        None
-    }
+    let mew_web = PathBuf::from(env!("CARGO_BIN_EXE_mew-web"));
+    let mew = mew_web.with_file_name(format!("mew{}", std::env::consts::EXE_SUFFIX));
+    mew.is_file().then_some((mew, mew_web))
 }
 
 /// Bind a TCP listener on an OS-assigned port, read the port, and close.
@@ -95,12 +83,16 @@ fn spawn_fake_daemon(
 ) -> Result<ChildGuard> {
     ChildGuard::spawn(
         Command::new(mew_bin)
+            .current_dir(home_dir)
             .arg("daemon")
             .arg("--fake-provider")
             .arg("--socket")
             .arg(socket_path)
-            // Keep daemon state and catalog caches inside the isolated home.
-            .env("HOME", home_dir)
+            .arg("--pidfile")
+            .arg(home_dir.join("mew.pid"))
+            .env("MEW_CONFIG_DIR", home_dir.join("config"))
+            .env("MEW_DATA_DIR", home_dir.join("data"))
+            .env("MEW_SESSION_DIR", home_dir.join("sessions"))
             .env("MEW_CACHE_DIR", home_dir.join("catalog-cache"))
             .env_remove("MEW_CONFIG")
             .env_remove("MEW_DEFAULT_MODEL"),
@@ -260,9 +252,86 @@ async fn bridge_startup_timeout_reports_stderr_while_child_is_alive() -> Result<
 }
 
 #[tokio::test]
+async fn bridge_websocket_accepts_only_the_bound_host_and_trusted_origins() -> Result<()> {
+    let port = free_port().await?;
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let approved_origin = "http://127.0.0.1:5173";
+    let tmp = TempDir::new()?;
+    let mut bridge = ChildGuard::spawn(
+        Command::new(env!("CARGO_BIN_EXE_mew-web"))
+            .args(["--port", &addr.to_string(), "--spawn", "false"])
+            .arg("--daemon-socket")
+            .arg(tmp.path().join("unused.sock"))
+            .args(["--allow-origin", approved_origin]),
+    )?;
+    wait_for_tcp_port(addr, &mut bridge, Duration::from_secs(5)).await?;
+
+    let bound_host = addr.to_string();
+    let bound_origin = format!("http://{addr}");
+    let localhost = format!("localhost:{port}");
+    let localhost_origin = format!("http://{localhost}");
+    for (host, origin, should_upgrade) in [
+        (bound_host.as_str(), None, true),
+        (bound_host.as_str(), Some(bound_origin.as_str()), true),
+        (localhost.as_str(), Some(localhost_origin.as_str()), true),
+        (bound_host.as_str(), Some(approved_origin), true),
+        (bound_host.as_str(), Some("http://localhost:5173"), false),
+        (
+            bound_host.as_str(),
+            Some("https://untrusted.example"),
+            false,
+        ),
+        (bound_host.as_str(), Some("null"), false),
+        ("untrusted.example", None, false),
+        ("untrusted.example", Some(bound_origin.as_str()), false),
+    ] {
+        let mut request = format!("ws://{addr}/ws").into_client_request()?;
+        request.headers_mut().insert(header::HOST, host.parse()?);
+        if let Some(origin) = origin {
+            request
+                .headers_mut()
+                .insert(header::ORIGIN, origin.parse()?);
+        }
+        let stream = TcpStream::connect(addr).await?;
+        let result =
+            tokio::time::timeout(Duration::from_secs(2), client_async(request, stream)).await?;
+        if should_upgrade {
+            result.with_context(|| format!("rejected host {host}, origin {origin:?}"))?;
+        } else {
+            assert!(
+                matches!(result, Err(WebSocketError::Http(response)) if response.status() == StatusCode::FORBIDDEN),
+                "host {host}, origin {origin:?} should have received HTTP 403"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn bridge_refuses_to_bind_off_loopback() -> Result<()> {
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_mew-web"));
+    command
+        .kill_on_drop(true)
+        .args(["--port", "0.0.0.0:0", "--spawn", "false"]);
+    let result = tokio::time::timeout(Duration::from_secs(2), command.output()).await??;
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("loopback"),
+        "{result:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn bin_e2e_daemon_plus_bridge_full_round_trip() -> Result<()> {
     let Some((mew_bin, mew_web_bin)) = binary_paths() else {
-        eprintln!("skipping: binaries not built. Run `cargo build` (or `just build`) and re-run.");
+        anyhow::ensure!(
+            std::env::var_os("MEW_REQUIRE_SUBPROCESS_E2E").is_none(),
+            "mew binary missing next to mew-web; run just build-web with the same target directory"
+        );
+        eprintln!(
+            "skipping: mew binary missing; run just build-web to exercise the subprocess gate"
+        );
         return Ok(());
     };
 
@@ -279,7 +348,7 @@ async fn bin_e2e_daemon_plus_bridge_full_round_trip() -> Result<()> {
     // Spawn the daemon first. It must bind the socket before the
     // bridge can connect.
     let mut daemon = spawn_fake_daemon(&mew_bin, &socket_path, &home_dir)?;
-    wait_for_unix_socket(&socket_path, &mut daemon, Duration::from_secs(5)).await?;
+    wait_for_unix_socket(&socket_path, &mut daemon, Duration::from_secs(15)).await?;
     assert!(
         !home_dir.join("catalog-cache").exists(),
         "fake daemon must start without accessing real model catalogs"

@@ -578,6 +578,7 @@ impl Adapter {
         // The finish reason may arrive in a chunk before the usage chunk and
         // [DONE]. Defer finalization until the stream ends so usage is captured.
         let mut pending_finish: Option<Finish> = None;
+        let mut saw_done = false;
 
         while let Some(item) = stream.next().await {
             let event = match item {
@@ -589,7 +590,7 @@ impl Adapter {
                             message: format!("sse stream error: {e}"),
                         }))
                         .await;
-                    break;
+                    return;
                 }
             };
 
@@ -598,16 +599,8 @@ impl Adapter {
             }
 
             if event.data == "[DONE]" {
-                Self::finalize_all(
-                    &mut current_text_part,
-                    &mut current_reasoning_part,
-                    &mut current_tool_calls,
-                    &mut tx,
-                    pending_finish.unwrap_or(Finish::Stop),
-                    last_usage,
-                )
-                .await;
-                return;
+                saw_done = true;
+                break;
             }
 
             let chunk: CompletionChunk = match serde_json::from_str(&event.data) {
@@ -619,7 +612,7 @@ impl Adapter {
                             message: format!("unmarshal chunk: {e}"),
                         }))
                         .await;
-                    break;
+                    return;
                 }
             };
 
@@ -774,13 +767,44 @@ impl Adapter {
             }
         }
 
-        // Stream ended without [DONE] (or we hit [DONE] which finalizes above).
+        let finish = pending_finish.or_else(|| {
+            saw_done.then_some({
+                if current_tool_calls.is_empty() {
+                    Finish::Stop
+                } else {
+                    Finish::ToolUse
+                }
+            })
+        });
+        let Some(finish) = finish else {
+            let _ = tx
+                .send(ProviderEvent::Error(MessageError {
+                    kind: ErrorKind::Network,
+                    message: "SSE stream ended before the response was complete".into(),
+                }))
+                .await;
+            return;
+        };
+        if finish == Finish::ToolUse
+            && (current_tool_calls.is_empty()
+                || !current_tool_calls
+                    .values()
+                    .all(ToolCallAccumulator::is_complete))
+        {
+            let _ = tx
+                .send(ProviderEvent::Error(MessageError {
+                    kind: ErrorKind::ProviderApi,
+                    message: "response finished with incomplete tool calls".into(),
+                }))
+                .await;
+            return;
+        }
         Self::finalize_all(
             &mut current_text_part,
             &mut current_reasoning_part,
             &mut current_tool_calls,
             &mut tx,
-            pending_finish.unwrap_or(Finish::Stop),
+            finish,
             last_usage,
         )
         .await;
@@ -891,6 +915,13 @@ struct ToolCallAccumulator {
 }
 
 impl ToolCallAccumulator {
+    fn is_complete(&self) -> bool {
+        !self.id.is_empty()
+            && !self.name.is_empty()
+            && self.arguments.trim_start().starts_with('{')
+            && serde_json::from_str::<serde::de::IgnoredAny>(&self.arguments).is_ok()
+    }
+
     fn finalize(&mut self) {
         self.part.tool_name.clone_from(&self.name);
         self.part.call_id.clone_from(&self.id);
@@ -1512,6 +1543,174 @@ mod tests {
     // -----------------------------------------------------------------------
     // SSE fixture replay tests
     // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn stream_requires_terminal_evidence() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let tool_call = include_str!("testdata/tool-call.sse");
+        let confirmed_tool_call = tool_call.split("data: [DONE]").next().unwrap();
+        let fragments = tool_call
+            .split("\n\n")
+            .take(2)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let confirmed_by_sentinel = confirmed_tool_call
+            .replace("\"finish_reason\":\"tool_calls\"", "\"finish_reason\":null");
+        let malformed = format!("{fragments}\n\ndata: invalid-json\n\n");
+
+        let malformed_arguments = format!(
+            "{fragments}\n\ndata: {}\n\n",
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{"}}]},"finish_reason":"tool_calls"}]}"#,
+        );
+        let empty_arguments = format!(
+            "{fragments}\n\ndata: {}\n\n",
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#,
+        );
+
+        for (name, body, expected) in [
+            (
+                "explicit finish with malformed arguments",
+                malformed_arguments,
+                None,
+            ),
+            (
+                "explicit finish with empty object arguments",
+                empty_arguments,
+                Some(Finish::ToolUse),
+            ),
+            ("early EOF", format!("{fragments}\n\n"), None),
+            (
+                "incomplete sentinel",
+                format!("{fragments}\n\ndata: [DONE]\n\n"),
+                None,
+            ),
+            ("parse failure", malformed, None),
+            (
+                "finish without sentinel",
+                confirmed_tool_call.to_owned(),
+                Some(Finish::ToolUse),
+            ),
+            (
+                "valid sentinel without finish reason",
+                format!("{confirmed_by_sentinel}data: [DONE]\n\n"),
+                Some(Finish::ToolUse),
+            ),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+                .mount(&server)
+                .await;
+            let adapter = Adapter::new(
+                "test".into(),
+                server.uri(),
+                "test-model".into(),
+                "test-key".into(),
+            );
+            let events: Vec<_> = adapter
+                .stream(Request::default())
+                .await
+                .unwrap()
+                .collect()
+                .await;
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    ProviderEvent::PartStart {
+                        part: Part::ToolCall(_)
+                    }
+                )),
+                "{name}: {events:?}"
+            );
+            let terminal: Vec<_> = events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        ProviderEvent::MessageEnd { .. } | ProviderEvent::Error(_)
+                    )
+                })
+                .collect();
+            match expected {
+                Some(expected) => assert!(
+                    matches!(terminal.as_slice(), [ProviderEvent::MessageEnd { finish, .. }] if *finish == expected),
+                    "{name}: {terminal:?}"
+                ),
+                None => assert!(
+                    matches!(terminal.as_slice(), [ProviderEvent::Error(_)]),
+                    "{name}: {terminal:?}"
+                ),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_transport_failure_overrides_a_finish_reason() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(&mut socket);
+            let mut length = 0;
+            loop {
+                let mut header = String::new();
+                assert_ne!(reader.read_line(&mut header).await.unwrap(), 0);
+                if header == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = header.split_once(':') {
+                    if name.eq_ignore_ascii_case("content-length") {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+            }
+            reader.read_exact(&mut vec![0; length]).await.unwrap();
+
+            let body = include_str!("testdata/tool-call.sse")
+                .split("data: [DONE]")
+                .next()
+                .unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len() + 100,
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.shutdown().await.unwrap();
+        });
+        let adapter = Adapter::new("test".into(), url, "test-model".into(), "test-key".into());
+        let events: Vec<_> = adapter
+            .stream(Request::default())
+            .await
+            .unwrap()
+            .collect()
+            .await;
+        server.await.unwrap();
+
+        assert!(events.iter().any(|e| matches!(
+            e,
+            ProviderEvent::PartStart {
+                part: Part::ToolCall(_)
+            }
+        )));
+        let terminal: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    ProviderEvent::MessageEnd { .. } | ProviderEvent::Error(_)
+                )
+            })
+            .collect();
+        assert!(
+            matches!(terminal.as_slice(), [ProviderEvent::Error(error)] if error.kind == ErrorKind::Network),
+            "{terminal:?}"
+        );
+    }
 
     #[tokio::test]
     async fn test_fixture_text_only() {

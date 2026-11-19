@@ -1,7 +1,9 @@
 use chrono::Utc;
 use tokio::sync::mpsc;
 
-use mew_message::{AssistantMeta, Message, Part, PartId, Role, Time, Tokens};
+use mew_message::{
+    AssistantMeta, ErrorKind, Finish, Message, MessageError, Part, PartId, Role, Time, Tokens,
+};
 use mew_provider::ProviderEvent;
 
 use crate::agent::Agent;
@@ -57,20 +59,24 @@ impl Agent {
             ProviderEvent::MessageEnd {
                 finish,
                 usage,
-                cost: _,
+                cost,
             } => {
                 if let Some(ref mut msg) = assistant_msg {
+                    if *finish != Finish::ToolUse {
+                        msg.parts.retain(|part| !matches!(part, Part::ToolCall(_)));
+                    }
                     let now = Utc::now().timestamp_millis();
                     msg.time.completed = Some(now);
-                    let computed_cost = usage.input as f64 / 1_000_000.0 * self.input_price
-                        + usage.output as f64 / 1_000_000.0 * self.output_price
-                        + usage.reasoning as f64 / 1_000_000.0 * self.reasoning_price
-                        + usage.cache_read as f64 / 1_000_000.0 * self.cache_read_price
-                        + usage.cache_write as f64 / 1_000_000.0 * self.cache_write_price;
                     if let Some(ref mut meta) = msg.assistant {
                         meta.finish = Some(*finish);
                         meta.tokens = *usage;
-                        meta.cost = computed_cost;
+                        meta.cost = *cost;
+                        if *finish == Finish::Error {
+                            meta.error = Some(MessageError {
+                                kind: ErrorKind::ProviderApi,
+                                message: "provider reported a failed response".into(),
+                            });
+                        }
                         // Backfill the manifest with real usage data and
                         // scale segment token counts.
                         if let Some(ref mut manifest) = meta.manifest {
@@ -83,7 +89,7 @@ impl Agent {
                     .send(AgentEvent::Provider(ProviderEvent::MessageEnd {
                         finish: *finish,
                         usage: *usage,
-                        cost: 0.0,
+                        cost: *cost,
                     }))
                     .await;
             }
@@ -104,6 +110,7 @@ impl Agent {
             }
             ProviderEvent::Error(err) => {
                 if let Some(ref mut msg) = assistant_msg {
+                    msg.parts.retain(|part| !matches!(part, Part::ToolCall(_)));
                     let now = Utc::now().timestamp_millis();
                     msg.time.completed = Some(now);
                     if let Some(ref mut meta) = msg.assistant {

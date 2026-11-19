@@ -18,7 +18,7 @@ function HomeComponent() {
   const connectionError = useSessionStore((s) => s.connectionError);
   const retryConnection = useSessionStore((s) => s.retryConnection);
   const attemptedResume = useRef(false);
-  const newSession = useRef<string | null>(null);
+  const newChatId = useRef<string | null>(null);
   const [resumeState, setResumeState] = useState<"idle" | "loading" | "failed">("idle");
 
   useEffect(() => {
@@ -28,6 +28,7 @@ function HomeComponent() {
     const prevSessionId = localStorage.getItem(SESSION_ID_KEY);
 
     if (prevSessionId) {
+      const location = router.state.location;
       let active = true;
       let pending = true;
       setResumeState("loading");
@@ -35,8 +36,8 @@ function HomeComponent() {
         .attachSession(prevSessionId)
         .then(() => {
           pending = false;
-          if (active && router.state.location.pathname === "/") {
-            router.navigate({ to: "/session/$sessionId", params: { sessionId: prevSessionId } });
+          if (active && router.state.location === location && location.pathname === "/") {
+            void router.navigate({ to: "/session/$sessionId", params: { sessionId: prevSessionId } });
           }
         })
         .catch(() => { pending = false; if (active) setResumeState("failed"); });
@@ -49,16 +50,22 @@ function HomeComponent() {
 
   const sendNewMessage = async (text: string, attachments?: Attachment[]) => {
     const client = getClient();
-    const newId = newSession.current ?? await client.newSession();
-    newSession.current = newId;
-    if (client.getSessionId() !== newId || !client.hasConfirmedSession(newId)) {
-      await client.attachSession(newId);
+    const location = router.state.location;
+    if (newChatId.current === null) {
+      useSessionStore.getState().reset();
+      newChatId.current = await client.newSession();
     }
-    localStorage.setItem(SESSION_ID_KEY, newId);
+    const newId = newChatId.current;
+    const isCurrent = () => router.state.location === location && location.pathname === "/";
+    if (!isCurrent()) throw new Error("The selected conversation changed before sending.");
+    if (!client.isSessionStable(newId)) await client.attachSession(newId);
+    if (!isCurrent() || !client.isSessionStable(newId)) {
+      throw new Error("The selected conversation changed before sending.");
+    }
     await client.submitPrompt(newId, text, attachments);
-    if (router.state.location.pathname === "/") {
-      await router.navigate({ to: "/session/$sessionId", params: { sessionId: newId } });
-    }
+    if (!isCurrent()) return;
+    localStorage.setItem(SESSION_ID_KEY, newId);
+    await router.navigate({ to: "/session/$sessionId", params: { sessionId: newId } });
   };
 
   const showResumeFailure = resumeState === "failed";
@@ -98,7 +105,9 @@ function HomeComponent() {
           )}
         </section>
       </main>
-      <InputArea draftId="new" connected={connectionState === "connected" && resumeState !== "loading"} onSend={sendNewMessage} onCancel={() => getClient().cancel()} />
+      <InputArea draftId="new" connected={connectionState === "connected" && resumeState !== "loading"} onSend={sendNewMessage} onCancel={() => {
+        if (newChatId.current && getClient().isSessionStable(newChatId.current)) getClient().cancel();
+      }} />
     </ConversationLayout>
   );
 }

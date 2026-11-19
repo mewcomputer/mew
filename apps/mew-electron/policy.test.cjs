@@ -70,3 +70,15 @@ test('daemon ports remain protected across aliases and standard ports disable br
     assert.equal(guestRequestAllowed('ws://127.0.0.1:41002/', ports), false);
   }
 });
+
+test('the private relay port is protected alongside the underlying daemon', () => {
+  const { ports, unavailable } = browserProtection(
+    'http://127.0.0.1:41001/',
+    'ws://daemon.example:41002/',
+    'http://127.0.0.1:41003/',
+    'ws://127.0.0.1:41004/private',
+  );
+  assert.equal(unavailable, null);
+  assert.equal(guestRequestAllowed('ws://127.0.0.1:41004/', ports), false);
+  assert.equal(guestRequestAllowed('ws://daemon.example:41002/', ports), false);
+});
