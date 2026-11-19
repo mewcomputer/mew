@@ -9,7 +9,11 @@ const readPage = (path) => readFile(new URL(path, dist), 'utf8');
 test('the built homepage serves the garden and leads readers to an existing docs page', async () => {
   const home = await readPage('index.html');
   assert.ok(home.includes('<h1>Mew is an agent harness designed for your work.</h1>'));
-  assert.equal([...home.matchAll(/<section[^>]+data-focus=/g)].length, 7);
+  assert.match(home, /<p class="lede">Moddable with skills, personas, and experimental plugins\.<\/p>/);
+  assert.deepEqual(
+    Array.from(home.matchAll(/<section[^>]+data-focus="([^"]+)"/g), ([, stop]) => stop),
+    ['garden', 'hall', 'pavilion', 'gallery', 'wall', 'gate', 'tower'],
+  );
 
   for (const [attribute, expected] of [['data-garden-model', 'glTF'], ['data-sprite-sheet', '\u0089PNG']]) {
     const match = home.match(new RegExp(`${attribute}="([^"]+)"`));

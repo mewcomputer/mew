@@ -4509,3 +4509,12 @@ the built hero and all 12 site tests.
 
 The hero subtitle now names skills, personas, and experimental plugins.
 Verified the built subtitle and all 12 site tests.
+
+### 2026-11-19: Move the homepage into Astro
+
+The published homepage now owns its copy and markup in `index.astro`.
+Astro renders the install picker and binds the garden assets directly.
+Jianghu's standalone preview remains available separately.
+
+Verified equivalent rendered markup and copy, all 12 site tests, the
+Jianghu build, and the mobile hero and install link.
