@@ -67,7 +67,7 @@ const sky = `
 `;
 
 export function createReflectiveWater(
-  T: typeof Three, scene: Three.Scene, renderer: Three.WebGLRenderer, level: number, maxCaptureSize = 1024,
+  T: typeof Three, scene: Three.Scene, renderer: Three.WebGLRenderer, level: number,
 ) {
   const time = { value: 0 };
   const keyDirection = { value: new T.Vector3(...sampleCityTime(defaultCityTime).direction).normalize() };
@@ -92,12 +92,14 @@ export function createReflectiveWater(
   const sight = new T.Vector3();
   const up = new T.Vector3();
   let dirty = true;
+  let capturedLimit = 0;
 
-  function capture(camera: Three.OrthographicCamera) {
+  function capture(camera: Three.OrthographicCamera, maxCaptureSize = 1024) {
     camera.updateMatrixWorld();
     viewProjection.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     renderer.getDrawingBufferSize(drawSize);
-    if (!dirty && previousViewProjection.equals(viewProjection) && resolution.value.equals(drawSize)) return;
+    if (!dirty && maxCaptureSize === capturedLimit && previousViewProjection.equals(viewProjection) &&
+        resolution.value.equals(drawSize)) return;
     previousViewProjection.copy(viewProjection);
     resolution.value.copy(drawSize);
     const { x: width, y: height } = drawSize;
@@ -131,6 +133,7 @@ export function createReflectiveWater(
       renderer.clippingPlanes = previousClipping;
       water.visible = true;
     }
+    capturedLimit = maxCaptureSize;
     dirty = false;
   }
 

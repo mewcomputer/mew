@@ -5,6 +5,7 @@ import { cityLighting, mountCityLighting, type CityTime } from './city-lighting.
 import { createReflectiveWater } from './city-water.ts';
 import { createGardenDaylight } from './garden-daylight.ts';
 import { createGardenLanterns, mountLanternRack } from './garden-lanterns.ts';
+import { createGardenRenderQuality } from './garden-render-quality.ts';
 import { gardenWaterGeometry } from './garden-waterfall.ts';
 import { mountGardenWind } from './garden-wind.ts';
 import { gardenOutfits, gardenOverview, mountImportedGarden } from './imported-garden.ts';
@@ -39,9 +40,10 @@ Promise.all([
   const { scene: model } = await new GLTFLoader().parseAsync(modelBytes, '');
   if (lifetime.signal.aborted) return;
   const compact = story && matchMedia(`${mewCompactQuery}, (pointer: coarse)`).matches;
+  const quality = compact ? createGardenRenderQuality() : null;
   const view = createSceneView(T, canvas, {
     viewport, alpha: false, exposure: cityLighting.exposure, far: 150, shadows: true,
-    maxPixelRatio: compact ? 1 : undefined,
+    maxPixelRatio: quality?.current.pixelRatio,
     orbit: {
       ...(story ? mewOverview : gardenOverview), width: story ? 53.75 : 43, height: 35, radius: 65,
       turn: Math.PI / 4, zoomFactor: 1.2, minPitch: 0.37, maxPitch: 0.8, minZoom: 0.8, maxZoom: 2.5,
@@ -54,7 +56,7 @@ Promise.all([
   const wind = mountGardenWind(T, scene);
   const light = mountCityLighting(T, scene);
   const { pool, spillway, level, runoff } = gardenWaterGeometry(T, garden.pool);
-  const water = createReflectiveWater(T, scene, renderer, level, compact ? 512 : undefined);
+  const water = createReflectiveWater(T, scene, renderer, level);
   water.channel(pool);
   water.fallingSheet(spillway, true);
   water.sprayAt(runoff, 4.2);
@@ -127,6 +129,11 @@ Promise.all([
   view.start({
     ...(story && mountMewLabels(T, view, characters)),
     beforeRender(now, delta) {
+      const nextQuality = quality?.recordFrame(delta * 1000);
+      if (nextQuality) {
+        const pixelRatio = Math.min(devicePixelRatio || 1, nextQuality.pixelRatio);
+        if (pixelRatio !== renderer.getPixelRatio()) renderer.setPixelRatio(pixelRatio);
+      }
       time += delta;
       const skyDelta = Math.max(0, now - (skyFrame ?? now)) / 1000;
       skyFrame = now;
@@ -166,13 +173,14 @@ Promise.all([
       if (!motion.matches) view.request(34);
     },
     render(zoom) {
-      water.capture(camera);
+      water.capture(camera, quality?.current.waterCaptureSize);
       if (tiltShift) tiltShift.render(scene, camera, zoom, 65);
       else renderer.render(scene, camera);
     },
     onInvalidate: water.invalidate,
     onSuspend() {
       skyFrame = undefined;
+      quality?.resetTiming();
     },
     onContextChange(lost) {
       status.hidden = !lost;

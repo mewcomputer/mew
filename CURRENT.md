@@ -4219,3 +4219,13 @@ pass uses eight blur samples with the same focus and radius as desktop.
 
 Verified 113 Jianghu tests, TypeScript, and the Astro build and smoke tests.
 Checked the hero and chapter scroll at 390 × 844 in the browser.
+
+### 2026-11-19: Adaptive mobile garden quality
+
+The mobile homepage now reduces canvas and water-capture resolution in
+steps when frame delivery slows. It restores one step after six seconds
+of steady frames. Both lower tiers keep the same depth-of-field profile.
+
+Verified 116 Jianghu tests, TypeScript, and the Astro build and smoke tests.
+Simulated sustained load at 390 × 844 in the browser and confirmed the
+canvas reached the lowest tier and recovered to full mobile resolution.
