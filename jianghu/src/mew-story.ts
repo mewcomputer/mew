@@ -7,6 +7,7 @@ type Chapter = { stop: Stop; center: number; side: 'left' | 'right'; hero?: bool
 export const mewOverview = {
   target: [0, 1.875, 0], yaw: Math.PI / 4, pitch: Math.atan2(0.3, Math.SQRT1_2), zoom: 0.92,
 } satisfies Stop;
+export const mewTiltShift = { wideAperture: 0.28, closeupZoom: 2.5 };
 
 const clamp = (n: number) => Math.min(1, Math.max(0, n));
 

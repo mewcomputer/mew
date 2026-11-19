@@ -9,7 +9,7 @@ import { gardenWaterGeometry } from './garden-waterfall.ts';
 import { mountGardenWind } from './garden-wind.ts';
 import { gardenOutfits, gardenOverview, mountImportedGarden } from './imported-garden.ts';
 import { createLanternRound } from './lantern-round.ts';
-import { mewOverview, mountMewLabels, mountMewStory } from './mew-story.ts';
+import { mewOverview, mewTiltShift, mountMewLabels, mountMewStory } from './mew-story.ts';
 import { createSceneView } from './scene-view.ts';
 import { createTiltShift } from './tilt-shift.ts';
 
@@ -56,7 +56,7 @@ Promise.all([
   water.channel(pool);
   water.fallingSheet(spillway, true);
   water.sprayAt(runoff, 4.2);
-  const tiltShift = createTiltShift(T, renderer);
+  const tiltShift = createTiltShift(T, renderer, story ? mewTiltShift : undefined);
   const billboard = createCharacterBillboards(T);
   const carryLantern = createGardenLanterns(T);
   mountLanternRack(T, scene, garden.rack);

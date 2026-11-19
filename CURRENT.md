@@ -4195,3 +4195,12 @@ image with the large headline and garden.
 Verified the frozen workspace install, all 110 Jianghu tests, and the Astro
 production build with its two smoke tests. Checked garden controls, the
 homepage-to-docs link, both docs themes, and the served share image.
+
+### 2026-11-19: Tilt shift on the Mew homepage
+
+The depth-of-field pass now follows the camera target when a chapter frames
+the garden off-center. The homepage uses a wider aperture at its overview
+and reaches the existing blur cap within its own zoom range.
+
+Verified 111 Jianghu tests, TypeScript, the Astro production build and smoke
+tests, and the overview and close-up in the browser.
