@@ -4499,3 +4499,8 @@ and using a release skill. Verified the original wording and all 12 site tests.
 Added short examples of finding API callers with a subagent and switching
 from planner to builder after reviewing a plan. Verified the built copy
 and all 12 site tests.
+
+### 2026-11-19: Shorten the homepage subtitle
+
+Kept the sentence about choosing a model, instructions, and tools. Verified
+the built hero and all 12 site tests.
