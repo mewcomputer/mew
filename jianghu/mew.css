@@ -75,6 +75,17 @@ button:focus-visible,a:focus-visible {
   background: #0a0e0d;
 }
 
+[data-garden-poster][aria-hidden="true"] {
+  opacity: 0;
+  visibility: hidden;
+}
+
+@media (prefers-reduced-motion:no-preference) {
+  [data-garden-poster][aria-hidden="true"] {
+    transition: opacity 120ms ease-out, visibility 0s linear 120ms;
+  }
+}
+
 [data-garden-poster] img {
   position: absolute;
   /* Match the hero camera's shifted focal point and fit. */

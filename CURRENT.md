@@ -4243,3 +4243,12 @@ to the original GLB.
 Verified 116 Jianghu tests, the Jianghu build, and four Astro smoke tests,
 including exact model decompression. Checked both stills, the first-frame
 handoff with a five-second delay, and the failure fallback in the browser.
+
+### 2026-11-19: Crossfade into the live garden
+
+The still fades out over 120 ms after the first live garden frame. The
+handoff is immediate with reduced motion. If WebGL loses its context, the
+still returns immediately.
+
+Verified the opacity transition and control availability in the browser,
+along with 116 Jianghu tests, TypeScript, and four Astro smoke tests.

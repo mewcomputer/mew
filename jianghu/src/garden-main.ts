@@ -196,7 +196,7 @@ Promise.all([
       if (toolbar.hidden) {
         toolbar.hidden = false;
         status.hidden = true;
-        if (poster) poster.hidden = true;
+        poster?.setAttribute('aria-hidden', 'true');
       }
       labels?.afterRender();
     },
@@ -208,7 +208,7 @@ Promise.all([
     onContextChange(lost) {
       if (!lost) return;
       toolbar.hidden = true;
-      if (poster) poster.hidden = false;
+      poster?.removeAttribute('aria-hidden');
       status.hidden = false;
       status.textContent = 'Waiting for the graphics connection…';
     },
