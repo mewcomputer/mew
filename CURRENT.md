@@ -4405,3 +4405,12 @@ Silicon Homebrew install upgraded from 0.2.0-pre.20261118 to
 The homepage and docs headers use a fixed 60-pixel bar, 25-pixel wordmark,
 and 40-pixel button. Verified the same dimensions at 390, 1280, and 2560
 pixels in the browser, along with the docs mobile menu and both builds.
+
+### 2026-11-19: Nightly install picker
+
+Added a shared install picker to the homepage and installation guide.
+Homebrew and the shell installer select the platform automatically. The
+Linux choice shows the glibc requirement.
+
+Verified eight site smoke tests, the Jianghu build, the phone layout, and
+both clipboard commands in the browser.

@@ -25,6 +25,7 @@ export default defineConfig({
       ],
       components: {
         Header: "./src/components/overrides/Header.astro",
+        MarkdownContent: "./src/components/overrides/MarkdownContent.astro",
         PageTitle: "./src/components/overrides/PageTitle.astro",
       },
       sidebar: [

@@ -18,10 +18,24 @@ test('the built homepage serves the garden and leads readers to an existing docs
     assert.equal(asset.toString('latin1', 0, 4), expected, attribute);
   }
 
-  const docsLink = home.match(/href="(\/docs\/[^"]+)"[^>]*>Get started/);
-  assert.ok(docsLink, 'the primary action points to local installation docs');
+  assert.match(home, /href="#start"[^>]*>Get started/);
+  const docsLink = home.match(/href="(\/docs\/[^"]+)"[^>]*>Read the install guide/);
+  assert.ok(docsLink, 'the picker links to the local installation guide');
   const docs = await readPage(docsLink[1].slice(1) + 'index.html');
   assert.ok(/<h1[^>]*>[^<]*Install/.test(docs));
+});
+
+test('the homepage and install guide include a nightly picker with both install commands', async () => {
+  const pages = await Promise.all([readPage('index.html'), readPage('docs/getting-started/installation/index.html')]);
+  for (const page of pages) {
+    const picker = page.match(/<section[^>]*data-install-picker[^>]*>[\s\S]*?<\/section>/)?.[0];
+    assert.ok(picker, 'the picker ships in the initial HTML');
+    for (const value of ['macos', 'linux', 'brew', 'shell']) assert.match(picker, new RegExp(`value="${value}"`));
+    assert.match(picker, /Nightly CLI builds/);
+    assert.match(picker, /brew tap mewcomputer\/tap &amp;&amp; brew install mewcomputer\/tap\/mew/);
+    assert.match(picker, /bash -s -- --nightly/);
+  }
+  assert.doesNotMatch(await readPage('docs/getting-started/quick-start/index.html'), /data-install-picker/);
 });
 
 test('the initial HTML offers a lightweight garden still for desktop and phones', async () => {

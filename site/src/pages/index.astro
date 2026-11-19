@@ -7,13 +7,14 @@ import fontNotice from "../../../jianghu/assets/instrument-sans-OFL.txt?raw";
 import desktopPoster from "../assets/garden-poster.webp?url";
 import mobilePoster from "../assets/garden-poster-mobile.webp?url";
 import seal from "../assets/mew-logo.svg?url";
+import InstallPicker from "../components/InstallPicker.astro";
 import "../../../jianghu/mew.css";
 
 const title = "mew";
 const description = "Mew is an agent harness designed for your work. Choose a model, give it instructions, and decide which tools it can use.";
 const socialImage = new URL("/og/mew.jpg", Astro.site);
 const notice = `<!--\n${spriteNotice}\n${fontNotice}-->`;
-const chrome = landing
+const [beforePicker, afterPicker] = landing
     .slice(landing.indexOf("<body>") + "<body>".length, landing.lastIndexOf("</body>"))
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, "")
     .replace('./assets/mew-diorama.glb', garden)
@@ -23,7 +24,9 @@ const chrome = landing
       <source media="(max-width: 860px)" srcset="${mobilePoster}">
       <img src="${desktopPoster}" width="1280" height="720" alt="A lantern-lit walled garden at night" fetchpriority="high">
     </picture><canvas id="stage"`)
-    .replaceAll('https://mew.computer/docs/', '/docs/');
+    .replaceAll('https://mew.computer/docs/', '/docs/')
+    .replaceAll('href="/docs/getting-started/installation/" data-install-link', 'href="#start"')
+    .split('<!-- install-picker -->');
 ---
 
 <!doctype html>
@@ -49,7 +52,9 @@ const chrome = landing
     </head>
     <body>
         <Fragment set:html={notice} />
-        <Fragment set:html={chrome} />
+        <Fragment set:html={beforePicker} />
+        <InstallPicker />
+        <Fragment set:html={afterPicker} />
         <script>
             import "../../../jianghu/src/garden-main.ts";
         </script>

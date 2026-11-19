@@ -202,6 +202,12 @@ main a,main button {
   justify-content: flex-end;
 }
 
+#start {
+  height: auto;
+  min-height: max(560px, 100svh);
+  padding-bottom: 4rem;
+}
+
 .panel {
   width: min(clamp(440px,30vw,700px),100%);
 }

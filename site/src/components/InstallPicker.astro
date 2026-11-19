@@ -1,0 +1,183 @@
+---
+const commands = {
+    brew: "brew tap mewcomputer/tap && brew install mewcomputer/tap/mew",
+    shell: "curl --proto '=https' --tlsv1.2 -sSf https://mew.computer/get.sh | bash -s -- --nightly",
+};
+---
+
+<section class="picker" data-install-picker aria-label="Install Mew">
+    <div class="choices">
+        <fieldset>
+            <legend>Platform</legend>
+            <label><input type="radio" name="install-platform" value="macos" checked /><span>macOS</span></label>
+            <label><input type="radio" name="install-platform" value="linux" /><span>Linux</span></label>
+        </fieldset>
+        <fieldset>
+            <legend>Install with</legend>
+            <label><input type="radio" name="install-method" value="brew" checked /><span>Homebrew</span></label>
+            <label><input type="radio" name="install-method" value="shell" /><span>Shell</span></label>
+        </fieldset>
+    </div>
+    <div class="command">
+        <pre class="brew"><code data-command="brew">{commands.brew}</code></pre>
+        <pre class="shell"><code data-command="shell">{commands.shell}</code></pre>
+        <button type="button" class="copy" data-copy-command hidden>Copy</button>
+    </div>
+    <div class="details">
+        <strong>Nightly CLI builds</strong>
+        <span class="brew">Requires Homebrew.</span>
+        <span class="shell">Uses Bash and curl.</span>
+        <span class="linux">Linux requires glibc 2.39 or later.</span>
+        <span data-copy-status role="status"></span>
+    </div>
+</section>
+
+<script>
+    for (const picker of document.querySelectorAll<HTMLElement>('[data-install-picker]')) {
+        const copy = picker.querySelector<HTMLButtonElement>('[data-copy-command]');
+        const status = picker.querySelector<HTMLElement>('[data-copy-status]');
+        if (!copy || !status) continue;
+
+        const selectedMethod = () => picker.querySelector<HTMLInputElement>('[name="install-method"]:checked')?.value;
+        copy.hidden = false;
+        picker.addEventListener('change', () => { status.textContent = ''; });
+        copy.addEventListener('click', async () => {
+            const method = selectedMethod();
+            const code = picker.querySelector<HTMLElement>(`[data-command="${method}"]`);
+            if (!code?.textContent) return;
+
+            try {
+                await navigator.clipboard.writeText(code.textContent);
+                if (selectedMethod() === method) status.textContent = 'Command copied.';
+            } catch {
+                if (selectedMethod() !== method) return;
+                const selection = window.getSelection();
+                const range = document.createRange();
+                range.selectNodeContents(code);
+                selection?.removeAllRanges();
+                selection?.addRange(range);
+                status.textContent = 'Copy the command from the text above.';
+            }
+        });
+    }
+</script>
+
+<style>
+    .picker {
+        margin-block: 1.25rem;
+        padding: 1rem;
+        border: 1px solid var(--line);
+        border-radius: var(--radius-md);
+        background: var(--surface-raised);
+        color: var(--ink);
+        pointer-events: auto;
+    }
+
+    .choices,
+    .details {
+        display: flex;
+        align-items: baseline;
+        flex-wrap: wrap;
+    }
+
+    .choices {
+        gap: 0.75rem 1rem;
+        margin-bottom: 0.875rem;
+    }
+
+    fieldset {
+        display: flex;
+        gap: 0.125rem;
+        min-width: 0;
+        margin: 0;
+        padding: 0.1875rem;
+        border: 1px solid var(--line);
+        border-radius: var(--radius-sm);
+    }
+
+    legend {
+        padding-inline: 0.25rem;
+        color: var(--ink-muted);
+        font: 500 0.8rem/1.5 var(--sans);
+    }
+
+    label { position: relative; }
+
+    input {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        opacity: 0;
+        cursor: pointer;
+    }
+
+    label span,
+    .copy {
+        display: inline-flex;
+        align-items: center;
+        min-height: 2.25rem;
+        padding-inline: 0.625rem;
+        border-radius: var(--radius-sm);
+        color: var(--ink);
+        font: 500 0.875rem/1 var(--sans);
+    }
+
+    input:checked + span {
+        background: color-mix(in oklab, var(--jade) 16%, var(--surface));
+        color: var(--jade);
+    }
+
+    input:focus-visible + span {
+        outline: 2px solid var(--jade);
+        outline-offset: -2px;
+    }
+
+    .command {
+        display: flex;
+        align-items: start;
+        gap: 0.5rem;
+        padding: 0.5rem;
+        border: 1px solid var(--line);
+        border-radius: var(--radius-sm);
+        background: var(--surface);
+    }
+
+    pre {
+        flex: 1;
+        min-width: 0;
+        margin: 0;
+        padding: 0.45rem 0.25rem;
+        background: transparent;
+        color: inherit;
+        font: 0.8rem/1.5 ui-monospace, monospace;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+    }
+
+    .copy {
+        border: 1px solid var(--line);
+        background: var(--surface-raised);
+        cursor: pointer;
+    }
+
+    .copy:hover { border-color: var(--jade); }
+
+    .details {
+        gap: 0.15rem 0.625rem;
+        margin-top: 0.625rem;
+        color: var(--ink-muted);
+        font: 400 0.8rem/1.55 var(--sans);
+    }
+
+    .details strong { color: var(--ink); }
+    [data-copy-status] { color: var(--jade); }
+
+    .copy[hidden],
+    .picker:not(:has(input[value="linux"]:checked)) .linux,
+    .picker:not(:has(input[value="shell"]:checked)) .shell,
+    .picker:has(input[value="shell"]:checked) .brew {
+        display: none;
+    }
+</style>
