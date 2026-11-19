@@ -4493,3 +4493,9 @@ Verified that the paragraphs match the original and all 12 site tests pass.
 
 Added one sentence each about tracing a failing test, asking before a push,
 and using a release skill. Verified the original wording and all 12 site tests.
+
+### 2026-11-19: Expand the subagent and persona examples
+
+Added short examples of finding API callers with a subagent and switching
+from planner to builder after reviewing a plan. Verified the built copy
+and all 12 site tests.
