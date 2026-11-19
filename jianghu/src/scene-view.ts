@@ -36,6 +36,7 @@ export type SceneViewOptions = {
   exposure: number;
   alpha?: boolean;
   far?: number;
+  maxPixelRatio?: number;
   orbit: OrbitOptions;
 };
 
@@ -203,7 +204,7 @@ export function createSceneView(T: typeof Three, canvas: HTMLCanvasElement, opti
   if (!container) throw new Error('The scene canvas requires a viewport.');
   const viewport = container;
   const renderer = new T.WebGLRenderer({ canvas, alpha, antialias: true });
-  renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 1.5));
+  renderer.setPixelRatio(Math.min(devicePixelRatio || 1, options.maxPixelRatio ?? 1.5));
   renderer.toneMapping = T.ACESFilmicToneMapping;
   renderer.toneMappingExposure = exposure;
   renderer.shadowMap.enabled = shadows;

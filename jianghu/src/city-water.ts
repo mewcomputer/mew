@@ -67,7 +67,7 @@ const sky = `
 `;
 
 export function createReflectiveWater(
-  T: typeof Three, scene: Three.Scene, renderer: Three.WebGLRenderer, level: number,
+  T: typeof Three, scene: Three.Scene, renderer: Three.WebGLRenderer, level: number, maxCaptureSize = 1024,
 ) {
   const time = { value: 0 };
   const keyDirection = { value: new T.Vector3(...sampleCityTime(defaultCityTime).direction).normalize() };
@@ -101,7 +101,7 @@ export function createReflectiveWater(
     previousViewProjection.copy(viewProjection);
     resolution.value.copy(drawSize);
     const { x: width, y: height } = drawSize;
-    const scale = Math.min(1, 1024 / Math.max(width, height));
+    const scale = Math.min(1, maxCaptureSize / Math.max(width, height));
     for (const target of [opaque, reflection]) {
       target.setSize(Math.max(1, Math.round(width * scale)), Math.max(1, Math.round(height * scale)));
     }

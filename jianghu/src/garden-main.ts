@@ -9,7 +9,7 @@ import { gardenWaterGeometry } from './garden-waterfall.ts';
 import { mountGardenWind } from './garden-wind.ts';
 import { gardenOutfits, gardenOverview, mountImportedGarden } from './imported-garden.ts';
 import { createLanternRound } from './lantern-round.ts';
-import { mewOverview, mewTiltShift, mountMewLabels, mountMewStory } from './mew-story.ts';
+import { mewCompactQuery, mewCompactTiltShift, mewOverview, mewTiltShift, mountMewLabels, mountMewStory } from './mew-story.ts';
 import { createSceneView } from './scene-view.ts';
 import { createTiltShift } from './tilt-shift.ts';
 
@@ -38,8 +38,10 @@ Promise.all([
 ]).then(async ([T, { GLTFLoader }, artwork, modelBytes]) => {
   const { scene: model } = await new GLTFLoader().parseAsync(modelBytes, '');
   if (lifetime.signal.aborted) return;
+  const compact = story && matchMedia(`${mewCompactQuery}, (pointer: coarse)`).matches;
   const view = createSceneView(T, canvas, {
     viewport, alpha: false, exposure: cityLighting.exposure, far: 150, shadows: true,
+    maxPixelRatio: compact ? 1 : undefined,
     orbit: {
       ...(story ? mewOverview : gardenOverview), width: story ? 53.75 : 43, height: 35, radius: 65,
       turn: Math.PI / 4, zoomFactor: 1.2, minPitch: 0.37, maxPitch: 0.8, minZoom: 0.8, maxZoom: 2.5,
@@ -52,11 +54,11 @@ Promise.all([
   const wind = mountGardenWind(T, scene);
   const light = mountCityLighting(T, scene);
   const { pool, spillway, level, runoff } = gardenWaterGeometry(T, garden.pool);
-  const water = createReflectiveWater(T, scene, renderer, level);
+  const water = createReflectiveWater(T, scene, renderer, level, compact ? 512 : undefined);
   water.channel(pool);
   water.fallingSheet(spillway, true);
   water.sprayAt(runoff, 4.2);
-  const tiltShift = createTiltShift(T, renderer, story ? mewTiltShift : undefined);
+  const tiltShift = createTiltShift(T, renderer, compact ? mewCompactTiltShift : story ? mewTiltShift : undefined);
   const billboard = createCharacterBillboards(T);
   const carryLantern = createGardenLanterns(T);
   mountLanternRack(T, scene, garden.rack);

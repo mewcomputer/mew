@@ -4210,3 +4210,12 @@ tests, and the overview and close-up in the browser.
 Raised the homepage's maximum blur radius from 3.6 to 6.4 CSS pixels.
 Verified 112 Jianghu tests, TypeScript, the Astro build and smoke tests,
 and the wider blur in the hero and a close-up.
+
+### 2026-11-19: Lighter mobile rendering on the Mew homepage
+
+Capped the compact and touch homepage's render scale at one pixel per CSS
+pixel and the water capture at 512 pixels on its longest side. The depth
+pass uses eight blur samples with the same focus and radius as desktop.
+
+Verified 113 Jianghu tests, TypeScript, and the Astro build and smoke tests.
+Checked the hero and chapter scroll at 390 × 844 in the browser.

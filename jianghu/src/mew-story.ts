@@ -7,7 +7,9 @@ type Chapter = { stop: Stop; center: number; side: 'left' | 'right'; hero?: bool
 export const mewOverview = {
   target: [0, 1.875, 0], yaw: Math.PI / 4, pitch: Math.atan2(0.3, Math.SQRT1_2), zoom: 0.92,
 } satisfies Stop;
-export const mewTiltShift = { wideAperture: 0.28, closeupZoom: 2.5, maxBlurRadius: 6.4 };
+export const mewCompactQuery = '(max-width: 860px)';
+export const mewTiltShift = { wideAperture: 0.28, closeupZoom: 2.5, maxBlurRadius: 6.4, blurSamples: 16 };
+export const mewCompactTiltShift = { ...mewTiltShift, blurSamples: 8 };
 
 const clamp = (n: number) => Math.min(1, Math.max(0, n));
 
@@ -38,7 +40,7 @@ export function mountMewStory(
   main: HTMLElement, view: ReturnType<typeof createSceneView>,
   stops: Record<string, Stop>, toolbar: HTMLElement,
 ) {
-  const compact = matchMedia('(max-width: 860px)');
+  const compact = matchMedia(mewCompactQuery);
   const sections = [...main.querySelectorAll<HTMLElement>('section[data-focus]')]
     .flatMap<Chapter & { section: HTMLElement; panel: HTMLElement | null }>((section) => {
       const hero = section.dataset.focus === 'garden';

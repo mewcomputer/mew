@@ -1,8 +1,8 @@
 import type * as Three from 'three';
 
-type TiltShiftProfile = { wideAperture: number; closeupZoom: number; maxBlurRadius: number };
+type TiltShiftProfile = { wideAperture: number; closeupZoom: number; maxBlurRadius: number; blurSamples: number };
 const maxAperture = 0.4;
-const defaultProfile: TiltShiftProfile = { wideAperture: 0.18, closeupZoom: 4.2, maxBlurRadius: 3.6 };
+const defaultProfile: TiltShiftProfile = { wideAperture: 0.18, closeupZoom: 4.2, maxBlurRadius: 3.6, blurSamples: 16 };
 
 export function tiltShiftAperture(zoom: number, { wideAperture, closeupZoom }: TiltShiftProfile = defaultProfile) {
   const closeup = Math.min(1, Math.max(0, (zoom - 0.75) / (closeupZoom - 0.75)));
@@ -13,7 +13,7 @@ export function tiltShiftBlurRadius(aperture: number, { maxBlurRadius }: TiltShi
   return maxBlurRadius * (aperture / maxAperture);
 }
 
-export function createTiltShift(T: typeof Three, renderer: Three.WebGLRenderer, profile?: TiltShiftProfile) {
+export function createTiltShift(T: typeof Three, renderer: Three.WebGLRenderer, profile = defaultProfile) {
   const gl = renderer.getContext();
   if (!('getInternalformatParameter' in gl) || !renderer.extensions.has('EXT_color_buffer_float')) return null;
   const samples = gl.getInternalformatParameter(gl.RENDERBUFFER, gl.RGBA16F, gl.SAMPLES) as Int32Array;
@@ -36,6 +36,7 @@ export function createTiltShift(T: typeof Three, renderer: Three.WebGLRenderer, 
 
   const material = new T.ShaderMaterial({
     uniforms,
+    defines: { BLUR_SAMPLES: profile.blurSamples },
     depthTest: false,
     depthWrite: false,
     vertexShader: `
@@ -64,9 +65,9 @@ export function createTiltShift(T: typeof Three, renderer: Three.WebGLRenderer, 
         float radius = maxRadius * smoothstep(1., 6., abs(offset) * aperture);
         if (depth < 1. && radius > .35) {
           float weight = 1.;
-          for (int tap = 0; tap < 16; tap++) {
+          for (int tap = 0; tap < BLUR_SAMPLES; tap++) {
             float angle = float(tap) * 2.39996323;
-            float ring = sqrt((float(tap) + .5) / 16.);
+            float ring = sqrt((float(tap) + .5) / float(BLUR_SAMPLES));
             vec2 uv = vUv + vec2(cos(angle), sin(angle)) * ring * radius * texel;
             float separation = abs(texture2D(sceneDepth, uv).r - depth) * depthRange;
             float coverage = mix(1., .18, smoothstep(.75, 6., separation));
