@@ -4483,3 +4483,8 @@ the matching share card and updated its description.
 
 All 12 site tests passed. Checked the hero and install link at 390 and
 1280 pixels.
+
+### 2026-11-19: Restore the original homepage body copy
+
+Restored the original descriptions and gave sections 4–6 new headings.
+Verified that the paragraphs match the original and all 12 site tests pass.
