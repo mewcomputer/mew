@@ -73,6 +73,48 @@ async fn code_mode_exposes_one_tool_and_keeps_python_state_between_calls() {
 }
 
 #[tokio::test]
+async fn code_mode_resets_a_worker_with_an_unfinished_tool_thread() {
+    let source = "import threading\nsaved = 42\nstarted = threading.Event()\nrelease = threading.Event()\nclass Arguments(dict):\n def items(self):\n  started.set()\n  return super().items()\ndef later():\n tools.echo(Arguments(input='hello'))\n release.wait()\nthreading.Thread(target=later, daemon=True).start()\nassert started.wait(2)";
+    let provider = Arc::new(CapturingProvider::new(vec![
+        FakeProvider::tool_call("python", "py1", serde_json::json!({"source":source})),
+        FakeProvider::tool_call(
+            "python",
+            "py2",
+            serde_json::json!({"source":"text('saved' in globals())"}),
+        ),
+        FakeProvider::text_response("done"),
+    ]));
+    let mut agent = Agent::new(
+        provider,
+        Arc::new(NopDispatcher),
+        None,
+        vec![Arc::new(mew_tools::tools::echo::Echo)],
+        None,
+    );
+    agent.code_mode.mode = Some(mew_config::CodeMode::Full);
+    agent.code_mode.isolated = false;
+    let mut events = agent.run("run".into());
+    while let Some(event) = events.recv().await {
+        if let AgentEvent::PermissionRequest { tx, .. } = event {
+            tx.send(mew_hooks::PermissionDecision::AllowOnce).unwrap();
+        }
+    }
+    let messages = agent.messages.lock().await;
+    let calls: Vec<_> = messages
+        .iter()
+        .flat_map(|message| &message.parts)
+        .filter_map(|part| match part {
+            Part::ToolCall(call) if call.call_id == "py1" || call.call_id == "py2" => Some(call),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        matches!(&calls[0].state, ToolState::Error(state) if state.error.contains("session state was lost"))
+    );
+    assert_eq!(calls[1].state.output(), Some("false\n"));
+}
+
+#[tokio::test]
 async fn code_mode_dispatches_nested_tools_with_their_permission() {
     let provider = Arc::new(CapturingProvider::new(vec![
         FakeProvider::tool_call(

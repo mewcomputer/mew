@@ -136,6 +136,7 @@ pub struct SimpleRunner {
     default_model_id: String,
     code_mode: mew_config::CodeModeConfig,
     codex_code_mode_models: Arc<std::collections::HashSet<String>>,
+    secrets: Arc<mew_tools::SecretSet>,
     tools: HashMap<String, Arc<dyn Tool>>,
     dispatcher: Arc<dyn Dispatcher>,
     cwd: PathBuf,
@@ -180,6 +181,7 @@ impl SimpleRunner {
             default_model_id: String::new(),
             code_mode: mew_config::CodeModeConfig::default(),
             codex_code_mode_models: Arc::default(),
+            secrets: Arc::new(mew_tools::SecretSet::default()),
             tools: tools_map,
             dispatcher,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -201,6 +203,7 @@ impl SimpleRunner {
     pub fn with_agent_registry(mut self, agent: &mut crate::Agent) -> Self {
         self.code_mode = agent.code_mode.clone();
         self.codex_code_mode_models = agent.codex_code_mode_models.clone();
+        self.secrets = agent.secrets.clone();
         self.default_provider_id = agent.provider_id.clone();
         self.default_model_id = agent.model_id.clone();
         self.active_children = agent
@@ -446,6 +449,7 @@ impl SubagentRunner for SimpleRunner {
 
         agent.code_mode = self.code_mode.clone();
         agent.codex_code_mode_models = self.codex_code_mode_models.clone();
+        agent.secrets = self.secrets.clone();
         agent.set_model_info(&model_id, &provider_id);
 
         agent.cwd = self.cwd.clone();
@@ -666,6 +670,26 @@ impl SubagentRunner for SimpleRunner {
                             part: mew_message::Part::ToolCall(tc),
                             ..
                         } => {
+                            if tc.tool_name == "progress_update"
+                                && !tool_parts.contains_key(&tc.base.id)
+                                && matches!(tc.state, mew_message::ToolState::Completed(_))
+                            {
+                                if let Some(message) = tc
+                                    .state
+                                    .input()
+                                    .get("message")
+                                    .and_then(|v| v.as_str())
+                                    .filter(|message| !message.is_empty())
+                                {
+                                    let _ = event_tx
+                                        .send(SubagentEvent::Progress {
+                                            call_id: tc.call_id.clone(),
+                                            tool_name: tc.tool_name.clone(),
+                                            message: message.to_owned(),
+                                        })
+                                        .await;
+                                }
+                            }
                             // Keep our copy of the part in sync with the agent's.
                             // This catches the Completed state for exit_tool; for
                             // progress_update we already handled it at PartEnd.
@@ -1701,6 +1725,126 @@ mod tests {
     async fn code_mode_subagent_returns_the_nested_exit_result() {
         check_code_mode_subagent(false).await;
         check_code_mode_subagent(true).await;
+    }
+
+    #[tokio::test]
+    async fn code_mode_subagent_forwards_progress_to_parent() {
+        let directory = tempfile::tempdir().unwrap();
+        let provider = Arc::new(ScriptedProvider::new(vec![(
+            Duration::ZERO,
+            mew_provider_fake::FakeProvider::tool_call(
+                "python",
+                "py",
+                serde_json::json!({"source":"tools.progress_update({'message':'scanning files'})\ntools.exit_tool({'final_answer':'done'})"}),
+            ),
+        )]));
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(mew_tools::tools::progress_update::ProgressUpdate),
+            exit_tool(),
+        ];
+        let mut parent = crate::Agent::new(
+            provider.clone(),
+            Arc::new(mew_hooks::NopDispatcher),
+            None,
+            tools.clone(),
+            None,
+        );
+        parent.code_mode.mode = Some(mew_config::CodeMode::Full);
+        parent.code_mode.isolated = false;
+        let runner = SimpleRunner::new(provider, tools, Arc::new(mew_hooks::NopDispatcher))
+            .with_agent_registry(&mut parent)
+            .with_session_root(directory.path().to_path_buf());
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let drain = tokio::spawn(async move {
+            let mut messages = Vec::new();
+            while let Some(event) = rx.recv().await {
+                match event {
+                    SubagentEvent::PermissionRequest { tx, .. } => {
+                        let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
+                    }
+                    SubagentEvent::Progress { message, .. } => messages.push(message),
+                    _ => {}
+                }
+            }
+            messages
+        });
+        runner
+            .run(SubagentRunOptions {
+                def: &make_def(Some(10), Some(60)),
+                prompt: "prompt".into(),
+                parent_call_id: "parent".into(),
+                parent_session_id: SessionId::new(),
+                event_tx: tx,
+                cancel: Default::default(),
+                model: None,
+                parent_depth: 0,
+            })
+            .await
+            .unwrap();
+        assert_eq!(drain.await.unwrap(), ["scanning files"]);
+    }
+
+    #[tokio::test]
+    async fn subagent_tool_results_redact_parent_secrets() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("data.txt"), "token=secret-value").unwrap();
+        let provider = Arc::new(ScriptedProvider::new(vec![(
+            Duration::ZERO,
+            mew_provider_fake::FakeProvider::tool_call(
+                "python",
+                "py",
+                serde_json::json!({"source":"r = tools.read({'path':'data.txt'})\ntools.exit_tool({'final_answer':str(r)})"}),
+            ),
+        )]));
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(mew_tools::tools::read::Read), exit_tool()];
+        let mut parent = crate::Agent::new(
+            provider.clone(),
+            Arc::new(mew_hooks::NopDispatcher),
+            None,
+            tools.clone(),
+            None,
+        );
+        parent.code_mode.mode = Some(mew_config::CodeMode::Full);
+        parent.code_mode.isolated = false;
+        parent.secrets = Arc::new(mew_tools::SecretSet {
+            words: vec!["secret-value".into()],
+            globs: vec![],
+        });
+        let runner = SimpleRunner::new(provider, tools, Arc::new(mew_hooks::NopDispatcher))
+            .with_agent_registry(&mut parent)
+            .with_workspace(
+                directory.path().to_path_buf(),
+                vec![directory.path().to_path_buf()],
+                None,
+            )
+            .with_session_root(directory.path().to_path_buf());
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let drain = tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                if let SubagentEvent::PermissionRequest { tx, .. } = event {
+                    let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
+                }
+            }
+        });
+        let result = runner
+            .run(SubagentRunOptions {
+                def: &make_def(Some(10), Some(60)),
+                prompt: "prompt".into(),
+                parent_call_id: "parent".into(),
+                parent_session_id: SessionId::new(),
+                event_tx: tx,
+                cancel: Default::default(),
+                model: None,
+                parent_depth: 0,
+            })
+            .await
+            .unwrap();
+        drain.await.unwrap();
+        let SubagentResult::Complete { text, .. } = result else {
+            panic!("expected completed child");
+        };
+        assert!(text.contains("[REDACTED]"), "{text}");
+        assert!(!text.contains("secret-value"), "{text}");
     }
 
     async fn check_code_mode_subagent(from_catalog: bool) {

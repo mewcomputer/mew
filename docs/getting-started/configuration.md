@@ -112,6 +112,13 @@ model. Calls from Python threads are serialized through the tool dispatcher.
 Nested tool calls use the same permission checks as direct calls.
 Configured MCP tools are also available; see [MCP Servers](/docs/using-mew/mcp-servers/).
 
+Threads can call tools only during the cell that started them. In-flight calls
+finish before the cell returns; later calls from work that has not started are
+rejected. Join threads that call tools and await thread-pool tasks before
+returning from a cell. If one remains running, the cell fails and the Python
+session resets. Thread pools can be reused across cells. Output from background
+work that outlives its cell does not appear in later cells.
+
 With `isolated = true`, Mew runs Python in a macOS Seatbelt sandbox or a Linux
 Bubblewrap sandbox. Linux requires `bwrap` and working unprivileged user
 namespaces. The worker can read the selected Python environment and system

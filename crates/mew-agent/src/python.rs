@@ -186,6 +186,32 @@ impl Drop for PythonWorker {
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn executable_on_path(executable: &Path) -> io::Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if executable.components().count() != 1 {
+        return Ok(executable.to_path_buf());
+    }
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    for directory in std::env::split_paths(&path) {
+        let candidate = directory.join(executable);
+        if std::fs::metadata(&candidate)
+            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        {
+            return if candidate.is_absolute() {
+                Ok(candidate)
+            } else {
+                Ok(std::env::current_dir()?.join(candidate))
+            };
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("executable not found: {}", executable.display()),
+    ))
+}
+
 async fn isolated_command(python: &Path, scratch: &Path) -> io::Result<Command> {
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
@@ -197,13 +223,12 @@ async fn isolated_command(python: &Path, scratch: &Path) -> io::Result<Command> 
     }
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
+        let python = executable_on_path(python)?;
         const DISCOVER: &str = "import json,os,site,sys,sysconfig; libdir=sysconfig.get_config_var('LIBDIR') or ''; lib=sysconfig.get_config_var('LDLIBRARY') or ''; root=os.path.dirname(os.path.dirname(sys.executable)); paths=sys.path + site.getsitepackages() + [os.path.join(libdir,lib),os.path.join(sys.base_prefix,'Python'),os.path.join(root,'pyvenv.cfg'),os.path.join(root,'lib','python%d.%d'%sys.version_info[:2],'site-packages')]; print(json.dumps({'executable':sys.executable,'base':sys.base_prefix,'paths':paths}))";
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            Command::new(python)
+            Command::new(&python)
                 .args(["-I", "-S", "-c", DISCOVER])
-                .env_clear()
-                .env("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
                 .kill_on_drop(true)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -313,7 +338,7 @@ async fn isolated_command(python: &Path, scratch: &Path) -> io::Result<Command> 
                     }
                 }
             }
-            let mut command = Command::new("bwrap");
+            let mut command = Command::new(executable_on_path(Path::new("bwrap"))?);
             command.env_clear().env("PATH", "/usr/bin:/bin");
             command.args([
                 "--unshare-all",
@@ -465,6 +490,9 @@ impl crate::agent::Agent {
                     });
                 }
                 Some("error") => {
+                    if message["reset"] == true {
+                        *worker = None;
+                    }
                     return Ok(mew_hooks::ToolOutput {
                         error: format!(
                             "{}{}",
@@ -476,7 +504,7 @@ impl crate::agent::Agent {
                                 .unwrap_or_default()
                         ),
                         ..Default::default()
-                    })
+                    });
                 }
                 Some("tool") => {
                     let name = message["name"].as_str().unwrap_or("");
@@ -537,7 +565,7 @@ impl crate::agent::Agent {
                                         .await;
                                 }
                                 crate::AgentEvent::ToolEnd { .. } => {}
-                                crate::AgentEvent::PartUpdated { ref part, .. } if !matches!(part, mew_message::Part::ToolCall(call) if call.tool_name == "exit_tool") =>
+                                crate::AgentEvent::PartUpdated { ref part, .. } if !matches!(part, mew_message::Part::ToolCall(call) if call.tool_name == "exit_tool" || (call.tool_name == "progress_update" && matches!(call.state, mew_message::ToolState::Completed(_)))) =>
                                     {}
                                 crate::AgentEvent::ToolProgress { chunk, .. } => {
                                     let _ = events
@@ -613,4 +641,65 @@ fn python_identifier(name: &str) -> String {
             }
         })
         .collect()
+}
+
+#[cfg(all(test, unix, any(target_os = "macos", target_os = "linux")))]
+mod path_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn isolated_worker_resolves_python_on_daemon_path() {
+        const MARKER: &str = "MEW_TEST_PYTHON_PATH_CHILD";
+        if std::env::var_os(MARKER).is_some() {
+            let mut worker = PythonWorker::start(&PythonOptions {
+                executable: "mew-path-test-python".into(),
+                isolated: true,
+            })
+            .await
+            .unwrap();
+            worker.send(&serde_json::json!({"type":"exec","cell":"path","source":"import os\nassert 'MEW_TEST_DISCOVERY_SECRET' not in os.environ\ntext(42)","tools":[]})).await.unwrap();
+            assert_eq!(worker.receive().await.unwrap()["output"], "42\n");
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let python = executable_on_path(Path::new("python3")).unwrap();
+        std::os::unix::fs::symlink(python, dir.path().join("mew-python-helper")).unwrap();
+        let shim = dir.path().join("mew-path-test-python");
+        std::fs::write(&shim, "#!/bin/sh\nexec mew-python-helper \"$@\"\n").unwrap();
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let paths = vec![dir.path().to_path_buf()];
+        #[cfg(target_os = "linux")]
+        {
+            let bwrap = executable_on_path(Path::new("bwrap")).unwrap();
+            std::os::unix::fs::symlink(bwrap, dir.path().join("bwrap")).unwrap();
+        }
+        #[cfg(target_os = "macos")]
+        let paths: Vec<_> = paths
+            .into_iter()
+            .chain(std::env::split_paths(
+                &std::env::var_os("PATH").unwrap_or_default(),
+            ))
+            .collect();
+        let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "python::path_tests::isolated_worker_resolves_python_on_daemon_path",
+                "--nocapture",
+            ])
+            .env(MARKER, "1")
+            .env("MEW_TEST_DISCOVERY_SECRET", "sentinel")
+            .env("PATH", std::env::join_paths(paths).unwrap())
+            .kill_on_drop(true)
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
