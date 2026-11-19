@@ -114,3 +114,13 @@ test('off-axis framing shifts the projected target without changing the orbit', 
   assert.ok(Math.abs(projected.y + 0.12) < 1e-8);
   assert.equal(rig.yaw, settings.yaw);
 });
+
+test('identical camera poses and offsets do not need another render', () => {
+  const rig = createOrbitCamera(Three, new Three.OrthographicCamera(), settings);
+  assert.equal(rig.setView(settings.target, settings.yaw, settings.pitch, 1), false);
+  assert.equal(rig.setFrame(0, 0), false);
+  assert.equal(rig.setView([1, 2, 0], settings.yaw, settings.pitch, 1), true);
+  assert.equal(rig.setView([1, 2, 0], settings.yaw, settings.pitch, 1), false);
+  assert.equal(rig.setFrame(0.14, -0.06), true);
+  assert.equal(rig.setFrame(0.14, -0.06), false);
+});

@@ -10,7 +10,7 @@ import { gardenWaterGeometry } from './garden-waterfall.ts';
 import { mountGardenWind } from './garden-wind.ts';
 import { gardenOutfits, gardenOverview, mountImportedGarden } from './imported-garden.ts';
 import { createLanternRound } from './lantern-round.ts';
-import { mewCompactQuery, mewCompactTiltShift, mewOverview, mewTiltShift, mountMewLabels, mountMewStory } from './mew-story.ts';
+import { mewOverview, mewTiltShift, mountMewLabels, mountMewStory } from './mew-story.ts';
 import { createSceneView } from './scene-view.ts';
 import { createTiltShift } from './tilt-shift.ts';
 
@@ -29,6 +29,16 @@ const lifetime = new AbortController();
 window.addEventListener('pagehide', (event) => {
   if (!event.persisted) lifetime.abort();
 }, { signal: lifetime.signal });
+
+const showGardenStill = () => {
+  if (!poster) return false;
+  viewport.setAttribute('data-garden-still', '');
+  poster.removeAttribute('aria-hidden');
+  toolbar.hidden = true;
+  status.hidden = true;
+  canvas.hidden = true;
+  return true;
+};
 
 async function loadGardenModel(url: string) {
   const { signal } = lifetime;
@@ -55,10 +65,10 @@ Promise.all([
 ]).then(async ([T, { GLTFLoader }, artwork, modelBytes]) => {
   const { scene: model } = await new GLTFLoader().parseAsync(modelBytes, '');
   if (lifetime.signal.aborted) return;
-  const compact = story && matchMedia(`${mewCompactQuery}, (pointer: coarse)`).matches;
-  const quality = compact ? createGardenRenderQuality() : null;
+  const quality = story ? createGardenRenderQuality() : null;
   const view = createSceneView(T, canvas, {
     viewport, alpha: false, exposure: cityLighting.exposure, far: 150, shadows: true,
+    failIfMajorPerformanceCaveat: Boolean(poster),
     maxPixelRatio: quality?.current.pixelRatio,
     orbit: {
       ...(story ? mewOverview : gardenOverview), width: story ? 53.75 : 43, height: 35, radius: 65,
@@ -76,7 +86,9 @@ Promise.all([
   water.channel(pool);
   water.fallingSheet(spillway, true);
   water.sprayAt(runoff, 4.2);
-  const tiltShift = createTiltShift(T, renderer, compact ? mewCompactTiltShift : story ? mewTiltShift : undefined);
+  const tiltShift = createTiltShift(T, renderer, story ? mewTiltShift : undefined);
+  const lastCameraMatrix = new T.Matrix4();
+  const lastProjectionMatrix = new T.Matrix4();
   const billboard = createCharacterBillboards(T);
   const carryLantern = createGardenLanterns(T);
   mountLanternRack(T, scene, garden.rack);
@@ -106,6 +118,7 @@ Promise.all([
   scene.fog = null;
   let lastLighting: CityTime | undefined;
   let skyFrame: number | undefined;
+  let lastQualityFrame = 0;
   let time = 0;
   let reflectedLanternFrame = -1;
 
@@ -144,10 +157,20 @@ Promise.all([
   view.start({
     ...labels,
     beforeRender(now, delta) {
-      const nextQuality = quality?.recordFrame(delta * 1000);
-      if (nextQuality) {
-        const pixelRatio = Math.min(devicePixelRatio || 1, nextQuality.pixelRatio);
-        if (pixelRatio !== renderer.getPixelRatio()) renderer.setPixelRatio(pixelRatio);
+      if (quality) {
+        const moving = !lastCameraMatrix.equals(camera.matrixWorld) || !lastProjectionMatrix.equals(camera.projectionMatrix);
+        lastCameraMatrix.copy(camera.matrixWorld);
+        lastProjectionMatrix.copy(camera.projectionMatrix);
+        const nextQuality = quality.recordFrame(delta ? now - lastQualityFrame : 0, moving);
+        lastQualityFrame = now;
+        if (quality.stalled && showGardenStill()) {
+          view.dispose();
+          return;
+        }
+        if (nextQuality) {
+          const pixelRatio = Math.min(devicePixelRatio || 1, nextQuality.pixelRatio);
+          if (pixelRatio !== renderer.getPixelRatio()) renderer.setPixelRatio(pixelRatio);
+        }
       }
       time += delta;
       const skyDelta = Math.max(0, now - (skyFrame ?? now)) / 1000;
@@ -221,7 +244,9 @@ Promise.all([
 }).catch((error) => {
   if (lifetime.signal.aborted) return;
   lifetime.abort();
-  status.hidden = false;
-  status.textContent = 'The garden could not start.';
+  if (!showGardenStill()) {
+    status.hidden = false;
+    status.textContent = 'The garden could not start.';
+  }
   console.warn('Mew garden initialization', error);
 });

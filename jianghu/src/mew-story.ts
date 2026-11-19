@@ -8,8 +8,7 @@ export const mewOverview = {
   target: [0, 1.875, 0], yaw: Math.PI / 4, pitch: Math.atan2(0.3, Math.SQRT1_2), zoom: 0.92,
 } satisfies Stop;
 export const mewCompactQuery = '(max-width: 860px)';
-export const mewTiltShift = { wideAperture: 0.28, closeupZoom: 2.5, maxBlurRadius: 6.4, blurSamples: 16 };
-export const mewCompactTiltShift = { ...mewTiltShift, blurSamples: 8 };
+export const mewTiltShift = { wideAperture: 0.28, closeupZoom: 2.5, maxBlurRadius: 6.4, blurSamples: 8, multisample: false };
 
 const clamp = (n: number) => Math.min(1, Math.max(0, n));
 
@@ -42,11 +41,13 @@ export function mountMewStory(
 ) {
   const compact = matchMedia(mewCompactQuery);
   const sections = [...main.querySelectorAll<HTMLElement>('section[data-focus]')]
-    .flatMap<Chapter & { section: HTMLElement; panel: HTMLElement | null }>((section) => {
+    .flatMap<Chapter & { section: HTMLElement; panel: HTMLElement | null; top: number; height: number }>((section) => {
       const hero = section.dataset.focus === 'garden';
       const side = section.dataset.side === 'right' ? 'right' : 'left';
       const stop = hero ? mewOverview : stops[section.dataset.focus ?? ''];
-      return stop ? [{ section, panel: section.querySelector('.panel, .intro'), hero, side, stop, center: 0 }] : [];
+      return stop ? [{
+        section, panel: section.querySelector('.panel, .intro'), hero, side, stop, center: 0, top: 0, height: 0,
+      }] : [];
     });
   if (!sections.length) return;
   const leftWash = document.querySelector<HTMLElement>('.wash.left');
@@ -54,36 +55,36 @@ export function mountMewStory(
   const tilt = toolbar.querySelector<HTMLButtonElement>('[data-tilt]');
   let steeper = false;
   let baseYaw = mewOverview.yaw;
-  let pending = 0;
   let chapterPitch = mewOverview.pitch;
+  let height = 0;
 
   function frame() {
-    pending = 0;
-    const height = window.innerHeight;
-    const center = height / 2;
+    const scroll = window.scrollY;
+    const center = scroll + height / 2;
     let index = 0;
     let left = 0;
     let right = 0;
     for (const [i, chapter] of sections.entries()) {
-      const rect = chapter.section.getBoundingClientRect();
-      chapter.center = rect.top + rect.height / 2;
       if (chapter.center <= center) index = i;
       const panel = chapter.panel;
       if (!panel) continue;
-      const bounds = panel.getBoundingClientRect();
+      const top = chapter.top - scroll;
+      let opacity = '';
       if (compact.matches && !chapter.hero) {
-        const visibility = clamp((height * 0.6 - bounds.top) / (height * 0.22));
-        panel.style.opacity = String(view.motion.matches ? 1 : 0.04 + 0.96 * visibility ** 2);
-      } else if (!compact.matches) {
-        panel.style.opacity = '';
+        const visibility = clamp((height * 0.6 - top) / (height * 0.22));
+        opacity = String(view.motion.matches ? 1 : 0.04 + 0.96 * visibility ** 2);
       }
-      const visible = Math.max(0, Math.min(bounds.bottom, height) - Math.max(bounds.top, 0));
-      const wash = clamp(visible / Math.min(height, bounds.height) * 1.25);
+      if (panel.style.opacity !== opacity) panel.style.opacity = opacity;
+      if (!chapter.height) continue;
+      const visible = Math.max(0, Math.min(top + chapter.height, height) - Math.max(top, 0));
+      const wash = clamp(visible / Math.min(height, chapter.height) * 1.25);
       if (chapter.side === 'right') right = Math.max(right, wash);
       else left = Math.max(left, wash);
     }
-    if (leftWash) leftWash.style.opacity = String(compact.matches ? 1 : left);
-    if (rightWash) rightWash.style.opacity = String(compact.matches ? 0 : right);
+    const leftOpacity = String(compact.matches ? 1 : left);
+    const rightOpacity = String(compact.matches ? 0 : right);
+    if (leftWash && leftWash.style.opacity !== leftOpacity) leftWash.style.opacity = leftOpacity;
+    if (rightWash && rightWash.style.opacity !== rightOpacity) rightWash.style.opacity = rightOpacity;
 
     const composed = frameMewStory(sections[index], sections[Math.min(index + 1, sections.length - 1)],
       center, compact.matches, view.motion.matches);
@@ -94,22 +95,44 @@ export function mountMewStory(
       [composed.shiftX, composed.shiftY]);
   }
 
-  function schedule() {
-    if (!pending) pending = requestAnimationFrame(frame);
+  function measure() {
+    height = window.innerHeight;
+    const scroll = window.scrollY;
+    for (const chapter of sections) {
+      const rect = chapter.section.getBoundingClientRect();
+      chapter.center = scroll + rect.top + rect.height / 2;
+      const panel = chapter.panel?.getBoundingClientRect();
+      if (panel) {
+        chapter.top = scroll + panel.top;
+        chapter.height = panel.height;
+      }
+    }
+    frame();
   }
 
   const { signal } = view;
-  window.addEventListener('scroll', schedule, { passive: true, signal });
-  window.addEventListener('resize', schedule, { signal });
-  view.motion.addEventListener('change', schedule, { signal });
-  signal.addEventListener('abort', () => cancelAnimationFrame(pending), { once: true });
+  const observer = new ResizeObserver(measure);
+  observer.observe(main);
+  for (const { section, panel } of sections) {
+    observer.observe(section);
+    if (panel) observer.observe(panel);
+  }
+  window.addEventListener('scroll', frame, { passive: true, signal });
+  window.addEventListener('resize', measure, { signal });
+  view.motion.addEventListener('change', frame, { signal });
+  signal.addEventListener('abort', () => {
+    observer.disconnect();
+    for (const { panel } of sections) panel?.style.removeProperty('opacity');
+    leftWash?.style.removeProperty('opacity');
+    rightWash?.style.removeProperty('opacity');
+  }, { once: true });
   tilt?.addEventListener('click', () => {
     steeper = !steeper;
     tilt.setAttribute('aria-pressed', String(steeper));
     const { target, yaw, zoom } = view.cameraState();
     view.move(target, zoom, { yaw, pitch: steeper ? 0.62 : chapterPitch });
   }, { signal });
-  frame();
+  measure();
 }
 
 
@@ -141,6 +164,7 @@ export function mountMewLabels(
   window.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') close();
   }, { signal: view.signal });
+  view.signal.addEventListener('abort', close, { once: true });
 
   return {
     onTap(x: number, y: number) {

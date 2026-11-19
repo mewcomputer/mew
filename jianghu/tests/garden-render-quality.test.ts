@@ -33,3 +33,31 @@ test('resuming discards partial measurements and recovery needs steady rendering
   for (let frame = 0; frame < 119; frame++) assert.equal(quality.recordFrame(50), undefined);
   assert.equal(quality.recordFrame(50)?.pixelRatio, 1);
 });
+
+test('camera motion lowers quality when active frames miss the display cadence', () => {
+  const quality = createGardenRenderQuality();
+  for (let frame = 0; frame < 11; frame++) assert.equal(quality.recordFrame(34, true), undefined);
+  assert.equal(quality.recordFrame(34, true)?.pixelRatio, 0.85);
+  for (let frame = 0; frame < 352; frame++) assert.equal(quality.recordFrame(17, true), undefined);
+  assert.equal(quality.recordFrame(17, true)?.pixelRatio, 1);
+});
+
+test('the still is reserved for sustained stalls after trying every live quality tier', () => {
+  const quality = createGardenRenderQuality();
+  for (const pixelRatio of [0.85, 0.7]) {
+    quality.recordFrame(180, true);
+    quality.recordFrame(180, true);
+    assert.equal(quality.stalled, false);
+    assert.equal(quality.recordFrame(180, true)?.pixelRatio, pixelRatio);
+  }
+  quality.recordFrame(180, true);
+  quality.recordFrame(180, true);
+  quality.recordFrame(17, true);
+  assert.equal(quality.stalled, false);
+  quality.recordFrame(180, true);
+  quality.recordFrame(180, true);
+  quality.recordFrame(180, true);
+  assert.equal(quality.stalled, true);
+  quality.resetTiming();
+  assert.equal(quality.stalled, false);
+});

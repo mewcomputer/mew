@@ -1,6 +1,8 @@
 import type * as Three from 'three';
 
-type TiltShiftProfile = { wideAperture: number; closeupZoom: number; maxBlurRadius: number; blurSamples: number };
+type TiltShiftProfile = {
+  wideAperture: number; closeupZoom: number; maxBlurRadius: number; blurSamples: number; multisample?: boolean;
+};
 const maxAperture = 0.4;
 const defaultProfile: TiltShiftProfile = { wideAperture: 0.18, closeupZoom: 4.2, maxBlurRadius: 3.6, blurSamples: 16 };
 
@@ -16,11 +18,12 @@ export function tiltShiftBlurRadius(aperture: number, { maxBlurRadius }: TiltShi
 export function createTiltShift(T: typeof Three, renderer: Three.WebGLRenderer, profile = defaultProfile) {
   const gl = renderer.getContext();
   if (!('getInternalformatParameter' in gl) || !renderer.extensions.has('EXT_color_buffer_float')) return null;
-  const samples = gl.getInternalformatParameter(gl.RENDERBUFFER, gl.RGBA16F, gl.SAMPLES) as Int32Array;
+  const samples = profile.multisample === false ? null :
+    gl.getInternalformatParameter(gl.RENDERBUFFER, gl.RGBA16F, gl.SAMPLES) as Int32Array;
   const target = new T.WebGLRenderTarget(1, 1, {
     type: T.HalfFloatType,
     depthTexture: new T.DepthTexture(1, 1, T.UnsignedIntType),
-    samples: samples.includes(2) ? 2 : samples.includes(4) ? 4 : 0,
+    samples: samples?.includes(2) ? 2 : samples?.includes(4) ? 4 : 0,
   });
   const size = new T.Vector2();
   const uniforms = {

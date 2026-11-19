@@ -37,6 +37,7 @@ export type SceneViewOptions = {
   alpha?: boolean;
   far?: number;
   maxPixelRatio?: number;
+  failIfMajorPerformanceCaveat?: boolean;
   orbit: OrbitOptions;
 };
 
@@ -89,11 +90,15 @@ export function createOrbitCamera(T: typeof Three, camera: Three.OrthographicCam
   }
 
   function setView(nextTarget: Readonly<Coordinates>, nextYaw: number, nextPitch: number, nextZoom: number) {
+    const previousYaw = yaw;
     transition = null;
-    target.set(...nextTarget);
     setYaw(nextYaw);
+    if (yaw === previousYaw && pitch === nextPitch && zoom === nextZoom &&
+        target.x === nextTarget[0] && target.y === nextTarget[1] && target.z === nextTarget[2]) return false;
+    target.set(...nextTarget);
     pitch = nextPitch;
     zoom = nextZoom;
+    return true;
   }
 
   function control(name: CameraControl) {
@@ -153,8 +158,10 @@ export function createOrbitCamera(T: typeof Three, camera: Three.OrthographicCam
   return {
     control, pan, setView, update, zoomBy,
     setFrame(x: number, y: number) {
+      if (x === shiftX && y === shiftY) return false;
       shiftX = x;
       shiftY = y;
+      return true;
     },
     get yaw() { return yaw; },
     get zoom() { return zoom; },
@@ -203,7 +210,9 @@ export function createSceneView(T: typeof Three, canvas: HTMLCanvasElement, opti
   const { viewport: container = canvas.parentElement, shadows = false, exposure, alpha = true, far = 100, orbit } = options;
   if (!container) throw new Error('The scene canvas requires a viewport.');
   const viewport = container;
-  const renderer = new T.WebGLRenderer({ canvas, alpha, antialias: true });
+  const renderer = new T.WebGLRenderer({
+    canvas, alpha, antialias: true, failIfMajorPerformanceCaveat: options.failIfMajorPerformanceCaveat,
+  });
   renderer.setPixelRatio(Math.min(devicePixelRatio || 1, options.maxPixelRatio ?? 1.5));
   renderer.toneMapping = T.ACESFilmicToneMapping;
   renderer.toneMappingExposure = exposure;
@@ -402,9 +411,9 @@ export function createSceneView(T: typeof Three, canvas: HTMLCanvasElement, opti
     cameraState: rig.snapshot,
     setView(nextTarget: Readonly<Coordinates>, yaw: number, pitch: number, zoom: number,
       framing?: readonly [number, number]) {
-      rig.setView(nextTarget, yaw, pitch, zoom);
-      if (framing) rig.setFrame(...framing);
-      invalidate();
+      const moved = rig.setView(nextTarget, yaw, pitch, zoom);
+      const reframed = framing && rig.setFrame(...framing);
+      if (moved || reframed) request();
     },
     refreshShadows() {
       renderer.shadowMap.needsUpdate = true;

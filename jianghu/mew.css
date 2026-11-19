@@ -104,6 +104,10 @@ button:focus-visible,a:focus-visible {
   background: linear-gradient(to left, var(--halo) 0%, var(--halo) 30%, transparent 58%);
 }
 
+body:has([data-garden-still]) .wash {
+  opacity: 1;
+}
+
 .bar {
   z-index: 10;
   height: var(--mew-header-height);

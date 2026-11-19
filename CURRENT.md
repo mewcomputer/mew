@@ -4450,3 +4450,18 @@ reconnect failure that follows invite consumption, and verified recovery by
 removing the saved machine and re-adding its Node ID. The remote daemon
 rejected new-chat creation because the app sends `client_kind=mobile`.
 Updated both iOS guides with the observed limits. All 12 site tests passed.
+
+### 2026-11-19: Homepage scroll performance
+
+Cached chapter layout between resizes and skipped renders for unchanged
+camera poses. Desktop now adapts garden resolution and water capture size
+as phones do. Kept the tilt-shift radius and reduced the sampling cost.
+The garden still takes over if live rendering repeatedly stalls at the
+lowest tier or WebGL cannot start.
+
+Verified 119 Jianghu tests, the Jianghu build, and 12 site tests. Chrome
+with 4× CPU throttling rendered 481 scroll frames over eight seconds with
+no gaps over 50 ms, compared with 474 frames and two such gaps before.
+Forced software rendering improved from 11 to 121 scroll frames on the
+same path and switched to the still. Also checked chapter scrolling,
+garden controls, and the install picker at a 390 px viewport.
