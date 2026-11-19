@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, type ReactNode } from "react";
+import { lazy, Suspense, useState, useEffect, useRef, type ReactNode } from "react";
 import {
   Folder,
   GitBranch,
@@ -37,6 +37,7 @@ import {
 } from "@/components/ui/sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
+const SubagentConversation = lazy(() => import("./subagent-conversation"));
 
 const NEW_TAB_TOOLS: ReadonlyArray<{
   kind: WorkbenchTabKind;
@@ -307,9 +308,9 @@ export function RightRail({
   function renderWorkbenchSurface(tab: WorkbenchTab, active: boolean, owner?: string) {
     switch (tab.kind) {
       case "agents":
-        return renderActivitySurface("agents");
+        return <SubagentRailPanel key={sessionId} parentId={sessionId} subagents={subagents} active={open && active} />;
       case "jobs":
-        return renderActivitySurface("jobs");
+        return <div className="flex h-full min-h-0 flex-col overflow-y-auto p-3"><JobsRailPanel jobs={jobs} /></div>;
       case "browser":
         return <BrowserPanel
           client={getClient()}
@@ -355,15 +356,6 @@ export function RightRail({
       case "terminal":
         return <TerminalWorkbenchPanel jobs={jobs} />;
     }
-  }
-
-  function renderActivitySurface(kind: "agents" | "jobs") {
-    return (
-      <div className="flex h-full min-h-0 flex-col overflow-y-auto p-3">
-        {kind === "agents" && <SubagentRailPanel subagents={subagents} />}
-        {kind === "jobs" && <JobsRailPanel jobs={jobs} />}
-      </div>
-    );
   }
 
   if (mode === "dock" && !isMobile) {
@@ -522,8 +514,21 @@ function TerminalWorkbenchPanel({ jobs }: { jobs: Map<string, JobInfo> }) {
   );
 }
 
-function SubagentRailPanel({ subagents }: { subagents: Map<string, SubagentInfo> }) {
+function SubagentRailPanel({ subagents, parentId, active }: {
+  subagents: Map<string, SubagentInfo>;
+  parentId: string | null;
+  active: boolean;
+}) {
+  const [selectedChild, setSelectedChild] = useState<string | null>(null);
   const subs = [...subagents.values()];
+  const selected = subs.find((sub) => sub.childSessionId === selectedChild);
+  if (parentId && selected) {
+    return (
+      <Suspense fallback={<p role="status" className="p-3 text-xs text-muted-foreground">Loading agent conversation…</p>}>
+        <SubagentConversation key={selected.childSessionId} parentId={parentId} agent={selected} active={active} onBack={() => setSelectedChild(null)} />
+      </Suspense>
+    );
+  }
   if (subs.length === 0) {
     return (
       <EmptyState
@@ -534,15 +539,15 @@ function SubagentRailPanel({ subagents }: { subagents: Map<string, SubagentInfo>
     );
   }
   return (
-    <div className="space-y-1.5">
+    <div className="h-full space-y-1.5 overflow-y-auto p-3">
       {subs.map((sub) => (
-        <SubagentRailRow key={sub.parentCallId} sub={sub} />
+        <SubagentRailRow key={sub.parentCallId} sub={sub} onOpen={parentId && sub.childSessionId ? () => setSelectedChild(sub.childSessionId) : undefined} />
       ))}
     </div>
   );
 }
 
-function SubagentRailRow({ sub }: { sub: SubagentInfo }) {
+function SubagentRailRow({ sub, onOpen }: { sub: SubagentInfo; onOpen?: () => void }) {
   const dotColor = {
     running: "bg-blue-500 animate-pulse",
     completed: "bg-green-500",
@@ -550,8 +555,8 @@ function SubagentRailRow({ sub }: { sub: SubagentInfo }) {
     failed: "bg-destructive",
   }[sub.status] ?? "bg-muted-foreground";
 
-  return (
-    <div className="rounded-md border border-border bg-card/50 px-2 py-1.5">
+  const content = (
+    <>
       <div className="flex items-center gap-2">
         <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", dotColor)} />
         <span className="truncate text-xs font-medium text-foreground">
@@ -576,8 +581,14 @@ function SubagentRailRow({ sub }: { sub: SubagentInfo }) {
           {sub.outcome.reason}
         </div>
       )}
-    </div>
+    </>
   );
+  const className = "rounded-md border border-border bg-card/50 px-2 py-1.5";
+  return onOpen ? (
+    <button type="button" className={cn(className, "w-full text-left hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring")} aria-label={`Open ${sub.displayName ?? sub.name}`} onClick={onOpen}>
+      {content}
+    </button>
+  ) : <div className={className}>{content}</div>;
 }
 
 function JobsRailPanel({ jobs }: { jobs: Map<string, JobInfo> }) {

@@ -61,6 +61,8 @@ export type ClientMessage =
   | { type: "load_session_history"; session_id: string; before: number; limit?: number }
   | { type: "read_job_output"; session_id: string; job_id: string; request_id: string; offset: number }
   | { type: "read_subagent_history"; session_id: string; child_session_id: string; request_id: string }
+  | { type: "guide_subagent"; session_id: string; child_session_id: string; request_id: string; text: string }
+  | { type: "read_subagent_message_receipt"; session_id: string; child_session_id: string; request_id: string }
   | { type: "list_sessions" }
   | { type: "delete_session"; session_id: string }
   | { type: "delete_session_confirmed"; session_id: string; request_id: string }
@@ -530,6 +532,15 @@ type PromptReceipt = {
   message?: string;
 };
 
+export type SubagentMessageReceipt = {
+  type: "subagent_message_receipt";
+  session_id: string;
+  child_session_id: string;
+  request_id: string;
+  status: PromptReceipt["status"];
+  message?: string;
+};
+
 type SessionDeletionResult = {
   type: "session_deletion_result";
   session_id: string;
@@ -551,6 +562,7 @@ export type ServerMessage =
   | { type: "session_ready"; session_id: string; cwd?: string; model?: string; provider?: string; permission_mode?: string }
   | SessionOperationFailed
   | PromptReceipt
+  | SubagentMessageReceipt
   | SessionDeletionResult
   | { type: "error"; message: string }
   | { type: "provider"; event: ProviderEventWire }
@@ -800,6 +812,7 @@ export interface MewClientEvents {
   "job-output": (data: JobOutput) => void;
   "job-output-error": (data: JobOutputError) => void;
   "subagent-history": (data: { session_id: string; child_session_id: string; request_id: string; messages: Message[]; error: string | null }) => void;
+  "subagent-message-receipt": (receipt: SubagentMessageReceipt) => void;
   "model-list": (data: { models: ModelInfo[] }) => void;
   "model-switched": (data: { provider: string; model: string }) => void;
   "persona-list": (data: { personas: PersonaInfo[] }) => void;
@@ -1225,6 +1238,48 @@ export class MewClient {
   /** Request a recorded child transcript without changing the attached session. */
   readSubagentHistory(session_id: string, child_session_id: string, request_id: string): void {
     this.send({ type: "read_subagent_history", session_id, child_session_id, request_id });
+  }
+
+  /** Send guidance to a running child of the attached conversation. */
+  async guideSubagent(sessionId: string, childSessionId: string, text: string, requestId: string = crypto.randomUUID()): Promise<SubagentMessageReceipt> {
+    if (!text.trim()) throw new Error("Write a message before sending guidance.");
+    return this.requestSubagentReceipt({ type: "guide_subagent", session_id: sessionId, child_session_id: childSessionId, request_id: requestId, text });
+  }
+
+  /** Read a receipt without sending new guidance. */
+  readSubagentMessageReceipt(sessionId: string, childSessionId: string, requestId: string): Promise<SubagentMessageReceipt> {
+    return this.requestSubagentReceipt({ type: "read_subagent_message_receipt", session_id: sessionId, child_session_id: childSessionId, request_id: requestId });
+  }
+
+  private async requestSubagentReceipt(message: Extract<ClientMessage, { type: "guide_subagent" | "read_subagent_message_receipt" }>): Promise<SubagentMessageReceipt> {
+    const { session_id, child_session_id, request_id } = message;
+    if (!this.isSessionAttached(session_id)) throw new Error("The parent conversation is not attached.");
+    const signal = this.connectionLifetime?.signal;
+    return new Promise((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timeout);
+        signal?.removeEventListener("abort", unconfirmed);
+        this.off("subagent-message-receipt", onReceipt);
+      };
+      const unconfirmed = () => {
+        cleanup();
+        resolve({ type: "subagent_message_receipt", session_id, child_session_id, request_id, status: "unknown" });
+      };
+      const onReceipt = (receipt: SubagentMessageReceipt) => {
+        if (receipt.session_id !== session_id || receipt.child_session_id !== child_session_id || receipt.request_id !== request_id) return;
+        cleanup();
+        resolve(receipt);
+      };
+      const timeout = setTimeout(unconfirmed, 10000);
+      signal?.addEventListener("abort", unconfirmed, { once: true });
+      this.on("subagent-message-receipt", onReceipt);
+      try {
+        this.send(message);
+      } catch (error) {
+        cleanup();
+        reject(error);
+      }
+    });
   }
 
   /** List all sessions known to the daemon (active + persisted idle).
@@ -1769,6 +1824,9 @@ export class MewClient {
         break;
       case "subagent_history":
         this.emit("subagent-history", { session_id: msg.session_id, child_session_id: msg.child_session_id, request_id: msg.request_id, messages: msg.messages, error: msg.error });
+        break;
+      case "subagent_message_receipt":
+        this.emit("subagent-message-receipt", msg);
         break;
       case "session_history_page": {
         if (!this.isSessionAttached(msg.session_id)) break;

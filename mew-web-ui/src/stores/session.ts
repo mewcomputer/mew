@@ -14,6 +14,7 @@ import type {
   Question,
   SubagentQuestionSource,
   SubagentOutcome,
+  SubagentMessageReceipt,
   SessionActivitySnapshot,
   TurnManifest,
   Todo as WireTodo,
@@ -111,6 +112,16 @@ function wirePartToMessagePart(part: Part): MessagePart | null {
   }
 }
 
+export function wireMessageToChatMessage(message: Message): ChatMessage {
+  return {
+    id: message.id,
+    role: message.role,
+    parts: message.parts.map(wirePartToMessagePart).filter((part): part is MessagePart => part !== null),
+    timestamp: message.time.created,
+    assistantMeta: message.assistant ?? undefined,
+  };
+}
+
 export interface PendingPermission {
   requestId: string;
   toolName: string;
@@ -126,6 +137,26 @@ export interface SubagentInfo {
   lastProgress: string | null;
   outcome: SubagentOutcome | null;
   manifests: TurnManifest[];
+}
+
+export interface SubagentDraft {
+  text: string;
+  error?: string;
+  savedRequestId?: string;
+  submission?: {
+    parentId: string;
+    childId: string;
+    requestId: string;
+    text: string;
+    status: "sending" | "checking" | "unknown";
+    checks: number;
+  };
+}
+
+export const EMPTY_SUBAGENT_DRAFT: SubagentDraft = { text: "" };
+
+export function subagentDraftKey(parentId: string, childId: string): string {
+  return JSON.stringify([parentId, childId]);
 }
 
 export interface PendingAskUser {
@@ -241,6 +272,7 @@ interface SessionState {
 
   // Subagents
   subagents: Map<string, SubagentInfo>;
+  subagentDrafts: Map<string, SubagentDraft>;
 
   // Ask-user requests
   pendingAskUser: PendingAskUser[];
@@ -321,6 +353,7 @@ interface SessionState {
   onSessionCleared: () => void;
 
   // Subagent actions
+  setSubagentDraft: (key: string, draft: SubagentDraft) => void;
   onSubagentStart: (data: { parent_call_id: string; name: string; child_session_id: string; display_name: string | null }) => void;
   onSubagentStatus: (data: { parent_call_id: string; tool_name: string; message: string }) => void;
   onSubagentEnd: (data: { parent_call_id: string; child_session_id: string; outcome: SubagentOutcome; manifests?: TurnManifest[] }) => void;
@@ -394,6 +427,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   alerts: [],
   flaggedFiles: [],
   subagents: new Map(),
+  subagentDrafts: new Map(),
   pendingAskUser: [],
   pendingGoals: [],
   todos: [],
@@ -991,15 +1025,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set((state) => {
       if (page && page.session_id !== state.sessionId) return state;
       const history = (page?.messages ?? messages)
-        .map((m) => ({
-          id: m.id,
-          role: m.role as "user" | "assistant" | "system",
-          parts: m.parts
-            .map(wirePartToMessagePart)
-            .filter((p): p is MessagePart => p !== null),
-          timestamp: m.time.created,
-          assistantMeta: m.assistant ?? undefined,
-        }))
+        .map(wireMessageToChatMessage)
         .filter((m) => m.parts.length > 0 || m.assistantMeta);
       const historyCursor = page?.next_cursor ?? null;
       if (page && !page.replace) {
@@ -1039,6 +1065,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       totalCost: 0,
     }),
 
+  setSubagentDraft: (key, draft) =>
+    set((state) => ({ subagentDrafts: new Map(state.subagentDrafts).set(key, draft) })),
+
   onSubagentStart: (data) =>
     set((s) => {
       const subs = new Map(s.subagents);
@@ -1070,19 +1099,15 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   onSubagentEnd: (data) =>
     set((s) => {
+      const sub = s.subagents.get(data.parent_call_id);
+      if (!sub || sub.childSessionId !== data.child_session_id) return s;
       const subs = new Map(s.subagents);
-      const sub = subs.get(data.parent_call_id);
-      if (sub) {
-        let status: SubagentInfo["status"] = "completed";
-        if (data.outcome.type === "cancelled") status = "cancelled";
-        else if (data.outcome.type === "failed") status = "failed";
-        subs.set(data.parent_call_id, {
-          ...sub,
-          status,
-          outcome: data.outcome,
-          manifests: data.manifests ?? [],
-        });
-      }
+      subs.set(data.parent_call_id, {
+        ...sub,
+        status: data.outcome.type,
+        outcome: data.outcome,
+        manifests: data.manifests ?? [],
+      });
       return { subagents: subs };
     }),
 
@@ -1158,8 +1183,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           childSessionId: task.child_session_id ?? "",
           name: task.name,
           displayName: task.display_name,
-          status: task.status as SubagentInfo["status"],
-          lastProgress: task.tool_name ?? (sameChild ? previous.lastProgress : null),
+          status: "running",
+          lastProgress: task.status && task.status !== "running"
+            ? task.status
+            : task.tool_name ?? (sameChild ? previous.lastProgress : null),
           outcome: sameChild ? previous.outcome : null,
           manifests: sameChild ? previous.manifests : [],
         });
@@ -1226,10 +1253,73 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 // Bridge: wire mew-web-client events into the store
 // ---------------------------------------------------------------------------
 
+const UNCONFIRMED_GUIDANCE = "Could not confirm guidance. Check the agent's history before sending again.";
+const MAX_GUIDANCE_RECEIPT_CHECKS = 2;
+
+function applySubagentReceipt(receipt: SubagentMessageReceipt) {
+  const key = subagentDraftKey(receipt.session_id, receipt.child_session_id);
+  const store = useSessionStore.getState();
+  const draft = store.subagentDrafts.get(key);
+  const submission = draft?.submission;
+  if (!draft || submission?.requestId !== receipt.request_id) return;
+  if (receipt.status === "accepted") {
+    const text = draft.text === submission.text ? "" : draft.text;
+    store.setSubagentDraft(key, { text, savedRequestId: receipt.request_id });
+  } else if (receipt.status === "rejected") {
+    store.setSubagentDraft(key, { text: draft.text, error: receipt.message ?? "The agent could not receive guidance." });
+  } else {
+    store.setSubagentDraft(key, { ...draft, submission: { ...submission, status: "unknown" }, error: receipt.message ?? UNCONFIRMED_GUIDANCE });
+  }
+}
+
+function checkSubagentReceipt(client: MewClient, key: string) {
+  const store = useSessionStore.getState();
+  const draft = store.subagentDrafts.get(key);
+  const submission = draft?.submission;
+  if (!draft || submission?.status !== "unknown" || submission.checks >= MAX_GUIDANCE_RECEIPT_CHECKS || !client.isSessionAttached(submission.parentId)) return;
+  const { parentId, childId, requestId } = submission;
+  store.setSubagentDraft(key, { ...draft, submission: { ...submission, status: "checking", checks: submission.checks + 1 } });
+  void client.readSubagentMessageReceipt(parentId, childId, requestId).then(applySubagentReceipt, () => {
+    applySubagentReceipt({ type: "subagent_message_receipt", session_id: parentId, child_session_id: childId, request_id: requestId, status: "unknown" });
+  });
+}
+
+export async function sendSubagentGuidance(client: MewClient, parentId: string, childId: string, parentCallId: string) {
+  const key = subagentDraftKey(parentId, childId);
+  const store = useSessionStore.getState();
+  const agent = store.subagents.get(parentCallId);
+  const draft = store.subagentDrafts.get(key) ?? EMPTY_SUBAGENT_DRAFT;
+  const text = draft.text.trim();
+  const submission = draft.submission;
+  if (!text || store.connectionState !== "connected" || store.confirmedSessionId !== parentId
+    || !client.isSessionAttached(parentId) || agent?.childSessionId !== childId || agent.status !== "running"
+    || submission?.status === "sending" || submission?.status === "checking") return;
+  const retry = submission?.status === "unknown" && submission.text.trim() === text;
+  const requestId = retry ? submission.requestId : crypto.randomUUID();
+  store.setSubagentDraft(key, {
+    text: draft.text,
+    submission: { parentId, childId, requestId, text: draft.text, status: "sending", checks: retry ? submission.checks : 0 },
+  });
+  try {
+    const receipt = await client.guideSubagent(parentId, childId, text, requestId);
+    applySubagentReceipt(receipt);
+    if (receipt.status === "unknown") checkSubagentReceipt(client, key);
+  } catch (error) {
+    applySubagentReceipt({
+      type: "subagent_message_receipt", session_id: parentId, child_session_id: childId, request_id: requestId,
+      status: retry ? "unknown" : "rejected",
+      message: error instanceof Error ? error.message : "Could not send guidance.",
+    });
+  }
+}
+
 export function bridgeClientToStore(client: MewClient) {
   const store = useSessionStore;
 
   client.on("close", () => store.setState({ connectionState: "disconnected", confirmedSessionId: null }));
+  client.on("subagent-message-receipt", (receipt) => {
+    if (receipt.status !== "unknown") applySubagentReceipt(receipt);
+  });
 
   client.on("session-ready", (data) => {
     useSessionStore.setState({
@@ -1240,6 +1330,9 @@ export function bridgeClientToStore(client: MewClient) {
       pendingAskUser: [],
       pendingGoals: [],
     });
+    for (const [key, draft] of store.getState().subagentDrafts) {
+      if (draft.submission?.parentId === data.session_id) checkSubagentReceipt(client, key);
+    }
     permissionResponders.clear();
     askUserResponders.clear();
     if (data.model && data.provider) {

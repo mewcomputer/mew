@@ -666,7 +666,7 @@ describe("authoritative activity recovery", () => {
     store().onJobUpdate({ jobId: "stale-job", command: "old", state: "running" });
     const snapshot = {
       session_id: "active",
-      subagents: [{ task_id: "task", child_session_id: "child", name: "worker", display_name: "Curie", status: "running", tool_name: "read" }],
+      subagents: [{ task_id: "task", child_session_id: "child", name: "worker", display_name: "Curie", status: "Reading the build log", tool_name: "read" }],
       jobs: [{ job_id: "job", command: "cargo test", state: "running" }],
     };
     store().onSessionActivitySnapshot({ ...snapshot, session_id: "other" });
@@ -674,10 +674,18 @@ describe("authoritative activity recovery", () => {
     expect([...store().jobs.keys()]).toEqual(["stale-job"]);
     store().onSessionActivitySnapshot(snapshot);
     expect([...store().subagents.keys()]).toEqual(["task"]);
-    expect(store().subagents.get("task")).toMatchObject({ childSessionId: "child", displayName: "Curie", status: "running" });
+    expect(store().subagents.get("task")).toMatchObject({
+      childSessionId: "child", displayName: "Curie", status: "running", lastProgress: "Reading the build log",
+    });
     expect([...store().jobs.values()]).toEqual([{ jobId: "job", command: "cargo test", state: "running" }]);
     store().onSessionActivitySnapshot({ session_id: "active", subagents: [], jobs: [] });
     expect(store().subagents.size).toBe(0);
     expect(store().jobs.size).toBe(0);
+  });
+
+  it("ignores completion for a different child under the same call", () => {
+    store().onSubagentStart({ parent_call_id: "task", child_session_id: "current-child", name: "worker", display_name: null });
+    store().onSubagentEnd({ parent_call_id: "task", child_session_id: "old-child", outcome: { type: "completed" } });
+    expect(store().subagents.get("task")).toMatchObject({ childSessionId: "current-child", status: "running" });
   });
 });

@@ -513,6 +513,72 @@ test("a dropped deletion remains uncertain and sends no commands on the replacem
   assert.deepEqual(latest().sent, []);
 });
 
+test("direct guidance requires the attached parent and accepts only its exact child receipt", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory, clientKind: "desktop" });
+  const connected = client.connect();
+  latest().open();
+  await connected;
+  latest().peerSend({ type: "session_ready", session_id: "other-parent" });
+  latest().peerSend({ type: "session_ready", session_id: "parent" });
+  await assert.rejects(client.guideSubagent("other-parent", "child", "wrong parent"), /attached/i);
+  const accepted = client.guideSubagent("parent", "child", "direct guidance");
+  const command = latest().sent[0];
+  assert.ok(command?.type === "guide_subagent");
+  assert.deepEqual({ ...command, request_id: "id" }, {
+    type: "guide_subagent", session_id: "parent", child_session_id: "child", request_id: "id", text: "direct guidance",
+  });
+  const receipt = {
+    type: "subagent_message_receipt", session_id: "parent", child_session_id: "child", request_id: command.request_id, status: "accepted",
+  } as const;
+  latest().peerSend({ ...receipt, session_id: "other-parent", status: "rejected" });
+  latest().peerSend({ ...receipt, child_session_id: "other-child", status: "rejected" });
+  latest().peerSend({ ...receipt, request_id: "other-request", status: "rejected" });
+  latest().peerSend(receipt);
+  assert.equal((await accepted).status, "accepted");
+});
+
+test("a disconnected guidance receipt can be checked after the exact parent reattaches", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connected = client.connect();
+  latest().open();
+  await connected;
+  latest().peerSend({ type: "session_ready", session_id: "parent" });
+  const submitted = client.guideSubagent("parent", "child", "keep this draft");
+  latest().peerClose(1006);
+  const uncertain = await submitted;
+  assert.equal(uncertain.status, "unknown");
+  const replacement = client.connect();
+  latest().open();
+  await replacement;
+  await assert.rejects(client.readSubagentMessageReceipt("parent", "child", uncertain.request_id), /attached/i);
+  latest().peerSend({ type: "session_ready", session_id: "parent" });
+  const requested = client.readSubagentMessageReceipt("parent", "child", uncertain.request_id);
+  assert.deepEqual(latest().sent, [{
+    type: "read_subagent_message_receipt", session_id: "parent", child_session_id: "child", request_id: uncertain.request_id,
+  }]);
+  latest().peerSend({ ...uncertain, status: "accepted" });
+  assert.equal((await requested).status, "accepted");
+});
+
+test("guidance timeout returns the original request as uncertain", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connected = client.connect();
+  latest().open();
+  await connected;
+  latest().peerSend({ type: "session_ready", session_id: "parent" });
+  const result = client.guideSubagent("parent", "child", "review this", "original-request");
+  context.mock.timers.tick(10000);
+  assert.deepEqual(await result, {
+    type: "subagent_message_receipt", session_id: "parent", child_session_id: "child",
+    request_id: "original-request", status: "unknown",
+  });
+  assert.equal(latest().sent.length, 1);
+});
+
 test("provider events are dispatched to listeners", async () => {
   const { factory, latest } = makeFactory();
   const client = new MewClient("ws://test/", { socketFactory: factory });

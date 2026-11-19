@@ -4064,3 +4064,16 @@ to the parent. Look up saved receipts after the child finishes.
 
 Verified 215 agent tests, the focused guidance tests after the retirement fix,
 127 protocol tests, and 117 daemon tests.
+
+## 2026-11-18 Subagent conversations in Electron
+
+Open an agent's transcript from the Agents pane and send guidance to a running
+child. Keep drafts scoped to the parent and child. Check uncertain receipts
+after reattachment and reuse the request ID when retrying unchanged text.
+Load the transcript renderer on demand. Finished children can be viewed while
+listed, and reopening them for follow-up still needs saved child policy.
+
+Verified 51 SDK tests, 220 React tests, TypeScript checks, and the production
+renderer build. Electron host tests and real guest isolation passed. The
+native package and pinned browser input tests require agent-browser 0.34 or
+newer. The installed version was 0.31.2.
