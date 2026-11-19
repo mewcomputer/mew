@@ -4281,6 +4281,12 @@ ignored. Workspace Clippy, formatting, architecture, and theme checks passed.
 Local macOS checks used the library built from the pinned Ghostty revision
 after the local Zig linker failed.
 
+### 2026-11-19 TUI compaction notice order
+
+Render compaction notices where they occur in the transcript and record the
+actual header row for mouse clicks. Verified the ordering and hit-test
+regression with the full TUI suite.
+
 ### 2026-11-19: Garden homepage, docs palette, and share image
 
 The Astro homepage now uses Jianghu's landing markup, assets, and live
