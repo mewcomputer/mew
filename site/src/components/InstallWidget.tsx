@@ -3,8 +3,8 @@ import { useState, useCallback } from "react";
 type Tab = "bash" | "brew";
 
 const commands: Record<Tab, string> = {
-    bash: "curl --proto '=https' --tlsv1.2 -sSf https://mew.computer/get.sh | sh",
-    brew: "brew tap mewcomputer/mew && brew install mew",
+    bash: "curl --proto '=https' --tlsv1.2 -sSf https://mew.computer/get.sh | bash -s -- --nightly",
+    brew: "brew tap mewcomputer/tap && brew install mewcomputer/tap/mew",
 };
 
 function ClipboardIcon({ className }: { className?: string }) {

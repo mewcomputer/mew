@@ -33,5 +33,6 @@ test('the docs and homepage share the wordmark and header button styles', async 
 test('the installation guide remains available as raw Markdown', async () => {
   const markdown = await readFile(new URL(`${installation}.md`, dist), 'utf8');
   assert.match(markdown, /## macOS and Linux/);
-  assert.match(markdown, /```sh\s+brew tap mewcomputer\/mew/);
+  assert.match(markdown, /```sh\s+brew tap mewcomputer\/tap\nbrew install mewcomputer\/tap\/mew/);
+  assert.match(markdown, /brew upgrade mewcomputer\/tap\/mew/);
 });

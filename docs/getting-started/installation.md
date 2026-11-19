@@ -15,31 +15,29 @@ commands below install the `mew` CLI and its terminal UI only.
 ### Homebrew
 
 ```sh
-brew tap mewcomputer/mew
-brew install mew
+brew tap mewcomputer/tap
+brew install mewcomputer/tap/mew
 ```
 
 Upgrade later with:
 
 ```sh
-brew upgrade mew
+brew upgrade mewcomputer/tap/mew
 ```
+
+The [tap](https://github.com/mewcomputer/homebrew-tap) currently installs a
+pinned nightly build. The Linux binaries require glibc 2.39 or later.
 
 ### Install script
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf https://mew.computer/get.sh | sh
+curl --proto '=https' --tlsv1.2 -sSf https://mew.computer/get.sh | bash -s -- --nightly
 ```
 
-The script detects your platform, downloads the latest release from GitHub,
+The script detects your platform, downloads the latest nightly from GitHub,
 verifies the SHA256 checksum, and installs `mew` to `~/.local/bin` or
-`~/bin`. Re-run the script to upgrade.
-
-Install the latest nightly build instead:
-
-```sh
-curl --proto '=https' --tlsv1.2 -sSf https://mew.computer/get.sh | sh -s -- --nightly
-```
+`~/bin`. Re-run the command to upgrade. The stable channel becomes available
+when a stable release is published.
 
 Environment variables:
 

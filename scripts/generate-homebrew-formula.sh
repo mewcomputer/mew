@@ -3,20 +3,20 @@ set -euo pipefail
 
 # Generate a Homebrew formula for mew from a GitHub release.
 # Usage:
-#   scripts/generate-homebrew-formula.sh v0.2.0
+#   scripts/generate-homebrew-formula.sh v0.2.0 [owner/repository]
 #
 # The script fetches the SHA256SUMS asset from the release and prints the
 # formula to stdout. Copy the output into your tap repo, e.g.:
-#   scripts/generate-homebrew-formula.sh v0.2.0 > ../homebrew-mew/Formula/mew.rb
+#   scripts/generate-homebrew-formula.sh v0.2.0 > ../homebrew-tap/Formula/mew.rb
 
 version="${1:-}"
-if [[ -z "$version" ]]; then
-    echo "Usage: $0 <version>" >&2
+repo="${2:-mewcomputer/mew}"
+if [[ ! "$version" =~ ^v[0-9][0-9A-Za-z.+-]*$ || ! "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ || $# -gt 2 ]]; then
+    echo "Usage: $0 <version> [owner/repository]" >&2
     echo "Example: $0 v0.2.0" >&2
     exit 1
 fi
 
-repo="mewcomputer/mew"
 base_url="https://github.com/${repo}/releases/download/${version}"
 checksums_url="${base_url}/SHA256SUMS"
 
@@ -24,13 +24,24 @@ tmp_dir="$(mktemp -d 2>/dev/null || mktemp -d -t mew-homebrew)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
 checksums_path="$tmp_dir/SHA256SUMS"
-curl --fail --show-error --silent --proto '=https' --tlsv1.2 \
+curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
     --output "$checksums_path" "$checksums_url"
 
 sha_for() {
     local file="$1"
-    awk -v rel_path="$file" '$2 == rel_path { print $1 }' "$checksums_path"
+    local checksum
+    checksum="$(awk -v rel_path="$file" '$2 == rel_path { print $1 }' "$checksums_path")"
+    if [[ ! "$checksum" =~ ^[0-9a-f]{64}$ ]]; then
+        echo "Expected one SHA-256 checksum for $file" >&2
+        return 1
+    fi
+    printf '%s' "$checksum"
 }
+
+mac_arm="$(sha_for "mew-${version}-aarch64-apple-darwin.tar.gz")"
+mac_intel="$(sha_for "mew-${version}-x86_64-apple-darwin.tar.gz")"
+linux_arm="$(sha_for "mew-${version}-aarch64-unknown-linux-gnu.tar.gz")"
+linux_intel="$(sha_for "mew-${version}-x86_64-unknown-linux-gnu.tar.gz")"
 
 cat <<EOF
 class Mew < Formula
@@ -42,22 +53,22 @@ class Mew < Formula
   on_macos do
     on_arm do
       url "${base_url}/mew-${version}-aarch64-apple-darwin.tar.gz"
-      sha256 "$(sha_for "mew-${version}-aarch64-apple-darwin.tar.gz")"
+      sha256 "${mac_arm}"
     end
     on_intel do
       url "${base_url}/mew-${version}-x86_64-apple-darwin.tar.gz"
-      sha256 "$(sha_for "mew-${version}-x86_64-apple-darwin.tar.gz")"
+      sha256 "${mac_intel}"
     end
   end
 
   on_linux do
     on_arm do
       url "${base_url}/mew-${version}-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "$(sha_for "mew-${version}-aarch64-unknown-linux-gnu.tar.gz")"
+      sha256 "${linux_arm}"
     end
     on_intel do
       url "${base_url}/mew-${version}-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "$(sha_for "mew-${version}-x86_64-unknown-linux-gnu.tar.gz")"
+      sha256 "${linux_intel}"
     end
   end
 

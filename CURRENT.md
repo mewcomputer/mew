@@ -4273,3 +4273,15 @@ surface, with the table of contents on the article surface.
 
 Verified seven site smoke tests, 116 Jianghu tests, both Jianghu build
 formats, and the desktop and phone layouts in light and dark mode.
+
+### 2026-11-19: Public Mew Homebrew tap
+
+Published `mewcomputer/tap` with a formula for the November 18 nightly.
+The formula uses a dated prerelease in the tap repository with verified
+archives for both macOS and Linux architectures. Updated the install
+guide and formula publishing instructions to use the new tap.
+
+The installer and formula generator now follow GitHub asset redirects over
+HTTPS. Verified all published asset checksums, installed the public tap on
+Apple Silicon in an isolated Homebrew prefix, and installed the nightly
+with the shell script in a temporary directory. Seven site smoke tests passed.

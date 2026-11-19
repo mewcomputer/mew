@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Semver-versioned GitHub Releases with per-platform tarballs and SHA256 checksums.
 - Linux ARM64 release target (`aarch64-unknown-linux-gnu`).
 - One-line install script at `https://mew.computer/get.sh`.
-- Homebrew tap: `mewcomputer/mew`.
+- Homebrew tap `mewcomputer/tap`.
 
 ### Changed
 
