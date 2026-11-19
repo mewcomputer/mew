@@ -1,11 +1,16 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, info};
+
+pub const MCP_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+const STDIO_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const TOOL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 // ---------------------------------------------------------------------------
 // JSON-RPC 2.0 types
@@ -78,10 +83,23 @@ impl From<reqwest::Error> for McpError {
 #[async_trait]
 trait Transport: Send + Sync {
     async fn call(&self, method: &str, params: Option<Value>) -> Result<Value, McpError>;
+    async fn call_dispatched(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        dispatched: Arc<AtomicBool>,
+    ) -> Result<Value, McpError> {
+        dispatched.store(true, Ordering::Release);
+        self.call(method, params).await
+    }
     async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), McpError>;
     fn set_protocol_version(&self, _version: &str) {
         // Default no-op for transports that don't need version negotiation.
     }
+    fn is_broken(&self) -> bool {
+        false
+    }
+    async fn retire(&self) {}
     async fn close(&mut self) -> Result<(), McpError>;
 }
 
@@ -99,7 +117,7 @@ async fn parse_sse_response(mut resp: reqwest::Response, id: u64) -> Result<Valu
         .map_err(|e| McpError::Transport(format!("read sse body: {}", e.without_url())))?
     {
         buffer.extend_from_slice(&chunk);
-        if buffer.len() + data_buffer.len() > 16 * 1024 * 1024 {
+        if buffer.len() + data_buffer.len() > MAX_MESSAGE_BYTES {
             return Err(McpError::Protocol("SSE response too large".into()));
         }
         let mut consumed = 0;
@@ -320,10 +338,22 @@ impl Transport for HttpTransport {
                 return parse_sse_response(resp, id).await;
             }
 
-            let response: JsonRpcResponse = resp
-                .json()
-                .await
-                .map_err(|e| McpError::Transport(format!("parse response: {}", e.without_url())))?;
+            if resp
+                .content_length()
+                .is_some_and(|length| length > MAX_MESSAGE_BYTES as u64)
+            {
+                return Err(McpError::Protocol("HTTP response too large".into()));
+            }
+            let mut resp = resp;
+            let mut data = Vec::new();
+            while let Some(chunk) = resp.chunk().await? {
+                if chunk.len() > MAX_MESSAGE_BYTES.saturating_sub(data.len()) {
+                    return Err(McpError::Protocol("HTTP response too large".into()));
+                }
+                data.extend_from_slice(&chunk);
+            }
+            let response: JsonRpcResponse = serde_json::from_slice(&data)
+                .map_err(|e| McpError::Transport(format!("parse response: {e}")))?;
 
             if response.id != Some(id) {
                 return Err(McpError::Protocol(
@@ -388,6 +418,8 @@ struct StdioTransport {
     stdout: tokio::sync::Mutex<StdioOutput>,
     call_lock: Arc<tokio::sync::Mutex<()>>,
     request_id: AtomicU64,
+    broken: Arc<AtomicBool>,
+    retired: AtomicBool,
 }
 
 struct StdioOutput {
@@ -419,6 +451,8 @@ impl StdioTransport {
             }),
             call_lock: Arc::new(tokio::sync::Mutex::new(())),
             request_id: AtomicU64::new(1),
+            broken: Arc::new(AtomicBool::new(false)),
+            retired: AtomicBool::new(false),
         })
     }
 
@@ -430,7 +464,10 @@ impl StdioTransport {
 impl Drop for StdioTransport {
     fn drop(&mut self) {
         #[cfg(unix)]
-        if let Some(pid) = self.process_group {
+        if let Some(pid) = self
+            .process_group
+            .filter(|_| !self.retired.swap(true, Ordering::AcqRel))
+        {
             let _ = nix::sys::signal::killpg(
                 nix::unistd::Pid::from_raw(pid),
                 nix::sys::signal::Signal::SIGKILL,
@@ -444,6 +481,7 @@ struct StdioCancellation {
     id: u64,
     armed: bool,
     call_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    broken: Arc<AtomicBool>,
 }
 
 impl Drop for StdioCancellation {
@@ -453,22 +491,44 @@ impl Drop for StdioCancellation {
         }
         let stdin = self.stdin.clone();
         let call_guard = self.call_guard.take();
+        let broken = self.broken.clone();
+        if broken.swap(true, Ordering::AcqRel) {
+            return;
+        }
         let message = serde_json::json!({"jsonrpc":"2.0", "method":"notifications/cancelled", "params":{"requestId":self.id,"reason":"cancelled by client"}}).to_string() + "\n";
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
                 let _call_guard = call_guard;
-                if let Some(stdin) = stdin.lock().await.as_mut() {
-                    let _ = stdin.write_all(message.as_bytes()).await;
+                let result = tokio::time::timeout(STDIO_WRITE_TIMEOUT, async {
+                    let mut guard = stdin.lock().await;
+                    let stdin = guard
+                        .as_mut()
+                        .ok_or_else(|| std::io::Error::other("stdin closed"))?;
+                    stdin.write_all(message.as_bytes()).await
+                })
+                .await;
+                if !matches!(result, Ok(Ok(()))) {
+                    broken.store(true, Ordering::Release);
                 }
             });
         }
     }
 }
 
-#[async_trait]
-impl Transport for StdioTransport {
-    async fn call(&self, method: &str, params: Option<Value>) -> Result<Value, McpError> {
+impl StdioTransport {
+    async fn call_marked(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        dispatched: Option<Arc<AtomicBool>>,
+    ) -> Result<Value, McpError> {
         let call_guard = self.call_lock.clone().lock_owned().await;
+        if self.is_broken() {
+            return Err(McpError::Transport("stdio connection is unusable".into()));
+        }
+        if let Some(dispatched) = dispatched {
+            dispatched.store(true, Ordering::Release);
+        }
         let id = self.next_id();
         let request = JsonRpcRequest {
             jsonrpc: "2.0",
@@ -490,15 +550,22 @@ impl Transport for StdioTransport {
             id,
             armed: true,
             call_guard: Some(call_guard),
+            broken: self.broken.clone(),
         };
+        let broken = self.broken.clone();
         tokio::spawn(async move {
             let stdin = guard
                 .as_mut()
                 .ok_or_else(|| McpError::Transport("stdin closed".into()))?;
-            stdin
-                .write_all(body.as_bytes())
-                .await
-                .map_err(|e| McpError::Transport(format!("write stdin: {e}")))
+            let result =
+                tokio::time::timeout(STDIO_WRITE_TIMEOUT, stdin.write_all(body.as_bytes())).await;
+            if !matches!(result, Ok(Ok(()))) {
+                broken.store(true, Ordering::Release);
+            }
+            match result {
+                Ok(result) => result.map_err(|e| McpError::Transport(format!("write stdin: {e}"))),
+                Err(_) => Err(McpError::Transport("write stdin timed out".into())),
+            }
         })
         .await
         .map_err(|error| McpError::Transport(format!("write task: {error}")))??;
@@ -535,10 +602,16 @@ impl Transport for StdioTransport {
                     let stdin = guard
                         .as_mut()
                         .ok_or_else(|| McpError::Transport("stdin closed".into()))?;
-                    stdin
-                        .write_all(&body)
-                        .await
-                        .map_err(|e| McpError::Transport(format!("write stdin: {e}")))?;
+                    match tokio::time::timeout(STDIO_WRITE_TIMEOUT, stdin.write_all(&body)).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => {
+                            return Err(McpError::Transport(format!("write stdin: {error}")))
+                        }
+                        Err(_) => {
+                            self.broken.store(true, Ordering::Release);
+                            return Err(McpError::Transport("write stdin timed out".into()));
+                        }
+                    }
                 }
                 continue;
             }
@@ -558,6 +631,22 @@ impl Transport for StdioTransport {
                 .result
                 .ok_or_else(|| McpError::Protocol("missing result in stdio response".into()));
         }
+    }
+}
+
+#[async_trait]
+impl Transport for StdioTransport {
+    async fn call(&self, method: &str, params: Option<Value>) -> Result<Value, McpError> {
+        self.call_marked(method, params, None).await
+    }
+
+    async fn call_dispatched(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        dispatched: Arc<AtomicBool>,
+    ) -> Result<Value, McpError> {
+        self.call_marked(method, params, Some(dispatched)).await
     }
 
     async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), McpError> {
@@ -598,6 +687,25 @@ impl Transport for StdioTransport {
             let _ = child.wait().await;
         }
         Ok(())
+    }
+
+    fn is_broken(&self) -> bool {
+        self.broken.load(Ordering::Acquire)
+    }
+
+    async fn retire(&self) {
+        self.broken.store(true, Ordering::Release);
+        let first = !self.retired.swap(true, Ordering::AcqRel);
+        #[cfg(unix)]
+        if let Some(pid) = self.process_group.filter(|_| first) {
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        let mut child = self.child.lock().await;
+        let _ = child.start_kill();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), child.wait()).await;
     }
 }
 
@@ -680,9 +788,10 @@ pub async fn connect_tools(
         let cwd = cwd.to_path_buf();
         tasks.spawn(async move {
             let name = config.name.clone();
-            let result = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            let result = tokio::time::timeout(MCP_DISCOVERY_TIMEOUT, async {
                 let client = Arc::new(McpClient::connect_configured(&config, &cwd).await?);
                 let definitions = client.list_tools().await?;
+                let client = Arc::new(ManagedClient::configured(client, config, cwd));
                 Ok::<_, McpError>((client, definitions))
             })
             .await;
@@ -740,7 +849,11 @@ pub async fn connect_tools(
                 tracing::warn!(tool = %qualified, "skipping duplicate MCP tool");
                 continue;
             }
-            tools.push(Arc::new(McpTool::new(&name, &definition, client.clone())));
+            tools.push(Arc::new(McpTool::with_client(
+                &name,
+                &definition,
+                client.clone(),
+            )));
         }
     }
     tools.sort_by(|a, b| a.name().cmp(b.name()));
@@ -951,16 +1064,24 @@ impl McpClient {
         tool_name: &str,
         arguments: Value,
     ) -> Result<ToolCallResult, McpError> {
-        let result = self
-            .transport
-            .call(
-                "tools/call",
-                Some(serde_json::json!({
-                    "name": tool_name,
-                    "arguments": arguments,
-                })),
-            )
-            .await?;
+        self.call_tool_marked(tool_name, arguments, None).await
+    }
+
+    async fn call_tool_marked(
+        &self,
+        tool_name: &str,
+        arguments: Value,
+        dispatched: Option<Arc<AtomicBool>>,
+    ) -> Result<ToolCallResult, McpError> {
+        let params = Some(serde_json::json!({"name":tool_name, "arguments":arguments}));
+        let result = match dispatched {
+            Some(dispatched) => {
+                self.transport
+                    .call_dispatched("tools/call", params, dispatched)
+                    .await?
+            }
+            None => self.transport.call("tools/call", params).await?,
+        };
 
         let content = result.get("content").and_then(|v| v.as_array());
         let text = content
@@ -1067,11 +1188,110 @@ pub struct McpTool {
     description: String,
     schema: Value,
     tool_name: String,
-    client: Arc<McpClient>,
+    client: Arc<ManagedClient>,
+}
+
+/// A server shared by its tools. A failed call is returned to its caller;
+/// a later call reconnects rather than replaying a potentially mutating call.
+struct ManagedClient {
+    current: tokio::sync::RwLock<Arc<McpClient>>,
+    reconnect: Option<(McpServerConfig, std::path::PathBuf)>,
+    reconnect_lock: tokio::sync::Mutex<()>,
+    invalid: AtomicBool,
+}
+
+impl ManagedClient {
+    fn new(client: Arc<McpClient>) -> Self {
+        Self {
+            current: tokio::sync::RwLock::new(client),
+            reconnect: None,
+            reconnect_lock: tokio::sync::Mutex::new(()),
+            invalid: AtomicBool::new(false),
+        }
+    }
+
+    fn configured(
+        client: Arc<McpClient>,
+        config: McpServerConfig,
+        cwd: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            reconnect: Some((config, cwd)),
+            ..Self::new(client)
+        }
+    }
+
+    async fn call_tool(&self, name: &str, arguments: Value) -> Result<ToolCallResult, McpError> {
+        self.call_tool_with_timeout(name, arguments, TOOL_CALL_TIMEOUT)
+            .await
+    }
+
+    async fn call_tool_with_timeout(
+        &self,
+        name: &str,
+        arguments: Value,
+        timeout: std::time::Duration,
+    ) -> Result<ToolCallResult, McpError> {
+        let dispatched = Arc::new(AtomicBool::new(false));
+        let selected = StdMutex::new(None::<Arc<McpClient>>);
+        let operation = async {
+            let current = self.current.read().await.clone();
+            if let Some((config, cwd)) = self
+                .reconnect
+                .as_ref()
+                .filter(|_| self.invalid.load(Ordering::Acquire) || current.transport.is_broken())
+            {
+                let _guard = self.reconnect_lock.lock().await;
+                let current = self.current.read().await.clone();
+                if self.invalid.load(Ordering::Acquire) || current.transport.is_broken() {
+                    current.transport.retire().await;
+                    let client = tokio::time::timeout(
+                        MCP_DISCOVERY_TIMEOUT,
+                        McpClient::connect_configured(config, cwd),
+                    )
+                    .await
+                    .map_err(|_| McpError::Transport("server reconnection timed out".into()))??;
+                    let mut current = self.current.write().await;
+                    *current = Arc::new(client);
+                    self.invalid.store(false, Ordering::Release);
+                }
+            }
+            let client = self.current.read().await.clone();
+            *selected.lock().unwrap() = Some(client.clone());
+            client
+                .call_tool_marked(name, arguments, Some(dispatched.clone()))
+                .await
+        };
+        let (result, invalidate) = match tokio::time::timeout(timeout, operation).await {
+            Ok(result) => {
+                let invalid = matches!(
+                    &result,
+                    Err(McpError::Transport(_) | McpError::Http(_) | McpError::Protocol(_))
+                );
+                (result, invalid)
+            }
+            Err(_) => (
+                Err(McpError::Transport("tool call timed out".into())),
+                dispatched.load(Ordering::Acquire),
+            ),
+        };
+        let selected = selected.into_inner().unwrap();
+        if let Some(client) = selected.filter(|_| invalidate) {
+            let current = self.current.read().await;
+            if Arc::ptr_eq(&current, &client) {
+                self.invalid.store(true, Ordering::Release);
+            }
+        }
+        result
+    }
 }
 
 impl McpTool {
     pub fn new(server_name: &str, def: &McpToolDef, client: Arc<McpClient>) -> Self {
+        Self::with_client(server_name, def, Arc::new(ManagedClient::new(client)))
+    }
+
+    fn with_client(server_name: &str, def: &McpToolDef, client: Arc<ManagedClient>) -> Self {
         let qualified = def.qualified_name(server_name);
         Self {
             qualified_name: qualified,
@@ -1098,7 +1318,7 @@ impl mew_tools::Tool for McpTool {
     }
 
     fn sensitivity(&self) -> mew_tools::Sensitivity {
-        mew_tools::Sensitivity::Mutating
+        mew_tools::Sensitivity::Dangerous
     }
 
     async fn execute(
@@ -1294,6 +1514,7 @@ for line in sys.stdin:
         let tools = connect_tools(vec![config], directory.path()).await;
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name(), "mcp__files__read_file");
+        assert_eq!(tools[0].sensitivity(), mew_tools::Sensitivity::Dangerous);
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         let ctx = mew_tools::ToolCtx::new(
             Arc::new(mew_tools::ToolCtxShared::default()),
@@ -1307,6 +1528,461 @@ for line in sys.stdin:
             .unwrap();
         assert_eq!(output.output, "mcp fixture");
         assert!(output.error.is_empty());
+    }
+
+    #[tokio::test]
+    async fn configured_stdio_server_reconnects_after_exiting_without_replaying_call() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("attempts");
+        let server = r#"
+import json, os, pathlib, sys
+marker = pathlib.Path(sys.argv[1])
+for line in sys.stdin:
+    req = json.loads(line)
+    if 'id' not in req: continue
+    if req['method'] == 'initialize':
+        result = {'protocolVersion':'2025-11-25','capabilities':{'tools':{}},'serverInfo':{'name':'test','version':'1'}}
+    elif req['method'] == 'tools/list':
+        result = {'tools':[{'name':'write','inputSchema':{'type':'object'}}]}
+    else:
+        marker.write_text(marker.read_text() + 'call\n' if marker.exists() else 'call\n')
+        if len(marker.read_text().splitlines()) == 1: os._exit(0)
+        result = {'content':[{'type':'text','text':'completed'}]}
+    print(json.dumps({'jsonrpc':'2.0','id':req['id'],'result':result}),flush=True)
+"#;
+        let config = McpServerConfig {
+            name: "test".into(),
+            type_: None,
+            url: None,
+            command: Some("python3".into()),
+            args: vec![
+                "-u".into(),
+                "-c".into(),
+                server.into(),
+                marker.to_string_lossy().into(),
+            ],
+            env: Default::default(),
+            headers: Default::default(),
+            disabled: false,
+        };
+        let tools = connect_tools(vec![config], directory.path()).await;
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let ctx = || {
+            mew_tools::ToolCtx::new(
+                Arc::new(mew_tools::ToolCtxShared::default()),
+                "call".into(),
+                Default::default(),
+                tx.clone(),
+            )
+        };
+        let first = tools[0]
+            .execute(ctx(), serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(!first.error.is_empty());
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "call\n");
+        let second = tools[0]
+            .execute(ctx(), serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(second.output, "completed", "{}", second.error);
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "call\ncall\n");
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_blocked_stdio_write_does_not_wedge_other_calls() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("stalled");
+        let server = r#"
+import json, pathlib, sys, time
+marker = pathlib.Path(sys.argv[1])
+for line in sys.stdin:
+    req = json.loads(line)
+    if 'id' not in req: continue
+    if req['method'] == 'initialize':
+        result = {'protocolVersion':'2025-11-25','capabilities':{'tools':{}},'serverInfo':{'name':'test','version':'1'}}
+    elif req['method'] == 'tools/list':
+        result = {'tools':[{'name':'echo','inputSchema':{'type':'object'}}]}
+        print(json.dumps({'jsonrpc':'2.0','id':req['id'],'result':result}),flush=True)
+        if not marker.exists():
+            sys.stdin.buffer.read(1)
+            marker.write_text('stalled')
+            time.sleep(30)
+        continue
+    else:
+        result = {'content':[{'type':'text','text':'recovered'}]}
+    print(json.dumps({'jsonrpc':'2.0','id':req['id'],'result':result}),flush=True)
+"#;
+        let config = McpServerConfig {
+            name: "test".into(),
+            type_: None,
+            url: None,
+            command: Some("python3".into()),
+            args: vec![
+                "-u".into(),
+                "-c".into(),
+                server.into(),
+                marker.to_string_lossy().into(),
+            ],
+            env: Default::default(),
+            headers: Default::default(),
+            disabled: false,
+        };
+        let tools = connect_tools(vec![config], directory.path()).await;
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let ctx = mew_tools::ToolCtx::new(
+            Arc::new(mew_tools::ToolCtxShared::default()),
+            "slow".into(),
+            Default::default(),
+            tx.clone(),
+        );
+        let cancel = ctx.cancel.clone();
+        let tool = tools[0].clone();
+        let slow = tokio::spawn(async move {
+            tool.execute(ctx, serde_json::json!({"value":"x".repeat(2_000_000)}))
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !marker.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("server did not begin reading the request");
+        cancel.cancel();
+        assert!(slow.await.unwrap().is_err());
+        let ctx = mew_tools::ToolCtx::new(
+            Arc::new(mew_tools::ToolCtxShared::default()),
+            "next".into(),
+            Default::default(),
+            tx,
+        );
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tools[0].execute(ctx, serde_json::json!({})),
+        )
+        .await
+        .expect("other calls were wedged")
+        .unwrap();
+        assert_eq!(result.output, "recovered", "{}", result.error);
+    }
+
+    #[tokio::test]
+    async fn cancelling_an_unanswered_stdio_call_reconnects_on_the_next_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("request-read");
+        let server = r#"
+import json, pathlib, sys, time
+marker = pathlib.Path(sys.argv[1])
+for line in sys.stdin:
+    req = json.loads(line)
+    if 'id' not in req: continue
+    if req['method'] == 'initialize':
+        result = {'protocolVersion':'2025-11-25','capabilities':{},'serverInfo':{'name':'test','version':'1'}}
+    elif req['method'] == 'tools/list':
+        result = {'tools':[{'name':'echo','inputSchema':{'type':'object'}}]}
+    elif not marker.exists():
+        marker.write_text('read')
+        time.sleep(30)
+        continue
+    else:
+        result = {'content':[{'type':'text','text':'recovered'}]}
+    print(json.dumps({'jsonrpc':'2.0','id':req['id'],'result':result}),flush=True)
+"#;
+        let config = McpServerConfig {
+            name: "test".into(),
+            type_: None,
+            url: None,
+            command: Some("python3".into()),
+            args: vec![
+                "-u".into(),
+                "-c".into(),
+                server.into(),
+                marker.to_string_lossy().into(),
+            ],
+            env: Default::default(),
+            headers: Default::default(),
+            disabled: false,
+        };
+        let tools = connect_tools(vec![config], dir.path()).await;
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let ctx = mew_tools::ToolCtx::new(
+            Arc::new(mew_tools::ToolCtxShared::default()),
+            "first".into(),
+            Default::default(),
+            tx.clone(),
+        );
+        let cancel = ctx.cancel.clone();
+        let tool = tools[0].clone();
+        let pending = tokio::spawn(async move { tool.execute(ctx, serde_json::json!({})).await });
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !marker.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("server did not consume the call");
+        cancel.cancel();
+        assert!(pending.await.unwrap().is_err());
+        let ctx = mew_tools::ToolCtx::new(
+            Arc::new(mew_tools::ToolCtxShared::default()),
+            "next".into(),
+            Default::default(),
+            tx,
+        );
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tools[0].execute(ctx, serde_json::json!({})),
+        )
+        .await
+        .expect("next call was wedged")
+        .unwrap();
+        assert_eq!(output.output, "recovered", "{}", output.error);
+    }
+
+    #[tokio::test]
+    async fn queued_stdio_call_does_not_timeout_or_retire_an_active_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = dir.path().join("started");
+        let release = dir.path().join("release");
+        let server = r#"
+import json, pathlib, sys, time
+started, release = map(pathlib.Path, sys.argv[1:])
+for line in sys.stdin:
+    req = json.loads(line)
+    if 'id' not in req: continue
+    if req['method'] == 'initialize':
+        result = {'protocolVersion':'2025-11-25','capabilities':{},'serverInfo':{'name':'test','version':'1'}}
+    else:
+        value = req['params']['arguments']['value']
+        if value == 'first':
+            started.write_text('started')
+            while not release.exists(): time.sleep(0.01)
+        result = {'content':[{'type':'text','text':value}]}
+    print(json.dumps({'jsonrpc':'2.0','id':req['id'],'result':result}),flush=True)
+"#;
+        let config = McpServerConfig {
+            name: "test".into(),
+            type_: None,
+            url: None,
+            command: Some("python3".into()),
+            args: vec![
+                "-u".into(),
+                "-c".into(),
+                server.into(),
+                started.to_string_lossy().into(),
+                release.to_string_lossy().into(),
+            ],
+            env: Default::default(),
+            headers: Default::default(),
+            disabled: false,
+        };
+        let client = Arc::new(
+            McpClient::connect_configured(&config, dir.path())
+                .await
+                .unwrap(),
+        );
+        let managed = Arc::new(ManagedClient::configured(
+            client,
+            config,
+            dir.path().to_path_buf(),
+        ));
+        let mut first = {
+            let managed = managed.clone();
+            tokio::spawn(async move {
+                managed
+                    .call_tool_with_timeout(
+                        "echo",
+                        serde_json::json!({"value":"first"}),
+                        std::time::Duration::from_secs(3),
+                    )
+                    .await
+            })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !started.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("first request did not start");
+        let queued = {
+            let managed = managed.clone();
+            tokio::spawn(async move {
+                managed
+                    .call_tool_with_timeout(
+                        "echo",
+                        serde_json::json!({"value":"second"}),
+                        std::time::Duration::from_millis(100),
+                    )
+                    .await
+            })
+        };
+        assert!(
+            queued.await.unwrap().is_err(),
+            "the queued call should respect its total deadline"
+        );
+        let third = {
+            let managed = managed.clone();
+            tokio::spawn(async move {
+                managed
+                    .call_tool_with_timeout(
+                        "echo",
+                        serde_json::json!({"value":"third"}),
+                        std::time::Duration::from_secs(3),
+                    )
+                    .await
+            })
+        };
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(250), &mut first)
+                .await
+                .is_err(),
+            "a queued timeout killed the active call"
+        );
+        std::fs::write(release, "go").unwrap();
+        assert_eq!(first.await.unwrap().unwrap().text, "first");
+        assert_eq!(third.await.unwrap().unwrap().text, "third");
+    }
+
+    #[tokio::test]
+    async fn stdio_call_deadline_includes_reconnect_and_later_call_can_recover() {
+        let dir = tempfile::tempdir().unwrap();
+        let failed = dir.path().join("failed");
+        let waiting = dir.path().join("waiting");
+        let release = dir.path().join("release");
+        let server = r#"
+import json, pathlib, sys, time
+failed, waiting, release = map(pathlib.Path, sys.argv[1:])
+if failed.exists() and not release.exists():
+    waiting.write_text('waiting')
+    while not release.exists(): time.sleep(0.01)
+for line in sys.stdin:
+    req = json.loads(line)
+    if 'id' not in req: continue
+    if req['method'] == 'initialize':
+        result = {'protocolVersion':'2025-11-25','capabilities':{},'serverInfo':{'name':'test','version':'1'}}
+    elif not failed.exists():
+        failed.write_text('failed')
+        print('invalid-json',flush=True)
+        continue
+    else:
+        result = {'content':[{'type':'text','text':'recovered'}]}
+    print(json.dumps({'jsonrpc':'2.0','id':req['id'],'result':result}),flush=True)
+"#;
+        let config = McpServerConfig {
+            name: "test".into(),
+            type_: None,
+            url: None,
+            command: Some("python3".into()),
+            args: vec![
+                "-u".into(),
+                "-c".into(),
+                server.into(),
+                failed.to_string_lossy().into(),
+                waiting.to_string_lossy().into(),
+                release.to_string_lossy().into(),
+            ],
+            env: Default::default(),
+            headers: Default::default(),
+            disabled: false,
+        };
+        let client = Arc::new(
+            McpClient::connect_configured(&config, dir.path())
+                .await
+                .unwrap(),
+        );
+        let managed = ManagedClient::configured(client, config, dir.path().to_path_buf());
+        assert!(managed
+            .call_tool("echo", serde_json::json!({}))
+            .await
+            .is_err());
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            managed.call_tool_with_timeout(
+                "echo",
+                serde_json::json!({}),
+                std::time::Duration::from_secs(2),
+            ),
+        )
+        .await
+        .expect("reconnect ignored the call deadline");
+        assert!(result.is_err());
+        assert!(waiting.exists(), "the replacement server never started");
+        std::fs::write(release, "go").unwrap();
+        assert_eq!(
+            managed
+                .call_tool("echo", serde_json::json!({}))
+                .await
+                .unwrap()
+                .text,
+            "recovered"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn broken_stdio_process_releases_exclusive_resources_before_reconnect() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("server.lock");
+        let marker = dir.path().join("first-call");
+        let server = r#"
+import fcntl, json, pathlib, sys, time
+lock = open(sys.argv[1], 'w')
+fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+marker = pathlib.Path(sys.argv[2])
+for line in sys.stdin:
+    req = json.loads(line)
+    if 'id' not in req: continue
+    if req['method'] == 'initialize':
+        result = {'protocolVersion':'2025-11-25','capabilities':{},'serverInfo':{'name':'test','version':'1'}}
+    elif req['method'] == 'tools/list':
+        result = {'tools':[{'name':'echo','inputSchema':{'type':'object'}}]}
+    elif not marker.exists():
+        marker.write_text('called')
+        print('not json',flush=True)
+        time.sleep(30)
+        continue
+    else:
+        result = {'content':[{'type':'text','text':'recovered'}]}
+    print(json.dumps({'jsonrpc':'2.0','id':req['id'],'result':result}),flush=True)
+"#;
+        let config = McpServerConfig {
+            name: "test".into(),
+            type_: None,
+            url: None,
+            command: Some("python3".into()),
+            args: vec![
+                "-u".into(),
+                "-c".into(),
+                server.into(),
+                lock.to_string_lossy().into(),
+                marker.to_string_lossy().into(),
+            ],
+            env: Default::default(),
+            headers: Default::default(),
+            disabled: false,
+        };
+        let tools = connect_tools(vec![config], dir.path()).await;
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let ctx = || {
+            mew_tools::ToolCtx::new(
+                Arc::new(mew_tools::ToolCtxShared::default()),
+                "call".into(),
+                Default::default(),
+                tx.clone(),
+            )
+        };
+        let first = tools[0]
+            .execute(ctx(), serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(!first.error.is_empty());
+        let next = tools[0]
+            .execute(ctx(), serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(next.output, "recovered", "{}", next.error);
     }
 
     #[cfg(unix)]
@@ -1533,6 +2209,31 @@ for line in sys.stdin:
         )
         .await
         .unwrap();
+        let complete = client
+            .call_tool("echo", serde_json::json!({"value":"slow"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            complete.text, "slow",
+            "a complete split response must be reconstructed"
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let config = McpServerConfig {
+            name: "test".into(),
+            type_: None,
+            url: None,
+            command: Some("python3".into()),
+            args: vec!["-u".into(), "-c".into(), server.into()],
+            env: Default::default(),
+            headers: Default::default(),
+            disabled: false,
+        };
+        let client = Arc::new(
+            McpClient::connect_configured(&config, directory.path())
+                .await
+                .unwrap(),
+        );
+        let client = ManagedClient::configured(client, config, directory.path().to_path_buf());
         let slow = client.call_tool("echo", serde_json::json!({"value":"slow"}));
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(50), slow)
@@ -1661,6 +2362,95 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
+    async fn blocked_server_request_reply_retires_stdio_connection() {
+        let server = r#"
+import json, sys, time
+for line in sys.stdin:
+    req = json.loads(line)
+    if req['method'] == 'initialize':
+        result = {'protocolVersion':'2025-11-25','capabilities':{},'serverInfo':{'name':'test','version':'1'}}
+        print(json.dumps({'jsonrpc':'2.0','id':req['id'],'result':result}),flush=True)
+    elif req['method'] == 'tools/call':
+        print(json.dumps({'jsonrpc':'2.0','id':'x' * 1_000_000,'method':'unsupported'}),flush=True)
+        time.sleep(30)
+"#;
+        let client = McpClient::connect_stdio(
+            "test",
+            "python3",
+            &["-u".into(), "-c".into(), server.into()],
+        )
+        .await
+        .unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            client.call_tool("test", serde_json::json!({})),
+        )
+        .await
+        .expect("server request reply blocked indefinitely");
+        assert!(result.is_err());
+        let next = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            client.call_tool("test", serde_json::json!({})),
+        )
+        .await
+        .expect("broken connection blocked the next call");
+        assert!(next.is_err());
+    }
+
+    #[tokio::test]
+    async fn cancelling_partial_server_request_reply_retires_stdio_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("reply-started");
+        let server = r#"
+import json, pathlib, sys, time
+for line in sys.stdin:
+    req = json.loads(line)
+    if req['method'] == 'initialize':
+        result = {'protocolVersion':'2025-11-25','capabilities':{},'serverInfo':{'name':'test','version':'1'}}
+        print(json.dumps({'jsonrpc':'2.0','id':req['id'],'result':result}),flush=True)
+    elif req['method'] == 'tools/call':
+        print(json.dumps({'jsonrpc':'2.0','id':'x' * 1_000_000,'method':'unsupported'}),flush=True)
+        sys.stdin.buffer.read(1)
+        pathlib.Path(sys.argv[1]).write_text('started')
+        time.sleep(30)
+"#;
+        let client = Arc::new(
+            McpClient::connect_stdio(
+                "test",
+                "python3",
+                &[
+                    "-u".into(),
+                    "-c".into(),
+                    server.into(),
+                    marker.to_string_lossy().into(),
+                ],
+            )
+            .await
+            .unwrap(),
+        );
+        let pending = {
+            let client = client.clone();
+            tokio::spawn(async move { client.call_tool("test", serde_json::json!({})).await })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !marker.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("server did not consume part of the reply");
+        pending.abort();
+        assert!(matches!(pending.await, Err(error) if error.is_cancelled()));
+        let next = tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            client.call_tool("test", serde_json::json!({})),
+        )
+        .await
+        .expect("partially written reply wedged the connection");
+        assert!(next.is_err());
+    }
+
+    #[tokio::test]
     async fn http_sse_returns_the_matching_response_before_the_stream_closes() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1668,7 +2458,7 @@ for line in sys.stdin:
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = [0; 4096];
-            stream.read(&mut request).await.unwrap();
+            assert!(stream.read(&mut request).await.unwrap() > 0);
             let events = "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\"}\n\ndata: {\"jsonrpc\":\"2.0\",\"id\":999,\"result\":{\"value\":\"wrong\"}}\n\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"value\":\"right\"}}\n\n";
             let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n";
             stream.write_all(headers.as_bytes()).await.unwrap();
@@ -1718,6 +2508,154 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
+    async fn http_json_response_rejects_oversized_content_length_without_waiting_for_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert!(stream.read(&mut request).await.unwrap() > 0);
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 16777217\r\n\r\n").await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        });
+        let transport =
+            HttpTransport::new(format!("http://{address}"), &Default::default()).unwrap();
+        let error = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            transport.call("test", None),
+        )
+        .await
+        .expect("waited for oversized body")
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("too large"), "{error}");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn http_json_response_rejects_oversized_chunked_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert!(stream.read(&mut request).await.unwrap() > 0);
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
+            let chunk = vec![b'x'; 64 * 1024];
+            for _ in 0..257 {
+                if stream.write_all(b"10000\r\n").await.is_err()
+                    || stream.write_all(&chunk).await.is_err()
+                    || stream.write_all(b"\r\n").await.is_err()
+                {
+                    return;
+                }
+            }
+            let _ = stream.write_all(b"0\r\n\r\n").await;
+        });
+        let transport =
+            HttpTransport::new(format!("http://{address}"), &Default::default()).unwrap();
+        let error = transport.call("test", None).await.unwrap_err().to_string();
+        assert!(error.contains("too large"), "{error}");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn configured_http_server_reconnects_expired_session_without_replaying_call() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut tool_calls = 0;
+            let mut sessions = 0;
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut data = Vec::new();
+                let (headers, request) = loop {
+                    let mut buffer = [0; 4096];
+                    let n = stream.read(&mut buffer).await.unwrap();
+                    assert!(n > 0);
+                    data.extend_from_slice(&buffer[..n]);
+                    if let Some(end) = data.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&data[..end]).to_lowercase();
+                        let length: usize = headers
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length:").map(str::trim))
+                            .unwrap()
+                            .parse()
+                            .unwrap();
+                        if data.len() >= end + 4 + length {
+                            break (
+                                headers,
+                                serde_json::from_slice::<Value>(&data[end + 4..end + 4 + length])
+                                    .unwrap(),
+                            );
+                        }
+                    }
+                };
+                let method = request["method"].as_str().unwrap();
+                let (status, body, session) = match method {
+                    "initialize" => {
+                        assert!(!headers.contains("mcp-session-id:"));
+                        sessions += 1;
+                        ("200 OK", serde_json::json!({"jsonrpc":"2.0","id":request["id"],"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"test","version":"1"}}}).to_string(), format!("MCP-Session-Id: session-{sessions}\r\n"))
+                    }
+                    "notifications/initialized" => ("202 Accepted", String::new(), String::new()),
+                    "tools/list" => ("200 OK", serde_json::json!({"jsonrpc":"2.0","id":request["id"],"result":{"tools":[{"name":"write","inputSchema":{"type":"object"}}]}}).to_string(), String::new()),
+                    "tools/call" => {
+                        tool_calls += 1;
+                        if tool_calls == 1 {
+                            assert!(headers.contains("mcp-session-id: session-1"));
+                            ("404 Not Found", String::new(), String::new())
+                        } else {
+                            assert!(headers.contains("mcp-session-id: session-2"));
+                            ("200 OK", serde_json::json!({"jsonrpc":"2.0","id":request["id"],"result":{"content":[{"type":"text","text":"completed"}]}}).to_string(), String::new())
+                        }
+                    }
+                    _ => panic!("unexpected method {method}"),
+                };
+                stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{session}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                if tool_calls == 2 {
+                    return (sessions, tool_calls);
+                }
+            }
+        });
+        let config = McpServerConfig {
+            name: "test".into(),
+            type_: None,
+            url: Some(format!("http://{address}")),
+            command: None,
+            args: vec![],
+            env: Default::default(),
+            headers: Default::default(),
+            disabled: false,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let tools = connect_tools(vec![config], directory.path()).await;
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let ctx = || {
+            mew_tools::ToolCtx::new(
+                Arc::new(mew_tools::ToolCtxShared::default()),
+                "call".into(),
+                Default::default(),
+                tx.clone(),
+            )
+        };
+        let first = tools[0]
+            .execute(ctx(), serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(!first.error.is_empty());
+        let second = tools[0]
+            .execute(ctx(), serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(second.output, "completed", "{}", second.error);
+        assert_eq!(server.await.unwrap(), (2, 2));
+    }
+
+    #[tokio::test]
     async fn http_errors_do_not_expose_server_credentials() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1726,7 +2664,7 @@ for line in sys.stdin:
             for _ in 0..2 {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut request = [0; 4096];
-                stream.read(&mut request).await.unwrap();
+                assert!(stream.read(&mut request).await.unwrap() > 0);
                 let body = "credential-in-server-error";
                 let reply = format!("HTTP/1.1 401 Unauthorized\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
                 stream.write_all(reply.as_bytes()).await.unwrap();
@@ -1801,6 +2739,104 @@ for line in sys.stdin:
             .unwrap();
         assert_eq!(notification["method"], "notifications/cancelled");
         assert_eq!(notification["params"]["requestId"], 1);
+    }
+
+    #[tokio::test]
+    async fn timed_out_http_tool_notifies_server_and_reconnects_without_replay() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut calls = 0;
+            let mut sessions = 0;
+            let mut cancelled = 0;
+            let mut pending = None;
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut data = Vec::new();
+                let request: Value = loop {
+                    let mut buffer = [0; 4096];
+                    let count = stream.read(&mut buffer).await.unwrap();
+                    assert!(count > 0);
+                    data.extend_from_slice(&buffer[..count]);
+                    if let Some(end) = data.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&data[..end]).to_lowercase();
+                        let length: usize = headers
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length:").map(str::trim))
+                            .unwrap()
+                            .parse()
+                            .unwrap();
+                        if data.len() >= end + 4 + length {
+                            break serde_json::from_slice(&data[end + 4..end + 4 + length])
+                                .unwrap();
+                        }
+                    }
+                };
+                let (status, body, session) = match request["method"].as_str().unwrap() {
+                    "initialize" => {
+                        sessions += 1;
+                        ("200 OK", serde_json::json!({"jsonrpc":"2.0","id":request["id"],"result":{"protocolVersion":"2025-11-25","capabilities":{},"serverInfo":{"name":"test","version":"1"}}}).to_string(), format!("MCP-Session-Id: session-{sessions}\r\n"))
+                    }
+                    "notifications/initialized" => ("202 Accepted", String::new(), String::new()),
+                    "notifications/cancelled" => {
+                        cancelled += 1;
+                        drop(pending.take());
+                        ("202 Accepted", String::new(), String::new())
+                    }
+                    "tools/call" => {
+                        calls += 1;
+                        if calls == 1 {
+                            pending = Some(stream);
+                            continue;
+                        }
+                        ("200 OK", serde_json::json!({"jsonrpc":"2.0","id":request["id"],"result":{"content":[{"type":"text","text":"recovered"}]}}).to_string(), String::new())
+                    }
+                    method => panic!("unexpected method {method}"),
+                };
+                stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{session}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                if sessions == 2 && calls == 2 && cancelled == 1 {
+                    return (sessions, calls, cancelled);
+                }
+            }
+        });
+        let config = McpServerConfig {
+            name: "test".into(),
+            type_: None,
+            url: Some(format!("http://{address}")),
+            command: None,
+            args: vec![],
+            env: Default::default(),
+            headers: Default::default(),
+            disabled: false,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let client = Arc::new(
+            McpClient::connect_configured(&config, directory.path())
+                .await
+                .unwrap(),
+        );
+        let managed = ManagedClient::configured(client, config, directory.path().to_path_buf());
+        let result = managed
+            .call_tool_with_timeout(
+                "test",
+                serde_json::json!({}),
+                std::time::Duration::from_millis(100),
+            )
+            .await;
+        assert!(matches!(result, Err(McpError::Transport(_))));
+        let result = managed
+            .call_tool("test", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(result.text, "recovered");
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(3), server)
+                .await
+                .unwrap()
+                .unwrap(),
+            (2, 2, 1)
+        );
     }
 
     /// Live integration test — connect, handshake, list tools, call one.
