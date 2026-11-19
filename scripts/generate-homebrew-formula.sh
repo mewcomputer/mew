@@ -3,29 +3,30 @@ set -euo pipefail
 
 # Generate a Homebrew formula for mew from a GitHub release.
 # Usage:
-#   scripts/generate-homebrew-formula.sh v0.2.0 [owner/repository]
+#   scripts/generate-homebrew-formula.sh v0.2.0 [owner/repository] [SHA256SUMS]
 #
 # The script fetches the SHA256SUMS asset from the release and prints the
 # formula to stdout. Copy the output into your tap repo, e.g.:
 #   scripts/generate-homebrew-formula.sh v0.2.0 > ../homebrew-tap/Formula/mew.rb
 
-version="${1:-}"
+release_tag="${1:-}"
+version="${release_tag#nightly-}"
 repo="${2:-mewcomputer/mew}"
-if [[ ! "$version" =~ ^v[0-9][0-9A-Za-z.+-]*$ || ! "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ || $# -gt 2 ]]; then
-    echo "Usage: $0 <version> [owner/repository]" >&2
+checksums_path="${3:-}"
+if [[ ! "$version" =~ ^v[0-9][0-9A-Za-z.+-]*$ || ! "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ || $# -gt 3 ]]; then
+    echo "Usage: $0 <release-tag> [owner/repository] [SHA256SUMS]" >&2
     echo "Example: $0 v0.2.0" >&2
     exit 1
 fi
 
-base_url="https://github.com/${repo}/releases/download/${version}"
-checksums_url="${base_url}/SHA256SUMS"
-
-tmp_dir="$(mktemp -d 2>/dev/null || mktemp -d -t mew-homebrew)"
-trap 'rm -rf "$tmp_dir"' EXIT
-
-checksums_path="$tmp_dir/SHA256SUMS"
-curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-    --output "$checksums_path" "$checksums_url"
+base_url="https://github.com/${repo}/releases/download/${release_tag}"
+if [[ -z "$checksums_path" ]]; then
+    tmp_dir="$(mktemp -d 2>/dev/null || mktemp -d -t mew-homebrew)"
+    trap 'rm -rf "$tmp_dir"' EXIT
+    checksums_path="$tmp_dir/SHA256SUMS"
+    curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
+        --output "$checksums_path" "$base_url/SHA256SUMS"
+fi
 
 sha_for() {
     local file="$1"

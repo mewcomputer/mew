@@ -25,8 +25,8 @@ Upgrade later with:
 brew upgrade mewcomputer/tap/mew
 ```
 
-The [tap](https://github.com/mewcomputer/homebrew-tap) currently installs a
-pinned nightly build. The Linux binaries require glibc 2.39 or later.
+The [tap](https://github.com/mewcomputer/homebrew-tap) checks for successful
+nightly builds twice an hour. The Linux binaries require glibc 2.39 or later.
 
 ### Install script
 
