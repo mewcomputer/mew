@@ -199,6 +199,21 @@ not yet be recorded. Press `r` to refresh manually, use arrow/page keys or the
 wheel to scroll, and Escape to close. An open viewer retains the final outcome.
 Trace replies cannot switch the parent conversation or replace its transcript.
 
+## Guide a running subagent in Electron
+
+In the parent conversation, open the **Agents** pane and select a subagent to
+read its transcript. While the subagent is running, enter a message and choose
+**Send guidance**. **Guidance saved** means the message was saved for the
+subagent's next model request. Use the refresh button to load its latest saved
+messages.
+
+If the connection drops before delivery is confirmed, Electron keeps your draft
+and checks for a receipt when it reconnects. Retrying the same text uses the
+original request ID so the subagent receives it at most once.
+
+You can read a finished subagent's transcript while it remains listed.
+To give it more work, ask the parent to start a new subagent.
+
 ## Subagent sessions
 
 Each subagent run gets its own session file, nested under the parent:

@@ -1,0 +1,34 @@
+---
+import Default from "@astrojs/starlight/components/PageTitle.astro";
+
+const section = Astro.locals.starlightRoute.sidebar.find((item) =>
+    item.type === "group" && item.entries.some((entry) => entry.type === "link" && entry.isCurrent),
+);
+---
+
+<div class="mew-docs-title">
+    {section && <p>{section.label}</p>}
+    <Default><slot /></Default>
+</div>
+
+<style>
+    .mew-docs-title {
+        padding-block: clamp(0.75rem, 3vw, 2.5rem) 0.75rem;
+    }
+
+    p {
+        margin: 0 0 0.625rem;
+        color: var(--jade);
+        font-size: 0.78rem;
+        font-weight: 500;
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+    }
+
+    .mew-docs-title :global(h1) {
+        margin: 0;
+        font: 400 clamp(2.5rem, 5vw, 4rem)/1.04 var(--display);
+        letter-spacing: -0.035em;
+        text-wrap: balance;
+    }
+</style>

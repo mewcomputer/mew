@@ -4280,3 +4280,112 @@ with the lockfile. The full macOS workspace suite passed 2,856 tests with five
 ignored. Workspace Clippy, formatting, architecture, and theme checks passed.
 Local macOS checks used the library built from the pinned Ghostty revision
 after the local Zig linker failed.
+
+### 2026-11-19: Garden homepage, docs palette, and share image
+
+The Astro homepage now uses Jianghu's landing markup, assets, and live
+garden runtime. Its calls to action open the installation docs. Starlight
+shares the landing palette for its light and dark surfaces, links, code
+blocks, and navigation. The homepage advertises a 1200 × 630 Open Graph
+image with the large headline and garden.
+
+Verified the frozen workspace install, all 110 Jianghu tests, and the Astro
+production build with its two smoke tests. Checked garden controls, the
+homepage-to-docs link, both docs themes, and the served share image.
+
+### 2026-11-19: Tilt shift on the Mew homepage
+
+The depth-of-field pass now follows the camera target when a chapter frames
+the garden off-center. The homepage uses a wider aperture at its overview
+and reaches the existing blur cap within its own zoom range.
+
+Verified 111 Jianghu tests, TypeScript, the Astro production build and smoke
+tests, and the overview and close-up in the browser.
+
+### 2026-11-19: Stronger depth blur on the Mew homepage
+
+Raised the homepage's maximum blur radius from 3.6 to 6.4 CSS pixels.
+Verified 112 Jianghu tests, TypeScript, the Astro build and smoke tests,
+and the wider blur in the hero and a close-up.
+
+### 2026-11-19: Lighter mobile rendering on the Mew homepage
+
+Capped the compact and touch homepage's render scale at one pixel per CSS
+pixel and the water capture at 512 pixels on its longest side. The depth
+pass uses eight blur samples with the same focus and radius as desktop.
+
+Verified 113 Jianghu tests, TypeScript, and the Astro build and smoke tests.
+Checked the hero and chapter scroll at 390 × 844 in the browser.
+
+### 2026-11-19: Adaptive mobile garden quality
+
+The mobile homepage now reduces canvas and water-capture resolution in
+steps when frame delivery slows. It restores one step after six seconds
+of steady frames. Both lower tiers keep the same depth-of-field profile.
+
+Verified 116 Jianghu tests, TypeScript, and the Astro build and smoke tests.
+Simulated sustained load at 390 × 844 in the browser and confirmed the
+canvas reached the lowest tier and recovered to full mobile resolution.
+
+### 2026-11-19: Garden still and smaller homepage model download
+
+The homepage shows a desktop or phone still from the default garden camera
+before JavaScript runs. The live garden takes over after its first frame.
+The still remains visible if the model fails to load.
+
+The static build also emits a lossless 736 KB gzip of the 4.08 MB garden
+model. Browsers with decompression support use it first and can fall back
+to the original GLB.
+
+Verified 116 Jianghu tests, the Jianghu build, and four Astro smoke tests,
+including exact model decompression. Checked both stills, the first-frame
+handoff with a five-second delay, and the failure fallback in the browser.
+
+### 2026-11-19: Crossfade into the live garden
+
+The still fades out over 120 ms after the first live garden frame. The
+handoff is immediate with reduced motion. If WebGL loses its context, the
+still returns immediately.
+
+Verified the opacity transition and control availability in the browser,
+along with 116 Jianghu tests, TypeScript, and four Astro smoke tests.
+
+### 2026-11-19: Mew theme for Starlight docs
+
+The docs use Starlight's page frame and shared desktop and mobile menu
+with a Mew masthead, article titles, and the homepage's fonts and palette.
+Installation leads into Quick Start. Removed Lucode and the separate
+drawer and sidebar theme overrides.
+
+Verified a frozen install, all six site smoke tests, and the same set of
+docs routes. Checked both color modes, Pagefind results, and mobile
+navigation in the browser.
+
+### 2026-11-19: Shared lander and docs chrome
+
+The docs header shares the lander's wordmark, typography, horizontal
+spacing, and buttons. It uses Starlight's search, theme selector, and
+mobile menu. The sidebar and mobile navigation sit on the raised Mew
+surface, with the table of contents on the article surface.
+
+Verified seven site smoke tests, 116 Jianghu tests, both Jianghu build
+formats, and the desktop and phone layouts in light and dark mode.
+
+### 2026-11-19: Public Mew Homebrew tap
+
+Published `mewcomputer/tap` with a formula for the November 18 nightly.
+The formula uses a dated prerelease in the tap repository with verified
+archives for both macOS and Linux architectures. Updated the install
+guide and formula publishing instructions to use the new tap.
+
+The installer and formula generator now follow GitHub asset redirects over
+HTTPS. Verified all published asset checksums, installed the public tap on
+Apple Silicon in an isolated Homebrew prefix, and installed the nightly
+with the shell script in a temporary directory. Seven site smoke tests passed.
+
+### 2026-11-19 Electron guidance in the public docs
+
+Preserved both sets of journal entries when merging main. The subagents guide
+now covers opening a child transcript, sending guidance, and checking delivery
+after reconnecting. Verified the frozen install, production site build, all
+seven site smoke tests, and the new section in the rendered guide.

@@ -1,0 +1,92 @@
+@font-face {
+  font-family: Sentient;
+  src: url(./assets/sentient.woff2) format("woff2");
+  font-weight: 200 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Instrument Sans";
+  src: url(./assets/instrument-sans.woff2) format("woff2");
+  font-weight: 400 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --edge: clamp(20px, 6vw, 180px);
+  --radius-sm: 6px;
+  --radius-md: 12px;
+  --display: "Sentient", Georgia, serif;
+  --sans: "Instrument Sans", "Noto Sans SC", system-ui, sans-serif;
+  --hanzi: "Noto Serif SC", "Songti SC", serif;
+  --mew-header-height: clamp(68px, 4.6vw, 104px);
+  --mew-header-gap: 28px;
+  --mew-header-button-height: clamp(40px, 2.4vw, 52px);
+}
+
+@media (max-width: 860px) {
+  :root {
+    --mew-header-height: 64px;
+    --mew-header-gap: 16px;
+  }
+}
+
+.mew-wordmark {
+  color: var(--ink);
+  align-items: center;
+  gap: 10px;
+  text-decoration: none;
+  display: flex;
+}
+
+.mew-wordmark .name {
+  font-family: var(--display);
+  letter-spacing: -.02em;
+  font-size: clamp(28px,1.8vw,42px);
+  font-weight: 300;
+  line-height: 1;
+}
+
+.mew-wordmark .seal {
+  border-radius: var(--radius-sm);
+  background: var(--vermilion);
+  width: clamp(26px,1.7vw,38px);
+  height: clamp(26px,1.7vw,38px);
+  color: var(--on-vermilion);
+  font: 600 clamp(17px, 1.1vw, 25px)/1 var(--hanzi);
+  place-items: center;
+  transition: background-color .65s;
+  display: grid;
+}
+
+.mew-button {
+  border-radius: var(--radius-md);
+  border: 1px solid var(--line-strong);
+  height: clamp(44px,2.7vw,58px);
+  color: var(--ink);
+  align-items: center;
+  gap: 10px;
+  padding: 0 clamp(18px,1.1vw,26px);
+  font-size: clamp(15px,.85vw,19px);
+  font-weight: 500;
+  text-decoration: none;
+  transition: background-color .2s ease-out,color .2s ease-out,border-color .2s ease-out;
+  display: inline-flex;
+}
+
+.mew-button.primary {
+  background: var(--jade);
+  color: var(--on-jade);
+  border-color: var(--jade);
+}
+
+.mew-button:hover {
+  border-color: var(--ink);
+}
+
+.mew-button.primary:hover {
+  border-color: var(--jade);
+  filter: brightness(1.08);
+}

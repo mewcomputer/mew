@@ -3,7 +3,7 @@ set -euo pipefail
 
 # One-line installer for mew.
 # Usage:
-#   curl --proto '=https' --tlsv1.2 -sSf https://mew.computer/get.sh | sh
+#   curl --proto '=https' --tlsv1.2 -sSf https://mew.computer/get.sh | bash -s -- --nightly
 #
 # Flags:
 #   --nightly        install the latest nightly build instead of the latest release
@@ -227,11 +227,11 @@ mkdir -p "$extract_dir"
 
 log "Installing mew $version for $target"
 verbose_log "Downloading $tarball_url"
-curl --fail --show-error --silent --proto '=https' --tlsv1.2 --retry 3 --retry-delay 1 \
+curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 --retry-delay 1 \
     --output "$archive_path" "$tarball_url"
 
 verbose_log "Downloading $checksums_url"
-curl --fail --show-error --silent --proto '=https' --tlsv1.2 --retry 3 --retry-delay 1 \
+curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 --retry-delay 1 \
     --output "$checksums_path" "$checksums_url"
 
 expected_sha="$(awk -v rel_path="$tarball_name" '$2 == rel_path { print $1 }' "$checksums_path")"

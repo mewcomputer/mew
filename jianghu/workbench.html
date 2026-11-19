@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Jianghu · Waterworks</title>
+  <link rel="stylesheet" href="https://api.fontshare.com/v2/css?f[]=sentient@400&amp;display=swap">
+  <link rel="stylesheet" href="./tokens.css">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main id="jianghu">
+    <header class="sandbox-header">
+      <div class="wordmark">
+        <span class="seal" lang="zh-Hans" aria-hidden="true">江</span>
+        <h1>jianghu</h1>
+        <a class="world-workshop" href="./index.html">Waterworks</a>
+      </div>
+      <div class="environment" aria-label="Environment controls" role="group" hidden>
+        <button type="button" data-gate>Close sluice</button>
+        <button type="button" data-water>Pause water</button>
+        <button type="button" data-dusk aria-pressed="false">Dusk</button>
+      </div>
+    </header>
+    <section class="scene" aria-labelledby="district-title">
+      <h2 id="district-title">Waterworks</h2>
+      <div class="viewport">
+        <img class="fallback" src="./assets/waterworks.webp" alt="Terraced canal district with jade roofs and a stone spillway">
+        <p class="fallback-note" role="status">Loading the district…</p>
+        <canvas role="img" aria-label="Waterworks district. Drag to orbit or use the camera controls." hidden></canvas>
+        <span class="crosshair" aria-hidden="true" hidden>+</span>
+        <button class="pin" type="button" data-landmark="west" aria-label="West Workshop" aria-pressed="true" hidden><span aria-hidden="true">W</span></button>
+        <button class="pin" type="button" data-landmark="north" aria-label="North Relay" aria-pressed="false" hidden><span aria-hidden="true">N</span></button>
+        <button class="pin" type="button" data-landmark="east" aria-label="East Pavilion" aria-pressed="false" hidden><span aria-hidden="true">E</span></button>
+      </div>
+      <div class="camera-controls" aria-label="Camera controls" role="group" hidden>
+        <button type="button" data-camera="left" aria-label="Rotate left">←</button>
+        <button type="button" data-camera="right" aria-label="Rotate right">→</button>
+        <button type="button" data-camera="out" aria-label="Zoom out">−</button>
+        <button type="button" data-camera="in" aria-label="Zoom in">+</button>
+        <button type="button" data-camera="spillway" aria-pressed="false">Spillway</button>
+        <button type="button" data-camera="reset" aria-label="Reset camera">↺</button>
+      </div>
+    </section>
+    <section class="tools" aria-label="Terrain editor" hidden>
+      <div class="tool-row">
+        <div class="brush-modes" role="group" aria-label="Terrain tools">
+          <button type="button" data-mode="orbit" aria-pressed="true">Orbit</button>
+          <button type="button" data-mode="place" aria-pressed="false">Place</button>
+          <button type="button" data-mode="remove" aria-pressed="false">Remove</button>
+          <button type="button" data-undo disabled>Undo</button>
+          <button type="button" data-aim hidden>Edit at +</button>
+        </div>
+        <label class="material-label">Material
+          <select data-material>
+            <option value="stone">Stone</option>
+            <option value="jade">Jade</option>
+            <option value="cinnabar">Cinnabar</option>
+          </select>
+        </label>
+        <output class="measurements" aria-label="Water measurements" aria-live="off"></output>
+      </div>
+      <p class="edit-status" aria-live="polite">Drag to orbit. Use Place or Remove to edit the terrain.</p>
+    </section>
+    <footer class="landmarks">
+      <div role="group" aria-label="District landmarks" hidden>
+        <button type="button" data-landmark="west" aria-pressed="true">Workshop</button>
+        <button type="button" data-landmark="north" aria-pressed="false">Relay</button>
+        <button type="button" data-landmark="east" aria-pressed="false">Pavilion</button>
+      </div>
+      <div aria-live="polite">
+        <h2 class="landmark-title">West Workshop</h2>
+        <p class="landmark-copy">The workshop terrace sits above the water on the west bank.</p>
+      </div>
+    </footer>
+  </main>
+  <script type="module" src="./generated/main.js"></script>
+</body>
+</html>

@@ -1,14 +1,124 @@
+@import "../../../jianghu/mew-palette.css";
+
+@import "../../../jianghu/mew-chrome.css";
+
 :root {
-  /* base font */
-  --sl-font: "MiSans", sans-serif;
-  --sl-font-mono: "Ioskeley Mono", monospace;
+  --sl-font: var(--sans);
+  --sl-text-body: 1.0625rem;
+  --sl-line-height: 1.7;
+  --sl-nav-height: var(--mew-header-height);
+  --sl-nav-pad-x: var(--edge);
+  --sl-nav-gap: 0.5rem;
+  --sl-menu-button-size: 2.5rem;
+  --sl-content-width: 44rem;
+  --sl-content-pad-x: clamp(1.25rem, 3vw, 2.5rem);
+  --sl-sidebar-width: 16.5rem;
+  --sl-sidebar-pad-x: 1.25rem;
+
+  --sl-color-white: var(--ink);
+  --sl-color-gray-1: var(--ink);
+  --sl-color-gray-2: color-mix(in oklab, var(--ink) 88%, var(--surface));
+  --sl-color-gray-3: var(--ink-muted);
+  --sl-color-gray-4: var(--line-strong);
+  --sl-color-gray-5: var(--line);
+  --sl-color-gray-6: var(--surface-raised);
+  --sl-color-gray-7: var(--surface-raised);
+  --sl-color-black: var(--surface);
+  --sl-color-text: var(--sl-color-gray-2);
+  --sl-color-text-accent: var(--jade);
+  --sl-color-text-invert: var(--on-jade);
+  --sl-color-accent: var(--jade);
+  --sl-color-accent-high: var(--jade);
+  --sl-color-accent-low: color-mix(in oklab, var(--jade) 13%, var(--surface));
+  --sl-color-bg: var(--surface);
+  --sl-color-bg-nav: var(--surface);
+  --sl-color-bg-sidebar: var(--surface-raised);
+  --sl-color-bg-inline-code: var(--surface-raised);
+  --sl-color-hairline: var(--line);
+  --sl-color-hairline-light: var(--line);
+  --sl-color-hairline-shade: var(--line);
 }
-/* title fonts (h1-h6) should be banga */
-h1,
-h2,
-h3,
-h4,
-h5,
-h6 {
-  font-family: "Banga", sans-serif !important;
+
+#starlight__sidebar {
+  background: var(--sl-color-bg-sidebar);
+}
+
+#starlight__sidebar .top-level > li + li {
+  margin-top: 0.875rem;
+}
+
+#starlight__sidebar summary .large {
+  font-size: 0.9375rem;
+  font-weight: 500;
+}
+
+#starlight__sidebar a {
+  padding-block: 0.4rem;
+}
+
+#starlight__sidebar [aria-current="page"] {
+  background: color-mix(in oklab, var(--jade) 14%, var(--sl-color-bg-sidebar));
+  color: var(--jade);
+}
+
+@media (min-width: 72rem) {
+  .right-sidebar {
+    border-inline-start: 0;
+  }
+}
+
+@media (max-width: 49.99rem) {
+  starlight-menu-button button {
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+    background: transparent;
+    color: var(--ink);
+    box-shadow: none;
+  }
+
+  starlight-menu-button[aria-expanded="true"] button {
+    background: var(--surface-raised);
+  }
+
+  #starlight__sidebar a,
+  #starlight__sidebar summary {
+    min-height: 2.75rem;
+  }
+
+  #starlight__sidebar a {
+    align-content: center;
+  }
+}
+
+.sl-markdown-content :is(h2, h3) {
+  font-family: var(--display);
+  font-weight: 400;
+  letter-spacing: -0.025em;
+}
+
+.sl-markdown-content h2 {
+  margin-top: 2.75rem;
+}
+
+.sl-markdown-content a:not([class]) {
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.2em;
+}
+
+site-search button[data-open-modal],
+site-search dialog {
+  background: var(--surface-raised);
+}
+
+site-search dialog {
+  --sl-color-black: var(--surface-raised);
+}
+
+:where(a, button, select, summary, input):focus-visible {
+  outline: 2px solid var(--jade);
+}
+
+::selection {
+  color: var(--on-jade);
+  background: var(--jade);
 }

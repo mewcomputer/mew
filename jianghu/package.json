@@ -1,0 +1,26 @@
+{
+  "name": "jianghu",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node tools/build-app.ts --serve",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test tests/*.test.ts",
+    "build": "npm run typecheck && node tools/build-app.ts",
+    "preview": "node tools/build-preview.ts"
+  },
+  "devDependencies": {
+    "@types/node": "26.0.0",
+    "@types/three": "0.180.0",
+    "@webgpu/types": "0.1.74",
+    "esbuild": "0.25.12",
+    "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "three": "0.180.0"
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  }
+}

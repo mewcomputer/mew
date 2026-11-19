@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Jianghu · Baichuan</title>
+  <style>
+    body { margin: 0; background: #172524; color: #d9e3d2; font: 16px system-ui, sans-serif; }
+    main { display: grid; place-items: center; height: 100svh; }
+    main > * { grid-area: 1 / 1; }
+    canvas { display: block; width: 100%; height: 100%; min-height: 0; touch-action: none; cursor: grab; }
+    canvas:active { cursor: grabbing; }
+    main[data-playtest] canvas:not(:active) { cursor: crosshair; }
+    .movement-tools {
+      z-index: 1; align-self: start; justify-self: start; margin: 1rem;
+      display: flex; flex-wrap: wrap; align-items: center; gap: .5rem;
+      max-width: calc(100% - 2rem); pointer-events: none;
+    }
+    .movement-tools button, .movement-tools > output, .time-control {
+      border: 1px solid #809b8c; border-radius: .4rem; background: #1f302c;
+      color: #edf2da; padding: .55rem .75rem; font: 500 .875rem/1.4 system-ui, sans-serif;
+    }
+    .movement-tools button { cursor: pointer; pointer-events: auto; }
+    .movement-tools button[aria-pressed="true"] { background: #c3e2c8; border-color: #c3e2c8; color: #1a2d27; }
+    .movement-tools button:focus-visible { outline: 2px solid #fff1b4; outline-offset: 3px; }
+    .time-control { display: flex; align-items: center; gap: .55rem; pointer-events: auto; }
+    .time-control input { width: clamp(4rem, 25vw, 9rem); min-width: 0; margin: 0; accent-color: #c3e2c8; }
+    .time-control output { min-width: 5ch; font-variant-numeric: tabular-nums; }
+    [hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <main data-sprite-sheet="./vendor/tactics/a1.png">
+    <p data-graphics-status role="status">Loading Baichuan…</p>
+    <canvas hidden aria-label="Baichuan, a city around a waterfall. Drag or use the arrow keys to orbit. Use WASD or Shift-drag to pan. Scroll or use plus and minus to zoom. Press R to reset."></canvas>
+    <div class="movement-tools" hidden>
+      <button type="button" aria-pressed="false">Test movement</button>
+      <button type="button" data-new-start hidden>New start</button>
+      <label class="time-control">
+        <span>Time of day</span>
+        <input type="range" min="0" max="1439" value="960">
+        <output data-city-time>16:00</output>
+      </label>
+      <output data-movement-status hidden aria-live="polite"></output>
+    </div>
+  </main>
+  <script type="module" src="./generated/city-main.js"></script>
+</body>
+</html>

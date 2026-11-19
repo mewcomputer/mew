@@ -1,0 +1,228 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400&family=IBM+Plex+Sans:wght@400;500&family=Noto+Serif+SC:wght@600&display=swap');
+
+body { margin: 0; background: #0e1213; }
+#jianghu {
+  container-type: inline-size;
+  font: 400 15px/24px var(--font-sans);
+  background: var(--surface);
+  color: var(--ink);
+  padding-bottom: var(--space-6);
+}
+
+#jianghu [hidden] { display: none !important; }
+#jianghu button,
+#jianghu select {
+  box-sizing: border-box;
+  min-width: 44px;
+  min-height: 44px;
+  padding-inline: var(--space-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: inherit;
+  font: 500 13px/20px var(--font-sans);
+}
+#jianghu button:not(:disabled),
+#jianghu select { cursor: pointer; }
+#jianghu button:disabled { color: var(--ink-muted); }
+#jianghu button[aria-pressed='true'] { background: var(--jade-soft); color: var(--jade); }
+#jianghu :is(button, select):focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 2px var(--surface);
+}
+@media (hover: hover) and (pointer: fine) {
+  #jianghu button:not([aria-pressed='true'], :disabled):hover { background: var(--surface-sunken); }
+}
+
+#jianghu .sandbox-header {
+  min-height: 64px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-2);
+  margin-inline: clamp(var(--space-3), 4cqw, var(--space-12));
+  border-bottom: 1px solid var(--line);
+}
+#jianghu .wordmark { display: flex; align-items: center; gap: var(--space-2); }
+#jianghu .wordmark h1 { margin: 0; font: 500 20px/24px var(--font-sans); letter-spacing: -.025em; }
+#jianghu .seal {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+  background: var(--vermilion);
+  color: var(--on-vermilion);
+  font: 600 16px/1 var(--font-hanzi);
+}
+#jianghu .environment { display: flex; align-items: center; gap: var(--space-1); }
+#jianghu .environment [data-water][data-paused] { color: var(--ochre); }
+
+#jianghu .scene {
+  position: relative;
+  isolation: isolate;
+  margin: var(--space-6) clamp(var(--space-3), 4cqw, var(--space-12)) 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface-sunken);
+}
+#jianghu .scene > h2 {
+  position: absolute;
+  top: var(--space-6);
+  left: var(--space-6);
+  z-index: 1;
+  margin: 0;
+  color: var(--ink);
+  font: 400 28px/34px var(--font-title);
+  letter-spacing: -.015em;
+  pointer-events: none;
+}
+#jianghu .viewport {
+  position: relative;
+  height: clamp(338px, 56cqw, 700px);
+  overflow: hidden;
+  border-radius: inherit;
+}
+#jianghu .viewport canvas,
+#jianghu .fallback { display: block; width: 100%; height: 100%; object-fit: contain; }
+#jianghu .viewport canvas { cursor: grab; touch-action: pan-y; }
+#jianghu .viewport canvas:active { cursor: grabbing; }
+#jianghu .viewport canvas.is-editing { cursor: crosshair; }
+#jianghu .fallback-note {
+  position: absolute;
+  right: var(--space-3);
+  bottom: var(--space-3);
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  color: var(--ink-muted);
+  font: 400 13px/20px var(--font-sans);
+}
+#jianghu .crosshair {
+  position: absolute;
+  inset: 50% auto auto 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  text-shadow: 0 1px 2px var(--surface);
+  color: var(--jade);
+}
+#jianghu .pin {
+  position: absolute;
+  display: grid;
+  place-items: center;
+  transform: translate(-50%, -50%);
+  padding: 0;
+}
+#jianghu .pin[aria-pressed],
+#jianghu .pin[aria-pressed]:hover { background: transparent; }
+#jianghu .pin span {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  color: var(--ink);
+  font: 500 12px/1 var(--font-sans);
+}
+#jianghu .pin[aria-pressed='true'] span {
+  background: var(--jade);
+  border-color: var(--jade);
+  color: var(--on-jade);
+}
+#jianghu .camera-controls {
+  position: absolute;
+  right: var(--space-4);
+  bottom: var(--space-4);
+  display: flex;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  background: var(--surface-raised);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+}
+#jianghu .camera-controls button:not([data-camera='spillway']) { font-size: 16px; }
+#jianghu .camera-controls [data-camera='spillway'] { border-inline-start-color: var(--line); }
+
+#jianghu .tools {
+  margin-inline: clamp(var(--space-3), 4cqw, var(--space-12));
+  padding: var(--space-3) 0 var(--space-4);
+}
+#jianghu .tool-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-4);
+}
+#jianghu .brush-modes,
+#jianghu .landmarks [role='group'] { display: flex; flex-wrap: wrap; gap: var(--space-1); }
+#jianghu .material-label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--ink-muted);
+  font: 400 13px/20px var(--font-sans);
+}
+#jianghu .material-label select {
+  color: var(--ink);
+  background: var(--surface-sunken);
+  border-color: var(--line-strong);
+}
+#jianghu .measurements {
+  margin-left: auto;
+  color: var(--ink-muted);
+  font: 400 12px/20px var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+#jianghu .edit-status { margin: var(--space-2) 0 0; color: var(--ink-muted); font: 400 13px/20px var(--font-sans); }
+#jianghu .landmarks {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: start;
+  gap: var(--space-3);
+  margin-inline: clamp(var(--space-3), 4cqw, var(--space-12));
+  padding: var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+}
+#jianghu .landmark-title { margin: 0; color: var(--ink); font: 500 17px/24px var(--font-sans); }
+#jianghu .landmark-copy { margin: var(--space-1) 0 0; color: var(--ink-muted); font: 400 13px/20px var(--font-sans); }
+
+@container (max-width: 610px) {
+  #jianghu .sandbox-header { min-height: 56px; }
+  #jianghu .environment { gap: 0; }
+  #jianghu .environment button { padding-inline: var(--space-1); font-size: 12px; }
+  #jianghu .scene { margin-inline: var(--space-1); margin-top: var(--space-3); }
+  #jianghu .scene > h2 {
+    position: static;
+    padding: var(--space-3) var(--space-4) 0;
+    font-size: 24px;
+    line-height: 30px;
+  }
+  #jianghu .viewport { height: clamp(245px, 82cqw, 440px); }
+  #jianghu .camera-controls {
+    position: static;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0;
+    margin-inline: 0;
+    padding: 0;
+    border-inline: 0;
+    border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+  }
+  #jianghu .camera-controls button { padding-inline: var(--space-1); }
+  #jianghu .camera-controls [data-camera='spillway'] { padding-inline: 2px; font-size: 12px; }
+  #jianghu .wordmark { gap: var(--space-1); }
+  #jianghu .wordmark h1 { font-size: 17px; }
+  #jianghu .seal { width: 20px; height: 20px; font-size: 14px; }
+  #jianghu .landmarks { grid-template-columns: 1fr; gap: var(--space-2); padding: var(--space-3); }
+  #jianghu .measurements { flex-basis: 100%; margin-left: 0; }
+}
+
+#jianghu .world-workshop { color: var(--jade); font-size: 13px; padding: var(--space-2); }
