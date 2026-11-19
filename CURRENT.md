@@ -4399,3 +4399,9 @@ Ran the publisher with the last successful nightly and verified that the
 hosted tap workflow pushed the generated formula. An isolated Apple
 Silicon Homebrew install upgraded from 0.2.0-pre.20261118 to
 0.2.0-pre.20261118.142. Formula tests and seven site smoke tests passed.
+
+### 2026-11-19: Fixed-size Mew navigation
+
+The homepage and docs headers use a fixed 60-pixel bar, 25-pixel wordmark,
+and 40-pixel button. Verified the same dimensions at 390, 1280, and 2560
+pixels in the browser, along with the docs mobile menu and both builds.

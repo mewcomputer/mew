@@ -21,16 +21,9 @@
   --display: "Sentient", Georgia, serif;
   --sans: "Instrument Sans", "Noto Sans SC", system-ui, sans-serif;
   --hanzi: "Noto Serif SC", "Songti SC", serif;
-  --mew-header-height: clamp(68px, 4.6vw, 104px);
-  --mew-header-gap: 28px;
-  --mew-header-button-height: clamp(40px, 2.4vw, 52px);
-}
-
-@media (max-width: 860px) {
-  :root {
-    --mew-header-height: 64px;
-    --mew-header-gap: 16px;
-  }
+  --mew-header-height: 60px;
+  --mew-header-gap: 20px;
+  --mew-header-text-size: 0.875rem;
 }
 
 .mew-wordmark {
@@ -44,7 +37,7 @@
 .mew-wordmark .name {
   font-family: var(--display);
   letter-spacing: -.02em;
-  font-size: clamp(28px,1.8vw,42px);
+  font-size: 25px;
   font-weight: 300;
   line-height: 1;
 }
@@ -52,10 +45,10 @@
 .mew-wordmark .seal {
   border-radius: var(--radius-sm);
   background: var(--vermilion);
-  width: clamp(26px,1.7vw,38px);
-  height: clamp(26px,1.7vw,38px);
+  width: 24px;
+  height: 24px;
   color: var(--on-vermilion);
-  font: 600 clamp(17px, 1.1vw, 25px)/1 var(--hanzi);
+  font: 600 16px/1 var(--hanzi);
   place-items: center;
   transition: background-color .65s;
   display: grid;
@@ -80,6 +73,13 @@
   background: var(--jade);
   color: var(--on-jade);
   border-color: var(--jade);
+}
+
+.mew-button.mew-header-button {
+  height: 40px;
+  padding-inline: 16px;
+  font-size: var(--mew-header-text-size);
+  white-space: nowrap;
 }
 
 .mew-button:hover {

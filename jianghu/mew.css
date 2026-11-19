@@ -123,8 +123,8 @@ button:focus-visible,a:focus-visible {
 }
 
 .bar .links {
-  gap: clamp(26px,1.8vw,40px);
-  font-size: clamp(15px,.85vw,19px);
+  gap: var(--mew-header-gap);
+  font-size: var(--mew-header-text-size);
   display: flex;
 }
 
@@ -135,10 +135,6 @@ button:focus-visible,a:focus-visible {
 
 .bar .links a:hover {
   text-decoration: underline;
-}
-
-.bar .mew-button {
-  height: var(--mew-header-button-height);
 }
 
 main {

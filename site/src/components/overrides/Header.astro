@@ -13,7 +13,7 @@ const github = config.social.find(({ icon }) => icon === "github");
         {github && <a class="github" href={github.href}>GitHub</a>}
         <Search />
         <div class="theme"><ThemeSelect /></div>
-        <a class="mew-button primary" href="/docs/getting-started/quick-start/">Get started</a>
+        <a class="mew-button mew-header-button primary" href="/docs/getting-started/quick-start/">Get started</a>
     </div>
 </div>
 
@@ -30,22 +30,14 @@ const github = config.social.find(({ icon }) => icon === "github");
         justify-content: space-between;
     }
 
-    .actions {
-        gap: clamp(0.75rem, 1.6vw, 1.75rem);
-    }
-
     .github {
         color: var(--ink);
+        font-size: var(--mew-header-text-size);
         text-decoration: none;
     }
 
     .github:hover {
         text-decoration: underline;
-    }
-
-    .mew-button {
-        height: var(--mew-header-button-height);
-        white-space: nowrap;
     }
 
     .actions :global(button[data-open-modal]) {
