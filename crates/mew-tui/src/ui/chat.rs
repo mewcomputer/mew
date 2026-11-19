@@ -406,23 +406,6 @@ pub(crate) fn build_chat_lines(
     app.reasoning_header_rows.clear();
     app.tool_batch_header_rows.clear();
     app.compaction_header_rows.clear();
-    // Snapshot compaction parts so we can render them after the main loop
-    // releases the immutable `app.messages` borrow. The renderer needs
-    // `&mut app` to record header-row indices and look up theme colors,
-    // which can't be done while the iteration is active.
-    let compactions_to_render: Vec<mew_message::CompactionPart> = app
-        .messages
-        .iter()
-        .filter_map(|msg| {
-            if msg.role != Role::System {
-                return None;
-            }
-            msg.parts.iter().find_map(|p| match p {
-                Part::Compaction(c) => Some(c.clone()),
-                _ => None,
-            })
-        })
-        .collect();
     let mut sel_ctx = ChatLineCtx {
         lines: &mut lines,
         chat_rows: &mut chat_rows,
@@ -441,8 +424,21 @@ pub(crate) fn build_chat_lines(
 
     for (msg_idx, msg) in app.messages.iter().enumerate() {
         if msg.role == Role::System {
-            // Skip; the compaction block is rendered below in its own pass
-            // after the main loop's immutable borrow is released.
+            if let Some(compaction) = msg.parts.iter().find_map(|part| match part {
+                Part::Compaction(compaction) => Some(compaction),
+                _ => None,
+            }) {
+                let header_row = render_compaction_block(
+                    &mut sel_ctx,
+                    app,
+                    compaction,
+                    chat_width.saturating_sub(2),
+                    tool_bg_style,
+                );
+                app.compaction_header_rows
+                    .push((compaction.base.id, header_row));
+                sel_ctx.push_line(Line::from(""));
+            }
             continue;
         }
         let is_last = msg_idx + 1 == msg_count;
@@ -911,17 +907,6 @@ pub(crate) fn build_chat_lines(
             sel_ctx.push_line(Line::from(""));
         }
     }
-    // Render compaction blocks now that the main loop's immutable borrow
-    // of `app.messages` is released. The renderer needs `&mut app` to
-    // record header rows and look up theme colors, so we can't run it
-    // inside the main loop. We re-use `sel_ctx` so the visual_row
-    // counter continues to be accurate across the full chat.
-    for compaction in compactions_to_render {
-        let tool_width = chat_width.saturating_sub(2);
-        let tool_bg_style = Style::default().bg(tool_bg);
-        render_compaction_block(&mut sel_ctx, app, &compaction, tool_width, tool_bg_style);
-        sel_ctx.push_line(Line::from(""));
-    }
     #[allow(clippy::drop_non_drop)]
     drop(sel_ctx);
     crate::app::BuiltChat {
@@ -1112,11 +1097,11 @@ fn render_single_tool_call(
 /// is usually long and not interesting at a glance.
 fn render_compaction_block(
     sel_ctx: &mut ChatLineCtx<'_>,
-    app: &mut App,
+    app: &App,
     compaction: &mew_message::CompactionPart,
     tool_width: u16,
     tool_bg_style: Style,
-) {
+) -> usize {
     let tool_bg = app.theme.resolve("tool.background");
     let is_expanded = app.tool_batch_expanded.contains(&compaction.base.id);
     let chevron = if is_expanded { "▼" } else { "▶" };
@@ -1138,6 +1123,7 @@ fn render_compaction_block(
     if let Some(line) = push_tool_edge(tool_width, true, tool_bg) {
         sel_ctx.push_line(line);
     }
+    let header_row = sel_ctx.visual_row;
     sel_ctx.push_line(push_tool_line(
         tool_width,
         vec![
@@ -1165,9 +1151,6 @@ fn render_compaction_block(
         ],
         tool_bg_style,
     ));
-    app.compaction_header_rows
-        .push((compaction.base.id, sel_ctx.visual_row));
-
     if is_expanded {
         if let Some(summary) = compaction.summary.as_ref() {
             if !summary.is_empty() {
@@ -1200,6 +1183,7 @@ fn render_compaction_block(
     if let Some(line) = push_tool_edge(tool_width, false, tool_bg) {
         sel_ctx.push_line(line);
     }
+    header_row
 }
 
 fn push_tool_line(width: u16, mut spans: Vec<Span<'static>>, pad_style: Style) -> Line<'static> {
@@ -1622,7 +1606,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compaction_block_renders_with_header_and_none_placeholder() {
+    fn test_compaction_block_renders_in_transcript_order_with_clickable_header() {
         // A `CompactionPart` with a `None` summary should still render a
         // hit-testable header line ("context compacted · N messages") and
         // a "(no summary captured)" placeholder when expanded. The header
@@ -1632,6 +1616,7 @@ mod tests {
         use mew_message::{CompactionPart, Message, Part, PartBase, Role};
 
         let mut app = App::new();
+        app.push_user("prompt before compaction".into(), vec![]);
         let msg_id = ulid::Ulid::new();
         let part_id = ulid::Ulid::new();
         app.push_message(Message {
@@ -1656,17 +1641,22 @@ mod tests {
             },
             assistant: None,
         });
+        app.push_synthetic_message("reply after compaction".into());
 
         let chat_width = 60u16;
         let built = build_chat_lines(&mut app, chat_width - 2, chat_width);
 
-        // Header row should be recorded so click hit-testing works.
-        assert!(
-            app.compaction_header_rows
+        let row = |label: &str| {
+            built
+                .chat_rows
                 .iter()
-                .any(|&(id, _)| id == part_id),
-            "compaction header row should be recorded for hit-testing"
-        );
+                .position(|text| text.contains(label))
+                .unwrap_or_else(|| panic!("missing transcript row: {label}"))
+        };
+        let header = row("context compacted");
+        assert!(row("prompt before compaction") < header);
+        assert!(header < row("reply after compaction"));
+        assert_eq!(app.compaction_header_rows, vec![(part_id, header)]);
 
         // The header text "context compacted" should appear in the rendered
         // output.
