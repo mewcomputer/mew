@@ -13,8 +13,9 @@ OpenCode Zen account in your shell:
 export MEW_CRED_OPENCODE_ZEN="your-api-key"
 ```
 
-See [Providers](/docs/using-mew/providers/) for other providers and Codex
-sign-in. Use `mew config edit` to add a custom provider.
+See [Providers](/docs/using-mew/providers/) for other API key options or
+[sign in to Codex](/docs/using-mew/providers/#sign-in-to-codex) with ChatGPT.
+Use `mew config edit` to add a custom provider.
 
 ## 2. Start a chat
 

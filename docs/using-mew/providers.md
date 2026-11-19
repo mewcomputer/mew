@@ -23,8 +23,22 @@ choose a built-in provider or add your own.
 OpenCode Zen and Go share a credential. The China and international Alibaba
 Token Plan endpoints use separate credentials.
 
-For Codex, run `mew auth login codex` to sign in with ChatGPT. Run
-`mew auth status` to check your sign-in and `mew auth logout codex` to sign out.
+## Sign in to Codex
+
+Run `mew auth login codex` and complete the ChatGPT sign-in in your browser.
+The browser opens at `auth.openai.com` and returns to Mew's local callback.
+The CLI prints `Login successful for Codex (ChatGPT).` Run `mew auth status`
+and look for `codex: OAuth` to confirm the session.
+
+Select a Codex model explicitly for your first prompt. The application's
+default model can belong to a different provider.
+
+```sh
+mew run --provider codex --model gpt-6.2-sol "Reply with hello."
+```
+
+Use a Codex model available to your account. Run `mew auth logout codex` to
+remove Mew's saved OAuth session.
 
 ## Provider shapes
 

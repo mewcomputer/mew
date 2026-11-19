@@ -4433,3 +4433,10 @@ as raw Markdown, and links to existing pages and headings.
 Verified all 38 guides, the seven external links, the Apple silicon nightly
 installer, configuration examples, and both TUI capture modes. The site,
 Web UI, Web client, Electron unit tests, and Jianghu build passed.
+
+### 2026-11-19: Codex sign-in smoke test
+
+Signed in through the browser with the published macOS nightly, verified OAuth
+status, received a real Codex reply, and signed out using an isolated config.
+The provider guide now shows the success messages and names a Codex model for
+the first prompt. All 12 site tests passed.
