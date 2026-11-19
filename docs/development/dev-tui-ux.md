@@ -3,9 +3,10 @@ title: TUI task flow assessment
 description: October 2026 UX findings and implementation priorities for the TUI and its native companion.
 ---
 
-The TUI should keep its personality and keyboard efficiency while sharing task
-semantics with GPUI. The largest remaining problems concern ownership and live
-observation of a conversation. Visual repairs alone cannot address them.
+This page records an October 2026 assessment of terminal and desktop task
+flow. See [TUI Architecture](/docs/development/dev-tui/) for the current runtime
+and [Session handover](/docs/development/handover/) for current attachment and
+reconnect behavior.
 
 ## Scope and evidence
 

@@ -9,6 +9,7 @@ the `mew-web-client` TypeScript library.
 ## Getting started
 
 ```sh
+just build-web        # installs dependencies and builds both binaries
 just dev-web          # starts the bridge and Vite with HMR
 just dev-web --open   # also launches the browser
 ```
@@ -22,7 +23,7 @@ server. Hot module replacement works for all React components.
 Browser → mew-web (bridge) → mew daemon (Unix socket)
 ```
 
-Three packages in a pnpm workspace:
+The browser stack consists of a Rust bridge and two pnpm workspace packages.
 
 - **`mew-web-bridge`** (Rust): TCP+WS listener that relays browser WebSocket
   connections to the daemon's Unix socket. Serves the built React app from
@@ -40,111 +41,72 @@ Three packages in a pnpm workspace:
 `MewClient` (`mew-web-client/src/index.ts`):
 
 ```typescript
-const client = new MewClient();
-await client.connect("ws://localhost:9847");
+import { MewClient } from "@mew/web-client";
+
+const client = new MewClient("ws://localhost:9847/");
+await client.connect();
+await client.ping();
+const sessionId = await client.newSession();
 
 // Promise-based methods (wait for the matching server response):
 const models = await client.listModels();
-const result = await client.switchModel("deepseek", "deepseek-v4-flash");
-const variant = await client.setThinkingVariant("high");
+const model = models[0];
+if (model) await client.switchModel(model.provider, model.model);
 
 // Event-based (streaming):
 client.on("provider", (ev) => { /* handle PartStart/PartDelta/etc */ });
-client.on("tool-start", (callId) => { /* ... */ });
+client.on("tool-start", ({ call_id }) => { /* ... */ });
 client.on("model-switched", (data) => { /* ... */ });
+
+await client.submitPrompt(sessionId, "Summarize this project.");
 ```
 
-Request/response methods use a pattern: register a one-time listener for
-the response event, send the request, resolve the promise when the response
-arrives.
+The application calls `ping()` after connection to discover daemon capabilities.
+Create or attach a session before submitting a prompt. Scoped submissions
+resolve once the daemon acknowledges acceptance. Watch provider events for
+streamed output.
 
-Permission requests use a callback pattern: `client.onPermissionRequest`
-registers a handler that receives a `respond(decision)` callback. The
-handler can be async and the response is forwarded automatically.
+Subscribe to `client.on("permission-request", (request, respond) => { … })`
+to handle permission requests and call `respond` with the user's decision.
 
 ## The Zustand store
 
-State lives in `src/stores/session.ts`. The `SessionState` interface defines
-all state fields and actions:
-
-```typescript
-interface SessionState {
-  // Connection
-  connectionState: ConnectionState;
-  sessionId: string | null;
-
-  // Messages
-  messages: ChatMessage[];
-  streamingPartId: string | null;
-  streamingText: string;
-
-  // Model management
-  availableModels: ModelInfo[];
-  currentModel: string | null;
-  currentProvider: string | null;
-  currentThinkingVariant: string | null;
-
-  // Session titles
-  sessionTitles: Map<string, string>;
-
-  // Actions
-  setAvailableModels: (models: ModelInfo[]) => void;
-  setCurrentModel: (provider: string, model: string) => void;
-  setCurrentThinkingVariant: (variant: string | null) => void;
-  onSessionTitleChanged: (sessionId: string, title: string) => void;
-  // ... 30+ more actions
-}
-```
+`src/stores/session.ts` defines `SessionState` and its actions. The store
+tracks connection and session state, assembles streaming messages and
+history pages, and holds model settings, todos, and pending requests.
 
 ## The bridge function
 
-`bridgeClientToStore` wires client events to store actions:
+`getClient()` in `src/lib/client.ts` creates a shared `MewClient` and calls
+`bridgeClientToStore(client)`. The bridge maps client events to actions on
+`useSessionStore`. Permission responders and queued ask-user actions retain
+request IDs so replies reach the right pending action.
 
-```typescript
-export function bridgeClientToStore(client: MewClient, store: typeof useSessionStore) {
-  client.on("session-ready", (data) => store.getState().setSessionId(data.session_id));
-  client.on("model-list", (data) => store.getState().setAvailableModels(data.models));
-  client.on("model-switched", (data) =>
-    store.getState().setCurrentModel(data.provider, data.model));
-  client.on("thinking-variant-changed", (data) =>
-    store.getState().setCurrentThinkingVariant(data.variant));
-  client.on("session-title-changed", (data) =>
-    store.getState().onSessionTitleChanged(data.session_id, data.title));
-  // ... 20+ more event bindings
-}
-```
+## Routing and reconnect
 
-Permission and ask-user requests use side-channel maps
-(`permissionResponders`, `askUserResponders`) to pair the UI's response
-with the client's callback.
+`src/routes/__root.tsx` mounts the workspace and calls `useMewConnection`.
+The connection hook retries with exponential backoff capped at 30 seconds and
+checks the daemon with `ping()`. The session route's `useSessionAttach` hook
+reattaches after reconnect and surfaces attachment errors.
 
-## App.tsx
-
-`App.tsx` handles:
-
-- **Connection lifecycle**: exponential backoff reconnection (2s, 4s, 8s,
-  cap 30s). On unexpected WS close, retries automatically and re-attaches
-  to the same session.
-- **Session persistence**: `sessionId` saved to `localStorage`. On reload,
-  reconnects via `attachSession`, falling back to `newSession` if the
-  session is gone.
-- **Layout tree**: `ChatSurface → TodoPanel → SubagentPanel → AskUserCard → InputArea`
+The confirmed session ID is saved to `localStorage`. The home route tries the
+saved session, and `/session/<id>` opens a specific conversation directly.
+History is paginated. Attaching loads the newest page, and older messages load
+when requested.
 
 ## Key components
 
-| Component | Purpose |
+| Component or route | Purpose |
 |-----------|---------|
-| `App.tsx` | Root layout, reconnect logic, session attach |
-| `ChatSurface.tsx` | Message list + streaming text |
-| `MessageItem.tsx` | Single message with markdown rendering |
-| `InputArea.tsx` | Prompt input (Cmd/Ctrl+Enter to send) |
-| `ModelPill.tsx` | Model picker with thinking variant selection |
-| `TitleStrip.tsx` | Session title + connection status |
-| `ToolCallCard.tsx` | Tool call display with inline output |
-| `CodeBlock.tsx` | Shiki syntax-highlighted code blocks |
-| `MarkdownBody.tsx` | Markdown renderer (streaming + finalized) |
-| `SessionRail.tsx` | Session list sidebar |
-| `StatusFooter.tsx` | Token count, model, connection status |
+| `routes/__root.tsx` | Workspace layout, connection hook, global navigation |
+| `routes/session.$sessionId.tsx` | Session attachment and conversation layout |
+| `components/virtual-chat-surface.tsx` | Virtualized message list and streaming text |
+| `components/input-area.tsx` | Prompt input and slash command suggestions |
+| `components/model-pill.tsx` | Model picker with thinking variant selection |
+| `components/session-rail.tsx` | Session list |
+| `components/right-rail.tsx` | Tabbed workspace tools |
+| `components/permission-toast.tsx` | Tool permission requests |
+| `components/ask-user-card.tsx` | Interactive questions |
 
 ## Building
 
@@ -173,4 +135,5 @@ address. Repeat `--allow-origin` for each additional local development origin.
    add the dispatch case in `handleMessage`, and add any request method.
 4. **Store**: Add state field + action to `SessionState`, initialize in the
    store, wire in `bridgeClientToStore`.
-5. **Component**: Render the new state in a React component.
+5. **Component**: Render the new state in a React component and exercise the
+   flow with the relevant client or UI tests.

@@ -16,8 +16,8 @@ with `/permissions <mode>` or CLI flags.
 | Mode | Behavior | CLI flag |
 |------|----------|----------|
 | `standard` | Prompts for Mutating and Dangerous tools. ReadOnly tools auto-allow. Rules and the workspace escape tier still apply. Default. | (default) |
-| `permissive` | Mutating tools auto-allow. Bash still prompts. Secret-file guard and bash escape tier still fire. Rules and session cache are skipped. | `-P` |
-| `auto` | Every tool call is classified by a small LLM. The classifier decides allow, deny, or escalate to user. Requires a classifier provider in config. | `-A` |
+| `permissive` | ReadOnly and Mutating tools usually run without asking. Dangerous tools usually prompt. Secret-file guards, shell workspace checks, and deny rules still apply. Single-command checks skip allow rules, ask rules, and session grants. | `-P` |
+| `auto` | The classifier decides whether to allow, deny, or ask you about a tool call. If the classifier is unavailable, mew asks you. | `-A` |
 | `auto_plus` | Like `auto`, but the classifier cannot escalate. If the classifier is unsure or fails, the call is denied. Fails closed. | `--auto-plus` |
 | `dangerous` | Every tool auto-runs. Bypasses deny rules, ask rules, the secret-file guard, and bash decomposition. Output redaction still applies. | `-D` |
 
@@ -41,12 +41,11 @@ the tool name, its input, and three choices:
 | Key | Decision | Effect |
 |-----|----------|--------|
 | `a` | Allow once | Run this call. The next call to the same tool prompts again. |
-| `s` | Allow session | Run this call and all future calls to this tool for the rest of the session. |
+| `s` | Allow session | Run this call and remember the allowance for this active session. Rules and guards can still block or prompt for other calls. |
 | `d` / `Esc` | Deny | Don't run. The agent sees the denial and adapts. |
 
-`Allow session` grants survive `/clear`. They're tied to the session
-(the JSONL log), not the visible context. See [Sessions](/docs/getting-started/sessions/)
-for the distinction.
+`Allow session` grants survive `/clear` while the session stays active in
+the daemon. The daemon keeps these grants in memory.
 
 ## Tool sensitivity
 
@@ -56,8 +55,8 @@ when no rule matches:
 | Sensitivity | Default behavior | Built-in tools |
 |-------------|-----------------|----------------|
 | `ReadOnly` | Auto-allow (no prompt) | Read, Glob, Grep |
-| `Mutating` | Prompt | Write, Edit, Bash, MCP tools |
-| `Dangerous` | Prompt (highest urgency) | (reserved) |
+| `Mutating` | Prompt | `write`, `edit_str_replace`, `job_cancel`, MCP tools |
+| `Dangerous` | Prompt | `bash`, `shell_background`, `shell_monitor` |
 
 MCP tools are always treated as `Mutating` regardless of what they do.
 
@@ -70,18 +69,17 @@ tool name and optional conditions:
 [[permissions.rules]]
 tool = "bash"
 decision = "deny"
-match.command_prefix = "rm -rf"
+match.command_prefix = "git push"
 
 [[permissions.rules]]
 tool = "bash"
 decision = "allow"
-match.command_program = "git"
-match.command_subcommand = "log"
+match.command_prefix = "git log "
 
 [[permissions.rules]]
 tool = "write"
 decision = "ask"
-match.path_glob = "~/secrets/**"
+match.path_glob = "secrets/**"
 ```
 
 ### Rule decisions
@@ -90,35 +88,41 @@ match.path_glob = "~/secrets/**"
 |----------|--------|
 | `allow` | Auto-allow matching calls |
 | `deny` | Block matching calls |
-| `ask` | Always prompt, even if the mode would auto-allow |
+| `ask` | Prompt in standard mode for a single-command or file call when no deny or allow rule matches |
 
-Deny rules always win. If a call matches both a deny and an allow rule,
-it's denied.
+In standard mode, single-command checks evaluate deny rules before allow
+rules. An allow rule takes precedence over an ask rule.
 
 ### Match conditions
 
-All conditions are optional. At least one must be present for a rule to
-match anything.
+A rule with no conditions matches every call to the named tool. Use `*`
+as the tool name to match every tool.
 
 | Field | Applies to | Description |
 |-------|-----------|-------------|
-| `command_prefix` | bash | Matches the start of the full command string |
-| `command_program` | bash | Matches the program name (e.g. `"git"` for `git push`) |
-| `command_subcommand` | bash | Matches the first non-flag argument (e.g. `"push"` for `git push`) |
+| `command_prefix` | Single shell command | Matches the start of the command string, including spaces. |
+| `command_program` | Compound shell command | Matches a program name, such as `git`. |
+| `command_subcommand` | Compound shell command | Matches a program’s first non-flag argument, such as `log` in `git log`. |
 | `path_glob` | path-based tools | Glob pattern matched against the path argument |
 
-For compound bash commands (e.g. `git log | grep fix`), each program is
-checked against the rules. If any program matches a deny rule, the whole
-command is denied.
+For pipelines and compound shell commands, mew checks workspace paths
+first, then checks each program against the `bash` deny and allow rules.
+An explicit allow needs a match for every program. The parser may prompt
+for commands it cannot safely decompose.
+
+Use `command_prefix` when you want to match a single shell command. A rule
+with only `command_program` or `command_subcommand` matches every simple
+call to that shell tool in the current implementation, so avoid those
+fields in rules intended for simple calls.
 
 ## Workspace sandboxing
 
-`workspace.roots` in config defines directories the agent is allowed to
-touch. It feeds two layers:
+`workspace.roots` in config defines the directories the agent can access
+without workspace approval. It feeds two layers.
 
-**Agent layer** (path-based tools: read, write, edit, glob, grep): every
+**Agent layer** (path-based file tools): every
 path argument is checked against the roots before the tool runs. Paths
-outside the roots are rejected.
+outside the roots require workspace approval.
 
 **Escape tier** (bash, shell_background, shell_monitor): shell commands
 are parsed, and any path-shaped argument that resolves outside the
@@ -140,9 +144,8 @@ regardless of cwd.
 
 ## Secret file guard
 
-Files listed under `[secrets.files]` are protected: reading them forces
-a permission prompt unless a literal (non-glob) allow rule explicitly
-permits that exact path.
+The `read` tool prompts for paths listed in `[[secrets.files]]` unless
+an allow rule permits that exact path with a literal `path_glob`.
 
 ```toml
 [[secrets.files]]
@@ -154,28 +157,24 @@ This sits above the normal rule cascade as its own tier. It fires in
 
 ## Secret redaction
 
-Two layers of redaction prevent secrets from leaking into tool output:
+`glob` and `grep` omit results from files that match `secrets.files`.
+`read` and the shell output helpers replace configured secret values
+with `[REDACTED]`. `grep` redacts matching output lines.
 
-**Pattern-based**: regex patterns match common secret formats (API keys,
-tokens, passwords). Matches are redacted before the output reaches the
-model or the display.
-
-**File-based**: contents of files listed in `secrets.files` are loaded
-and redacted from all tool output. If a bash command prints a value
-that appears in your `.env`, it's replaced with `[REDACTED]`.
+List the exact, case-sensitive values to redact in `[[secrets.words]]`.
+Adding a file glob only protects the path. It does not add the file’s
+contents to the redaction list.
 
 ```toml
 [[secrets.words]]
-words = ["my-api-key-value", "sk-1234567890"]
+values = ["my-secret-value"]
 ```
-
-Secret words let you redact specific values that don't match common
-patterns.
 
 ## Auto mode classifier
 
-`auto` and `auto_plus` modes route every tool call through a small LLM
-classifier. Configure it in `config.toml`:
+`auto` and `auto_plus` use a classifier in place of standard tool rules,
+the secret-file prompt, and shell decomposition. Configure a provider in
+`config.toml` or set the `micro` tier of a [router](/docs/using-mew/providers/#router-provider).
 
 ```toml
 [permissions]
@@ -183,9 +182,8 @@ classifier_provider = "deepseek"
 classifier_model = "deepseek-v4-flash"
 ```
 
-If no classifier is configured, `auto` mode falls through to the user
-modal on every call (same as `standard`). The difference between `auto`
-and `auto_plus`:
+The router’s `micro` tier takes precedence over the explicit classifier
+settings. The two modes handle uncertainty differently.
 
 - **`auto`**: if the classifier is unsure or fails, the call escalates
   to the user prompt.

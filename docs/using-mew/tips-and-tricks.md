@@ -3,6 +3,8 @@ title: Tips & Tricks
 description: Power-user features and workflows for mew.
 ---
 
+These shortcuts and slash commands are for the terminal client.
+
 ## Input editing
 
 - **Multi-line input**: press `Shift+Enter`, `Alt+Enter` or `Ctrl+J` to insert a newline without
@@ -52,10 +54,8 @@ description: Power-user features and workflows for mew.
   approvals and failures need attention; completed results stay unread until
   visible in a focused terminal. Without terminal focus reporting, interacting
   with the visible conversation acknowledges its result.
-- **History**: `/sessions` lists previous sessions with timestamps.
-  `/resume <id>` resumes one. See [Sessions](/docs/getting-started/sessions/).
-- **Rewind**: `/rewind <n>` truncates to the first N messages. Use
-  `/rewind` with no args to see a list with snippets.
+- **History**: `/sessions` opens the session picker. `/resume <id>` resumes
+  a session directly. See [Sessions](/docs/getting-started/sessions/).
 - **Clear**: `/clear` wipes the conversation context (persists to disk).
   `/compact` forces context compaction on the next turn.
 
@@ -125,9 +125,9 @@ See [Subagents](/docs/using-mew/subagents/) for the built-in options.
 
 Use the planner/builder workflow for complex tasks:
 
-1. `/persona planner` to investigate and write a plan
-2. Review the plan in `PLAN.md`
-3. `/persona builder` to execute it
+1. Switch to `/persona planner` and ask it to write a plan.
+2. Review the plan under `plans/`.
+3. Switch to `/persona builder` and ask it to implement the plan.
 
 See [Personas](/docs/using-mew/personas/) for details.
 
@@ -135,7 +135,7 @@ See [Personas](/docs/using-mew/personas/) for details.
 
 If you're doing repetitive work that needs many tool approvals:
 
-1. Start in `standard` mode to review each tool call.
+1. Start in `standard` mode to review changes before they run.
 2. Once you trust the pattern, switch to `permissive` with
    `/permissions permissive` to auto-allow writes and edits.
 3. For full automation, use `/permissions auto` to let the classifier

@@ -14,15 +14,15 @@ mew ships with two built-in personas designed for a two-phase workflow:
 
 | Persona | Tools | Purpose |
 |---------|-------|---------|
-| `builder` | All tools | The default. Reads a plan from `PLAN.md` and executes it step by step. |
-| `planner` | Read-only + write/edit/flag/todos | Investigates the codebase, writes a plan to `PLAN.md`, and presents it for review. Select the builder explicitly when ready to implement. No bash or dangerous tools. |
+| `builder` | All tools | The default. When asked to implement a plan, reads it and works through it step by step. |
+| `planner` | Code search, plan tools, questions, and todos | Investigates the codebase, writes a plan, and presents it for review. |
 
 The intended flow:
 
 1. `/persona planner` to start in planning mode
-2. The planner investigates, writes `PLAN.md`, and flags it
+2. The planner investigates and writes a named file in `plans/` by default. Set `plan_path` in your config to use a fixed file
 3. `/persona builder` to switch to execution
-4. The builder reads the plan and works through it
+4. Ask the builder to execute the reviewed plan
 
 User-defined personas with the same name override the built-ins. Both are
 always available even without any persona files on disk.
@@ -159,7 +159,6 @@ being used as the system prompt. These variables are available:
 | `available_skills` | list of objects | Skills with `name` and `description` fields |
 | `project_vars` | map | Project-local variables from `.mew/project_vars.yaml` |
 | `available_subagents` | list of objects | Subagents with `name` and `description` fields |
-| `project_vars` | map | Project-local variables from `.mew/project_vars.yaml` |
 
 Template functions:
 
@@ -235,5 +234,5 @@ full toolset. This bypasses the confirm modal.
 /persona
 ```
 
-Lists all available personas with their descriptions and whether they're
-built-in or user-defined.
+Opens the persona picker. It shows descriptions and identifies built-in
+and user-defined personas.

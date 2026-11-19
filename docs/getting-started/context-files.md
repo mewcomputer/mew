@@ -3,10 +3,9 @@ title: Context Files
 description: AGENTS.md and CLAUDE.md files that give the agent project context.
 ---
 
-mew discovers context files (AGENTS.md or CLAUDE.md) from the working
-directory up to the git root. These files are loaded at startup and
-injected into the agent's context, giving it project-specific
-instructions, conventions, and architecture notes.
+Mew loads project context from the conversation's working directory up
+to the Git worktree root. It adds these files to the system prompt when
+it builds the session.
 
 ## What context files are for
 
@@ -21,15 +20,18 @@ that your test files live in `tests/` not `src/tests/`.
 
 ## Discovery
 
-`mew-context` walks from the current directory up to the git root,
-collecting `AGENTS.md` and `CLAUDE.md` files. All found files are loaded.
-If multiple files exist along the path (e.g. one in a subdirectory and
-one at the root), they all get loaded and concatenated.
+Mew loads context from the Git worktree root down to the conversation's
+working directory, in order from broad to specific. Outside a worktree,
+it uses your home directory as the root when the working directory is
+inside it. In other locations it checks the working directory itself.
 
-A global context file is loaded before the project files:
-`$MEW_CONFIG_DIR/AGENTS.md` (default `~/.config/mew/AGENTS.md`), falling back to
-`~/.claude/CLAUDE.md` when no mew-global file is present. `mew debug context`
-shows which one was picked.
+At each level, Mew reads `AGENTS.md` or falls back to `CLAUDE.md`. It
+also loads `.mew/AGENTS.md` and `.mew/wiki.md` when present.
+
+Before project files, Mew loads a global `AGENTS.md` from the directory
+reported by `mew config path`. If that file is absent it tries
+`~/.claude/CLAUDE.md`. Use `mew debug context` to inspect the sources it
+found.
 
 ## What to put in a context file
 
@@ -72,13 +74,8 @@ shows which one was picked.
 
 ## CLAUDE.md vs AGENTS.md
 
-Both filenames are checked. `AGENTS.md` is the standard name for
-agent-readable context files. `CLAUDE.md` is supported for compatibility
-with Claude Code projects. If both exist in the same directory, both are
-loaded.
-
-The content format is the same for both. Use whichever name your team
-prefers, or both if you work across different tools.
+Both files use the same Markdown format. Where both exist in the same
+directory, Mew uses `AGENTS.md`.
 
 ## `@file` includes
 
@@ -100,9 +97,7 @@ text, no template rendering).
 @docs/coding-style.md
 ```
 
-Paths are resolved relative to the directory of the file containing the
-`@` reference. `../` traversal is rejected: includes are confined to the
-file's directory subtree.
+Write paths relative to the file that contains the `@` reference.
 
 Missing files leave the `@` line as-is and log a warning. This works in
 both AGENTS.md and CLAUDE.md, and in `.mew/AGENTS.md` additively loaded
@@ -138,12 +133,9 @@ from cwd up to the git root. First match wins.
 
 ## How context is used
 
-The context file content is injected into the system prompt on every turn.
-This means:
-
-- It's always available to the agent, not just at startup
-- Changes to the file take effect on the next turn (no restart needed)
-- It consumes context window tokens, so keep it focused
+Context files form part of the session's system prompt and use context
+window tokens. Start a new session after editing a context file to use
+the revised instructions.
 
 If your context file is large, consider moving detailed procedures into
 [skills](/docs/using-mew/skills/) that the agent loads on demand instead of
@@ -151,8 +143,8 @@ embedding everything in the system prompt.
 
 ## Inspecting loaded context
 
-`mew debug context` prints a tree of every source that will be injected, so you
-can confirm what the agent actually sees. File-system context files appear under
+Run `mew debug context` from the project directory to inspect the sources
+used by the CLI's debug prompt assembly. File-system context files appear under
 their paths; built-in VFS resources pulled in by templates (`transclude`) appear
 under `mew://`:
 
@@ -173,9 +165,9 @@ $ mew debug context
 The VFS list is resolved, not scanned: only the branches actually taken are
 shown (for example a single provider-specific `base_*` variant), and nested
 transclusions are followed. Add `--full` to print the fully assembled system
-prompt instead: the base scaffold, every context file, and the skills listing,
-in the exact order the model receives them. Diagnostics go to stderr, so the
-output is safe to pipe or redirect:
+prompt assembled by the debug command, including the base scaffold, context
+files, and skills listing. The command writes diagnostics to stderr, so you
+can redirect the prompt:
 
 ```bash
 mew debug context --full > context.txt

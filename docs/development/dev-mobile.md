@@ -9,12 +9,11 @@ SwiftUI layer on top.
 
 ## Prerequisites
 
-```sh
-# iOS compile targets
-rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+Use a Mac with Xcode and the iOS 26 SDK. Install the Rust targets for
+the device and the Apple Silicon simulator.
 
-# xcodegen (for the Xcode project)
-brew install xcodegen
+```sh
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim
 ```
 
 ## Build the mobile core for iOS
@@ -145,9 +144,8 @@ model:
 ### Reconnect
 
 Exponential backoff (1s, 2s, 4s… cap 30s) with jitter, reset on
-success. After reconnect, re-sends `AttachSession` — the daemon
-replays `SessionHistory`, and the core rebuilds session state from
-the replay.
+success. After reconnect, the core reattaches and rebuilds session state
+from the newest `SessionHistoryPage`. Older pages load on demand.
 
 ### Lenient codec
 
@@ -204,20 +202,12 @@ Integration tests use `#[tokio::test(flavor = "multi_thread")]` because
 `MobileCore::connect()` calls `tokio::spawn` for the background
 connection task.
 
-## CI
+## Check generated bindings
 
-The `ios-ci` job (`.github/workflows/ci.yml`) runs on macOS and does
-three things:
-
-1. `cargo check` for both iOS targets (`aarch64-apple-ios` and
-   `aarch64-apple-ios-sim`).
-2. Regenerates the UniFFI Swift bindings from the current Rust interface.
-3. Fails if the committed bindings (`mew_mobile_core.swift` and
-   `mew_mobile_coreFFI.h`) differ from the regenerated ones.
-
-This is the guard against bindings drifting behind the Rust core, which
-breaks the Xcode build and can crash the app on an FFI mismatch. If the
-job fails, run `just ios-core` and commit the regenerated files.
+When the Rust FFI changes, run `just ios-core` to regenerate the Swift
+bindings and XCFramework, then run `just ios-test` against the checked-in
+Xcode project. Commit the regenerated binding sources with the Rust change
+so the Swift code and framework use the same FFI contract.
 
 ## Adding a new CoreEvent variant
 

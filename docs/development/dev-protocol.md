@@ -3,22 +3,24 @@ title: Daemon Protocol
 description: Wire protocol between the daemon and frontends.
 ---
 
-The daemon communicates with frontends (TUI, web UI) over WebSocket using
-JSON-encoded messages. The protocol is defined in `mew-protocol`.
+The daemon uses JSON-encoded WebSocket messages with terminal, browser,
+desktop, and iOS clients. The protocol is defined in `mew-protocol`.
 
 ## Wire format
 
-Messages are tagged enums serialized with `serde(tag = "type")`:
+Rust enums serialize with a `type` tag and snake_case wire names.
 
 ```json
-{"type": "Prompt", "text": "hello", "attachments": []}
+{"type": "prompt", "text": "hello", "attachments": []}
 ```
 
 ```json
-{"type": "SessionReady", "session_id": "sess_01J...", "model": "deepseek-v4-flash"}
+{"type": "session_ready", "session_id": "sess_01J...", "model": "deepseek-v4-flash"}
 ```
 
-Encoding/decoding via `encode_json` / `decode_json` in `mew-protocol`.
+Use `encode_json` and `decode_json` in `mew-protocol`. The tables show common
+operations with their Rust variant names. The enum definitions are the full
+reference.
 
 ## Client → Server messages
 
@@ -26,6 +28,7 @@ Encoding/decoding via `encode_json` / `decode_json` in `mew-protocol`.
 |---------|--------|---------|
 | `NewSession` | `cwd?: String` | Create a fresh session |
 | `AttachSession` | `session_id: String` | Attach to an existing session |
+| `LoadSessionHistory` | `session_id`, `before`, `limit` | Fetch older messages from an attached session |
 | `ListSessions` | | List all known sessions |
 | `Prompt` | `text: String`, `attachments: Vec<Attachment>` | Send a user prompt |
 | `SubmitPrompt` | `session_id`, `request_id`, `text`, `attachments` | Submit input with an acceptance receipt |
@@ -49,7 +52,8 @@ Encoding/decoding via `encode_json` / `decode_json` in `mew-protocol`.
 | Message | Fields | Purpose |
 |---------|--------|---------|
 | `SessionReady` | `session_id`, `model?`, `provider?` | Session ready for prompts |
-| `SessionHistory` | `messages: Vec<Message>` | Full message replay on resume |
+| `SessionHistoryPage` | `session_id`, `messages`, `next_cursor?`, `replace` | Send the newest page on attach or prepend an older page |
+| `SessionHistory` | `messages: Vec<Message>` | Legacy full-history message |
 | `SessionList` | `sessions: Vec<SessionInfo>` | Response to `ListSessions` |
 | `SessionCleared` | | Context cleared (broadcast to all clients) |
 | `SessionTitleChanged` | `session_id`, `title` | Daemon generated a title |
@@ -140,20 +144,21 @@ See `mew-daemon/src/session.rs` for the full `Session` struct definition.
 ```
 Client connects
   → NewSession or AttachSession
-  → SessionReady + SessionHistory
-  → Prompt
+  → SessionReady and, on attach, SessionHistoryPage
+  → SubmitPrompt → PromptReceipt
   → Provider events stream (PartStart → PartDelta → ... → MessageEnd)
   → (optional) PermissionRequest → PermissionResponse → RequestResolved
   → (optional) ToolStart → ToolProgress → ToolEnd
   → (optional) more turns
 Client disconnects
   → detach_client
-  → if last client: cancel turn, remove session from active
+  → if last client: unload once the runtime is idle
 ```
 
-Idle sessions can be resumed from disk. The session writer persists every
-message to `~/.local/share/mew/sessions/<id>/session.jsonl`. On resume,
-`Agent::load_messages` replays the history.
+A detached session can keep running. The daemon checks every 30 seconds
+and unloads it once no clients, turns, or jobs need it. Unloaded sessions
+can be resumed from disk. Transcripts live in `<id>/session.jsonl` under
+`mew_session::session_dir()`, which honors `MEW_SESSION_DIR`.
 
 ## AgentEvent → ServerMessage translation
 
@@ -168,20 +173,21 @@ zero or more `ServerMessage`s:
 
 ## ServerMessage → AgentEvent translation
 
-For the TUI daemon-client (`mew-daemon/src/client.rs`), `translate_server_message`
-reverses the translation. Channel-bearing messages reconstruct `oneshot`
-channels and return `AgentEvent::PermissionRequest { call, tx }` with a
-fresh `oneshot::Sender` that the client maps to `ClientMessage::PermissionResponse`.
+The TUI's `runtime::client::TuiClient` drives
+`mew_client_core::ClientEngine`, which projects wire messages into shared
+session state and emits client events. Required actions retain the session
+and request IDs so the response reaches the right pending action.
 
-Messages that don't map to `AgentEvent` (model list, session list, etc.)
-return `Vec::new()` and are handled by the `DaemonClient` directly.
+`mew-daemon/src/client.rs` also provides `DaemonClient` and
+`translate_server_message`, which converts compatible wire messages into
+`AgentEvent` values for consumers of that API.
 
 ## Adding a new message type
 
 1. Add the variant to `ClientMessage` or `ServerMessage` in `mew-protocol/src/lib.rs`
 2. Add a roundtrip test in the protocol test module
 3. Handle the new message in `handle_connection` (`mew-daemon/src/lib.rs`)
-4. Update `translate_server_message` in `mew-daemon/src/client.rs` if it's
-   a `ServerMessage` the TUI daemon-client needs to handle
+4. Update `mew-client-core` and the native frontend projection if they
+   consume the new message
 5. Add the TypeScript type + dispatch to `mew-web-client/src/index.ts`
 6. Wire the store action in `mew-web-ui/src/stores/session.ts`

@@ -3,9 +3,9 @@ title: Adding a Provider
 description: How to implement a new LLM provider for mew.
 ---
 
-mew supports two provider shapes: `openai` (SSE, delta-based) and
-`anthropic` (SSE, content-block events). To add a new provider, implement
-the `Provider` trait.
+Use the `openai` provider shape for Chat Completions, `anthropic` for
+Messages, and `responses` for the Responses API. To add
+an adapter, implement the `Provider` trait.
 
 ## The Provider trait
 
@@ -37,6 +37,7 @@ pub struct Request {
     pub reasoning: Option<ReasoningConfig>,
     pub params: Option<ChatParams>,
     pub headers: http::HeaderMap,
+    pub supports_vision: bool,
 }
 ```
 
@@ -46,6 +47,8 @@ pub struct Request {
 - `system`: system prompt (already merged with persona body if active)
 - `reasoning`: thinking variant config (provider-specific params)
 - `params`: temperature, top_p, max_tokens, tool_choice
+- The host supplies request `headers`.
+- `supports_vision` reports whether the model accepts image input.
 
 ## ProviderEvent variants
 
@@ -68,7 +71,9 @@ MessageEnd { finish, usage, cost }
 | `PartStart` | `part: Part` (Text, Reasoning, or ToolCall) | New part begins |
 | `PartDelta` | `part_id`, `field` ("text" or "reasoning"), `delta` | Incremental content |
 | `PartEnd` | `part_id` | Part complete |
-| `MessageEnd` | `finish: Finish` (Stop, ToolUse, Length, Error), `usage: Tokens`, `cost: f64` | Turn complete |
+| `MessageEnd` | `finish: Finish`, `usage: Tokens`, `cost: f64` | Provider response complete |
+| `RetryWait` | `attempt`, `max_attempts`, `delay_secs`, `reason` | Backoff before another attempt |
+| `Error` | `MessageError` | Provider or stream error |
 
 ## OpenAI adapter (`mew-provider-openai`)
 
@@ -99,21 +104,21 @@ Umans). Key differences from OpenAI:
 - Thinking blocks become `Part::Reasoning`. Tool use becomes
   `Part::ToolCall`.
 
+## Responses adapter (`mew-provider-responses`)
+
+This adapter handles Responses API requests for compatible providers. The
+provider builder selects API key authentication for compatible API endpoints
+and supports Codex OAuth for the built-in Codex provider.
+
 ## The router (`mew-provider-router`)
 
-The router wraps two providers (small + big) behind the same `Provider`
-trait:
+`Router` checks each request’s message history to choose a tier.
 
-- **Selection logic**: starts with the small (cheap) model. Switches to
-  the big (capable) model when:
-  - Tool calls appear in the response, OR
-  - The conversation exceeds a turn threshold (default 3)
-- **Routed wrapper**: preserves the display model name so the TUI status
-  line shows what the user chose, even though the actual model may differ
-  per turn.
-- **Failover**: if the small model errors, the router can fall back to big.
+- Use `deci` if the history contains a tool result.
+- Use `nano` for the initial request if that tier is configured.
+- Use `micro` otherwise.
 
-A single session can bounce between models without the caller knowing.
+`Routed` preserves the selected display model and provider for the UI.
 
 ## The fake provider (`mew-provider-fake`)
 
@@ -135,15 +140,15 @@ async fn stream(&self, _req: Request) -> Result<EventStream, ProviderError> {
 }
 ```
 
-`text_response("hello")` produces a 4-event script: PartStart, PartDelta,
-PartEnd, MessageEnd. `tool_call(name, id, input)` produces a tool-call
+`text_response("hello")` produces PartStart, two PartDelta events
+with up to four characters each, PartEnd, and MessageEnd. `tool_call(name, id, input)` produces a tool-call
 script ending with `Finish::ToolUse`.
 
 ## Adding a new provider
 
 1. Create a `mew-provider-<name>` crate (or add to an existing adapter).
 2. Implement `Provider`. Use the OpenAI or Anthropic adapter as reference.
-3. Register in `build_provider` (`main.rs`):
+3. Register the adapter in `build_provider` in `crates/mew/src/setup/providers.rs`.
 
 ```rust
 "my-shape" => {

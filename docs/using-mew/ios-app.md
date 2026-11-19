@@ -13,16 +13,31 @@ sessions with recent history replay + live streaming, and supports
 sending prompts, canceling turns, answering permission and ask-user
 requests, and switching models.
 
+The app requires iOS 26 or later. For source build instructions, see
+[Mobile Core Development](/docs/development/dev-mobile/).
+
 ## Pairing with a daemon
+
+Remote pairing requires a source build of the CLI with the `iroh` feature.
+Follow the [source build prerequisites](/docs/getting-started/installation/)
+before running this build.
+
+```sh
+pnpm install --frozen-lockfile
+just build-ui
+cargo build --locked -p mew --features iroh
+```
+
+Use `./target/debug/mew` from that checkout for each command below.
 
 1. On your daemon machine, start remote access:
 
    ```sh
-   mew daemon --remote
+   ./target/debug/mew daemon --remote
    ```
 
-   In another terminal, run `mew pair`. This prints a QR code containing a
-   single-use invite that expires after 120 seconds.
+   In another terminal, run `./target/debug/mew pair`. This prints a QR code
+   containing a single-use invite that expires after 120 seconds.
 
 2. On your phone, open **Machines** from the Chats toolbar, then tap **+**.
 
@@ -216,27 +231,24 @@ The app handles reconnection automatically:
 
 - On unexpected disconnect, the app retries with exponential backoff
   (1s, 2s, 4s, up to 30s) with jitter.
-- After reconnect, the app re-sends `AttachSession` so the daemon
-  replays the full message history. The UI swaps state in one
-  operation — no delta storm.
+- After reconnect, the app attaches to the same session and loads its
+  newest history page. Older messages can be loaded on demand.
 - If the agent is blocked on a permission or ask-user request when the
   app attaches, the daemon replays those pending requests too (they
   aren't in the message history). The app deduplicates by request ID so
   a re-attach doesn't double up sheets.
-- When the app returns to the foreground after being backgrounded, iOS
-  kills QUIC connections within ~30 seconds. The app redials and
-  re-attaches automatically.
+- If iOS closes the connection while the app is in the background, the app
+  reconnects and reattaches when it returns to the foreground.
 
-Multiple devices can attach to the same session. Permission and
-ask-user prompts go to all connected clients. Any client can respond,
-and `RequestResolved` dismisses the prompt on all devices.
+Multiple devices can attach to the same session. A client with permission
+to respond can resolve a pending question or tool approval. The daemon then
+dismisses the prompt on the other attached clients.
 
 ## Limitations (v1)
 
 - **Foreground only**: the app does not receive push notifications
   while backgrounded. When the app is open, in-app alerts fire for
-  sessions that need your attention. Background push is planned for a
-  future release via a push relay.
+  sessions that need your attention.
 - **No prompt attachments**: sending a photo from the phone has no
   protocol support yet.
 - **No syntax highlighting in code blocks**: markdown renders via

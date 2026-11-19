@@ -11,9 +11,9 @@ fidelity, and setup complexity differently.
 | | `mew tui-capture` | `mew tui-capture --connect` | `vhs` |
 |---|---|---|---|
 | **Determinism** | Fully deterministic (in-process FakeProvider) | Non-deterministic (real daemon turn) | Non-deterministic (real pty + real provider) |
-| **Dependencies** | ffmpeg (for video only) | running mew daemon + ffmpeg | vhs, ttyd, ffmpeg, Chrome |
+| **Dependencies** | ffmpeg (for video only) | running mew daemon, ffmpeg for video | vhs, ttyd, ffmpeg, Chrome |
 | **Terminal chrome** | None — raw rasterized buffer | None — raw rasterized buffer | Full — window decorations, fonts, themes |
-| **Network** | Never | Local WebSocket to daemon | Required (LLM or fake-provider daemon) |
+| **Network** | None | Local WebSocket to daemon | Local WebSocket in the example below |
 | **CI-runnable** | Yes | Yes (if daemon is fake-provider) | No (needs Chrome + display) |
 | **Best for** | Regression tests, agent feedback, fast iteration | Real chat/turn behavior for demos | Polished README gifs, social media |
 
@@ -113,23 +113,18 @@ rendering is still headless through the rasterizer.
 
 ### Prerequisites
 
-- A running daemon with a provider credential configured.
+- A running daemon. Use the bundled fake provider to run without credentials.
 - `ffmpeg` on PATH for `--mp4`.
 
 ### Start the daemon
 
 ```bash
-export MEW_CRED_UMANS=<key>
-mew daemon \
-  --provider umans \
-  --model umans/umans-coder \
-  --port 127.0.0.1:0 \
-  --background \
-  --log /tmp/mew-capture.log
-
-# Find the actual port
-grep "mew daemon listening (tcp)" /tmp/mew-capture.log
+mew daemon --fake-provider --port 127.0.0.1:19847
 ```
+
+Keep this terminal open while you run the capture in a second one. For a
+live model, configure [a provider](/docs/using-mew/providers/) and replace
+`--fake-provider` with `--provider` followed by its ID.
 
 ### Daemon-mode verbs
 
@@ -149,10 +144,9 @@ last frame for a few seconds.
 Example:
 
 ```text
-send "What's the optimised way of reversing a binary string in Rust?"
-wait_turn 120000
-expect "reverse"
-pause 4000
+send "Explain what this project does."
+wait_turn 30000
+snapshot response
 screenshot response.png
 ```
 
@@ -161,25 +155,21 @@ Run:
 ```bash
 mew tui-capture \
   --script capture.txt \
-  --connect ws://127.0.0.1:<port> \
-  --mp4 demo.mp4 \
+  --connect ws://127.0.0.1:19847 \
   --width 100 --height 30
 ```
 
-Stop the daemon when done:
-
-```bash
-mew daemon --stop
-```
+Add `--mp4 demo.mp4` for video. When you're done, press `Ctrl+C` in the
+daemon's terminal.
 
 ### How it works
 
 `crates/mew/src/commands/tui_capture.rs` implements `DaemonBackend`, which:
 
-1. Connects to the daemon with `DaemonClient::connect(url)`.
+1. Connects to the daemon with the same `TuiClient` as interactive chat.
 2. Creates a session and reads `model`/`provider` from `ServerMessage::SessionReady`.
-3. Runs the script verb-by-verb, pumping `AgentEvent`s and `ServerMessage`s into
-   a headless `mew_tui::App`.
+3. Runs the script verb by verb and applies the client events, state,
+   and required actions to a headless `mew_tui::App`.
 4. During `wait_turn`, while `app.streaming` is true, draws and captures a frame
    roughly every 16 ms so the recorded video shows the response appearing
    progressively.
@@ -200,12 +190,7 @@ drives a real terminal via headless Chrome + ttyd.
 | `ffmpeg` | `which ffmpeg` |
 | Chrome | `ls "/Applications/Google Chrome.app"` |
 
-### Start a fake-provider daemon
-
-```bash
-mew daemon --fake-provider --port 127.0.0.1:9847 --background --log /tmp/mew-vhs.log
-sleep 2
-```
+Use the fake-provider daemon from [method 2](#method-2-mew-tui-capture---connect-real-daemon-turn).
 
 ### Example tape
 
@@ -217,13 +202,14 @@ Set Height 600
 Set Padding 20
 Set TypingSpeed 30ms
 
-Type "./target/debug/mew chat --connect ws://127.0.0.1:9847"
+Type "mew chat --connect ws://127.0.0.1:19847"
 Enter
 Sleep 3s
 
 Screenshot "welcome.png"
 
 Type "hello, what can you do?"
+Enter
 Sleep 3s
 
 Screenshot "response.png"
@@ -248,18 +234,12 @@ Both `mew tui-capture -i` (harness) and `mew tui-capture -i --connect <url>`
 path after each verb. This lets an agent drive the TUI in a feedback loop:
 
 ```bash
-mkfifo /tmp/mew-capture-fifo
-./target/debug/mew tui-capture -i --connect ws://127.0.0.1:<port> \
-  --screenshot-dir /tmp/frames < /tmp/mew-capture-fifo > /tmp/mew-capture.log 2>&1 &
-
-# Agent sends verbs and reads frames
-printf 'send "hi"\n' > /tmp/mew-capture-fifo
-printf 'wait_turn 60000\n' > /tmp/mew-capture-fifo
-printf 'snapshot response\n' > /tmp/mew-capture-fifo
-printf 'quit\n' > /tmp/mew-capture-fifo
+printf '%s\n' 'send "hi"' 'wait_turn 30000' 'snapshot response' 'quit' |
+  mew tui-capture -i --connect ws://127.0.0.1:19847 \
+    --screenshot-dir /tmp/frames
 ```
 
-The agent reads `/tmp/mew-capture.log` for `--- frame ---` blocks and inspects
+Read the `--- frame ---` blocks on stdout and inspect
 `/tmp/frames/frame_*.png` for visual state.
 
 ## Choosing a method

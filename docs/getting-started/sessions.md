@@ -1,25 +1,27 @@
 ---
 title: Sessions
-description: Session persistence, history, resume, and rewind.
+description: Find and resume conversations, clear context, and compact history.
 ---
 
-Every mew conversation is persisted to disk as it happens. You can list
-past sessions, resume one, rewind to an earlier point, or clear the
-current context.
+Mew saves conversations to disk as you work. You can reopen a past
+conversation, archive it, or clear the context used by the model.
 
 ## Where sessions live
 
 Sessions are stored as JSONL files under a per-session directory:
 
 ```
-~/.config/mew/sessions/<session-id>/
+~/.local/share/mew/sessions/<session-id>/
   ├── session.jsonl    # one JSON message per line
   ├── meta.json        # session metadata
   └── todos.json       # session todo list (if any)
 ```
 
-The default path is `~/.config/mew/sessions/` on macOS and Linux.
-You can override the location with the `MEW_SESSION_DIR` environment variable.
+On macOS and Linux, Mew uses `~/.local/share/mew/sessions/` by default.
+With `XDG_DATA_HOME` set, it uses `$XDG_DATA_HOME/mew/sessions/`.
+Setting `MEW_DATA_DIR` changes the parent data directory. To override
+the session directory directly, set `MEW_SESSION_DIR` before launching
+Mew. For a remote session, the daemon stores these files on its host.
 
 Subagent sessions nest under their parent:
 
@@ -50,14 +52,12 @@ are hidden from the list.
 /sessions
 ```
 
-Shows up to 20 recent sessions, sorted by last modified, with file size:
+Opens the terminal conversation picker. Type to filter conversations
+and press `Enter` to open one.
 
-```
-sessions:
-  01JXK4M3PQ7B9...  (14284 bytes)
-  01JXJ2F8NK6Q1...  (8921 bytes)
-  ...
-```
+- `Tab` switches between current and archived conversations.
+- `Ctrl+Alt+A` archives or restores the selected conversation.
+- `Ctrl+Alt+P` toggles the selected conversation's pin.
 
 ## Resuming a session
 
@@ -65,37 +65,14 @@ sessions:
 /resume <session-id>
 ```
 
-Loads the full message history from disk, replaces the current conversation,
-and restores the session's todo list. The session ID is the folder name
-shown by `/sessions`.
-
-Resume reconstructs the conversation from the JSONL log. If the session
-was cleared with `/clear` at some point, resume replays forward from the
-clear marker, so you get the post-clear context.
+Attaches to a conversation by ID and restores its history and todos.
+The session ID is the directory name under the session storage root.
+Run `/resume` without an ID to open the conversation picker.
 
 ## Rewinding
 
-```
-/rewind <n>
-```
-
-Truncates the conversation to keep only the first `n` messages. Both the
-display store and the agent's API history are truncated. A synthetic
-message confirms how many messages were removed.
-
-Without an argument:
-
-```
-/rewind
-```
-
-Lists the last 15 messages with their indices and role, so you can pick
-the number to keep.
-
-Rewind doesn't modify the session file on disk. The JSONL log is
-append-only. Rewind only changes what the model sees on the next turn.
-
-You cannot rewind while streaming.
+The terminal client uses daemon sessions, which currently lack rewind
+support.
 
 ## Clearing the context
 
@@ -103,14 +80,11 @@ You cannot rewind while streaming.
 /clear
 ```
 
-Clears the visible conversation. A clear marker is appended to the
-session log so resume knows where the fresh context starts.
+Resets the model's conversational context. Mew writes a clear marker
+to the session log and keeps earlier messages on disk. When you
+resume, the model uses the context after the marker.
 
-Permission caches survive `/clear`. If you approved a tool for the
-session with "Allow session", that approval persists. This is
-intentional: a session is the JSONL log, the context is what the model
-sees this turn, and clearing the latter doesn't invalidate your prior
-grants.
+Tool approvals granted with "Allow session" remain active.
 
 ## Compaction
 
@@ -118,22 +92,17 @@ grants.
 /compact
 ```
 
-Forces context compaction on the next turn. When the conversation
-approaches the model's context window, mew summarizes earlier messages
-to free space. `/compact` triggers this immediately rather than waiting
-for the threshold.
-
-Compaction runs automatically when needed. The command is for when you
-want to control the timing.
+Schedules compaction for the next turn. Mew can also compact
+automatically when a conversation approaches the model's context
+limit, summarizing earlier messages to free space.
 
 ## Session IDs
 
 Session IDs are ULIDs (Universally Unique Lexicographically Sortable
-Identifiers). They sort chronologically by creation time, which is why
-`/sessions` can list them newest-first without reading metadata.
+Identifiers). They sort chronologically by creation time.
 
 ## Daemon sessions
 
-When running the daemon (`mew daemon`), sessions are managed by the
-`SessionManager`. Multiple clients can attach to the same session. See
+The daemon manages sessions, and multiple clients can attach to the
+same one. See
 [Daemon Protocol](/docs/development/dev-protocol/) for the wire-level details.

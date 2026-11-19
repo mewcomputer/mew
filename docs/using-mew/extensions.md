@@ -3,9 +3,15 @@ title: Extensions
 description: Install, manage, and troubleshoot mew extensions.
 ---
 
-Extensions are packaged plugins that add tools, slash commands, hooks,
-personas, skills, and subagents to mew. Each extension is a directory
-containing a `mew-ext.toml` manifest and an optional entry program.
+An extension is a directory containing a `mew-ext.toml` manifest and
+an optional entry program.
+
+The current `mew run` command loads personas, skills, and subagents from
+an extension's declarative `[provides]` paths. Daemon-backed chat loads
+project and global definitions directly. It does not load extension packages.
+Neither command starts extension programs for hooks or dynamic tool
+registration. The sandbox and consent sections describe the experimental
+runtime.
 
 ## Installing extensions
 
@@ -64,8 +70,8 @@ mew ext enable <name>
 mew ext disable <name>
 ```
 
-Disabling an extension prevents it from loading on next startup. It
-remains installed but is skipped during discovery.
+These commands record whether an extension is enabled. `mew ext list` and
+`mew ext doctor` display that status.
 
 ### Remove
 
@@ -88,7 +94,7 @@ Diagnoses extension discovery, conflicts, and health. Shows:
 - Discovery paths (global and project-local)
 - Each extension with version, scope, status, and entry type
 - Sandbox status per extension:
-  - `[sandboxed]` — running under macOS Seatbelt sandbox
+  - `[sandboxed]` — eligible for the macOS Seatbelt sandbox
   - `[unsandboxed (platform)]` — sandbox not available (Linux/Windows)
   - `[unsandboxed (legacy)]` — bare plugin, no sandbox
   - `[n/a]` — declarative-only extension (no process)
@@ -114,14 +120,13 @@ These widenings appear in the consent prompt when the extension is first
 loaded. Sensitive paths (`~/.ssh`, `~/.aws`, `~/.gnupg`) are always
 denied regardless of manifest widenings.
 
-On Linux and Windows, the OS sandbox is not yet available. Extensions
-run unsandboxed with a visible warning in `mew ext doctor`. Linux
-Landlock + seccomp support is planned for a future release.
+The runtime has no OS sandbox on Linux or Windows. On those platforms,
+`mew ext doctor` labels executable packages as unsandboxed.
 
 ## Consent
 
-When an extension is loaded for the first time (or after an upgrade that
-adds new capabilities), mew shows a consent prompt listing what the
+When the experimental runtime loads an extension for the first time or
+sees new capabilities after an upgrade, its consent resolver shows a consent prompt listing what the
 extension can do:
 
 - **Non-sensitive capabilities** (storage, config read, UI
@@ -141,8 +146,8 @@ respected.
 
 ## Attach tokens
 
-Extensions that connect to a running daemon (rather than being spawned
-by it) use attach tokens for authentication. Token management:
+The CLI manages tokens for a future extension attach flow. The daemon
+does not validate extension attach tokens.
 
 ### Show a token
 
@@ -181,11 +186,6 @@ Tokens are stored in the system keyring when available, with a file
 fallback at `~/.config/mew/extensions/tokens/<name>.token` (permissions
 `0600`).
 
-> **Note:** Token validation is not yet wired into the daemon's extension
-> attach path. Tokens are minted and managed via CLI, but the daemon does
-> not yet check them on attach. This infrastructure is in place for when
-> the daemon socket-attach feature ships.
-
 ## Slash command aliases
 
 mew accepts both singular and plural forms for some commands:
@@ -208,6 +208,5 @@ mew accepts both singular and plural forms for some commands:
 | Status in doctor | `[sandboxed]` or `[unsandboxed (platform)]` | `[unsandboxed (legacy)]` |
 
 Bare plugins (executables in `~/.config/mew/plugins/`) are the original
-plugin format. They continue to work but are not sandboxed and receive a
-legacy full-access consent prompt on first load. A future release will
-add deprecation warnings pointing toward the extension package format.
+plugin format. The experimental runtime runs bare plugins without an OS sandbox and
+uses a full-access prompt on first load.

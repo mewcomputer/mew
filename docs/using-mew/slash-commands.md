@@ -11,12 +11,16 @@ Type any of these in the input box (they autocomplete as you type).
 |---------|-------------|
 | `/clear` | Clear the current context (persists to disk) |
 | `/compact` | Force context compaction on the next turn |
-| `/rewind <n>` | Rewind to keep only the first N messages |
-| `/rewind` | List recent messages with indices |
 | `/sessions` | Open conversations ordered by latest activity (`/session` also works) |
-| `/resume <id>` | Resume a previous session by ID |
+| `/resume <id>` | Resume a previous session by ID. Omit the ID to open the picker. |
+| `/project` | Pick a project directory and open a new conversation there |
+| `/rename <title>` | Rename the active conversation |
+| `/autotitle on` / `/autotitle off` | Turn automatic titles on or off for the active conversation |
+| `/autosummary on` / `/autosummary off` | Turn automatic summaries on or off for the active conversation |
+| `/yield` | Let another connected client take control |
 
-See [Sessions](/docs/getting-started/sessions/) for details on persistence, resume, and rewind.
+The daemon-backed TUI does not support `/rewind`. See
+[Sessions](/docs/getting-started/sessions/) for persistence and resume.
 
 ## Model & reasoning
 
@@ -25,14 +29,14 @@ See [Sessions](/docs/getting-started/sessions/) for details on persistence, resu
 | `/model <name>` | Switch to a different model |
 | `/model` | Open the model picker (`/models` also works) |
 | `/thinking <variant>` | Set thinking variant (`high`, `max`, `thinking`, `off`) |
-| `/thinking` | Show usage help |
+| `/thinking` | Open the available thinking variants |
 
 ## Personas
 
 | Command | Description |
 |---------|-------------|
 | `/persona <name>` | Switch to a named persona (opens confirm modal) |
-| `/persona` | List available personas |
+| `/persona` | Open the persona picker |
 | `/persona default` | Clear the active persona |
 
 ## Permissions
@@ -43,6 +47,16 @@ See [Sessions](/docs/getting-started/sessions/) for details on persistence, resu
 | `/permissions <mode>` | Switch directly: `standard`, `permissive`, `auto`, `auto_plus`, `dangerous` |
 
 See [Permissions](/docs/using-mew/permissions/) for mode details, rules, and sandboxing.
+
+## Goals
+
+| Command | Description |
+|---------|-------------|
+| `/goal <objective>` | Open the goal editor and confirm an objective for the agent to work toward |
+| `/goal` | Show the active goal and its status |
+| `/goal pause` / `/goal resume` | Pause or resume automatic continuation toward the goal |
+| `/goal complete` | Mark the active goal complete |
+| `/goal clear` | Remove the active goal |
 
 ## Other
 
@@ -55,6 +69,8 @@ See [Permissions](/docs/using-mew/permissions/) for mode details, rules, and san
 | `/jobs` | Open a background shell job and read its captured output |
 | `/tools` | Browse tool calls with full arguments, results and errors |
 | `/review` `/diff` | Review changes in this conversation's workspace; press `r` to refresh |
+| `/theme <name>` | Switch themes. Omit the name to open the theme picker. |
+| `/unflag <path>` | Stop keeping a file marked as important for compaction |
 | `/mouse` `/m` | Toggle mouse capture for text selection |
 | `/quit` `/q` | Exit mew |
 

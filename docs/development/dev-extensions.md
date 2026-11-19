@@ -66,8 +66,8 @@ subagents = "agents/"
 
 ## Capability model
 
-Capabilities are defined in `capabilities.rs`. The `Capability` enum has
-~17 variants with risk tiers:
+Capabilities are defined in `capabilities.rs`. The following table groups capabilities by how the broker requests
+consent.
 
 | Tier | Capabilities | Consent behavior |
 |------|-------------|-----------------|
@@ -103,8 +103,8 @@ runs per extension at broker spawn time:
    to manifest's requested set via `intersect`
 4. If manifest grew (new capabilities): prompt only for the delta
 
-Consent state persists capability ID strings (not the enum) to
-`~/.local/share/mew/extensions/consent.json`. The `LEGACY_FULL_SENTINEL`
+Consent state persists capability ID strings to `extensions/consent.json`
+in Mew’s platform-specific data directory. The `LEGACY_FULL_SENTINEL`
 string marks bare-plugin full-access consent.
 
 ### ConsentDecision → CapabilitySet mapping
@@ -171,13 +171,11 @@ Bare plugins use `SpawnSpec::Path` — no sandbox.
 
 `tokens.rs` implements attach tokens for socket-transport extensions:
 
-- **Minting**: `ulid::Ulid::new()` generates 26-character ULIDs (128
-  bits of entropy)
+- `ulid::Ulid::new()` generates a 26-character ULID.
 - **Storage**: keyring first (`mew-ext-tokens` service), file fallback at
   `~/.config/mew/extensions/tokens/<name>.token` (permissions 0600, parent
   dir 0700)
-- **Marker files**: when a token is stored in the keyring, an empty
-  marker file is written so `list_tokened_extensions` can discover it
+- When a token is stored in the keyring, a marker file containing the extension name is written so `list_tokened_extensions` can discover it
   for rotation
 - **Validation**: `constant_time_eq` prevents timing side-channels
 - **Rotation**: `rotate_all_tokens` collects per-extension results

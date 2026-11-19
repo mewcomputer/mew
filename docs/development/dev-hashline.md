@@ -50,8 +50,8 @@ apply_edits → new text
 commit → HashlineFs.write_text
 ```
 
-All-or-nothing behavior is implemented at the section level: every section is
-prepared in memory before any write happens.
+The patcher preflights every section in memory before writing. If a
+filesystem operation fails during commit, earlier writes can remain.
 
 ## Tokenizer
 
@@ -264,7 +264,7 @@ uses the line numbers and hash from `read` output to construct patches.
 7:}
 ```
 
-- The hash (`A1B2`) is the first four hex digits of a stable xxHash32 of
+- The hash (`A1B2`) is the low 16 bits of a stable xxHash32 of
   the normalized file content.
 - Normalization strips trailing spaces/tabs/`\r` but preserves a
   trailing newline.
@@ -286,8 +286,9 @@ INS.POST 4:
 +}
 ```
 
-Operations are applied in order within a section. Multiple sections for
-the same path are merged automatically.
+Anchors refer to the original snapshot. The engine applies edits from the
+bottom of the file upward so earlier anchors retain their line numbers.
+Multiple sections for the same path are merged automatically.
 
 ### Line operations
 
@@ -334,9 +335,8 @@ If the live file no longer matches the section hash:
 3. **Hash mismatch error**: if recovery fails, the patch is rejected and
    no file is modified.
 
-Recovery only works for in-session drift (snapshots are in-memory). If
-mew is restarted or the file is edited externally, `read` the file again
-for a fresh hash.
+Recovery requires a recent in-memory snapshot. After a restart, or if
+recovery fails, read the file again to get a fresh hash.
 
 ### Seen-line validation
 

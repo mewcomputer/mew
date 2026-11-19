@@ -7,7 +7,10 @@ Plugins are external programs that extend mew's capabilities. They can
 register tools, add slash commands, modify requests, observe events, and
 push UI updates. Plugins are the original extension format — the newer
 [extension package](/docs/using-mew/extensions/) format adds manifests,
-sandboxing, and consent. Hook execution through daemon chat is experimental.
+sandboxing, and consent. The built-in chat daemon and the `mew run` command use a no-op hook
+dispatcher. Managing an executable with `mew ext` does not activate it in
+those commands. The hook behavior below describes the experimental
+runtime.
 
 ## Where plugins live
 
@@ -20,10 +23,11 @@ The hook runtime discovers executable files in alphabetical order.
 
 ## Managing plugins
 
-There's no `mew plugin install` command — just copy the executable into
-the plugins directory:
+To make a bare plugin discoverable by `mew ext list`, place the
+executable in the global plugins directory.
 
 ```bash
+mkdir -p ~/.config/mew/plugins
 cp my-plugin ~/.config/mew/plugins/
 chmod +x ~/.config/mew/plugins/my-plugin
 ```
@@ -77,9 +81,7 @@ Your choice is persisted and remembered on subsequent loads.
 | Install | Manual file copy | `mew ext install` |
 | Discovery | `plugins/` dir | `extensions/` dir |
 
-Bare plugins are being superseded by extension packages. A future release
-will add deprecation warnings for bare plugins. See
-[Extensions](/docs/using-mew/extensions/) for the newer format.
+See [Extensions](/docs/using-mew/extensions/) for the package format.
 
 For the JSON-RPC protocol, hook point reference, and host function API,
 see [Extension System Internals](/docs/development/dev-extensions/).

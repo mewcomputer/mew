@@ -1,14 +1,11 @@
 ---
 title: TUI Architecture
-description: How the ratatui frontend works, in standalone mode and when connected to the daemon.
+description: How the ratatui frontend handles input, daemon updates, and rendering.
 ---
 
-The mew TUI is a ratatui application that can run in two modes:
-
-- **Standalone**: it builds the `Agent` directly and drives the provider loop
-  itself. This is the default `mew chat` path.
-- **Daemon client**: it connects to `mew-daemon` over WebSocket and receives
-  `AgentEvent`s over the wire. This is `mew chat --connect <url>`.
+The terminal UI is a ratatui client for `mew-daemon`. Plain `mew chat`
+starts a daemon on a local TCP port. Use `mew chat --connect <url>` to select a
+running daemon and add `--attach <session-id>` to open an existing session.
 
 This doc covers the TUI's event loop, display state, streaming markdown, and
 how a keystroke becomes a provider stream. For the daemon and session model,
@@ -18,85 +15,38 @@ against a live daemon, see [TUI capture methods](/docs/development/dev-tui-captu
 ## The pipeline
 
 ```
-Keyboard → crossterm EventStream → EventLoop (mpsc::channel(256))
-                                      │
-                                      ├─ Event::Input(crossterm::Event)
-                                      ├─ Event::Agent(AgentEvent)
-                                      ├─ Event::Tick (60fps)
-                                      └─ Event::Quit
-                                            │
-                  handle_input_event() → Action::Submit(text)
-                                            │
-                  agent.run_with_parts(prompt, attachments, token)
-                      returns mpsc::Receiver<AgentEvent>
-                                            │
-                  event_loop.forward_agent_events(agent_rx)
-                      spawns tokio task pumping AgentEvent → EventLoop
-                                            │
-                  app.handle_agent_event(event) → draw()
-```
+Keyboard → crossterm EventStream → EventLoop → Action
+  → runtime::dispatch::handle_action → DaemonTarget → TuiClient
+  → daemon WebSocket → session → agent → provider
 
-In daemon mode the same pipeline runs, but the `AgentEvent`s arrive through
-`mew-daemon/src/client.rs` instead of a local `Agent`.
+Daemon events → TuiClient and ClientEngine → App → ratatui
+```
 
 ## The event loop
 
-`EventLoop` (`events.rs`) is a thin wrapper around `mpsc::channel(256)`:
-
-```rust
-pub struct EventLoop {
-    tx: mpsc::Sender<Event>,
-}
-```
-
-Three tokio tasks feed events into the channel:
-
-- **Crossterm reader**: reads keyboard/mouse events and forwards as `Event::Input`.
-- **Tick generator**: fires every 16ms (60fps) as `Event::Tick`. Skipped
-  when idle (see `tick_interval_ms` for adaptive polling).
-- **Agent forwarder**: per-prompt. `forward_agent_events` spawns a task
-  that pumps `mpsc::Receiver<AgentEvent>` into `Event::Agent`:
-
-```rust
-pub fn forward_agent_events(&self, mut agent_rx: Receiver<AgentEvent>) {
-    let tx = self.tx.clone();
-    tokio::spawn(async move {
-        while let Some(event) = agent_rx.recv().await {
-            if tx.send(Event::Agent(event)).await.is_err() { break; }
-        }
-    });
-}
-```
+`crates/mew-tui/src/events.rs` defines `EventLoop`. Its crossterm
+reader sends keyboard and mouse events over a bounded channel. A second task
+sends ticks every 16 milliseconds. The daemon client actor sends updates over
+a separate channel.
 
 ## The main loop
 
-The TUI main loop (`run_tui` in `main.rs`):
-
-1. **Render**: `terminal.draw(|f| mew_tui::ui::draw(f, &mut app))`. Skipped
-   when idle: `if !last_event_was_tick || app.needs_redraw()`.
-2. **Wait for event**: `event_rx.recv().await`.
-3. **Process**: match on `Event::Input` / `Event::Agent` / `Event::Tick` / `Event::Quit`.
-4. **Drain loop**: after processing the first event, coalesces rapid events
-   via `try_recv()`. Capped at `STREAMING_DRAIN_LIMIT = 4` agent events per
-   frame so streaming text appears incrementally instead of all at once.
+`chat_with_daemon` in `crates/mew/src/commands/tui.rs` waits for terminal
+input, ticks, and client updates. It applies daemon updates and pending
+permission or question requests to `App`. The input drain coalesces rapid
+events and queues each action for `runtime::dispatch::handle_action`.
+Rendering skips idle ticks when `App` has nothing to redraw.
 
 ## How a keystroke becomes a provider stream
 
-1. User types text and presses Enter. Crossterm fires `Event::Key(Enter)`.
-2. `handle_input_event` calls `app.submit_input()`, returns `Action::Submit(text)`.
-3. The main loop calls `agent.run_with_parts(prompt, attachments, token)`.
-4. `run_with_parts` spawns a tokio task running `run_loop`, which calls
-   `turn_loop`. Returns `mpsc::Receiver<AgentEvent>` immediately.
-5. `event_loop.forward_agent_events(agent_rx)` pumps the receiver into the
-   main event channel.
-6. Each `AgentEvent::Provider(pe)` updates App state via `handle_agent_event`:
-   `PartStart` creates a new part, `PartDelta` appends text, `MessageEnd`
-   finalizes the stream.
-7. `draw()` renders the updated state.
-
-In daemon mode steps 3–5 are replaced by sending `ClientMessage::Prompt` over
-WebSocket and receiving `ServerMessage`s that are translated back into
-`AgentEvent`s by `DaemonClient`.
+1. `handle_input_event` turns a submit keystroke into `Action::Submit`.
+2. The dispatcher resolves mentions and attachments and gives the prompt
+   a request ID for the confirmed session.
+3. `DaemonTarget` passes the scoped submission through `TuiClient`.
+4. The daemon accepts the prompt, serializes the turn, and streams events
+   back over WebSocket.
+5. `TuiClient` uses the shared `mew-client-core::ClientEngine` to project
+   those events. The TUI applies the changes to `App` and renders.
 
 ## Display store vs API history store
 

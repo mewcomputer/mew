@@ -18,8 +18,8 @@ mew ships with three built-in subagent definitions:
 
 | Name | Purpose |
 |------|---------|
-| `researcher` | Investigate research questions against the local codebase or internet |
-| `reviewer` | Review plans and code for issues |
+| `researcher` | Investigate the codebase with `read`, `glob`, and `grep` |
+| `plan-reviewer` | Review an implementation plan before handoff |
 | `coder` | Execute implementation tasks |
 
 User-defined subagents override built-ins by name. The agent decides which
@@ -36,8 +36,9 @@ subagent to use based on the task and the subagent's description.
 By default, `subagent_start` blocks until the subagent finishes and
 returns the result directly. Pass `async: true` to start the subagent in
 the background and get a task ID immediately. Use `subagent_wait` with
-the task ID to collect the result later. This is useful for running
-multiple subagents in parallel before combining their results.
+the task ID to collect the result later. This is useful for running multiple subagents in parallel. A session can
+run up to four subagents at once by default. Configure the cap with
+`[orchestration] max_concurrent_subagents`.
 
 ### What the parent sees
 
@@ -64,9 +65,9 @@ returns its final result directly for a blocking start, or when the parent
 collects an asynchronous task with `subagent_wait`. Progress reports are UI
 status updates; they are not new messages in the parent's model context.
 
-There is no parent/child mailbox or follow-up messaging API. The parent can
-cancel a child, but cannot send new instructions to that running child. Child
-`ask_user` questions are not yet forwarded by the runner.
+The parent agent can cancel a child. The user can send follow-up guidance
+to a running child from Electron. If a child uses `ask_user_question`, its
+question is forwarded to the attached client for a reply.
 
 ## Defining custom subagents
 
@@ -98,10 +99,16 @@ Be direct and specific. Reference file paths and line numbers.
 | `name` | yes | Subagent identifier |
 | `description` | yes | When the agent should delegate to this subagent |
 | `tools` | no | Tool allowlist. Inherits all tools if omitted |
-| `model` | no | Pin a `provider/model` pair, or use tier keywords (`micro`, `deci`) when the active provider is a router |
+| `model` | no | Pin a `provider/model` pair, or use `nano`, `micro`, or `deci` from a configured [task router](/docs/using-mew/providers/#router-provider) |
 | `max_turns` | no | Maximum turns before stopping (default: 500) |
 | `max_duration_secs` | no | Time limit in seconds (default: 600) |
 | `template` | no | When `true`, render the body through minijinja before using it as the system prompt |
+| `can_spawn` | no | Permit nested subagents within the configured depth cap. Defaults to `false`. |
+| `output_schema` | no | Validate the final answer against a JSON Schema. Use a YAML map or an `@file.json` path relative to the subagent definition. |
+
+With an output schema, ask the child to return plain JSON with `exit_tool`.
+The runner gives the child one chance to correct an invalid answer. If
+the retry still fails, it returns the answer with a `schema_invalid` warning.
 
 ### System prompt composition
 
@@ -142,6 +149,10 @@ Discovery paths (walked cwd to git root, earlier wins):
 3. `.claude/agents/*.md`
 4. `.agents/*.md`
 
+After project paths, the loader checks `~/.config/mew/agents/`,
+`~/.config/opencode/agents/`, `~/.claude/agents/`, and `~/.agents/agents/`
+in that order.
+
 ## Limits
 
 Subagent runs are bounded by two caps:
@@ -160,9 +171,10 @@ per-subagent limit takes precedence.
 
 ## Depth limiting
 
-Subagent nesting is capped at `max_subagent_depth` (default 3). Top-level
-sessions are depth 0, their direct subagents are depth 1, and so on. A
-subagent at the depth cap cannot spawn further subagents.
+A subagent can spawn children when its definition sets `can_spawn: true`
+and its tool allowlist permits `subagent_start`. The session-wide limit
+is `[orchestration] max_subagent_depth` (default 1). Top-level sessions are
+at depth 0 and their direct children are at depth 1.
 
 ## Cancellation
 

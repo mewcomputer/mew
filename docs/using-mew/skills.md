@@ -36,9 +36,9 @@ make it a skill.
 5. Persona `mew.skills` allowlists can restrict which skills are
    available.
 
-This means skill descriptions are important. The model decides whether
-to load a skill based solely on its `description` field. Write
-descriptions that clearly state when the skill applies.
+The skill list shows the name and description, so describe what the
+skill does and when to use it. In the TUI, enter `@skill:<name>` to include
+a skill body in your own prompt.
 
 ## Discovery
 
@@ -60,8 +60,9 @@ the git root:
 8. `~/.agents/skills/<name>/SKILL.md`
 
 When two skills have the same name, the one from the earlier path wins.
-User-defined skills can shadow project skills by placing them in a
-higher-priority directory.
+Project skills take precedence over global skills. A skill named
+`mew-docs` is also built in and can be overridden by a discovered skill
+of the same name.
 
 ## Format
 

@@ -9,8 +9,13 @@ capabilities.
 
 ## Starting the web UI
 
+Build the browser bridge from a [source checkout](/docs/getting-started/installation/).
+The CLI nightly includes `mew`. The separate `mew-web` executable is built by
+`just build-web`.
+
 ```sh
-mew-web
+just build-web
+./target/debug/mew-web
 ```
 
 Then open `http://localhost:9847` in your browser. The `mew-web` bridge
@@ -34,40 +39,17 @@ just dev-web --open
 
 ## What you see
 
-The web UI has a layout similar to the TUI but optimized for browser
-interaction:
+- **Chat** shows streamed Markdown, tool output, and expandable tool cards.
+- **Model picker** lets you switch models and choose thinking settings.
+- **Session rail** lists conversations. Start a new chat in a recent workspace
+  or select a workspace by path.
+- **Composer** sends with Enter. Use Shift+Enter for a newline.
+- **Tool permissions and questions** appear as permission prompts and inline
+  question cards.
+- **Conversation details** include status, todos, and workers as they become
+  available.
 
-- **Chat surface**: streaming markdown with syntax-highlighted code
-  blocks (Shiki). Tool calls appear as cards with inline output and
-  expand/collapse.
-- **Model picker**: shows available models with thinking variant
-  selection. Click to switch models.
-- **Title strip**: shows the session title and connection status.
-- **Session rail**: lists previous sessions. Click to resume. The folder
-  button opens a project picker — pick a recent project directory or
-  type a path to start a new session in that directory.
-- **Input area**: type your prompt. `Cmd/Ctrl+Enter` to send.
-- **Status footer**: shows token count, model, and connection state.
-- **Todo panel**: renders the agent's todo list when active.
-- **Subagent panel**: shows running and completed subagents.
-- **Ask-user cards**: interactive question cards when the agent asks.
-- **Permission prompts**: approve or deny tool calls inline.
-
-## Features
-
-| Feature | TUI | Web UI |
-|---------|-----|--------|
-| Streaming markdown | ratatui-mdstream | Shiki syntax highlighting |
-| Tool call cards | inline | inline with expand/collapse |
-| Model picker | `Ctrl+Space` | click model pill |
-| Thinking variant | `Ctrl+Alt+P` cycle | dropdown |
-| Session list | `/sessions` | sidebar rail |
-| Subagent panel | sidebar | dedicated panel |
-| Todo list | sidebar panel | dedicated panel |
-| Ask-user prompts | modal | inline card |
-| Permission prompts | modal (`a`/`s`/`d`) | inline buttons |
-| Reconnect | n/a | exponential backoff (2s, 4s, 8s, cap 30s) |
-| Theme | terminal colors | system, light, dark |
+Use Cmd+K on macOS or Ctrl+K on Linux to open the command palette.
 
 ## Architecture
 
@@ -75,7 +57,7 @@ interaction:
 Browser → mew-web (bridge) → mew daemon (Unix socket)
 ```
 
-Three packages in a pnpm workspace:
+The browser stack consists of a Rust bridge and two pnpm workspace packages.
 
 - **`mew-web-bridge`** (Rust): TCP+WS listener that relays browser
   WebSocket connections to the daemon's Unix socket. Serves the built
@@ -94,18 +76,16 @@ lookup rather than hardcoded `include_bytes!`.
 
 ## Connection lifecycle
 
-The web UI handles disconnection gracefully:
+The browser retries a dropped connection with exponential backoff, up to
+30 seconds between attempts. It reattaches to the current session and loads
+the newest messages. Select **Load earlier messages** at the top of the chat
+for older history.
 
-1. On unexpected WS close, the client retries with exponential backoff
-   (2s, 4s, 8s, up to 30s).
-2. The session ID is saved to `localStorage`. On reload, the client
-   reconnects via `attachSession`, falling back to `newSession` if the
-   session is gone.
-3. When reconnected, the full message history is replayed.
-
-Multiple browser tabs can attach to the same session. Permission and
-ask-user prompts go to all connected clients. Any client can respond.
-`RequestResolved` dismisses the prompt across all clients.
+The home page remembers your last opened session in local storage. To open a
+specific conversation, use its `/session/<session-id>` URL from the same
+running bridge. Multiple tabs can attach to one session, and handling a
+permission request or question in one authorized client resolves it for the
+others.
 
 See [Daemon Protocol](/docs/development/dev-protocol/) for the wire-level details,
 and [Web UI Development](/docs/development/dev-web/) for the developer guide.

@@ -110,11 +110,16 @@ should call this once per render and resolve `persona.accent.fg` /
 
 ## Custom themes
 
-Users can install a custom theme JSON file with:
+Install a custom theme JSON file and list the available themes.
 
 ```bash
 mew theme install /path/to/my-theme.json
+mew theme list
 ```
+
+Use `/theme <name>` in the TUI to select a theme, or `/theme` without a
+name to open the picker. Run `mew theme current` to print the configured
+TUI theme.
 
 Custom themes are validated against the manifest: every token key must exist in
 the base vocabulary. Unknown tokens are rejected. Use `mew theme export-css

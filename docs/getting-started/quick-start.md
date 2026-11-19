@@ -1,25 +1,28 @@
 ---
 title: Quick Start
-description: Get up and running with mew in under a minute.
+description: Configure a provider and send your first prompt in the terminal.
 ---
 
 ## 1. Configure a provider
 
-mew needs at least one LLM provider. The easiest way is to set an API
-key as an environment variable:
+After [installing Mew](/docs/getting-started/installation/), set credentials
+for one of the built-in providers. For example, set the API key from an
+OpenCode Zen account in your shell:
 
 ```sh
-export MEW_CRED_OPENCODE_ZEN="sk-..."
+export MEW_CRED_OPENCODE_ZEN="your-api-key"
 ```
 
-Or create a `~/.config/mew/config.toml`. See
-[Configuration](/docs/getting-started/configuration/) for the full reference.
+See [Providers](/docs/using-mew/providers/) for other providers and Codex
+sign-in. Use `mew config edit` to add a custom provider.
 
 ## 2. Start a chat
 
 ```sh
-mew
+mew chat --provider opencode-zen
 ```
+
+Use `mew` to start with your last-used provider on later launches.
 
 This opens the TUI. The layout has three areas:
 
@@ -43,8 +46,7 @@ This opens the TUI. The layout has three areas:
   window usage.
 - **Sidebar** (right): the current session at the top, then live activity
   (todos, subagents, background jobs, file changes) as it happens. Press
-  `Ctrl+1` to expand the Environment section (loaded context files, MCP
-  servers).
+  `Ctrl+1` to expand the Environment section and see loaded context files.
 - **Chat** (center): messages stream in as the model responds. Tool calls
   appear as cards with their input and output.
 - **Input bar** (bottom): type your prompt and press `Enter`.
@@ -56,7 +58,7 @@ Type a prompt and press Enter. The response streams in as it's generated.
 For quick prompts without the TUI:
 
 ```sh
-mew run "explain what this project does"
+mew run --provider opencode-zen "explain what this project does"
 ```
 
 This runs a single turn, prints the response, and exits. Useful for
@@ -65,14 +67,9 @@ scripting and quick questions.
 ## 4. Switch models
 
 Inside the TUI, press `Ctrl+Space` to open the command palette, then select
-"Switch Model". Or use the slash command:
-
-```
-/model deepseek-v4-flash
-```
-
-The model picker shows available models from your configured providers
-and the built-in catalog. See [Providers](/docs/using-mew/providers/) for the full
+"Switch Model" and choose a model. You can also use `/model provider/model`
+with a model from one of your configured providers. The picker lists
+available models from those providers and the built-in catalog. See [Providers](/docs/using-mew/providers/) for the full
 list.
 
 ## 5. Set thinking variant
@@ -83,8 +80,8 @@ For models that support configurable reasoning:
 /thinking high
 ```
 
-Or use `Ctrl+Space` and select "Thinking Variant". Press `Ctrl+Alt+P` repeatedly
-to cycle through available options. See
+Or use `Ctrl+Space` and select "Thinking Variant". In that picker,
+`Ctrl+Alt+P` cycles through available options. See
 [Providers](/docs/using-mew/providers/#thinking-variants) for which models support
 which variants.
 
@@ -105,7 +102,7 @@ Shows accumulated token counts and estimated cost for the session.
 ## Where to go next
 
 - [Slash Commands](/docs/using-mew/slash-commands/): full command reference
-- [Keyboard Shortcuts](/docs/getting-started/keyboard-shortcuts/): all TUI keybindings
+- [Keyboard Shortcuts](/docs/getting-started/keyboard-shortcuts/): terminal keybindings
 - [Tips & Tricks](/docs/using-mew/tips-and-tricks/): power-user features and
   workflows
 - [Permissions](/docs/using-mew/permissions/): how tool approval works

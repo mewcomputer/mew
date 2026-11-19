@@ -3,8 +3,9 @@ title: Configuration
 description: Configure mew providers, credentials, permissions, and workspace.
 ---
 
-mew is configured through `config.toml`, environment variables, and a
-runtime `state.toml`. This page covers every configurable field.
+Configure Mew with `config.toml` and environment variables. Mew saves
+runtime preferences in `state.toml`. Run `mew config show` to inspect
+the effective configuration, or `mew config edit` to edit the file.
 
 ## File locations
 
@@ -20,16 +21,16 @@ Override the config directory by setting `MEW_CONFIG_DIR` or
 
 ## Config sources (later wins)
 
-1. Built-in provider defaults (`opencode-zen`, `opencode-go`, `z-ai`,
-   `deepseek`, `umans`)
+1. Built-in defaults (see [Providers](/docs/using-mew/providers/) for provider IDs)
 2. `config.toml` (overrides built-in providers, adds custom providers)
-3. Environment variables with `MEW_` prefix (`MEW_DEFAULT_MODEL`,
-   `MEW_WORKSPACE__ROOTS`, `__` = nested path)
+3. Environment variables with the `MEW_` prefix. A double underscore
+   denotes a nested key, as in `MEW_TUI__THEME`. Set lists such as
+   `workspace.roots` in `config.toml`.
 
-A `.env` file in your working directory is loaded at startup before
-anything else, so `RUST_LOG` and `MEW_CRED_*` vars work from there.
+The CLI loads a `.env` file at process startup. A daemon started earlier
+keeps its own environment when you open or resume a conversation.
 
-## Full config reference
+## Configuration reference
 
 ### Top-level fields
 
@@ -38,32 +39,30 @@ default_model = "deepseek-v4-flash"
 default_persona = "builder"
 plan_path = "plans/"
 
-[providers.deepseek]
-# ... see below
-
 [workspace]
 roots = ["~/code"]
 
-[permissions]
-# ... see Permissions
-
-[secrets]
-# ... see below
-
-[[models]]
-# ... see below
+[tui]
+sidebar_finished_ttl_secs = 180
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `default_model` | string | (empty) | Model ID used when no `--model` flag or state entry exists |
 | `default_persona` | string | `"builder"` | Persona loaded at startup. `"none"` or `"default"` starts without one |
-| `plan_path` | string | `"plans/"` | Each `write_plan` call creates a new pronounceable name (for example, `plans/vale-nori.md`); use the returned path with `edit_plan`. Other relative or absolute paths name one fixed file |
+| `plan_path` | string | `"plans/"` | Each `write_plan` call creates a new file such as `plans/vale-nori.md`. Use the returned path with `edit_plan`. Set a different relative or absolute path to use a fixed file |
 | `providers` | table | (built-in) | Provider definitions keyed by provider ID |
 | `models` | array | `[]` | Custom model entries that override or extend the catalog |
 | `permissions` | table | (empty) | Permission rules and classifier config. See [Permissions](/docs/using-mew/permissions/) |
 | `secrets` | table | (empty) | Secret files and words for redaction |
-| `workspace` | table | (empty) | Workspace roots for sandboxing |
+| `workspace` | table | (empty) | Workspace roots for file access and shell permission checks |
+| `plugins` | table | (empty) | Configuration by plugin name. See [Plugins](/docs/using-mew/plugins/) |
+| `tui` | table | (built-in) | Terminal theme and sidebar settings. See [Theming](/docs/using-mew/theming/) |
+| `orchestration` | table | (built-in) | Subagent limits and reminders. See [Subagents](/docs/using-mew/subagents/) |
+
+Set `tui.sidebar_finished_ttl_secs` to change how long failed activity
+stays visible in the terminal sidebar. It defaults to 180 seconds.
+A value of 0 hides failed activity immediately.
 
 :::note
 Personas and skills accept `polytoken:` as an alias for `mew:` in their
@@ -84,27 +83,30 @@ credential_ref = "deepseek"
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `shape` | yes | Adapter protocol: `"openai"` or `"anthropic"` |
-| `base_url` | yes | API endpoint URL |
-| `credential_ref` | yes | Credential name (resolved via env, keyring, or credentials.json) |
+| `shape` | yes | Adapter protocol (`"openai"`, `"anthropic"`, or `"responses"`) |
+| `base_url` | direct API providers | API endpoint URL |
+| `credential_ref` | direct providers using API keys | Credential name. See [Credentials](#credentials) |
 | `kind` | no | `"direct"` (default) or `"router"` |
-| `small` | no | Router: small model ID for simple turns |
-| `big` | no | Router: big model ID for complex turns |
+| `nano` | no | Least expensive router model |
+| `micro` | router | General-purpose router model |
+| `deci` | router | Most capable router model |
 | `disable_hashline` | no | If `true`, do not register the `edit_hashline` tool for this provider (default: `false`) |
 
-Router providers wrap two models behind one entry:
+Router providers group model tiers for subagents and the permission
+classifier. Choose a direct provider for chat. A tier uses
+`provider/model` syntax:
 
 ```toml
-[providers.smart]
+[providers.router]
 shape = "openai"
 kind = "router"
-small = "deepseek/deepseek-v4-flash"
-big = "z-ai/glm-4.5-air"
-credential_ref = "deepseek"
+micro = "deepseek/deepseek-v4-flash"
+deci = "deepseek/deepseek-v4-pro"
 ```
 
-See [Providers](/docs/using-mew/providers/) for the full router behavior and
-built-in provider list.
+Existing router configurations can use `small` and `big` as fallbacks
+for `micro` and `deci`. See [Providers](/docs/using-mew/providers/) for routing
+behavior and built-in providers.
 
 ### Custom models
 
@@ -132,23 +134,26 @@ params = { reasoning_effort = "high" }
 | `context_window` | integer | Context window in tokens |
 | `prompt_cache_retention_secs` | integer | Known prompt-cache retention in seconds; omit when unknown |
 | `thinking_variants` | array | Named thinking variants with provider-specific params |
+| `thinking_budget` | table | Token budget range for models that accept a thinking budget |
+| `responses_lite` | boolean | Use the Responses Lite transport for compatible models |
+| `merge` | boolean | Keep catalog values for omitted fields when overriding an existing model (default: `false`) |
 
 ### Secrets
 
-Files listed under `secrets.files` are guarded: reading them forces a
-permission prompt. Their contents are also redacted from all tool output.
+Add file patterns under `secrets.files` to guard reads and hide matching
+paths from search tools. Add literal values under `secrets.words` to redact
+them from supported tool output.
 
 ```toml
 [[secrets.files]]
 paths = [".env", "secrets.toml", "*.key"]
 
 [[secrets.words]]
-words = ["my-api-key-value", "sk-1234567890"]
+values = ["example-secret-value"]
 ```
 
-Pattern-based redaction (API keys, tokens) is always on. File-based and
-word-based redaction add to this. See [Permissions](/docs/using-mew/permissions/)
-for how the secret-file guard interacts with permission rules.
+See [Permissions](/docs/using-mew/permissions/) for how the secret-file
+guard interacts with permission rules and modes.
 
 ### Workspace
 
@@ -186,11 +191,13 @@ persistent setups. `credentials.json` works when neither is available.
 |----------|-------------|
 | `MEW_CRED_<NAME>` | Set a credential value (hyphens in name become underscores) |
 | `MEW_DEFAULT_MODEL` | Override `default_model` |
-| `MEW_WORKSPACE__ROOTS` | Override workspace roots (`__` = nested path, comma-separated) |
 | `MEW_SESSION_DIR` | Override session storage directory |
+| `MEW_DATA_DIR` | Override persistent data directory (XDG default: `~/.local/share/mew`) |
+| `MEW_CACHE_DIR` | Override cache directory (XDG default: `~/.cache/mew`) |
 | `MEW_CONFIG_DIR` | Override config directory |
 | `MEW_PERMISSIVE` | Start in permissive mode |
 | `MEW_AUTO` | Start in auto mode |
+| `MEW_AUTO_PLUS` | Start in auto+ mode |
 | `MEW_DANGEROUS` | Start in dangerous mode (skip all prompts) |
 | `RUST_LOG` | Log level (loaded from `.env` before tracing init) |
 
@@ -211,13 +218,6 @@ the built-in default. The last-used model and provider are saved back to
 
 ## MCP servers
 
-MCP servers are configured in `mcp.json` (not `config.toml`). The code
-checks these locations in order:
-
-1. `mcp.json`
-2. `.mcp.json`
-3. `.mew/mcp.json`
-4. `.mew/.mcp.json`
-
-See [MCP Servers](/docs/using-mew/mcp-servers/) for the format and transport
-options.
+MCP support is experimental library functionality. See
+[MCP Servers](/docs/using-mew/mcp-servers/) for the library and transport
+configuration.

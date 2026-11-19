@@ -3,44 +3,39 @@ title: Providers
 description: Configure and use different LLM providers with mew.
 ---
 
-mew supports multiple LLM providers. Each provider has a "shape" that
-determines how mew communicates with it. You can use built-in providers,
-add custom ones, or wrap multiple providers behind a router.
+Each provider has a shape that tells mew which API to call. You can
+choose a built-in provider or add your own.
 
 ## Built-in providers
 
-These are configured out of the box. Set the credential and you're ready.
+| Provider | Shape | Credential environment variable |
+|----------|-------|---------------------------------|
+| `opencode-zen` | `openai` | `MEW_CRED_OPENCODE_ZEN` |
+| `opencode-go` | `openai` | `MEW_CRED_OPENCODE_ZEN` |
+| `z-ai` | `openai` | `MEW_CRED_Z_AI` |
+| `deepseek` | `openai` | `MEW_CRED_DEEPSEEK` |
+| `umans` | `anthropic` | `MEW_CRED_UMANS` |
+| `codex` | `responses` | `MEW_CRED_CODEX` for API key authentication |
+| `kimi-for-coding` | `openai` | `MEW_CRED_KIMI_FOR_CODING` |
+| `alibaba-token-plan` | `openai` | `MEW_CRED_ALIBABA_TOKEN_PLAN` |
+| `alibaba-token-plan-cn` | `openai` | `MEW_CRED_ALIBABA_TOKEN_PLAN_CN` |
 
-| Provider | Shape | Default model | Credential env var |
-|----------|-------|---------------|-------------------|
-| `opencode-zen` | openai | `deepseek-v4-flash` | `MEW_CRED_OPENCODE_ZEN` |
-| `opencode-go` | openai | - | `MEW_CRED_OPENCODE_ZEN` |
-| `z-ai` | openai | - | `MEW_CRED_Z_AI` |
-| `deepseek` | openai | `deepseek-v4-flash` | `MEW_CRED_DEEPSEEK` |
-| `umans` | anthropic | - | `MEW_CRED_UMANS` |
-| `alibaba-token-plan` | openai | - | `MEW_CRED_ALIBABA_TOKEN_PLAN` |
-| `alibaba-token-plan-cn` | openai | - | `MEW_CRED_ALIBABA_TOKEN_PLAN_CN` |
+OpenCode Zen and Go share a credential. The China and international Alibaba
+Token Plan endpoints use separate credentials.
 
-`opencode-zen` and `opencode-go` share the same credential. `umans` uses
-the Anthropic shape and hits `/v1/messages` with `x-api-key` headers. The
-Alibaba Token Plan providers are OpenAI-compatible (`/compatible-mode/v1`);
-`alibaba-token-plan-cn` targets the mainland China endpoint and has its own
-credential.
+For Codex, run `mew auth login codex` to sign in with ChatGPT. Run
+`mew auth status` to check your sign-in and `mew auth logout codex` to sign out.
 
 ## Provider shapes
 
-Two shapes are supported:
+| Shape | API |
+|-------|-----|
+| `openai` | OpenAI-compatible Chat Completions |
+| `anthropic` | Anthropic-compatible Messages |
+| `responses` | OpenAI Responses |
 
-- **`openai`**: SSE, delta-based streaming. Used by OpenAI-compatible
-  APIs (DeepSeek, OpenAI, openai-compatible gateways). Streams
-  `choices[0].delta.content` as text deltas.
-- **`anthropic`**: SSE, content-block events. Used by Anthropic-compatible
-  APIs (Claude, Z.AI, Umans). Uses named events like `content_block_start`
-  and `content_block_delta`. Thinking blocks become `Part::Reasoning`.
-
-The shape determines how mew parses the SSE stream and maps it to
-`ProviderEvent` variants. See [Adding a Provider](/docs/development/dev-providers/)
-for implementation details.
+The shape determines how mew makes requests and parses streaming responses.
+See [Adding a Provider](/docs/development/dev-providers/) for adapter details.
 
 ## Adding a custom provider
 
@@ -51,13 +46,13 @@ Add a `[providers.<id>]` section to your `config.toml`:
 shape = "openai"
 base_url = "https://api.example.com/v1"
 credential_ref = "MY_API_KEY"
-model = "my-model-id"
 ```
 
-Then set the credential:
+Set the credential and select the model with its provider prefix.
 
 ```sh
 export MEW_CRED_MY_API_KEY="sk-..."
+mew chat --model my-provider/my-model-id
 ```
 
 The `credential_ref` is resolved through env vars, keyring, or
@@ -66,40 +61,28 @@ for the resolution order.
 
 ## Router provider
 
-The router wraps two providers (small + big) behind the same `Provider`
-trait with automatic switching. It picks the cheap model for simple turns
-and switches to the capable model when tool calls appear or the
-conversation exceeds a turn threshold.
+A task router assigns models to tiers for subagents and permission
+classification. For chat, select a model from a direct provider.
 
 ```toml
-[providers.smart]
+[providers.router]
 shape = "openai"
 kind = "router"
-small = "deepseek/deepseek-v4-flash"
-big = "z-ai/glm-4.5-air"
-credential_ref = "deepseek"
+micro = "deepseek/deepseek-v4-flash"
+deci = "deepseek/deepseek-v4-pro"
 ```
 
-### How the router decides
-
-The router starts with the small model. It switches to the big model
-when either:
-
-- **Tool calls appear** in the response: the small model started
-  generating tool calls, so the router hands off to the big model for
-  the rest of the turn.
-- **Turn threshold exceeded** (default 3): after 3 turns in one
-  agentic loop, the router switches to the big model for robustness.
-
-The `Routed` wrapper preserves the display model name so the TUI status
-line shows what you chose, even though the actual model may differ per
-turn. A single session can bounce between models without you knowing.
+Use `model: micro` or `model: deci` in a subagent definition to select
+that tier. You can also set an optional `nano` model. Without it,
+`model: nano` uses the `micro` model. The permission classifier uses
+`micro` when a task router is configured. The configured provider for
+each tier supplies its own credentials.
 
 ## Model catalog
 
-mew includes a built-in model catalog (from models.dev with 24-hour
-cache) that provides pricing, context windows, capabilities, and thinking
-variant defaults. The catalog is used to:
+mew’s model catalog provides pricing, context windows, capabilities, and
+thinking options. It loads catalog data from models.dev and supplements
+it with provider-specific catalogs where available. The catalog is used to:
 
 - Populate the model picker (`Ctrl+Space` and select "Switch Model")
 - Resolve thinking variant names to provider-specific params
@@ -116,21 +99,8 @@ Some models support configurable thinking/reasoning levels. When you
 set a thinking variant, mew translates it into the provider-specific
 parameters the model expects.
 
-Available variants depend on the model:
-
-| Model | Variants |
-|-------|----------|
-| DeepSeek V4 | `high`, `max` |
-| GLM 5.2 | `high`, `max` |
-| GLM 5/5.1 | `thinking` |
-| GPT-5 family | `minimal`, `low`, `medium`, `high` |
-| Claude Opus 4.7+ / Fable | `low`, `medium`, `high`, `xhigh`, `max` |
-| Claude Sonnet 4.6 | `low`, `medium`, `high`, `max` |
-| MiMo v2.5 | `thinking` |
-| MiniMax M3 | `thinking`, `none` |
-| Grok-3-mini | `low`, `high` |
-
-Note that if you use a supported provider that provides thinking variants (e.g. umans), we will use those.
+Available variants depend on both the provider and the model. In the
+TUI, run `/thinking` to see the choices for your current model.
 
 Set a variant with:
 

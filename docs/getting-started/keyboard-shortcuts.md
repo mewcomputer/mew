@@ -1,6 +1,6 @@
 ---
 title: Keyboard Shortcuts
-description: All TUI keyboard shortcuts in one place.
+description: Keyboard and mouse shortcuts for the terminal client.
 ---
 
 Press `?` with an empty composer to open the shortcuts overlay.
@@ -71,7 +71,7 @@ Plain `Ctrl+A` and `Ctrl+P/N` retain their editing/navigation meanings.
 | `Ctrl+Shift+C` | Copy selected text to clipboard |
 | `Ctrl+Alt+T` | Toggle reasoning/thinking block expansion |
 | `Ctrl+O` | Toggle bash output expansion |
-| `Ctrl+1` | Toggle the sidebar Environment section (context files / MCP) |
+| `Ctrl+1` | Toggle the sidebar Environment section |
 | `x` | Cancel most recently started subagent (when input empty) |
 | `@` | Open the reference picker for @-mentions (files, models, skills, subagents) |
 

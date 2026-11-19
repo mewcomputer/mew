@@ -3,14 +3,17 @@ title: Installation
 description: Install mew on macOS and Linux.
 ---
 
-mew is a terminal-based AI coding assistant. It runs on your machine and
-connects to LLM providers you configure. No data leaves your system except
-API calls to your chosen provider.
-
-The native GPUI desktop app is distributed separately from the CLI/TUI. The
-commands below install the `mew` CLI and its terminal UI only.
+Mew is an agent harness that runs locally and sends model requests to your
+configured provider.
 
 ## macOS and Linux
+
+The commands below install the CLI and its terminal UI. Nightly builds are
+available for Intel and Apple silicon on macOS, and x86-64 and ARM64 on
+Linux. The Linux builds target glibc 2.39 and use the OpenSSL 3 and zlib
+runtime libraries.
+
+For the macOS desktop clients, see the [Desktop App](/docs/using-mew/desktop-app/) guide.
 
 ### Homebrew
 
@@ -26,7 +29,7 @@ brew upgrade mewcomputer/tap/mew
 ```
 
 The [tap](https://github.com/mewcomputer/homebrew-tap) checks for successful
-nightly builds twice an hour. The Linux binaries require glibc 2.39 or later.
+nightly builds twice an hour.
 
 ### Install script
 
@@ -51,72 +54,37 @@ Environment variables:
 
 ### Manual download
 
-Grab the tarball for your platform from the [GitHub Releases](https://github.com/mewcomputer/mew/releases)
-page. Each release includes a `SHA256SUMS` file for verification.
+Download the archive for your platform and the accompanying `SHA256SUMS`
+file from the [nightly release](https://github.com/mewcomputer/mew/releases/tag/nightly).
+Run `shasum -a 256 mew-nightly-<target>.tar.gz` on macOS or
+`sha256sum mew-nightly-<target>.tar.gz` on Linux and compare the result with
+the corresponding line in `SHA256SUMS`. Extract the archive, then move
+`bin/mew` to a directory on your `PATH`.
 
 ## Build from source
 
 ### Prerequisites
 
-- **Rust 1.75+** with the `2021` edition
+- Current stable Rust and Cargo
+- Zig 0.15.2 for Ghostty terminal emulation
+- On Linux, OpenSSL development headers, `pkg-config`, and libc++ development headers
 - A terminal that supports 256 colors and UTF-8
-- An API key for at least one provider (see [Providers](/docs/using-mew/providers/))
 
-### Install with cargo
-
-```sh
-cargo install --git https://github.com/mewcomputer/mew mew
-```
-
-This builds and installs the `mew` binary to `~/.cargo/bin/mew`. Make sure
-`~/.cargo/bin` is on your `PATH`.
-
-### Clone and build
+### Clone and build the CLI
 
 ```sh
 git clone https://github.com/mewcomputer/mew.git
 cd mew
-cargo build --release -p mew
+cargo install --locked --path crates/mew
 ```
 
-The binary lands at `target/release/mew`. Copy it somewhere on your `PATH`:
+Cargo installs the binary under `~/.cargo/bin` by default. Make sure that
+directory is on your `PATH`. For iroh remote pairing, add `--features iroh`
+to the Cargo command. The distributed CLI builds omit that feature.
 
-```sh
-cp target/release/mew /usr/local/bin/
-```
-
-Or use the install recipe:
-
-```sh
-just install
-```
-
-### Native desktop app (macOS)
-
-The desktop app bundles the GPUI client, its daemon sidecar, and the CEF
-browser runtime. From a checkout on macOS, build and install it with:
-
-```sh
-just desktop-install
-open -a /Applications/mew.app
-```
-
-For a distributable `.dmg`, `.zip`, and `SHA256SUMS` file instead, run:
-
-```sh
-just desktop-package
-```
-
-The artifacts are written to `target/release/dist/`. The first public desktop
-artifacts are unsigned and are not notarized. macOS may block the first launch;
-right-click `mew.app`, choose **Open**, and confirm the prompt. Do not use the
-CLI Homebrew formula or install script to install the desktop app.
-
-For a system-wide install that survives across cargo toolchain updates:
-
-```sh
-just install-system   # builds, then sudo cp to /usr/local/bin
-```
+To include the desktop host's embedded web UI in the binary, install Node.js
+24 or later, pnpm 10.33.0, and `just`. From the checkout, run
+`pnpm install --frozen-lockfile` and `just build-ui` before the Cargo command.
 
 ## Verify the installation
 
@@ -135,9 +103,7 @@ is on your `PATH`.
 | `mew` | `crates/mew` | The main binary. Runs the TUI, one-shot prompts, and the daemon. |
 | `mew-web` | `crates/mew-web-bridge` | Web UI bridge. Serves the browser-based chat interface. Build separately with `just build-web`. |
 
-The `mew` binary covers every subcommand: interactive chat (default),
-one-shot prompts (`mew run`), the daemon (`mew daemon`), and config
-editing (`mew config`). You only need `mew-web` if you want the browser
+See the [Web UI](/docs/using-mew/web-ui/) guide for running the browser
 interface.
 
 ## Subcommands
@@ -146,9 +112,9 @@ interface.
 |---------|-------------|
 | `mew` | Start an interactive TUI session (default) |
 | `mew run "prompt"` | Run a single prompt non-interactively |
-| `mew chat` | Same as the default, but accepts `--connect` to attach to a remote daemon |
-| `mew daemon` | Start the WebSocket daemon (for web UI or remote clients). Add `--iroh` for P2P transport. |
-| `mew pair` | Generate a QR code for pairing mobile/remote clients over iroh. |
+| `mew chat` | Start interactive chat with explicit options such as `--provider` or `--connect` |
+| `mew daemon` | Start the WebSocket daemon. Builds with iroh support also accept `--remote` for authenticated pairing. |
+| `mew pair` | Generate a QR code for pairing. Requires a source build with `--features iroh`. |
 | `mew config show` | Print current configuration |
 | `mew config edit` | Open the config file in your editor |
 | `mew debug` | Debug tools (permission simulator, VFS inspector) |

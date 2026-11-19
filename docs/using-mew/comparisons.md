@@ -60,18 +60,18 @@ them, which is what keeps your system prompt small.
 
 ## Plugins vs MCP servers
 
-Both spawn an external program and both can add tools. Beyond that they
-diverge hard.
+Both can add tools. Plugins run as local subprocesses. MCP servers can
+run locally or connect over HTTP.
 
 |                       | Plugin                                  | MCP server                              |
 |-----------------------|-----------------------------------------|-----------------------------------------|
 | Protocol              | mew's own JSON-RPC                      | The standard MCP protocol               |
 | Adds tools            | Yes                                     | Yes                                     |
-| Lifecycle hooks       | Yes, ~20 (mutate prompts, params, etc.) | No                                      |
+| Lifecycle hooks       | Yes, including prompt and request hooks | No                                      |
 | Registers slash cmds  | Yes                                     | No                                      |
 | Mutates requests      | Yes                                     | No                                      |
 | Persistent storage    | Yes, per-plugin key-value               | No (state lives inside the server)      |
-| Tool sensitivity      | Set per tool                            | Always `Mutating`                       |
+| Tool sensitivity      | Set per tool                            | `Mutating`                       |
 | Transport             | stdin/stdout subprocess                 | stdio subprocess or HTTP                |
 | Good for              | Deep integration, telemetry, policy     | Adding off-the-shelf tools              |
 
