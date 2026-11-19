@@ -109,11 +109,12 @@ pub struct Session {
 }
 
 impl Session {
-    pub(crate) async fn subagent_history(
-        &self,
-        child_session_id: &str,
-    ) -> Result<Vec<mew_message::Message>> {
-        ulid::Ulid::from_string(child_session_id).context("invalid child session ID")?;
+    pub(crate) async fn subagent_transcript_root(&self, child_session_id: &str) -> Result<PathBuf> {
+        anyhow::ensure!(
+            ulid::Ulid::from_string(child_session_id)
+                .is_ok_and(|id| id.to_string() == child_session_id),
+            "invalid child session ID"
+        );
         let recorded_parent = self.agent.lock().await.session_id.to_string();
         let mut parent = None;
         // Both parent folder conventions require recorded child membership.
@@ -142,6 +143,14 @@ impl Session {
             meta.id == child_session_id && meta.parent_session_id.as_deref() == Some(&parent),
             "child metadata does not match the attached parent"
         );
+        Ok(children)
+    }
+
+    pub(crate) async fn subagent_history(
+        &self,
+        child_session_id: &str,
+    ) -> Result<Vec<mew_message::Message>> {
+        let children = self.subagent_transcript_root(child_session_id).await?;
         let mut transcript =
             tokio::fs::File::open(children.join(child_session_id).join("session.jsonl"))
                 .await

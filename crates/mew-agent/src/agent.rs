@@ -324,6 +324,8 @@ pub struct Agent {
     /// starting a new turn. If the turn ends first, the guidance is picked up
     /// by the next turn. Shared via `Arc` so the running turn's clone sees it.
     pub pending_guidance: Arc<tokio::sync::Mutex<VecDeque<String>>>,
+    pub(crate) child_guidance: Option<Arc<crate::child_guidance::ChildGuidance>>,
+    pub(crate) child_guidance_registry: Option<Arc<crate::runner::ActiveChildren>>,
     /// Active persona name (for display/status). `None` = no persona.
     pub persona_name: Option<String>,
     /// Active persona's autonomous hint for the Auto/Auto+ permission
@@ -475,6 +477,8 @@ impl Agent {
             base_system: String::new(),
             personas: Vec::new(),
             pending_guidance: Arc::new(tokio::sync::Mutex::new(VecDeque::new())),
+            child_guidance: None,
+            child_guidance_registry: None,
             persona_name: None,
             autonomous_hint: None,
             fallback_models: None,
@@ -1228,6 +1232,15 @@ impl Agent {
         request_id: &str,
     ) -> Result<AcceptedPrompt, PromptAdmissionError> {
         let message = self.build_prompt_message(prompt, attachments)?;
+        self.persist_prompt(&message, request_id).await?;
+        Ok(AcceptedPrompt(Box::new(message)))
+    }
+
+    pub(crate) async fn persist_prompt(
+        &self,
+        message: &Message,
+        request_id: &str,
+    ) -> Result<(), PromptAdmissionError> {
         let session = self
             .session
             .as_ref()
@@ -1235,9 +1248,9 @@ impl Agent {
         session
             .lock()
             .await
-            .write_prompt(&message, request_id)
+            .write_prompt(message, request_id)
             .await?;
-        Ok(AcceptedPrompt(Box::new(message)))
+        Ok(())
     }
 
     pub fn run_accepted_prompt(

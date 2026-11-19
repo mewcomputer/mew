@@ -22,6 +22,16 @@ pub enum SubagentError {
     Execution(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ChildGuidanceError {
+    #[error("This child is not running under the requested parent.")]
+    NotRunning,
+    #[error("{0}")]
+    Rejected(String),
+    #[error("{0}")]
+    Unknown(String),
+}
+
 /// Outcome of a finished subagent run.
 #[derive(Debug, Clone)]
 pub enum SubagentResult {
@@ -253,6 +263,27 @@ pub struct SubagentRunOptions<'a> {
 #[async_trait::async_trait]
 pub trait SubagentRunner: Send + Sync {
     async fn run(&self, opts: SubagentRunOptions<'_>) -> Result<SubagentResult, SubagentError>;
+
+    /// Guide an active direct child when it reaches its next provider request.
+    async fn guide_child(
+        &self,
+        _parent_session_id: mew_message::SessionId,
+        _child_session_id: mew_message::SessionId,
+        _request_id: &str,
+        _text: String,
+    ) -> Result<(), ChildGuidanceError> {
+        Err(ChildGuidanceError::NotRunning)
+    }
+
+    /// Look up a settled guidance receipt while the child is still active.
+    fn child_guidance_receipt(
+        &self,
+        _parent_session_id: mew_message::SessionId,
+        _child_session_id: mew_message::SessionId,
+        _request_id: &str,
+    ) -> Option<Result<(), ChildGuidanceError>> {
+        None
+    }
 }
 
 /// Resolves a `provider/model` string into a `Provider`. Used by runners to

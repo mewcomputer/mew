@@ -4053,3 +4053,14 @@ transcript commit preserves the current context and returns an error.
 The TUI waits for the daemon's reset event before clearing its display.
 Verified the persistence failure and restart cases, 115 daemon tests,
 12 session tests, and all 30 TUI dispatch tests.
+
+## 2026-11-18 Guidance for running subagents
+
+Scope guidance and receipts to an attached parent, its direct child, and a
+request ID. Save guidance at the child's next provider request boundary.
+A successful final reply can continue with guidance within the same turn and
+time limits. Keep both replies in the transcript and return the guided result
+to the parent. Look up saved receipts after the child finishes.
+
+Verified 215 agent tests, the focused guidance tests after the retirement fix,
+127 protocol tests, and 117 daemon tests.

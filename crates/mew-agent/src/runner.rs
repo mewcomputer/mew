@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
@@ -8,10 +8,12 @@ use mew_hooks::Dispatcher;
 use mew_message::{SessionId, ToolState, TurnManifest};
 use mew_provider::Provider;
 use mew_subagents::{
-    ModelResolver, SubagentDef, SubagentError, SubagentEvent, SubagentOutcome, SubagentResult,
-    SubagentRunOptions, SubagentRunner,
+    ChildGuidanceError, ModelResolver, SubagentDef, SubagentError, SubagentEvent, SubagentOutcome,
+    SubagentResult, SubagentRunOptions, SubagentRunner,
 };
 use mew_tools::Tool;
+
+use crate::child_guidance::ChildGuidance;
 
 /// If the given tool state has completed successfully, return the output
 /// string. Used by the runner to pull the final answer out of an `exit_tool`
@@ -90,6 +92,42 @@ async fn extract_manifests(agent: &crate::Agent) -> Vec<TurnManifest> {
         .collect()
 }
 
+#[derive(Default)]
+pub(crate) struct ActiveChildren {
+    state: Mutex<ChildRegistry>,
+}
+
+type ChildKey = (SessionId, SessionId);
+
+#[derive(Default)]
+struct ChildRegistry {
+    active: HashMap<ChildKey, Arc<ChildGuidance>>,
+    // Keep unresolved receipts queryable after the child ends, including
+    // a transcript write still draining after cancellation.
+    retired: VecDeque<(ChildKey, Arc<ChildGuidance>)>,
+}
+
+struct ActiveChild<'a> {
+    registry: &'a ActiveChildren,
+    key: ChildKey,
+}
+
+impl Drop for ActiveChild<'_> {
+    fn drop(&mut self) {
+        let mut state = self.registry.state.lock().unwrap();
+        let Some(guidance) = state.active.remove(&self.key) else {
+            return;
+        };
+        if guidance.close() {
+            const MAX_RETIRED_CHILDREN: usize = 32;
+            if state.retired.len() == MAX_RETIRED_CHILDREN {
+                state.retired.pop_front();
+            }
+            state.retired.push_back((self.key, guidance));
+        }
+    }
+}
+
 /// Simple subagent runner that spawns a child agent for each invocation.
 #[derive(Clone)]
 pub struct SimpleRunner {
@@ -119,6 +157,7 @@ pub struct SimpleRunner {
     max_concurrent_subagents: u32,
     /// Fallback wall-clock cap for defs that don't set `max_duration_secs`.
     default_max_duration_secs: u64,
+    active_children: Arc<ActiveChildren>,
 }
 
 impl SimpleRunner {
@@ -146,7 +185,17 @@ impl SimpleRunner {
             max_subagent_depth: 1,
             max_concurrent_subagents: 4,
             default_max_duration_secs: mew_subagents::DEFAULT_MAX_DURATION_SECS,
+            active_children: Arc::default(),
         }
+    }
+
+    /// Keep active children addressable when a parent replaces its runner.
+    pub fn with_agent_registry(mut self, agent: &mut crate::Agent) -> Self {
+        self.active_children = agent
+            .child_guidance_registry
+            .get_or_insert_with(|| self.active_children.clone())
+            .clone();
+        self
     }
 
     /// Builder method to attach a model resolver for per-subagent overrides.
@@ -260,6 +309,55 @@ impl SimpleRunner {
 
 #[async_trait]
 impl SubagentRunner for SimpleRunner {
+    async fn guide_child(
+        &self,
+        parent_session_id: SessionId,
+        child_session_id: SessionId,
+        request_id: &str,
+        text: String,
+    ) -> Result<(), ChildGuidanceError> {
+        if text.trim().is_empty() {
+            return Err(ChildGuidanceError::Rejected(
+                "Child guidance is empty.".into(),
+            ));
+        }
+        if request_id.is_empty() || request_id.len() > 128 {
+            return Err(ChildGuidanceError::Rejected(
+                "Invalid child guidance request ID.".into(),
+            ));
+        }
+        let guidance = self
+            .active_children
+            .state
+            .lock()
+            .unwrap()
+            .active
+            .get(&(parent_session_id, child_session_id))
+            .cloned()
+            .ok_or(ChildGuidanceError::NotRunning)?;
+        guidance.guide(request_id, text).await
+    }
+
+    fn child_guidance_receipt(
+        &self,
+        parent_session_id: SessionId,
+        child_session_id: SessionId,
+        request_id: &str,
+    ) -> Option<Result<(), ChildGuidanceError>> {
+        let state = self.active_children.state.lock().unwrap();
+        let key = (parent_session_id, child_session_id);
+        state
+            .active
+            .get(&key)
+            .or_else(|| {
+                state
+                    .retired
+                    .iter()
+                    .find_map(|(child_key, guidance)| (*child_key == key).then_some(guidance))
+            })?
+            .receipt(request_id)
+    }
+
     async fn run(&self, opts: SubagentRunOptions<'_>) -> Result<SubagentResult, SubagentError> {
         let def = opts.def;
         let prompt = opts.prompt;
@@ -383,6 +481,20 @@ impl SubagentRunner for SimpleRunner {
             .max_duration_secs
             .unwrap_or(self.default_max_duration_secs);
 
+        let key = (parent_session_id, session_id);
+        let guidance = Arc::new(ChildGuidance::default());
+        agent.child_guidance = Some(guidance.clone());
+        self.active_children
+            .state
+            .lock()
+            .unwrap()
+            .active
+            .insert(key, guidance);
+        let active = ActiveChild {
+            registry: &self.active_children,
+            key,
+        };
+
         let display_name = mew_subagents::pick_display_name(session_id.0);
         let _ = event_tx
             .send(SubagentEvent::Started {
@@ -426,6 +538,7 @@ impl SubagentRunner for SimpleRunner {
             'runs: loop {
                 while let Some(event) = rx.recv().await {
                     match event {
+                        crate::AgentEvent::ChildGuidanceContinuation => result_text.clear(),
                         crate::AgentEvent::Provider(mew_provider::ProviderEvent::PartStart {
                             part: mew_message::Part::ToolCall(tc),
                         }) => {
@@ -655,6 +768,8 @@ impl SubagentRunner for SimpleRunner {
             ));
         }
 
+        drop(active);
+
         if let Some(answer) = exit_answer {
             result_text = answer;
         }
@@ -742,7 +857,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use futures::{stream, StreamExt};
-    use mew_provider::{EventStream, ProviderError};
+    use mew_provider::{EventStream, ProviderError, ProviderEvent};
     use std::path::PathBuf;
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
@@ -918,6 +1033,245 @@ mod tests {
             serde_json::json!({"input": label}),
         ));
         events
+    }
+
+    struct ControlledProvider {
+        requests: tokio::sync::mpsc::Sender<mew_provider::Request>,
+        responses: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Vec<ProviderEvent>>>,
+    }
+
+    #[async_trait]
+    impl Provider for ControlledProvider {
+        fn name(&self) -> &str {
+            "controlled"
+        }
+
+        async fn stream(
+            &self,
+            request: mew_provider::Request,
+        ) -> Result<EventStream, ProviderError> {
+            self.requests
+                .send(request)
+                .await
+                .map_err(|error| ProviderError::Message(error.to_string()))?;
+            let events =
+                self.responses.lock().await.recv().await.ok_or_else(|| {
+                    ProviderError::Message("fixture response stream closed".into())
+                })?;
+            Ok(Box::pin(stream::iter(events)))
+        }
+    }
+
+    #[tokio::test]
+    async fn child_guidance_is_durable_at_its_next_request_and_retry_is_idempotent() {
+        for (boundary, expected) in [
+            (tool_turn("continue"), "continuefinished"),
+            (turn("clean stop"), "finished"),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let parent = SessionId::new();
+            let (requests, mut incoming) = tokio::sync::mpsc::channel(2);
+            let (responses, reply) = tokio::sync::mpsc::channel(2);
+            let provider = Arc::new(ControlledProvider {
+                requests,
+                responses: tokio::sync::Mutex::new(reply),
+            });
+            let mut parent_agent = crate::Agent::new(
+                provider.clone(),
+                Arc::new(mew_hooks::NopDispatcher),
+                None,
+                vec![],
+                Some(parent),
+            );
+            let runner = SimpleRunner::new(
+                provider.clone(),
+                vec![Arc::new(mew_tools::tools::echo::Echo)],
+                Arc::new(mew_hooks::NopDispatcher),
+            )
+            .with_agent_registry(&mut parent_agent)
+            .with_session_root(directory.path().to_path_buf());
+            let def = make_def(Some(5), Some(30));
+            let (event_tx, mut events) = tokio::sync::mpsc::channel(16);
+
+            let child = runner.run(SubagentRunOptions {
+                def: &def,
+                prompt: "start task".into(),
+                parent_call_id: "child_call".into(),
+                parent_session_id: parent,
+                event_tx,
+                cancel: Default::default(),
+                model: None,
+                parent_depth: 0,
+            });
+            let parent_interaction = async {
+                let Some(SubagentEvent::Started {
+                    child_session_id, ..
+                }) = events.recv().await
+                else {
+                    panic!("expected child start");
+                };
+                let child_id: SessionId = child_session_id.parse().unwrap();
+                incoming.recv().await.expect("initial provider request");
+
+                let wrong_parent = runner
+                    .guide_child(
+                        SessionId::new(),
+                        child_id,
+                        "wrong-parent",
+                        "ignore me".into(),
+                    )
+                    .await;
+                assert!(wrong_parent.is_err());
+                assert!(runner
+                    .guide_child(parent, child_id, "empty", " ".into())
+                    .await
+                    .is_err());
+
+                let replacement =
+                    SimpleRunner::new(provider, vec![], Arc::new(mew_hooks::NopDispatcher))
+                        .with_agent_registry(&mut parent_agent);
+                let mut guidance = Box::pin(replacement.guide_child(
+                    parent,
+                    child_id,
+                    "guide-1",
+                    "Keep the API stable.".into(),
+                ));
+                assert!(futures::poll!(&mut guidance).is_pending());
+                let mut duplicate = Box::pin(runner.guide_child(
+                    parent,
+                    child_id,
+                    "guide-1",
+                    "Do not replace the original guidance".into(),
+                ));
+                assert!(futures::poll!(&mut duplicate).is_pending());
+                assert!(runner
+                    .guide_child(parent, child_id, "guide-2", "another guide".into())
+                    .await
+                    .is_err());
+                let child_root = directory.path().join(parent.to_string()).join("subagents");
+                assert!(!mew_session::Reader::has_prompt_receipt(
+                    &child_root,
+                    &child_session_id,
+                    "guide-1"
+                )
+                .await
+                .unwrap());
+
+                responses.send(boundary).await.unwrap();
+                let next = incoming.recv().await.expect("tool continuation");
+                guidance.await.unwrap();
+                duplicate.await.unwrap();
+                assert!(runner
+                    .guide_child(parent, child_id, "guide-1", "same request again".into())
+                    .await
+                    .is_ok());
+                let last = next.messages.last().unwrap();
+                assert!(last.parts.iter().any(|part| {
+                    matches!(part, mew_message::Part::Text(text) if text.text == "Keep the API stable.")
+                }));
+                let raw = mew_session::Reader::load_subagent_from(
+                    directory.path(),
+                    &parent.to_string(),
+                    &child_session_id,
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    raw.iter().filter(|message| message.id == last.id).count(),
+                    1
+                );
+                assert!(mew_session::Reader::has_prompt_receipt(
+                    &child_root,
+                    &child_session_id,
+                    "guide-1"
+                )
+                .await
+                .unwrap());
+
+                responses.send(turn("finished")).await.unwrap();
+                while events.recv().await.is_some() {}
+                assert!(runner
+                    .guide_child(parent, child_id, "late", "too late".into())
+                    .await
+                    .is_err());
+            };
+            let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+                tokio::join!(child, parent_interaction)
+            })
+            .await
+            .unwrap();
+            assert!(matches!(
+                result.unwrap(),
+                SubagentResult::Complete { turns_used: 2, text, .. } if text == expected
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_child_finishing_before_its_next_request_rejects_pending_guidance() {
+        let directory = tempfile::tempdir().unwrap();
+        let parent = SessionId::new();
+        let (requests, mut incoming) = tokio::sync::mpsc::channel(2);
+        let (responses, reply) = tokio::sync::mpsc::channel(2);
+        let provider = Arc::new(ControlledProvider {
+            requests,
+            responses: tokio::sync::Mutex::new(reply),
+        });
+        let runner = SimpleRunner::new(provider, vec![], Arc::new(mew_hooks::NopDispatcher))
+            .with_session_root(directory.path().to_path_buf());
+        let def = make_def(Some(1), Some(30));
+        let (event_tx, mut events) = tokio::sync::mpsc::channel(16);
+        let child = runner.run(SubagentRunOptions {
+            def: &def,
+            prompt: "start task".into(),
+            parent_call_id: "child_call".into(),
+            parent_session_id: parent,
+            event_tx,
+            cancel: Default::default(),
+            model: None,
+            parent_depth: 0,
+        });
+        let parent_interaction = async {
+            let Some(SubagentEvent::Started {
+                child_session_id, ..
+            }) = events.recv().await
+            else {
+                panic!("expected child start");
+            };
+            incoming.recv().await.expect("initial provider request");
+            let mut guidance = Box::pin(runner.guide_child(
+                parent,
+                child_session_id.parse().unwrap(),
+                "late-guide",
+                "Keep this as a draft".into(),
+            ));
+            assert!(futures::poll!(&mut guidance).is_pending());
+            responses.send(turn("finished")).await.unwrap();
+            assert!(matches!(
+                guidance.await, Err(ChildGuidanceError::Rejected(message)) if message.contains("ended before")
+            ));
+            let child_root = directory.path().join(parent.to_string()).join("subagents");
+            assert!(!mew_session::Reader::has_prompt_receipt(
+                &child_root,
+                &child_session_id,
+                "late-guide",
+            )
+            .await
+            .unwrap());
+            assert!(
+                incoming.try_recv().is_err(),
+                "guidance must not start another request"
+            );
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(child, parent_interaction)
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            result.unwrap(),
+            SubagentResult::Complete { turns_used: 1, .. }
+        ));
     }
 
     #[tokio::test]

@@ -435,6 +435,8 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
                 | ClientMessage::GitStatus { .. }
                 | ClientMessage::ReadSessionDiff { .. }
                 | ClientMessage::ReadSubagentHistory { .. }
+                | ClientMessage::GuideSubagent { .. }
+                | ClientMessage::ReadSubagentMessageReceipt { .. }
                 | ClientMessage::ReadJobOutput { .. }
                 | ClientMessage::ReadPromptReceipt { .. }
                 | ClientMessage::UpdateTodo { .. }
@@ -477,6 +479,7 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
             | ClientMessage::GitStatus { .. }
             | ClientMessage::ReadSessionDiff { .. }
             | ClientMessage::ReadSubagentHistory { .. }
+            | ClientMessage::ReadSubagentMessageReceipt { .. }
             | ClientMessage::ReadJobOutput { .. }
             | ClientMessage::ReadPromptReceipt { .. }
             | ClientMessage::WatchWorkspace { .. }
@@ -835,6 +838,7 @@ where
     let mut client_id: Option<u64> = None;
     let mut terminal: Option<terminal::TerminalHandle> = None;
     let mut workspace_watch: Option<CancellationToken> = None;
+    let guidance_slots = Arc::new(tokio::sync::Semaphore::new(16));
     let mut auto_title_enabled = true;
     let mut summary_updates = auto_summary_enabled.subscribe();
     let mut settings_updates = session_manager.settings_changed.subscribe();
@@ -1101,6 +1105,20 @@ where
                             session_id: session_id.clone(),
                             request_id: request_id.clone(),
                             error: Some(message),
+                        });
+                    }
+                    ClientMessage::GuideSubagent {
+                        session_id,
+                        child_session_id,
+                        request_id,
+                        ..
+                    } => {
+                        reply(ServerMessage::SubagentMessageReceipt {
+                            session_id: session_id.clone(),
+                            child_session_id: child_session_id.clone(),
+                            request_id: request_id.clone(),
+                            status: mew_protocol::PromptStatus::Rejected,
+                            message: Some(message),
                         });
                     }
                     _ => reply(ServerMessage::Error { message }),
@@ -1659,6 +1677,64 @@ where
                     request_id,
                     messages,
                     error,
+                });
+            }
+            ClientMessage::GuideSubagent {
+                session_id,
+                child_session_id,
+                request_id,
+                text,
+            } => {
+                let Ok(slot) = guidance_slots.clone().try_acquire_owned() else {
+                    reply(ServerMessage::SubagentMessageReceipt {
+                        session_id,
+                        child_session_id,
+                        request_id,
+                        status: mew_protocol::PromptStatus::Unknown,
+                        message: Some("Too many pending subagent message requests.".into()),
+                    });
+                    continue;
+                };
+                let parent = attached_session
+                    .clone()
+                    .filter(|parent| parent.id == session_id);
+                let client = client_tx.clone();
+                let lifetime = connection_lifetime.clone();
+                tokio::spawn(async move {
+                    let _slot = slot;
+                    // Closing the socket drops its receipt waiter. A guide
+                    // already queued on the child can still be admitted.
+                    let (status, message) = tokio::select! {
+                        result = subagent_message_status(
+                            parent.as_deref(), &child_session_id, &request_id, Some(text),
+                        ) => result,
+                        _ = lifetime.cancelled() => return,
+                    };
+                    let _ = client.send(ServerMessage::SubagentMessageReceipt {
+                        session_id,
+                        child_session_id,
+                        request_id,
+                        status,
+                        message,
+                    });
+                });
+            }
+            ClientMessage::ReadSubagentMessageReceipt {
+                session_id,
+                child_session_id,
+                request_id,
+            } => {
+                let parent = attached_session
+                    .as_deref()
+                    .filter(|parent| parent.id == session_id);
+                let (status, message) =
+                    subagent_message_status(parent, &child_session_id, &request_id, None).await;
+                reply(ServerMessage::SubagentMessageReceipt {
+                    session_id,
+                    child_session_id,
+                    request_id,
+                    status,
+                    message,
                 });
             }
             ClientMessage::ListSessions => {
@@ -3375,6 +3451,74 @@ async fn daemon_settings_message(
     })
 }
 
+async fn subagent_message_status(
+    parent: Option<&Session>,
+    child_session_id: &str,
+    request_id: &str,
+    text: Option<String>,
+) -> (mew_protocol::PromptStatus, Option<String>) {
+    use mew_protocol::PromptStatus::{Accepted, Rejected, Unknown};
+    use mew_subagents::ChildGuidanceError;
+    let Some(parent) = parent else {
+        return (
+            Rejected,
+            Some("Attach the parent conversation to message its subagent.".into()),
+        );
+    };
+    if request_id.is_empty() || request_id.len() > 128 {
+        return (
+            Rejected,
+            Some("Invalid subagent message request ID.".into()),
+        );
+    }
+    let child_root = match parent.subagent_transcript_root(child_session_id).await {
+        Ok(root) => root,
+        Err(error) => return (Rejected, Some(error.to_string())),
+    };
+    let sending = text.is_some();
+    let (runner, parent_id) = {
+        let agent = parent.agent.lock().await;
+        (agent.subagent_runner.clone(), agent.session_id)
+    };
+    if let Some(runner) = runner {
+        let child_id = ulid::Ulid::from_string(child_session_id).expect("validated child ID");
+        let receipt = if let Some(text) = text {
+            match runner
+                .guide_child(parent_id, child_id, request_id, text)
+                .await
+            {
+                Err(ChildGuidanceError::NotRunning) => {
+                    runner.child_guidance_receipt(parent_id, child_id, request_id)
+                }
+                receipt => Some(receipt),
+            }
+        } else {
+            runner.child_guidance_receipt(parent_id, child_id, request_id)
+        };
+        match receipt {
+            Some(Ok(())) => return (Accepted, None),
+            Some(Err(ChildGuidanceError::Rejected(error))) => return (Rejected, Some(error)),
+            Some(Err(ChildGuidanceError::Unknown(error))) => return (Unknown, Some(error)),
+            Some(Err(ChildGuidanceError::NotRunning)) | None => {}
+        }
+    }
+    match mew_session::Reader::has_prompt_receipt(&child_root, child_session_id, request_id).await {
+        Ok(true) => (Accepted, None),
+        Ok(false) if sending => (Rejected, Some("This subagent is no longer running.".into())),
+        Ok(false) => (
+            Unknown,
+            Some("The subagent message could not be confirmed.".into()),
+        ),
+        Err(error) => {
+            tracing::warn!(session_id = %parent.id, %child_session_id, %error, "could not read subagent message receipt");
+            (
+                Unknown,
+                Some("The subagent message could not be confirmed.".into()),
+            )
+        }
+    }
+}
+
 /// Register cancellation before accepting work or waiting for the agent lock.
 async fn register_turn(session: &Session) -> CancellationToken {
     let token = session
@@ -4326,6 +4470,7 @@ async fn translate_event(
             // is rare and can be handled later.
             Vec::new()
         }
+        AgentEvent::ChildGuidanceContinuation => Vec::new(),
         AgentEvent::TodosUpdated { .. } => {
             session.broadcast_todos().await;
             Vec::new()
@@ -4538,6 +4683,32 @@ mod tests {
             RemoteScope::Control,
         ] {
             assert!(remote_message_allowed(scope, &message));
+        }
+    }
+
+    #[test]
+    fn guiding_a_child_requires_remote_control_scope() {
+        let guide = ClientMessage::GuideSubagent {
+            session_id: "parent".into(),
+            child_session_id: "child".into(),
+            request_id: "guide".into(),
+            text: "Review the tests.".into(),
+        };
+        let receipt = ClientMessage::ReadSubagentMessageReceipt {
+            session_id: "parent".into(),
+            child_session_id: "child".into(),
+            request_id: "guide".into(),
+        };
+        for scope in [
+            RemoteScope::Observe,
+            RemoteScope::Collaborate,
+            RemoteScope::Control,
+        ] {
+            assert_eq!(
+                remote_message_allowed(scope, &guide),
+                scope == RemoteScope::Control
+            );
+            assert!(remote_message_allowed(scope, &receipt));
         }
     }
 

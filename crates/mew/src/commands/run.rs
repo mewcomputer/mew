@@ -271,6 +271,7 @@ pub(crate) async fn build_and_run(
             mew_agent::AgentEvent::FileDelta { .. } => {
                 // Diff stats are accumulated daemon-side; no-op in CLI mode.
             }
+            mew_agent::AgentEvent::ChildGuidanceContinuation => {}
             mew_agent::AgentEvent::FlaggedFilesChanged { .. } => {
                 // Flagged files visibility is web-UI only.
             }

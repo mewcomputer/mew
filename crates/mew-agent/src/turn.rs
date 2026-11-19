@@ -9,6 +9,7 @@ use mew_message::{
     ToolResultPart, ToolState, ToolStateError, ToolTime,
 };
 use mew_provider::{ProviderEvent, Request, ToolDef};
+use mew_subagents::ChildGuidanceError;
 use mew_tools::tools::flag_important::FlagMode;
 
 use crate::agent::{AcceptedPrompt, Agent, PromptAdmissionError, TurnInput};
@@ -180,6 +181,7 @@ impl Agent {
         ev_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut turn_count: u32 = 0;
+        let mut continuing_for_guidance = false;
         loop {
             if self.cancel_token.is_cancelled() {
                 let _ = ev_tx.send(AgentEvent::Error("aborted".into())).await;
@@ -294,13 +296,31 @@ impl Agent {
                 supports_vision: self.supports_vision,
             };
 
-            let manifest = match self.fit_request_context(&mut req, force).await {
+            let mut manifest = match self.fit_request_context(&mut req, force).await {
                 Ok((manifest, _)) => manifest,
                 Err(message) => {
-                    let _ = ev_tx.send(AgentEvent::Error(message)).await;
+                    if continuing_for_guidance {
+                        if let Some((admission, _)) =
+                            self.child_guidance.as_ref().and_then(|queue| queue.claim())
+                        {
+                            admission.finish(Err(ChildGuidanceError::Rejected(message)));
+                        }
+                    } else {
+                        let _ = ev_tx.send(AgentEvent::Error(message)).await;
+                    }
                     return Ok(());
                 }
             };
+            let guided = self.admit_child_guidance(&mut req, &mut manifest).await;
+            if continuing_for_guidance && !guided {
+                // The previous clean response already completed the original
+                // task. A rejected guide needs no extra provider call.
+                return Ok(());
+            }
+            if continuing_for_guidance {
+                let _ = ev_tx.send(AgentEvent::ChildGuidanceContinuation).await;
+                continuing_for_guidance = false;
+            }
             render_compaction_summary(&mut req.messages);
             self.dispatcher
                 .on_pre_model_turn(&req.messages, &req.system)
@@ -641,6 +661,17 @@ impl Agent {
                         continue;
                     }
                 }
+                if finish == Finish::Stop
+                    && self.max_turns.is_none_or(|max| turn_count < max)
+                    && self
+                        .child_guidance
+                        .as_ref()
+                        .is_some_and(|queue| queue.has_waiting_guide())
+                {
+                    continuing_for_guidance = true;
+                    continue;
+                }
+
                 return Ok(());
             }
 
@@ -765,6 +796,67 @@ impl Agent {
                 tracing::error!(%error, "session write failed");
             }
         }
+    }
+
+    async fn admit_child_guidance(
+        &self,
+        request: &mut Request,
+        manifest: &mut mew_message::TurnManifest,
+    ) -> bool {
+        use crate::child_guidance::CHILD_ENDED;
+
+        let Some(guidance) = &self.child_guidance else {
+            return false;
+        };
+        let Some((admission, text)) = guidance.claim() else {
+            return false;
+        };
+        if self.cancel_token.is_cancelled() {
+            admission.finish(Err(ChildGuidanceError::Rejected(CHILD_ENDED.into())));
+            return false;
+        }
+        let message = match self.build_prompt_message(text, vec![]) {
+            Ok(message) => message,
+            Err(error) => {
+                admission.finish(Err(ChildGuidanceError::Rejected(error.to_string())));
+                return false;
+            }
+        };
+        request
+            .messages
+            .push(self.dispatcher.on_chat_message(message.clone()).await);
+        let guided_manifest = self.request_manifest(request);
+        let result = if self.cancel_token.is_cancelled() || guidance.is_closed() {
+            Err(ChildGuidanceError::Rejected(CHILD_ENDED.into()))
+        } else if self.context_window > 0
+            && estimated_request_tokens(request, &guided_manifest) > self.context_window
+        {
+            Err(ChildGuidanceError::Rejected(
+                "Child guidance would exceed its model's context window.".into(),
+            ))
+        } else {
+            self.persist_prompt(&message, &admission.request_id)
+                .await
+                .map_err(|error| match error {
+                    PromptAdmissionError::Persistence(
+                        mew_session::SessionError::TranscriptCommitUnknown { .. },
+                    ) => ChildGuidanceError::Unknown(format!(
+                        "Could not confirm whether the child guidance was saved: {error}"
+                    )),
+                    _ => ChildGuidanceError::Rejected(format!(
+                        "Could not save child guidance: {error}"
+                    )),
+                })
+        };
+        let accepted = result.is_ok();
+        if accepted {
+            self.messages.lock().await.push(message);
+            *manifest = guided_manifest;
+        } else if let Some(rejected) = request.messages.pop() {
+            self.token_count_cache.lock().unwrap().remove(&rejected.id);
+        }
+        admission.finish(result);
+        accepted
     }
 
     async fn request_system(&self) -> String {

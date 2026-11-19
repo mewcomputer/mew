@@ -79,6 +79,45 @@ struct PendingTodoEdit {
 }
 
 impl DaemonClient {
+    pub async fn guide_subagent(
+        &self,
+        session_id: &str,
+        child_session_id: &str,
+        request_id: &str,
+        text: String,
+    ) -> Result<()> {
+        self.send_subagent_message_command(ClientMessage::GuideSubagent {
+            session_id: session_id.into(),
+            child_session_id: child_session_id.into(),
+            request_id: request_id.into(),
+            text,
+        })
+        .await
+    }
+
+    pub async fn read_subagent_message_receipt(
+        &self,
+        session_id: &str,
+        child_session_id: &str,
+        request_id: &str,
+    ) -> Result<()> {
+        self.send_subagent_message_command(ClientMessage::ReadSubagentMessageReceipt {
+            session_id: session_id.into(),
+            child_session_id: child_session_id.into(),
+            request_id: request_id.into(),
+        })
+        .await
+    }
+
+    async fn send_subagent_message_command(&self, message: ClientMessage) -> Result<()> {
+        let json = mew_protocol::encode_json(&message)?;
+        self.state
+            .ws_out
+            .send(json)
+            .await
+            .context("daemon connection closed during subagent messaging")
+    }
+
     pub async fn read_subagent_history(
         &self,
         session_id: &str,
@@ -1024,6 +1063,7 @@ async fn translate_server_message(
         | ServerMessage::SessionHistory { .. }
         | ServerMessage::SessionHistoryPage { .. }
         | ServerMessage::SubagentHistory { .. }
+        | ServerMessage::SubagentMessageReceipt { .. }
         | ServerMessage::JobOutput { .. }
         | ServerMessage::JobOutputError { .. }
         | ServerMessage::SessionTitleChanged { .. }

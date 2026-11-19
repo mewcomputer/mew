@@ -91,6 +91,92 @@ fn request_id(message: &ServerMessage) -> Option<&str> {
 }
 
 #[tokio::test]
+async fn child_message_receipts_require_the_attached_parent_and_survive_a_finished_child() {
+    let directory = tempfile::tempdir().unwrap();
+    let server = test_server(directory.path().to_path_buf());
+    let parent = server.session_manager.create(None).await.unwrap();
+    let parent_id = parent.agent.lock().await.session_id;
+    let child_id = ulid::Ulid::new();
+    let child_key = child_id.to_string();
+    let mut writer = mew_session::Writer::open_subagent_at(
+        directory.path(),
+        &parent_id.to_string(),
+        &child_key,
+        "reviewer",
+    )
+    .await
+    .unwrap();
+    let message = mew_message::Message {
+        id: ulid::Ulid::new(),
+        session_id: child_id,
+        role: mew_message::Role::User,
+        parts: Vec::new(),
+        time: mew_message::Time {
+            created: 0,
+            completed: None,
+        },
+        assistant: None,
+    };
+    writer.write_prompt(&message, "saved-guide").await.unwrap();
+    writer.close().await.unwrap();
+    let mut socket = connect(&server).await;
+
+    use mew_protocol::PromptStatus::{Accepted, Rejected, Unknown};
+    let other = server.session_manager.create(None).await.unwrap();
+    for (attach, guide, request_id, expected) in [
+        (None, false, "saved-guide", Rejected),
+        (Some(&other.id), false, "saved-guide", Rejected),
+        (Some(&parent.id), false, "saved-guide", Accepted),
+        (None, false, "unsaved-guide", Unknown),
+        (None, true, "saved-guide", Accepted),
+        (None, true, "unsaved-guide", Rejected),
+    ] {
+        if let Some(session_id) = attach {
+            send(
+                &mut socket,
+                ClientMessage::AttachSession {
+                    session_id: session_id.clone(),
+                    client_kind: ClientKind::Web,
+                },
+            )
+            .await;
+            flush(&mut socket).await;
+        }
+        let command = if guide {
+            ClientMessage::GuideSubagent {
+                session_id: parent.id.clone(),
+                child_session_id: child_key.clone(),
+                request_id: request_id.into(),
+                text: "Review the save path.".into(),
+            }
+        } else {
+            ClientMessage::ReadSubagentMessageReceipt {
+                session_id: parent.id.clone(),
+                child_session_id: child_key.clone(),
+                request_id: request_id.into(),
+            }
+        };
+        send(&mut socket, command).await;
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(3), socket.next())
+            .await
+            .expect("subagent receipt timed out")
+            .unwrap()
+            .unwrap();
+        let reply: ServerMessage = mew_protocol::decode_json(frame.to_text().unwrap()).unwrap();
+        assert!(
+            matches!(
+                &reply,
+                ServerMessage::SubagentMessageReceipt {
+                    session_id, child_session_id, request_id: key, status, ..
+                } if session_id == &parent.id && child_session_id == &child_key
+                    && key == request_id && status == &expected
+            ),
+            "{reply:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn session_operation_errors_keep_the_requested_identity_and_legacy_error() {
     let dir = tempfile::tempdir().unwrap();
     let server = test_server(dir.path().to_path_buf());

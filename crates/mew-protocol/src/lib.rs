@@ -299,6 +299,17 @@ pub enum ClientMessage {
         child_session_id: String,
         request_id: String,
     },
+    GuideSubagent {
+        session_id: String,
+        child_session_id: String,
+        request_id: String,
+        text: String,
+    },
+    ReadSubagentMessageReceipt {
+        session_id: String,
+        child_session_id: String,
+        request_id: String,
+    },
     /// Compare and edit one todo without replacing its identity or dependencies.
     UpdateTodo {
         session_id: String,
@@ -948,6 +959,14 @@ pub enum ServerMessage {
         request_id: String,
         messages: Vec<mew_message::Message>,
         error: Option<String>,
+    },
+    SubagentMessageReceipt {
+        session_id: String,
+        child_session_id: String,
+        request_id: String,
+        status: PromptStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
     },
 
     // -- Model management --
@@ -1690,6 +1709,46 @@ mod tests {
                 matches!(round_trip(&reply), ServerMessage::SubagentHistory { session_id, child_session_id, request_id, messages, error: actual } if session_id == "parent" && child_session_id == "child" && request_id == "request" && messages.is_empty() && actual == error)
             );
         }
+    }
+
+    #[test]
+    fn subagent_message_commands_and_receipt_preserve_their_scope() {
+        let guide = ClientMessage::GuideSubagent {
+            session_id: "parent".into(),
+            child_session_id: "child".into(),
+            request_id: "request".into(),
+            text: "Check the cache 🐈".into(),
+        };
+        assert!(matches!(
+            round_trip(&guide),
+            ClientMessage::GuideSubagent { session_id, child_session_id, request_id, text }
+                if session_id == "parent" && child_session_id == "child"
+                    && request_id == "request" && text == "Check the cache 🐈"
+        ));
+        let read = ClientMessage::ReadSubagentMessageReceipt {
+            session_id: "parent".into(),
+            child_session_id: "child".into(),
+            request_id: "request".into(),
+        };
+        assert!(matches!(
+            round_trip(&read),
+            ClientMessage::ReadSubagentMessageReceipt { session_id, child_session_id, request_id }
+                if session_id == "parent" && child_session_id == "child" && request_id == "request"
+        ));
+        let receipt = ServerMessage::SubagentMessageReceipt {
+            session_id: "parent".into(),
+            child_session_id: "child".into(),
+            request_id: "request".into(),
+            status: PromptStatus::Rejected,
+            message: Some("The child finished.".into()),
+        };
+        assert!(matches!(
+            round_trip(&receipt),
+            ServerMessage::SubagentMessageReceipt { session_id, child_session_id, request_id,
+                status: PromptStatus::Rejected, message: Some(message) }
+                if session_id == "parent" && child_session_id == "child"
+                    && request_id == "request" && message == "The child finished."
+        ));
     }
     #[test]
     fn todo_edit_and_scoped_replies_roundtrip() {

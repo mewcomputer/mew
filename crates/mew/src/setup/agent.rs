@@ -461,6 +461,7 @@ pub(crate) fn wire_subagents(
             agent.tools.values().cloned().collect(),
             dispatcher,
         )
+        .with_agent_registry(agent)
         .with_model_resolver(resolver)
         .with_workspace(
             agent.cwd.clone(),
