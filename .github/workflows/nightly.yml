@@ -96,6 +96,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: write
 
     steps:
@@ -139,3 +140,9 @@ jobs:
           files: |
             artifacts/*.tar.gz
             SHA256SUMS
+
+      - name: Publish versioned Homebrew nightly
+        if: github.ref_name == github.event.repository.default_branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/homebrew/publish-nightly.sh

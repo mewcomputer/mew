@@ -4285,3 +4285,14 @@ The installer and formula generator now follow GitHub asset redirects over
 HTTPS. Verified all published asset checksums, installed the public tap on
 Apple Silicon in an isolated Homebrew prefix, and installed the nightly
 with the shell script in a temporary directory. Seven site smoke tests passed.
+
+### 2026-11-19: Automatic nightly Homebrew updates
+
+The Nightly workflow now publishes a versioned Homebrew snapshot after
+updating the rolling nightly. The tap checks for new snapshots twice an
+hour and updates the formula without cross-repository write credentials.
+
+Ran the publisher with the last successful nightly and verified that the
+hosted tap workflow pushed the generated formula. An isolated Apple
+Silicon Homebrew install upgraded from 0.2.0-pre.20261118 to
+0.2.0-pre.20261118.142. Formula tests and seven site smoke tests passed.
