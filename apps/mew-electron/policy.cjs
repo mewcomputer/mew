@@ -58,10 +58,25 @@ function isAppUrl(value, appUrl) {
   } catch { return false; }
 }
 
+function endpointPort(url) {
+  return url.port || (['https:', 'wss:'].includes(url.protocol) ? '443' : '80');
+}
+
+function browserProtection(appUrl, daemonUrl, debugUrl, relayUrl) {
+  const daemon = new URL(daemonUrl);
+  const daemonPort = endpointPort(daemon);
+  const ports = new Set([endpointPort(new URL(appUrl)), daemonPort, endpointPort(new URL(debugUrl))]);
+  if (relayUrl) ports.add(endpointPort(new URL(relayUrl)));
+  const unavailable = ['80', '443'].includes(daemonPort)
+    ? `The browser is unavailable while the daemon uses port ${daemonPort}. Connect to a daemon on another port to use browser tabs.`
+    : null;
+  return { ports, unavailable };
+}
+
 function guestRequestAllowed(value, protectedPorts) {
   try {
     const url = new URL(value);
-    const port = url.port || (['https:', 'wss:'].includes(url.protocol) ? '443' : '80');
+    const port = endpointPort(url);
     if (url.username || url.password || (['http:', 'https:', 'ws:', 'wss:'].includes(url.protocol) && protectedPorts.has(port))) return false;
     return ['http:', 'https:', 'ws:', 'wss:', 'data:', 'blob:'].includes(url.protocol) || value === 'about:blank';
   } catch { return false; }
@@ -76,4 +91,4 @@ function debugEndpoint(contents) {
   return `http://127.0.0.1:${port}`;
 }
 
-module.exports = { parseRequest, isAppUrl, guestRequestAllowed, navigationUrl, debugEndpoint };
+module.exports = { parseRequest, isAppUrl, guestRequestAllowed, browserProtection, navigationUrl, debugEndpoint };

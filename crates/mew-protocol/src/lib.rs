@@ -1179,6 +1179,9 @@ pub enum ServerMessage {
         /// Supports the registered page's local focus callback before keyboard input.
         #[serde(default)]
         browser_focus_preflight: bool,
+        /// Reports lifecycle failures with their operation and session identity.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        scoped_session_failures: bool,
     },
 
     /// Response to `ListProjects`. Contains deduped project directories
@@ -1991,6 +1994,7 @@ mod tests {
             version: "0.2.0".into(),
             protocol_version: PROTOCOL_VERSION,
             browser_focus_preflight: false,
+            scoped_session_failures: false,
         };
         let j = encode_json(&pong).unwrap();
         assert!(j.contains(r#""type":"pong""#));
@@ -2001,6 +2005,7 @@ mod tests {
                 version,
                 protocol_version,
                 browser_focus_preflight,
+                ..
             } => {
                 assert_eq!(version, "0.2.0");
                 assert_eq!(protocol_version, PROTOCOL_VERSION);
@@ -2032,6 +2037,27 @@ mod tests {
         });
         let pong: ServerMessage = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(serde_json::to_value(pong).unwrap(), value);
+    }
+
+    #[test]
+    fn pong_reports_scoped_session_failures_only_when_advertised() {
+        let legacy: ServerMessage =
+            decode_json(r#"{"type":"pong","version":"old","protocol_version":3}"#).unwrap();
+        assert!(matches!(
+            legacy,
+            ServerMessage::Pong {
+                scoped_session_failures: false,
+                ..
+            }
+        ));
+        let current: ServerMessage = decode_json(r#"{"type":"pong","version":"new","protocol_version":3,"scoped_session_failures":true}"#).unwrap();
+        assert!(matches!(
+            current,
+            ServerMessage::Pong {
+                scoped_session_failures: true,
+                ..
+            }
+        ));
     }
 
     #[test]

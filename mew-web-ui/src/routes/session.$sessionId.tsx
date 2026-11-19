@@ -19,10 +19,8 @@ export const Route = createFileRoute("/session/$sessionId")({
 function SessionRouteComponent() {
   const { sessionId } = Route.useParams();
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
-  const connected = useSessionStore((s) => s.connectionState === "connected" && s.confirmedSessionId === sessionId);
   const current = useSessionStore((s) => s.sessionId === sessionId);
-
-  const attachError = useSessionAttach(sessionId);
+  const { ready, error: attachError } = useSessionAttach(sessionId);
   useComposerFocusShortcut(inputRef);
 
   const handleSend = (text: string, attachments: Attachment[] = []) =>
@@ -37,7 +35,7 @@ function SessionRouteComponent() {
 
   const handleCancel = () => {
     const client = getClient();
-    if (client.isSessionAttached(sessionId)) client.cancel();
+    if (client.isSessionStable(sessionId)) client.cancel();
   };
 
   const handlePermission = (
@@ -59,11 +57,11 @@ function SessionRouteComponent() {
         {attachError && <p role="alert" className="px-4 py-2 text-sm text-destructive">{attachError}</p>}
       </div>
       <div className="shrink-0">
-        {connected && <><AskUserCard /><GoalCard /></>}
-        <InputArea ref={inputRef} onSend={handleSend} onSlash={handleSlash} onCancel={handleCancel} connected={connected} draftSessionId={sessionId} />
+        {ready && <><AskUserCard /><GoalCard /></>}
+        <InputArea ref={inputRef} onSend={handleSend} onSlash={handleSlash} onCancel={handleCancel} connected={ready} draftId={sessionId} />
         <StatusFooter />
       </div>
-      {connected && <PermissionToast onResolve={handlePermission} />}
+      {ready && <PermissionToast onResolve={handlePermission} />}
     </ConversationLayout>
   );
 }

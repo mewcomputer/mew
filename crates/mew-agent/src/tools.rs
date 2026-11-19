@@ -1828,14 +1828,30 @@ impl Agent {
             "job_cancel" => {
                 let job_id = input.get("job_id").and_then(|v| v.as_str()).unwrap_or("");
                 if self.cancel_shell_job(job_id).await {
-                    let _ = ev_tx
-                        .send(AgentEvent::JobUpdate {
-                            job_id: job_id.to_string(),
-                            command: String::new(),
-                            state: "cancelled".into(),
-                        })
-                        .await;
-                    (format!("cancelled job: {}", job_id), true)
+                    let state = {
+                        let jobs = self.shell_jobs.lock().await;
+                        match jobs.get(job_id) {
+                            Some(job) => Some(job.state.lock().await.clone()),
+                            None => None,
+                        }
+                    };
+                    match state {
+                        Some(ShellJobState::Cancelled) => {
+                            let _ = ev_tx
+                                .send(AgentEvent::JobUpdate {
+                                    job_id: job_id.to_string(),
+                                    command: String::new(),
+                                    state: "cancelled".into(),
+                                })
+                                .await;
+                            (format!("cancelled job: {}", job_id), true)
+                        }
+                        Some(ShellJobState::Failed { reason }) => (
+                            format!("failed to cancel job '{}': {}", job_id, reason),
+                            false,
+                        ),
+                        _ => (format!("job '{}' already finished", job_id), false),
+                    }
                 } else {
                     (
                         format!("job '{}' not found or already finished", job_id),

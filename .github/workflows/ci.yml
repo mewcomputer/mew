@@ -61,13 +61,23 @@ jobs:
       - name: Build web UI (mew-web-bridge embeds dist/)
         run: pnpm --filter @mew/web-client build && pnpm --filter mew-web-ui build
 
+      - name: Install CEF SDK
+        run: |
+          scripts/setup-ci-cef.sh "$RUNNER_TEMP/mew-cef"
+          echo "CEF_PATH=$RUNNER_TEMP/mew-cef" >> "$GITHUB_ENV"
+
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
       - name: cargo clippy
         run: cargo clippy --locked --all -- -D warnings
 
+      - name: Build binaries for the bridge round trip
+        run: cargo build --locked -p mew -p mew-web-bridge
+
       - name: cargo test
+        env:
+          MEW_REQUIRE_SUBPROCESS_E2E: 1
         run: cargo test --locked --all
 
   web-ci:
@@ -106,9 +116,8 @@ jobs:
       - name: Web-client tests
         run: pnpm --filter @mew/web-client test
 
-      - name: React behavior tests
+      - name: Web UI tests
         run: pnpm --filter mew-web-ui test
 
       - name: Electron host tests
-        working-directory: apps/mew-electron
-        run: node --test package.test.cjs policy.test.cjs support.test.cjs
+        run: pnpm --filter @mew/electron test:unit

@@ -14,14 +14,19 @@ Project guidance for coding agents working in this repository.
 
 ## Commands
 
-Rust and repository checks:
+Rust and repository checks: build the web assets with `just build-ui` before
+running the full Rust suite on a fresh checkout. The bridge asset tests exercise
+the production bundle. Before running the full suite or GPUI tests, point
+`MEW_CONFIG_DIR`, `MEW_DATA_DIR`, `MEW_CACHE_DIR`, and `MEW_SESSION_DIR` at
+temporary directories: desktop tests can persist layout and session state.
+Provider tests can also depend on credentials present in the local keychain.
 
 ```bash
 cargo build -p mew
-cargo test --all
+cargo test --locked --all
 cargo test -p mew-agent
 cargo test test_text_turn
-cargo clippy --all -- -D warnings
+cargo clippy --locked --all -- -D warnings
 cargo fmt
 just ci                         # full CI gate: fmt, clippy, arch, themes, Rust/JS tests, e2e
 just arch-check
@@ -39,12 +44,15 @@ Web, capture, docs, and mobile workflows:
 just install-js                 # first checkout or lockfile changes
 just test-js
 just build-js
+just build-ui                   # client and React production assets
 just build-web
 just lint-all                   # Rust clippy + web-client TypeScript check
 just dev-web                    # Vite UI + bridge; accepts --open and bridge flags
 just dev-ui                     # Vite UI only
 just desktop-dev                # native GPUI app with a debug daemon and CEF runtime
 just desktop-build              # release native GPUI app, daemon, and CEF runtime
+just desktop-electron-dev       # Electron shell with the shared React UI
+just desktop-electron-build     # package the Electron shell for macOS
 just site-dev
 just e2e                        # builds web assets and runs subprocess bridge tests
 just ios-core
@@ -56,6 +64,11 @@ mew tui-capture --help
 production bridge. `mew tui-capture` is deterministic in local harness mode;
 daemon-connected capture requires a running daemon and real credentials. MP4
 capture also requires `ffmpeg`.
+
+`Cargo.lock` is committed. CI runs Rust checks with `--locked`, uses Zig 0.15.2
+for Ghostty terminal emulation, and provisions the pinned CEF SDK with
+`scripts/setup-ci-cef.sh`. Set `CEF_PATH` to a matching installed SDK when
+running full-workspace builds locally.
 
 ## Repository shape
 
@@ -265,6 +278,22 @@ leak reminders) live under `[orchestration]` in config.toml; see
 deterministic human display name and emits progress through
 `AgentEvent::SubagentStatus`.
 
+The default subagent time limit is 600 seconds, configurable through
+`[orchestration] default_max_duration_secs` or per subagent with
+`max_duration_secs`. The deadline covers model requests, tools, and schema
+correction. On expiry the runner cancels the child and gives it a bounded
+interval to save partial output. The parent's result is the
+`exit_tool` payload, or the final assistant message when that tool is not used;
+earlier narration and progress updates do not become the parent's result.
+Subagents should put their complete deliverable, including requested JSON, in
+that final result.
+
+Background shell jobs run in their own process group on Unix. `job_cancel`
+waits for cancellation and signals the group; a child that creates a separate
+group or session can outlive the job. On Linux and macOS cancellation remains
+available during the bounded one-second output drain after the shell exits.
+Once the drain completes, the existing completion behavior applies.
+
 ### Namespace references in input
 
 In the TUI, skills, models, and subagents can be referenced inline in the chat
@@ -326,6 +355,12 @@ permission settings are saved in `policy.json`; resume also restores todos.
 Project `.env`, MCP discovery and plugin startup remain process-startup concerns,
 not per-session configuration.
 
+Thinking variants and budgets are resolved for the selected provider and model
+in `crates/mew/src/setup/providers.rs`. `mew-catalog` reads Hy effort options
+from models.dev for the supported provider mappings and otherwise retains its
+built-in model defaults. Do not assume providers with the same model ID accept
+the same levels or request parameters.
+
 ### Plugins and extensions
 
 Bare executable plugins are discovered in `~/.config/mew/plugins` and
@@ -354,7 +389,8 @@ manifest. See `docs/THEMING.md` for token conventions.
 
 ## Verification targets
 
-- Rust behavior: `cargo test --all` and `cargo clippy --all -- -D warnings`.
+- Rust behavior: `cargo test --locked --all` and
+  `cargo clippy --locked --all -- -D warnings`.
 - Architecture rules and generated themes: `just arch-check` and
   `just theme-codegen-check`.
 - TypeScript client: `just test-js`, `just build-js`, and `pnpm --filter

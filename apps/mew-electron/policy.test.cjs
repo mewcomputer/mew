@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { parseRequest, isAppUrl, guestRequestAllowed, debugEndpoint } = require('./policy.cjs');
+const { parseRequest, isAppUrl, guestRequestAllowed, browserProtection, debugEndpoint } = require('./policy.cjs');
 
 test('host requests reject malformed, oversized and ambiguous input', () => {
   for (const value of [null, '{}', 'null', '{', JSON.stringify({ type: 'bootstrap', extra: true }), ' '.repeat(16385)]) {
@@ -55,4 +55,30 @@ test('debugging endpoint accepts only an actual ephemeral port file', () => {
   for (const value of ['', '0\n/devtools/browser/a', '65536\n/devtools/browser/a', '43210', 'abc\n/devtools/browser/a']) {
     assert.throws(() => debugEndpoint(value));
   }
+});
+
+test('daemon ports remain protected across aliases and standard ports disable browsing', () => {
+  for (const daemon of ['wss://daemon.example/', 'ws://daemon.example/']) {
+    const { ports, unavailable } = browserProtection('http://127.0.0.1:41001/', daemon, 'http://127.0.0.1:41003/');
+    assert.match(unavailable, /browser.*unavailable/i);
+    assert.equal(guestRequestAllowed(daemon, ports), false);
+  }
+  for (const daemon of ['ws://localhost.:41002/', 'ws://[::ffff:127.0.0.1]:41002/', 'ws://daemon.example:41002/']) {
+    const { ports, unavailable } = browserProtection('http://127.0.0.1:41001/', daemon, 'http://127.0.0.1:41003/');
+    assert.equal(unavailable, null);
+    assert.equal(guestRequestAllowed('http://rebind.example:41002/', ports), false);
+    assert.equal(guestRequestAllowed('ws://127.0.0.1:41002/', ports), false);
+  }
+});
+
+test('the private relay port is protected alongside the underlying daemon', () => {
+  const { ports, unavailable } = browserProtection(
+    'http://127.0.0.1:41001/',
+    'ws://daemon.example:41002/',
+    'http://127.0.0.1:41003/',
+    'ws://127.0.0.1:41004/private',
+  );
+  assert.equal(unavailable, null);
+  assert.equal(guestRequestAllowed('ws://127.0.0.1:41004/', ports), false);
+  assert.equal(guestRequestAllowed('ws://daemon.example:41002/', ports), false);
 });

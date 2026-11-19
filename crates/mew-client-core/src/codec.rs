@@ -41,7 +41,7 @@ mod tests {
             .unwrap()
             .expect("known message");
         assert!(
-            matches!(message, ServerMessage::Pong { version, protocol_version: 0, browser_focus_preflight: false } if version == "0.2.0")
+            matches!(message, ServerMessage::Pong { version, protocol_version: 0, browser_focus_preflight: false, .. } if version == "0.2.0")
         );
     }
 

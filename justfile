@@ -24,9 +24,11 @@ test-v:
 install-js:
     pnpm install
 
-# Run TypeScript tests for mew-web-client via the pnpm workspace.
+# Run the client, React UI and headless Electron tests.
 test-js:
     pnpm --filter @mew/web-client test
+    pnpm --filter mew-web-ui test
+    pnpm --filter @mew/electron test:unit
 
 # Run tests for both Rust and the TypeScript client.
 test-all: test-rs test-js
@@ -34,6 +36,10 @@ test-all: test-rs test-js
 # Build the TypeScript library (produces dist/ with .d.ts + .js).
 build-js:
     pnpm --filter @mew/web-client build
+
+# Build the assets embedded by the web bridge and exercised by its tests.
+build-ui: build-js
+    pnpm --filter mew-web-ui build
 
 # Build everything needed for the web harness: the bridge binary
 # (mew-web), the daemon binary (spawned by the bridge at runtime),
@@ -331,7 +337,7 @@ theme-codegen-check:
 # CI-ready check: format, clippy, unit/integration tests (Rust + JS), site build,
 # and the subprocess e2e test. The e2e test needs the binaries built;
 # `build-web` depends on the right set.
-ci: fmt clippy arch-check theme-codegen-check test-all e2e
+ci: build-ui fmt clippy arch-check theme-codegen-check test-all e2e
     pnpm --filter site build
 
 # End-to-end check: build binaries and run subprocess e2e tests.

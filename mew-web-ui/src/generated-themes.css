@@ -910,11 +910,11 @@
   --orange-fg: #ffb347;
   --orange-med: #cc8400;
   --panel-background: #ffffff;
-  --panel-overlay: #ffffff;
+  --panel-overlay: #f4f4f4;
   --panel-overlay-hover: #e9e9e9;
   --persona-accent-bg: #202020;
   --persona-accent-fg: #ffffff;
-  --popover: #ffffff;
+  --popover: #f4f4f4;
   --popover-foreground: #202020;
   --primary: #202020;
   --primary-foreground: #ffffff;

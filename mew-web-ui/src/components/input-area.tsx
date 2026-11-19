@@ -22,7 +22,7 @@ interface InputAreaProps {
   onSlash?: (command: string) => void;
   onCancel: () => void;
   connected: boolean;
-  draftSessionId?: string;
+  draftId?: string;
 }
 
 interface SlashCommand {
@@ -46,20 +46,21 @@ const EMPTY_DRAFT: ComposerDraft = { text: "", files: [] };
 
 /** Chat composer with attachments, policy, persona and model controls. */
 export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
-  function InputArea({ onSend, onSlash, onCancel, connected, draftSessionId }, ref) {
+  function InputArea({ onSend, onSlash, onCancel, connected, draftId }, ref) {
     const { isMobile } = useSidebar();
-    const sessionId = useSessionStore((state) => draftSessionId ?? state.sessionId) ?? "new";
-    const activeDraft = useRef<string | null>(sessionId);
+    const sessionId = useSessionStore((state) => state.sessionId) ?? "new";
+    const draftOwner = draftId ?? sessionId;
+    const activeDraft = useRef<{ owner: string } | null>(null);
     const [, refreshDraft] = useState(0);
-    const { text, files } = composerDrafts.get(sessionId) ?? EMPTY_DRAFT;
+    const { text, files } = composerDrafts.get(draftOwner) ?? EMPTY_DRAFT;
     const setText = (value: string | ((previous: string) => string)) => {
-      const current = composerDrafts.get(sessionId) ?? EMPTY_DRAFT;
-      composerDrafts.set(sessionId, { ...current, text: typeof value === "function" ? value(current.text) : value });
+      const current = composerDrafts.get(draftOwner) ?? EMPTY_DRAFT;
+      composerDrafts.set(draftOwner, { ...current, text: typeof value === "function" ? value(current.text) : value });
       refreshDraft((revision) => revision + 1);
     };
     const setFiles = (value: File[] | ((previous: File[]) => File[])) => {
-      const current = composerDrafts.get(sessionId) ?? EMPTY_DRAFT;
-      composerDrafts.set(sessionId, { ...current, files: typeof value === "function" ? value(current.files) : value });
+      const current = composerDrafts.get(draftOwner) ?? EMPTY_DRAFT;
+      composerDrafts.set(draftOwner, { ...current, files: typeof value === "function" ? value(current.files) : value });
       refreshDraft((revision) => revision + 1);
     };
     const [menuOpen, setMenuOpen] = useState<"slash" | "persona" | null>(null);
@@ -72,28 +73,28 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
     const fileInputRef = useRef<HTMLInputElement>(null);
 
     useLayoutEffect(() => {
-      activeDraft.current = sessionId;
+      activeDraft.current = { owner: draftOwner };
       return () => { activeDraft.current = null; };
-    }, [sessionId]);
+    }, [draftOwner, connected]);
 
     useLayoutEffect(() => {
       const input = textareaRef.current;
       if (!input) return;
       input.style.height = "auto";
       input.style.height = `${Math.min(input.scrollHeight, isMobile ? 120 : 160)}px`;
-    }, [text, sessionId, isMobile]);
+    }, [text, draftOwner, isMobile]);
 
     useEffect(() => {
       setSendError(null);
       setHistoryIndex(null);
       setMenuOpen(null);
-    }, [sessionId]);
+    }, [draftOwner]);
 
     useImperativeHandle(ref, () => textareaRef.current!, []);
 
     useEffect(() => {
       if (connected) textareaRef.current?.focus();
-    }, [connected, sessionId]);
+    }, [connected, draftOwner]);
 
     const hasStreaming = useSessionStore((s) => s.streamingPartId !== null);
     const selectPersona = useSessionStore((s) => s.selectPersona);
@@ -229,6 +230,7 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
 
       setIsSending(true);
       setSendError(null);
+      const source = activeDraft.current;
       try {
         // Convert File objects to Attachment[] (data URLs for wire protocol).
         let attachments: Attachment[] | undefined;
@@ -238,18 +240,18 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
           );
         }
 
-        if (activeDraft.current !== sessionId) return;
+        if (activeDraft.current !== source) return;
         const pending = onSend(trimmed, attachments);
         if (pending !== undefined) await pending;
         pushPromptHistory(trimmed);
         setText((current) => current === text ? "" : current);
         if (files.length > 0) setFiles((current) => current.filter((file) => !files.includes(file)));
-        if (activeDraft.current === sessionId) {
+        if (activeDraft.current?.owner === draftOwner) {
           setHistoryIndex(null);
           closeMenu();
         }
       } catch (e) {
-        if (activeDraft.current === sessionId) {
+        if (activeDraft.current?.owner === draftOwner) {
           setSendError(e instanceof Error ? e.message : "Could not send the message.");
         }
       } finally {
@@ -258,6 +260,7 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
     };
 
     const selectSlash = (cmd: SlashCommand) => {
+      if (!connected) return;
       if (onSlash) {
         onSlash(cmd.command);
       }
@@ -267,6 +270,7 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
     };
 
     const selectPersonaAction = (name: string) => {
+      if (!connected) return;
       selectPersona(name);
       setText("");
       closeMenu();

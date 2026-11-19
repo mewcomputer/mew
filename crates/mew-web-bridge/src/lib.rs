@@ -10,8 +10,8 @@ use tracing::warn;
 mod desktop;
 pub use desktop::DesktopRelay;
 
-/// The built React app. Rebuild the UI before compiling its host.
-static UI_DIST: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../../mew-web-ui/dist");
+/// The built React app, or an empty directory when its assets are unavailable.
+static UI_DIST: Dir<'static> = include_dir!("$MEW_WEB_UI_DIST");
 
 const MAX_HEADER_BYTES: usize = 8192;
 

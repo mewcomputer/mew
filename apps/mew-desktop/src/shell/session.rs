@@ -624,6 +624,7 @@ impl DesktopShell {
         );
         restore_session_layout(&mut self.layout, view_state.layout);
         self.work_tabs = view_state.work_tabs;
+        self.work_tab_scroll_pending = true;
         self.conversation_width = view_state.conversation_width;
         self.expanded_chat_parts = view_state.expanded_chat_parts;
         self.pending_transcript_scroll_anchor = view_state.transcript_scroll_anchor;
@@ -1547,6 +1548,38 @@ mod tests {
             assert_eq!(shell.browser_url, "https://second.example");
             shell.quitting = true;
         });
+    }
+
+    #[gpui::test]
+    fn restoring_a_session_reveals_its_selected_work_tab(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) =
+            cx.add_window_view(|window, cx| DesktopShell::new(None, None, None, None, window, cx));
+        cx.simulate_resize(gpui::size(px(1200.), px(900.)));
+        shell.update(cx, |shell, cx| {
+            shell.layout.sidebar_collapsed = false;
+            shell.layout.workbench_collapsed = false;
+            shell.workbench_animation_id = 0;
+            let mut view = shell.current_session_view_state();
+            for _ in 0..6 {
+                view.work_tabs.new_tab();
+            }
+            shell.session_view_states.insert("restored".into(), view);
+            shell.restore_session_view_state("restored", cx);
+            cx.notify();
+        });
+        cx.refresh().unwrap();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+        });
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+        let selected = cx.debug_bounds("work-tab-6").unwrap();
+        let plus = cx.debug_bounds("new-work-tab").unwrap();
+        assert!(
+            selected.right() <= plus.origin.x,
+            "selected={selected:?}, plus={plus:?}"
+        );
+        shell.update(cx, |shell, _| shell.quitting = true);
     }
 
     #[test]

@@ -2378,6 +2378,7 @@ where
                     version: env!("CARGO_PKG_VERSION").to_string(),
                     protocol_version: mew_protocol::PROTOCOL_VERSION,
                     browser_focus_preflight: true,
+                    scoped_session_failures: true,
                 });
             }
             ClientMessage::ListProjects => {

@@ -207,19 +207,23 @@ impl DesktopSupervisor {
 
         let address = allocate_local_address(self.config.local_port)?;
         let url = websocket_url(address);
-        if let Ok(stream) = TcpStream::connect_timeout(&address, PROBE_TIMEOUT) {
-            probe_daemon_connection(&url, stream).with_context(|| {
-                format!(
-                    "daemon address {address} is already in use; restart or update the daemon \
+        // An ephemeral address cannot refer to a configured existing daemon.
+        // Probing it can even connect the socket to itself after allocation.
+        if self.config.local_port != 0 {
+            if let Ok(stream) = TcpStream::connect_timeout(&address, PROBE_TIMEOUT) {
+                probe_daemon_connection(&url, stream).with_context(|| {
+                    format!(
+                        "daemon address {address} is already in use; restart or update the daemon \
                  before connecting; no second daemon was launched"
-                )
-            })?;
-            let endpoint = DaemonEndpoint {
-                websocket_url: url,
-                mode: DaemonMode::LocalExisting,
-            };
-            self.endpoint = Some(endpoint.clone());
-            return Ok(endpoint);
+                    )
+                })?;
+                let endpoint = DaemonEndpoint {
+                    websocket_url: url,
+                    mode: DaemonMode::LocalExisting,
+                };
+                self.endpoint = Some(endpoint.clone());
+                return Ok(endpoint);
+            }
         }
 
         let binary =
@@ -314,7 +318,7 @@ fn spawn_daemon(
     } else {
         command.stdout(Stdio::null()).stderr(Stdio::null());
     }
-    close_inherited_descriptors(&mut command);
+    mark_inherited_descriptors_close_on_exec(&mut command)?;
     {
         let mut owned_child = owned_child
             .lock()
@@ -430,18 +434,53 @@ fn parse_port(value: &str) -> Result<u16> {
     Ok(port)
 }
 
-fn close_inherited_descriptors(command: &mut Command) {
-    #[cfg(unix)]
-    unsafe {
-        command.pre_exec(|| {
-            let limit = libc::sysconf(libc::_SC_OPEN_MAX);
-            let limit = if limit > 3 { limit } else { 1024 };
-            for fd in 3..limit {
-                libc::close(fd as libc::c_int);
-            }
-            Ok(())
-        });
+/// Snapshot the process's open descriptors above stderr.
+#[cfg(unix)]
+pub fn inherited_descriptors() -> std::io::Result<Vec<std::os::fd::RawFd>> {
+    #[cfg(target_os = "linux")]
+    let path = "/proc/self/fd";
+    #[cfg(not(target_os = "linux"))]
+    let path = "/dev/fd";
+
+    let mut descriptors = Vec::new();
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if let Some(fd) = name
+            .to_str()
+            .and_then(|name| name.parse::<std::os::fd::RawFd>().ok())
+            .filter(|&fd| fd > libc::STDERR_FILENO)
+        {
+            descriptors.push(fd);
+        }
     }
+    Ok(descriptors)
+}
+
+fn mark_inherited_descriptors_close_on_exec(command: &mut Command) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let descriptors = inherited_descriptors().context("list inherited daemon descriptors")?;
+        // Snapshot before fork. The listing itself may appear in the snapshot
+        // and its descriptor number may be reused for Rust's exec-error pipe.
+        // Mark descriptors close-on-exec so that pipe survives a failed exec.
+        unsafe {
+            command.pre_exec(move || {
+                for &fd in &descriptors {
+                    if libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) == -1 {
+                        let error = std::io::Error::last_os_error();
+                        if error.raw_os_error() != Some(libc::EBADF) {
+                            return Err(error);
+                        }
+                    }
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = command;
+    Ok(())
 }
 
 #[cfg(test)]

@@ -565,13 +565,14 @@ async fn handle_slash_command<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: Strin
         }
         SlashResult::SetTheme(name) => {
             cx.app.theme = mew_tui::theme::Theme::load(&name);
+            cx.app.rendered_md_cache.clear();
+            cx.app.md_render_cache.invalidate();
+            cx.app.mark_chat_dirty();
             {
                 let mut save = mew_config::load_state().unwrap_or_default();
                 save.theme = cx.app.theme.name.clone();
                 let _ = mew_config::save_state(&save);
             }
-            // cx.app
-            //     .push_synthetic_message(format!("theme: {}", cx.app.theme.name));
             Flow::Continue
         }
         SlashResult::ToggleMouseCapture => {
@@ -746,7 +747,12 @@ async fn handle_switch_model<T: CommandTarget>(cx: &mut Ctx<'_, T>, spec: &str) 
             cx.app.active_thinking_variant = None;
             if let Some(ref prev) = prev_variant {
                 if let Some(c) = cx.cat {
-                    if let Some(mapped) = c.map_variant(prev, &switched.model_id) {
+                    if let Some(mapped) = crate::setup::providers::map_provider_thinking_variant(
+                        c,
+                        &switched.provider_id,
+                        &switched.model_id,
+                        prev,
+                    ) {
                         // set_thinking resolves the variant via the catalog
                         // and applies the reasoning config to the agent.
                         if cx.target.set_thinking(&mapped.name).await.is_ok() {

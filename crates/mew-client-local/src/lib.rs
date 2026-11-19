@@ -133,6 +133,7 @@ mod tests {
                 version: "test".into(),
                 protocol_version: mew_protocol::PROTOCOL_VERSION,
                 browser_focus_preflight: false,
+                scoped_session_failures: false,
             })
             .unwrap();
             socket.send(Message::Text(response)).await.unwrap();
@@ -168,6 +169,7 @@ mod tests {
                     version: "test".into(),
                     protocol_version: mew_protocol::PROTOCOL_VERSION,
                     browser_focus_preflight: false,
+                    scoped_session_failures: false,
                 },
             ] {
                 socket

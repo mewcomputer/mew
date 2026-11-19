@@ -1156,7 +1156,7 @@ impl DesktopShell {
             .h_full()
             .overflow_hidden()
             .bg(theme_rgb(&self.theme, "panel.background"))
-            .child(self.render_work_tab_bar(cx))
+            .child(self.render_work_tab_bar(window, cx))
             .child(workbench);
         let workbench_width = if self.layout.workbench_collapsed {
             WORKBENCH_COLLAPSED_WIDTH

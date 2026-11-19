@@ -1186,6 +1186,10 @@ async fn ping_returns_pong_with_version() {
         serde_json::to_value(&msg).unwrap()["browser_focus_preflight"],
         true
     );
+    assert_eq!(
+        serde_json::to_value(&msg).unwrap()["scoped_session_failures"],
+        true
+    );
     match msg {
         ServerMessage::Pong { version, .. } => {
             assert!(

@@ -43,7 +43,9 @@ See [Hashline Edits](/docs/using-mew/hashline/) for the patch format and example
 | `shell_monitor` | Dangerous | Run a command and wait for it to exit successfully, retrying until a timeout. For readiness probes. |
 | `job_status` | ReadOnly | Check the status of a background job (shell or subagent). |
 | `job_block` | Mutating | Wait for a background job to reach a terminal state. |
-| `job_cancel` | Dangerous | Cancel a running background job by killing its process. |
+| `job_cancel` | Dangerous | Cancel a running background job and wait for it to stop. On Unix, kills its process group, including children in that group. |
+
+A child that starts a separate process group or session can outlive the job.
 
 ### Session and agent
 

@@ -21,14 +21,14 @@ impl ClientEngine {
             connection.send(ClientMessage::Ping).await?;
             loop {
                 match connection.receive().await? {
-                    Some(ServerMessage::Pong { protocol_version, version, browser_focus_preflight }) => {
+                    Some(ServerMessage::Pong { protocol_version, version, browser_focus_preflight, scoped_session_failures }) => {
                         if protocol_version != PROTOCOL_VERSION {
                             return Err(TransportError::Other(format!(
                                 "incompatible daemon protocol {protocol_version} (daemon {version}); \
                                  this app requires {PROTOCOL_VERSION}"
                             )));
                         }
-                        state.apply_server_message(ServerMessage::Pong { protocol_version, version, browser_focus_preflight });
+                        state.apply_server_message(ServerMessage::Pong { protocol_version, version, browser_focus_preflight, scoped_session_failures });
                         return Ok(());
                     }
                     Some(message @ ServerMessage::RemoteReady { .. }) => {
@@ -240,6 +240,7 @@ mod tests {
             version: "previous-native".into(),
             protocol_version: 1,
             browser_focus_preflight: false,
+            scoped_session_failures: false,
         });
         let error = ClientEngine::connect(&transport)
             .await
@@ -259,6 +260,7 @@ mod tests {
             version: "test".into(),
             protocol_version: PROTOCOL_VERSION,
             browser_focus_preflight: false,
+            scoped_session_failures: false,
         });
         let mut engine = ClientEngine::connect(&transport).await.unwrap();
         assert!(matches!(
@@ -374,6 +376,7 @@ mod tests {
             version: "test".into(),
             protocol_version: PROTOCOL_VERSION,
             browser_focus_preflight: false,
+            scoped_session_failures: false,
         });
         let mut reconnected = ClientEngine::connect(&transport).await.unwrap();
         transport.push_server_message(ServerMessage::SessionReady {
@@ -408,6 +411,7 @@ mod tests {
             version: "test".into(),
             protocol_version: PROTOCOL_VERSION,
             browser_focus_preflight: false,
+            scoped_session_failures: false,
         });
         let mut engine = ClientEngine::connect(&transport).await.unwrap();
         transport.push_server_message(ServerMessage::SessionReady {
@@ -479,6 +483,7 @@ mod tests {
             version: "test".into(),
             protocol_version: PROTOCOL_VERSION,
             browser_focus_preflight: false,
+            scoped_session_failures: false,
         });
         let mut engine = ClientEngine::connect(&transport).await.unwrap();
 

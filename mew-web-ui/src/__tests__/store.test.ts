@@ -22,6 +22,15 @@ describe("pending input recovery", () => {
     } as unknown as MewClient);
   });
 
+  it("shows consecutive identical prompts broadcast by the daemon", () => {
+    handlers.get("user-message")?.({ text: "try again" });
+    handlers.get("user-message")?.({ text: "try again" });
+    expect(store().messages.map((message) => message.parts)).toEqual([
+      [{ type: "text", text: "try again" }],
+      [{ type: "text", text: "try again" }],
+    ]);
+  });
+
   it("deduplicates replayed permission, question, and goal requests", () => {
     for (let replay = 0; replay < 2; replay++) {
       handlers.get("permission-request")?.({ request_id: "p", tool_name: "bash", input: {} }, () => {});

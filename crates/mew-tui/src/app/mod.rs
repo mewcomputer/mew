@@ -1276,7 +1276,7 @@ impl App {
                     .filter(|m| !m.thinking_variants.is_empty())
                     .map(|m| {
                         (
-                            m.model.clone(),
+                            m.id.clone(),
                             m.thinking_variants
                                 .iter()
                                 .map(|v| v.name.clone())
@@ -1289,7 +1289,7 @@ impl App {
                     .filter_map(|m| {
                         m.thinking_budget
                             .clone()
-                            .map(|budget| (m.model.clone(), budget))
+                            .map(|budget| (m.id.clone(), budget))
                     })
                     .collect();
                 // Refresh the context window for the active model if the

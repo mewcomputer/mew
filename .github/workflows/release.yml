@@ -53,12 +53,12 @@ jobs:
         with:
           version: 0.15.2
 
-      - name: Setup pnpm
+      - name: Set up pnpm
         uses: pnpm/action-setup@v4
         with:
           version: 10.33.0
 
-      - name: Setup Node.js
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -66,7 +66,7 @@ jobs:
 
       - name: Build embedded web UI
         run: |
-          pnpm install --frozen-lockfile
+          pnpm install --frozen-lockfile --filter mew-web-ui...
           pnpm --filter @mew/web-client build
           pnpm --filter mew-web-ui build
 
@@ -138,6 +138,23 @@ jobs:
           command -v cmake >/dev/null || brew install cmake
           command -v ninja >/dev/null || brew install ninja
 
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Build embedded web UI
+        run: |
+          pnpm install --frozen-lockfile --filter mew-web-ui...
+          pnpm --filter @mew/web-client build
+          pnpm --filter mew-web-ui build
+
       - name: Install standalone agent-browser
         env:
           BROWSER_ARCH: ${{ matrix.browser_arch }}
@@ -155,8 +172,8 @@ jobs:
 
       - name: Build desktop client, daemon, and CEF helper
         run: |
-          cargo build --release -p mew -p mew-desktop
-          cargo build --release \
+          cargo build --locked --release -p mew -p mew-desktop
+          cargo build --locked --release \
             -p mew-cef-host --bin mew-cef-host-helper --no-default-features
 
       - name: Package desktop app

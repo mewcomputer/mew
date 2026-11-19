@@ -64,10 +64,40 @@ async function rejectedAttachment(permit, url) {
   return state.attempts.at(-1).prevented === true && state.attached === before.attached && !guestId;
 }
 
+async function attachWithoutBinding(permit, url) {
+  const view = viewFor(permit, url);
+  const loaded = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Browser guest did not attach.')), 5000);
+    view.addEventListener('dom-ready', () => { clearTimeout(timer); resolve(); }, { once: true });
+    view.addEventListener('did-fail-load', (event) => {
+      if (event.errorCode !== -3) { clearTimeout(timer); reject(new Error(event.errorDescription)); }
+    }, { once: true });
+  });
+  document.body.appendChild(view);
+  await loaded;
+  return view;
+}
+
 async function run() {
   document.body.style.cssText = 'display:flex;margin:0';
   const settings = await query({ type: 'bootstrap' });
   const { guestUrl } = settings;
+  const crossedOwners = ['cross-first', 'cross-second'].map((tabId) => ({ sessionId: 'session', tabId }));
+  const crossedPermits = await Promise.all(crossedOwners.map((owner) => query({
+    type: 'browser_update', ...owner, url: guestUrl, visible: true, interactive: true,
+    rect: { x: 0, y: 0, width: 400, height: 400 },
+  })));
+  const crossedViews = await Promise.all(crossedPermits.map((permit) => attachWithoutBinding(permit, guestUrl)));
+  for (const [index, owner] of crossedOwners.entries()) {
+    if (!await rejects({ type: 'browser_bind', ...owner, pageInstance: crossedPermits[index].pageInstance, guestId: crossedViews[1 - index].getWebContentsId() })) {
+      throw new Error('A guest was bound to another tab before either guest was bound.');
+    }
+  }
+  for (const [index, owner] of crossedOwners.entries()) {
+    await query({ type: 'browser_bind', ...owner, pageInstance: crossedPermits[index].pageInstance, guestId: crossedViews[index].getWebContentsId() });
+    await query({ type: 'browser_close', ...owner });
+    crossedViews[index].remove();
+  }
   const views = [];
   const permits = [];
   for (const tabId of ['first', 'second']) {

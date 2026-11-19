@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use anyhow::Context;
 use anyhow::Result;
 use clap::{CommandFactory, Parser};
 
@@ -173,7 +175,7 @@ fn main() -> Result<()> {
     // otherwise the daemon can keep the host's listening sockets alive after
     // the desktop process exits.
     if matches!(&cli.command, Some(Commands::Daemon { .. })) {
-        close_inherited_descriptors();
+        close_inherited_descriptors()?;
     }
 
     // Now safe to start the tokio runtime.
@@ -184,15 +186,16 @@ fn main() -> Result<()> {
     runtime.block_on(async_main(cli, daemonized))
 }
 
-fn close_inherited_descriptors() {
+fn close_inherited_descriptors() -> Result<()> {
     #[cfg(unix)]
-    unsafe {
-        let limit = libc::sysconf(libc::_SC_OPEN_MAX);
-        let limit = if limit > 3 { limit } else { 1024 };
-        for fd in 3..limit {
-            libc::close(fd as libc::c_int);
-        }
+    for fd in mew_desktop_supervisor::inherited_descriptors()
+        .context("list daemon's inherited descriptors")?
+    {
+        // The runtime has not started and the directory used to list
+        // descriptors is already closed.
+        unsafe { libc::close(fd) };
     }
+    Ok(())
 }
 
 async fn async_main(cli: Cli, daemonized: bool) -> Result<()> {

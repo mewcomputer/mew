@@ -2284,6 +2284,162 @@ strict Clippy, formatting, architecture, generated themes, subprocess end-to-end
 checks and the 38-page documentation build. Native checks used the existing
 matching CEF 150.0.14 SDK. The next remote run will verify both platforms.
 
+### 2026-10-14: refresh transcript colors when switching terminal themes
+
+The /theme command now invalidates completed markdown and committed streaming
+blocks and marks the full transcript stale. The next frame uses the selected
+theme at the same terminal width, without waiting for another message. Drafts,
+conversation content and the active markdown parser remain intact.
+
+A real command-dispatch regression failed with cached dark colors before the
+fix, then matched fresh light and dark renders for completed history and active
+streaming. Theme persistence runs in a child process with isolated config storage
+instead of modifying the test process's environment or the user's settings.
+All 779 CLI/TUI test executions passed, including existing visual goldens. The
+full just ci gate also passed, including strict Clippy, architecture, generated
+themes, workspace tests, web builds, the real daemon/bridge subprocess checks
+and the 38-page documentation build. Live terminal interaction is still pending.
+
+### 2026-10-14: rebuild the terminal and native companion for live verification
+
+Built the optimized CLI, GPUI app and CEF helper from merged main plus the theme
+fix in the attached theme-cache-refresh worktree. The shared checkout's unrelated
+plan-path edits were preserved and excluded from this build. The native bundle is
+under that worktree's target/release/bundle/macos/mew.app.
+
+The CLI reports mew 0.2.0; all three fresh executables are ARM64. Bundled daemon,
+desktop and helper hashes match their release binaries. The standalone browser
+helper reports 0.34.0 and matches the workflow's pinned SHA256. CEF reports
+150.0.14.0, its bundled credits match the selected SDK, and all five helper app
+executables and property lists passed verification. Build dependencies stayed in
+task caches; global tools were not replaced. The app was not launched, leaving
+focus, browser ownership and terminal interaction for the requested live pass.
+
+### 2026-11-16: make Rust dependency resolution reproducible
+
+The workspace now tracks Cargo.lock and CI uses locked resolution. This keeps
+fff-search's debouncer on its compatible notify prerelease rather than picking
+an incompatible newer prerelease in a clean checkout.
+
+The locked workspace passed Clippy, and mew-tools tests passed, including its
+search integration tests. Cargo metadata also verified the lockfile is current.
+
+### 2026-11-16: provision the CEF SDK for CI
+
+CI now downloads and verifies the CEF SDK matching the locked bindings before
+building. This avoids the bundled downloader's outdated index size limit.
+
+The actual Linux and macOS archives passed checksum and extraction checks; the
+macOS SDK also built the CEF host with locked dependencies.
+
+### 2026-11-16: fix Rust 1.100 clippy failures
+
+The terminal chat renderer and desktop selection copier iterate over their rows
+without indexing range loops, preserving the original ordering and bounds.
+
+Workspace Clippy passed with Rust 1.100 and Zig 0.15.2. The expanded tool batch
+rendering regression and all 154 desktop tests passed.
+
+### 2026-11-16: avoid copying plugin executables in Unix tests
+
+Unix plugin tests now link to the built sample executable instead of copying it
+immediately before launch. This avoids opening each test executable for writing
+while other test processes start, which can make Linux reject exec with ETXTBSY.
+
+All 17 plugin integration and restart tests passed, including 24 concurrent
+launches. A Linux container reproduced ETXTBSY with a held writable descriptor
+and completed 1,600 concurrent launches through symbolic links.
+
+### 2026-11-16: stabilize broker plugin test setup
+
+Broker integration fixtures also link their built plugin executables on Unix,
+including tests that load multiple plugins. The audit test checks that its
+plugin started and looks for an entry from its own session.
+
+The broker integration test compiled, and the two-plugin collision test passed.
+
+### 2026-11-16: increase the default subagent time limit
+
+Subagents now default to 600 seconds. Built-in agents inherit the configured
+orchestration default, while explicit per-agent limits retain precedence. The
+limit is checked after each provider message, so a stalled message can exceed it.
+
+The mew-agent, mew-config and mew-subagents tests passed, including coverage for
+the default and both override paths. The architecture check passed.
+
+# 2026-11-16 — Return only the subagent's final result
+
+The subagent runner previously concatenated text deltas from every assistant
+message, including reasoning, when the child did not call `exit_tool`. It now
+returns the last assistant message's text, while the explicit `exit_tool`
+payload remains authoritative. The subagent prompt tells children to include
+the complete result and requested JSON in that final message. Live progress
+and the child transcript remain available separately.
+
+Verified `cargo test -p mew-agent` (208 tests), `cargo test -p mew-prompts`
+(64 tests), and `just arch-check`.
+
+### 2026-11-16: verify empty subagent final responses
+
+A partless final provider message reports an agent error rather than returning
+an earlier progress message. The regression test exercises that sequence with
+an actual subagent runner; all 211 mew-agent tests passed.
+
+# 2026-11-16 — Hy thinking levels from models.dev
+
+Read provider-specific Hy effort levels from models.dev for OpenCode and
+OpenRouter when the request uses `reasoning_effort`. Keep provider identity
+through the daemon and terminal pickers so identical model IDs do not share
+levels. Explicit `none` disables thinking on the wire, and the default selects
+an enabled level. Entries requiring an unknown toggle format remain unavailable.
+
+Verified the catalog parsing regressions, OpenAI adapter off regression,
+`mew-tui` library tests, daemon policy and reasoning-resolution tests,
+`cargo check -p mew --bin mew --tests`, and `just arch-check`. No live provider
+request was made. The generated local Cargo.lock needed notify 9.0.0-rc.4:
+rc.9 is incompatible with fff-notify-debouncer-full 0.9.4.
+
+### 2026-11-16: preserve provider-specific thinking on model switches
+
+Thinking-level carryover now uses the destination provider's variants and
+budget. Numeric budget resolution also selects that provider's range instead
+of an unrelated model with the same id.
+
+The catalog tests and thinking-resolution tests passed, including duplicate
+model ids with different provider levels and budget ranges.
+
+# 2026-11-16 — Cancel background shell process groups
+
+Background shell cancellation killed only the `sh` leader and reported success
+before it stopped. On Unix each job now runs in its own process group, and
+cancellation kills that group and waits for the job to reach a terminal state.
+The tool reports failures instead of emitting a false cancelled update. A child
+that explicitly creates another process group or session can still outlive the
+job; the bounded pipe drain reports incomplete output in that case.
+
+Verified real subprocess and sibling-isolation regressions, immediate and
+repeated cancellation, detached pipe handling, the `job_cancel` tool flow,
+`cargo test -p mew-agent -p mew-daemon -p mew-tools`, and `just arch-check`.
+
+### 2026-11-16: finish shell job cancellation during output drain
+
+Shell jobs on Linux and macOS keep their leader waitable through the existing
+bounded output drain, so cancellation can still stop the process group after
+the shell exits. Cancellation also stops a leader that changes groups, handles
+stopped groups, and leaves status and block timeouts responsive. If child
+ownership is lost, the job reports failure without signalling the saved ID.
+
+Verified the competing-reaper, post-exit, stopped-group, moved-leader, cleanup,
+and timeout regressions with `cargo test --locked -p mew-agent --lib` (226
+passing), `cargo clippy --locked -p mew-agent --all-targets -- -D warnings`,
+and `just arch-check` on macOS.
+
+### 2026-11-17: refresh agent guidance
+
+Updated `AGENTS.md` for the native desktop workflow, locked CI dependencies,
+provider-specific thinking, subagent results and time limits, and background
+job cancellation. Verified the guidance against the implementation and CI,
+checked Cargo metadata with `--locked`, and ran `just arch-check`.
 ### 2026-10-14: per-plan names and no CURRENT.md agent directives
 
 Removed the active CURRENT.md instructions from the repository guidance and
@@ -4009,6 +4165,24 @@ generated-theme checks passed with commit hooks enabled. See
 `apps/mew-electron/README.md` and the updated migration/checklist
 notes for commands, evidence boundaries and the remaining first-release work.
 
+## 2026-11-17: Electron and shared web UI integration
+
+Merged the Electron desktop shell branch with current main, preserving the native
+GPUI desktop as the default while the migration checklist remains open. The
+Electron browser rejects daemon-control traffic across aliases and disables
+browsing when a daemon uses port 80 or 443. Scoped prompt receipts, session
+attachment handling, and guest ownership protect conversation and browser state
+across disconnects and rapid switches. The bridge builds without prebuilt web
+assets and release jobs build the production assets before embedding them.
+
+Resolved the terminal selection and light-theme merge conflicts, corrected
+ephemeral daemon probing and work-tab scrolling, and documented the temporary
+config directories required by desktop tests. Verified the isolated full Rust
+workspace suite, workspace clippy and formatting, architecture and theme checks,
+51 TypeScript client tests, 218 UI tests, 30 Electron host tests, production web
+and site builds, and three bridge subprocess tests. The Electron signed-package
+test is opt-in and was not rerun.
+
 ## 2026-11-18 Session recovery and transport hardening
 
 Serialize session metadata changes and replace the metadata file atomically.
@@ -4077,3 +4251,32 @@ Verified 51 SDK tests, 220 React tests, TypeScript checks, and the production
 renderer build. Electron host tests and real guest isolation passed. The
 native package and pinned browser input tests require agent-browser 0.34 or
 newer. The installed version was 0.31.2.
+
+## 2026-11-18 Foundation integration with main
+
+Merge the session and transport changes with main's attachment safeguards,
+guest restrictions, pinned dependencies, and CEF setup. Regenerate the tracked
+SDK. Keep the parent's subagent result limited to the final reply. Drain the
+last allowed turn through tool completion and give schema correction the
+remaining turn budget.
+
+Require CI's daemon and bridge round trip, and isolate the fixture's state and
+daemon status file. Verified 242 agent tests, 12 session tests, 63 SDK tests,
+230 React tests, the production renderer and site builds, and all five
+bridge subprocess tests. Real Electron guest isolation and browser input
+passed with agent-browser 0.34.0.
+
+Close only open inherited descriptors during daemon startup. Mark the
+supervisor's inherited descriptors close-on-exec to preserve launch errors.
+A Node-spawned desktop host reached readiness with an unlimited macOS
+descriptor limit, owned its daemon, and shut down cleanly at EOF.
+
+Verified the signed Electron debug bundle with a deterministic provider. The
+app reopened its parent connection, checked the guidance receipt, and the
+running child received the message once across a forced disconnect.
+
+Make plugin fixtures honor the Cargo target directory and build their examples
+with the lockfile. The full macOS workspace suite passed 2,856 tests with five
+ignored. Workspace Clippy, formatting, architecture, and theme checks passed.
+Local macOS checks used the library built from the pinned Ghostty revision
+after the local Zig linker failed.

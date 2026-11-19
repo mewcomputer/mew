@@ -6,6 +6,7 @@
   "scripts": {
     "start": "electron .",
     "test": "node --test *.test.cjs",
+    "test:unit": "node --test policy.test.cjs support.test.cjs package.test.cjs",
     "package": "node package.cjs"
   },
   "devDependencies": {

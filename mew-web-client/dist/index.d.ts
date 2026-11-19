@@ -51,10 +51,25 @@ export type ClientMessage = {
     child_session_id: string;
     request_id: string;
 } | {
+    type: "guide_subagent";
+    session_id: string;
+    child_session_id: string;
+    request_id: string;
+    text: string;
+} | {
+    type: "read_subagent_message_receipt";
+    session_id: string;
+    child_session_id: string;
+    request_id: string;
+} | {
     type: "list_sessions";
 } | {
     type: "delete_session";
     session_id: string;
+} | {
+    type: "delete_session_confirmed";
+    session_id: string;
+    request_id: string;
 } | {
     type: "rename_session";
     session_id: string;
@@ -83,6 +98,16 @@ export type ClientMessage = {
     type: "prompt";
     text: string;
     attachments: Attachment[];
+} | {
+    type: "submit_prompt";
+    session_id: string;
+    request_id: string;
+    text: string;
+    attachments: Attachment[];
+} | {
+    type: "read_prompt_receipt";
+    session_id: string;
+    request_id: string;
 } | {
     type: "cancel";
 } | {
@@ -581,6 +606,39 @@ export interface Segment {
     tokens_scaled: number;
     children: Segment[];
 }
+type SessionOperationFailed = {
+    type: "session_operation_failed";
+    operation: "create" | "attach";
+    session_id: string | null;
+    message: string;
+};
+type PromptReceipt = {
+    type: "prompt_receipt";
+    session_id: string;
+    request_id: string;
+    status: "accepted" | "rejected" | "unknown";
+    message?: string;
+};
+export type SubagentMessageReceipt = {
+    type: "subagent_message_receipt";
+    session_id: string;
+    child_session_id: string;
+    request_id: string;
+    status: PromptReceipt["status"];
+    message?: string;
+};
+type SessionDeletionResult = {
+    type: "session_deletion_result";
+    session_id: string;
+    request_id: string;
+    error?: string | null;
+};
+export interface SessionHistoryPage {
+    session_id: string;
+    messages: Message[];
+    next_cursor?: number;
+    replace: boolean;
+}
 export type ServerMessage = ({
     type: "daemon_settings";
 } & DaemonSettings) | {
@@ -597,7 +655,7 @@ export type ServerMessage = ({
     model?: string;
     provider?: string;
     permission_mode?: string;
-} | {
+} | SessionOperationFailed | PromptReceipt | SubagentMessageReceipt | SessionDeletionResult | {
     type: "error";
     message: string;
 } | {
@@ -713,13 +771,9 @@ export type ServerMessage = ({
     request_id: string;
     messages: Message[];
     error: string | null;
-} | {
+} | ({
     type: "session_history_page";
-    session_id: string;
-    messages: Message[];
-    next_cursor?: number;
-    replace: boolean;
-} | {
+} & SessionHistoryPage) | {
     type: "model_list";
     models: ModelInfo[];
 } | {
@@ -824,6 +878,7 @@ export type ServerMessage = ({
     version: string;
     protocol_version?: number;
     browser_focus_preflight?: boolean;
+    scoped_session_failures?: boolean;
 } | {
     type: "project_list";
     projects: ProjectInfo[];
@@ -885,6 +940,10 @@ export interface MewClientEvents {
         provider?: string;
         permission_mode?: string;
     }) => void;
+    "session-command-state": () => void;
+    "session-operation-failed": (data: SessionOperationFailed) => void;
+    "prompt-receipt": (data: PromptReceipt) => void;
+    "session-deletion-result": (data: SessionDeletionResult) => void;
     provider: (ev: ProviderEventWire) => void;
     "user-message": (data: {
         text: string;
@@ -973,6 +1032,7 @@ export interface MewClientEvents {
     "session-history": (data: {
         messages: Message[];
     }) => void;
+    "session-history-page": (page: SessionHistoryPage) => void;
     "job-output": (data: JobOutput) => void;
     "job-output-error": (data: JobOutputError) => void;
     "subagent-history": (data: {
@@ -982,6 +1042,7 @@ export interface MewClientEvents {
         messages: Message[];
         error: string | null;
     }) => void;
+    "subagent-message-receipt": (receipt: SubagentMessageReceipt) => void;
     "model-list": (data: {
         models: ModelInfo[];
     }) => void;
@@ -1154,27 +1215,37 @@ export declare class MewClient {
     private listeners;
     /** Promise resolved when the WebSocket opens. */
     private openPromise;
-    /** Session id returned by `newSession`. */
+    private connectionLifetime;
+    private protocolVersion;
     private sessionId;
     private confirmedSessions;
     private browserFocusPreflight;
     /** Messages currently projected from the most recent history pages. */
     private sessionHistoryMessages;
-    /** Session lifecycle requests share uncorrelated daemon errors. */
+    /** SessionReady has no request ID, so lifecycle requests share a queue. */
     private sessionCommandTail;
+    private pendingSessionCommands;
+    private scopedSessionFailures;
+    private pendingPrompts;
     constructor(url: string, opts?: MewClientOptions);
     /** Open the WebSocket connection. Idempotent. */
     connect(): Promise<void>;
-    /** Close the WebSocket. After calling this, the client cannot be reused. */
+    /** Close the current socket and discard its attachment confirmations. */
     disconnect(code?: number, reason?: string): void;
+    private endConnection;
     isConnected(): boolean;
     hasConfirmedSession(sessionId: string): boolean;
-    /** Serialize lifecycle requests because daemon errors have no request id. */
-    private enqueueSessionCommand;
+    /** Commands for the active session need its current socket's confirmation. */
+    isSessionAttached(sessionId: string): boolean;
+    /** True once the active attachment has no queued or in-flight lifecycle work. */
+    isSessionStable(sessionId: string): boolean;
+    private requestSession;
     /** Send `new_session`. Resolves with the daemon-assigned session id. */
     newSession(cwd?: string | null): Promise<string>;
     /** Send `prompt`. Streaming events are emitted via the registered handlers. */
     prompt(text: string, attachments?: Attachment[]): void;
+    /** Resolve only when the daemon accepts the prompt in the specified session. */
+    submitPrompt(sessionId: string, text: string, attachments?: Attachment[]): Promise<void>;
     /** Compare and save one todo; resolve only after the daemon confirms it. */
     updateTodo(sessionId: string, edit: TodoEdit): Promise<Todo[]>;
     /** Send `cancel` to abort the current turn. */
@@ -1207,11 +1278,18 @@ export declare class MewClient {
     readJobOutput(session_id: string, job_id: string, request_id: string, offset: number): void;
     /** Request a recorded child transcript without changing the attached session. */
     readSubagentHistory(session_id: string, child_session_id: string, request_id: string): void;
+    /** Send guidance to a running child of the attached conversation. */
+    guideSubagent(sessionId: string, childSessionId: string, text: string, requestId?: string): Promise<SubagentMessageReceipt>;
+    /** Read a receipt without sending new guidance. */
+    readSubagentMessageReceipt(sessionId: string, childSessionId: string, requestId: string): Promise<SubagentMessageReceipt>;
+    private requestSubagentReceipt;
     /** List all sessions known to the daemon (active + persisted idle).
      *  The daemon responds with a `session-list` event. */
     listSessions(): Promise<SessionInfo[]>;
     /** Delete a session from disk and remove it from the active list. */
     deleteSession(session_id: string): void;
+    /** Delete a conversation and wait for its matching daemon confirmation. */
+    deleteSessionConfirmed(sessionId: string): Promise<void>;
     /** Rename a session (set a custom title). Persists to disk and broadcasts. */
     renameSession(session_id: string, title: string): void;
     /** Enable or disable auto-generated session titles. */
@@ -1292,7 +1370,8 @@ export declare class MewClient {
     private emit;
     private dispatch;
     private send;
-    /** Return the active session id, or null if `newSession` hasn't succeeded. */
+    /** Return the last confirmed session ID, which can outlive its connection. */
     getSessionId(): string | null;
 }
+export {};
 //# sourceMappingURL=index.d.ts.map

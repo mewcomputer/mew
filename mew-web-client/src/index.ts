@@ -687,7 +687,7 @@ export type ServerMessage =
       pending_permissions: number;
       pending_questions: number;
     }
-  | { type: "pong"; version: string; protocol_version?: number; browser_focus_preflight?: boolean }
+  | { type: "pong"; version: string; protocol_version?: number; browser_focus_preflight?: boolean; scoped_session_failures?: boolean }
   | { type: "project_list"; projects: ProjectInfo[] }
   | { type: "browser_page_registration"; session_id: string; page_instance: string; error: string | null }
   | { type: "browser_snapshot"; snapshot: string; url: string; title: string; tab_id?: string }
@@ -748,7 +748,9 @@ export interface MewClientEvents {
     provider?: string;
     permission_mode?: string;
   }) => void;
+  "session-command-state": () => void;
   "session-operation-failed": (data: SessionOperationFailed) => void;
+  "prompt-receipt": (data: PromptReceipt) => void;
   "session-deletion-result": (data: SessionDeletionResult) => void;
   provider: (ev: ProviderEventWire) => void;
   "user-message": (data: { text: string }) => void;
@@ -921,12 +923,14 @@ export class MewClient {
   private browserFocusPreflight: Promise<boolean> | null = null;
   /** Messages currently projected from the most recent history pages. */
   private sessionHistoryMessages: Message[] = [];
-  /** Session lifecycle requests share uncorrelated daemon errors. */
+  /** SessionReady has no request ID, so lifecycle requests share a queue. */
   private sessionCommandTail: Promise<void> = Promise.resolve();
+  private pendingSessionCommands = 0;
+  private scopedSessionFailures = false;
   private pendingPrompts = new Map<string, {
     requestId: string;
     socket: MewWebSocket;
-    timeout?: ReturnType<typeof setTimeout>;
+    timeout: ReturnType<typeof setTimeout>;
     finish: (status: PromptReceipt["status"], message?: string) => void;
   }>();
 
@@ -949,6 +953,7 @@ export class MewClient {
     this.connectionLifetime = lifetime;
     this.openPromise = new Promise<void>((resolve, reject) => {
       const cleanup = () => {
+        clearTimeout(timeout);
         this.off("remote-ready", onReady);
         this.off("errorMessage", onRemoteError);
         lifetime.signal.removeEventListener("abort", onDisconnected);
@@ -960,6 +965,11 @@ export class MewClient {
         this.disconnect();
       };
       const onDisconnected = () => { cleanup(); reject(lifetime.signal.reason); };
+      const timeout = setTimeout(() => {
+        cleanup();
+        reject(new Error("The daemon connection did not open in time."));
+        this.disconnect();
+      }, 10000);
       lifetime.signal.addEventListener("abort", onDisconnected, { once: true });
       ws.addEventListener("open", () => {
         if (this.ws !== ws) return;
@@ -1019,11 +1029,15 @@ export class MewClient {
     this.confirmedSessions.clear();
     this.browserFocusPreflight = null;
     this.protocolVersion = 0;
+    this.scopedSessionFailures = false;
     this.sessionHistoryMessages = [];
+    const wasSwitching = this.pendingSessionCommands > 0;
+    this.pendingSessionCommands = 0;
+    this.sessionCommandTail = Promise.resolve();
     const lifetime = this.connectionLifetime;
     this.connectionLifetime = null;
     lifetime?.abort(new Error(message));
-    for (const pending of this.pendingPrompts.values()) clearTimeout(pending.timeout);
+    if (wasSwitching) this.emit("session-command-state");
     return true;
   }
 
@@ -1040,11 +1054,16 @@ export class MewClient {
     return this.sessionId === sessionId && this.hasConfirmedSession(sessionId);
   }
 
-  /** SessionReady has no request ID, so only one lifecycle command can be in flight. */
+  /** True once the active attachment has no queued or in-flight lifecycle work. */
+  isSessionStable(sessionId: string): boolean {
+    return this.pendingSessionCommands === 0 && this.isSessionAttached(sessionId);
+  }
+
   private requestSession(message: Extract<ClientMessage, { type: "new_session" | "attach_session" }>): Promise<string> {
     const connecting = this.connect();
     const signal = this.connectionLifetime?.signal;
     if (!signal) return connecting.then(() => { throw new Error("No daemon connection."); });
+    const wasIdle = this.pendingSessionCommands++ === 0;
     const run = this.sessionCommandTail.then(async () => {
       await connecting;
       signal.throwIfAborted();
@@ -1069,7 +1088,7 @@ export class MewClient {
           fail(new Error(data.message));
         };
         const onLegacyError = ({ message }: { message: string }) => {
-          if (this.protocolVersion < 3) fail(new Error(message));
+          if (!this.scopedSessionFailures) fail(new Error(message));
         };
         const onDisconnect = () => fail(signal.reason);
         const timeout = setTimeout(() => {
@@ -1083,11 +1102,15 @@ export class MewClient {
         try { this.send(message); }
         catch (error) { fail(error); }
       });
+    }).finally(() => {
+      if (this.connectionLifetime?.signal !== signal) return;
+      if (--this.pendingSessionCommands === 0) this.emit("session-command-state");
     });
     this.sessionCommandTail = run.then(
       () => undefined,
       () => undefined,
     );
+    if (wasIdle) this.emit("session-command-state");
     return run;
   }
 
@@ -1671,6 +1694,7 @@ export class MewClient {
         });
         break;
       case "session_operation_failed":
+        this.scopedSessionFailures = true;
         this.emit("session-operation-failed", msg);
         break;
       case "session_deletion_result":
@@ -1681,6 +1705,7 @@ export class MewClient {
         if (pending && pending.socket === this.ws && pending.requestId === msg.request_id) {
           pending.finish(msg.status, msg.message);
         }
+        this.emit("prompt-receipt", msg);
         break;
       }
       case "remote_ready":
@@ -1969,6 +1994,7 @@ export class MewClient {
         this.emit("errorEvent", { message: msg.message });
         break;
       case "pong": {
+        this.scopedSessionFailures ||= msg.scoped_session_failures ?? false;
         this.protocolVersion = msg.protocol_version ?? 0;
         const socket = this.ws;
         for (const [sessionId, pending] of this.pendingPrompts) {
@@ -1978,7 +2004,6 @@ export class MewClient {
             continue;
           }
           pending.socket = socket;
-          pending.timeout = setTimeout(() => pending.finish("unknown"), 15000);
           try { this.send({ type: "read_prompt_receipt", session_id: sessionId, request_id: pending.requestId }); }
           catch { pending.finish("unknown"); }
         }
@@ -2013,6 +2038,12 @@ export class MewClient {
   }
 
   private send(msg: ClientMessage): void {
+    if (this.pendingSessionCommands > 0 && [
+      "prompt", "cancel", "guide", "slash_command", "switch_model", "switch_persona",
+      "set_thinking_variant", "set_permission_mode", "yield_control", "set_auto_title", "set_auto_summary",
+    ].includes(msg.type)) {
+      throw new Error("Wait until switching conversations finishes.");
+    }
     if (!this.ws) throw new Error("not connected");
     if (this.debug) console.debug("[mew] ->", msg);
     this.ws.send(JSON.stringify(msg));

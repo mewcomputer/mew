@@ -322,6 +322,7 @@ impl DesktopShell {
             work_tabs: WorkTabs::default(),
             workbench_focus_handle: cx.focus_handle(),
             work_tab_scroll: gpui::ScrollHandle::new(),
+            work_tab_scroll_pending: false,
             transcript_list,
             transcript_scrolled_away: false,
             transcript_scrollbar_grab_offset: None,
@@ -951,6 +952,7 @@ mod lifecycle_tests {
                         version: "test".into(),
                         protocol_version: mew_protocol::PROTOCOL_VERSION,
                         browser_focus_preflight: false,
+                        scoped_session_failures: false,
                     })
                     .unwrap(),
                 ))
@@ -1034,6 +1036,7 @@ mod lifecycle_tests {
                 version: "test".into(),
                 protocol_version: mew_protocol::PROTOCOL_VERSION,
                 browser_focus_preflight: false,
+                scoped_session_failures: false,
             })
             .unwrap();
         server.join().unwrap();
@@ -1183,6 +1186,7 @@ mod lifecycle_tests {
                         version: "test".into(),
                         protocol_version: PROTOCOL_VERSION,
                         browser_focus_preflight: false,
+                        scoped_session_failures: false,
                     })
                     .unwrap(),
                 ))
@@ -1248,6 +1252,7 @@ mod lifecycle_tests {
                         version: "test".into(),
                         protocol_version: PROTOCOL_VERSION,
                         browser_focus_preflight: false,
+                        scoped_session_failures: false,
                     })
                     .unwrap(),
                 ))

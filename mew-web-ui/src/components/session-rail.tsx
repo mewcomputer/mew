@@ -136,12 +136,14 @@ export function SessionRail({ client }: SessionRailProps) {
 
   const handleNewSession = async () => {
     if (!client) return;
+    const location = router.state.location;
     try {
       // Clear the previous chat before creation. newSession emits session-ready
       // and seeds the store; resetting afterward would make the route attach
       // to the new session a second time.
       useSessionStore.getState().reset();
       const newId = await client.newSession();
+      if (router.state.location !== location) return;
       localStorage.setItem("mew.sessionId", newId);
       router.navigate({ to: "/session/$sessionId", params: { sessionId: newId } });
       setOpenMobile(false);
@@ -152,9 +154,11 @@ export function SessionRail({ client }: SessionRailProps) {
 
   const handleNewSessionFromCwd = async (cwd: string) => {
     if (!client) return;
+    const location = router.state.location;
     try {
       useSessionStore.getState().reset();
       const newId = await client.newSession(cwd);
+      if (router.state.location !== location) return;
       localStorage.setItem("mew.sessionId", newId);
       router.navigate({ to: "/session/$sessionId", params: { sessionId: newId } });
       setShowProjectPicker(false);

@@ -42,8 +42,10 @@ function RootComponent() {
         store.setConnectionError("Connect to the daemon before creating a chat.");
         return;
       }
+      const location = router.state.location;
       store.reset();
       void client.newSession().then((newId) => {
+        if (router.state.location !== location) return;
         localStorage.setItem("mew.sessionId", newId);
         router.navigate({ to: "/session/$sessionId", params: { sessionId: newId } });
       }).catch((error: unknown) => {

@@ -1167,6 +1167,7 @@ mod tests {
             version: "test".into(),
             protocol_version: mew_protocol::PROTOCOL_VERSION,
             browser_focus_preflight: false,
+            scoped_session_failures: false,
         };
         ws.send(Message::Text(mew_protocol::encode_json(&pong).unwrap()))
             .await

@@ -923,7 +923,7 @@ pub const THEME_OVERRIDES: &[(&str, &[(&str, &str)])] = &[
         ("pill.persona.fg", "@persona.accent.fg"),
         ("pill.thinking.bg", "@yellow.bg"),
         ("pill.thinking.fg", "@yellow.fg"),
-        ("popover", "#ffffff"),
+        ("popover", "#f4f4f4"),
         ("popover_foreground", "@foreground"),
         ("primary", "#202020"),
         ("primary_foreground", "#ffffff"),

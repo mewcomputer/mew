@@ -15,7 +15,7 @@ are untouched. `MEW_ORCHESTRATION__*` env overrides come free from the existing
 [orchestration]
 max_concurrent_subagents = 4     # 0 = unlimited (opt out of the cap)
 max_subagent_depth = 1           # children also need `can_spawn: true` to nest
-default_max_duration_secs = 300  # overrides the built-in per-run wall-clock default
+default_max_duration_secs = 600  # overrides the built-in per-run wall-clock default
 leak_reminder = true             # remind the model about uncollected tasks at turn end
 leak_reminder_max = 2            # max reminder loop-backs per user turn
 ```
@@ -117,7 +117,7 @@ receives the pieces it needs via `SimpleRunner::with_*` setters.
 |---|---|---|
 | `orchestration.max_concurrent_subagents` | 4 | 2 |
 | `orchestration.max_subagent_depth` | 1 | 2 |
-| `orchestration.default_max_duration_secs` | 300 | 2 |
+| `orchestration.default_max_duration_secs` | 600 | 2 |
 | `orchestration.leak_reminder` | true | 1 |
 | `orchestration.leak_reminder_max` | 2 | 1 |
 

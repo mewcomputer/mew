@@ -4,11 +4,12 @@ const { guestRequestAllowed } = require('./policy.cjs');
 
 // DOM guests share browser storage, but never the privileged renderer's Session.
 class BrowserHost {
-  constructor(parent, guestSession, endpoint, protectedPorts) {
+  constructor(parent, guestSession, endpoint, protectedPorts, unavailable) {
     this.parent = parent;
     this.session = guestSession;
     this.endpoint = endpoint;
     this.ports = protectedPorts;
+    this.unavailable = unavailable;
     this.pages = new Map();
     this.attached = new Map();
     guestSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
@@ -17,11 +18,14 @@ class BrowserHost {
     guestSession.webRequest.onBeforeRequest((details, callback) => callback({ cancel: !guestRequestAllowed(details.url, this.ports) }));
     parent.on('will-attach-webview', (event, preferences, params) => {
       const page = this.pages.values().find((entry) => entry.partition === params.partition);
-      if (!page || page.consumed || params.src !== page.initialUrl || !guestRequestAllowed(params.src, this.ports)) {
+      if (!page || page.consumed || !Number.isSafeInteger(params.instanceId) || params.instanceId <= 0
+        || this.pages.values().some((entry) => entry.consumed && entry.viewInstanceId === params.instanceId)
+        || params.src !== page.initialUrl || !guestRequestAllowed(params.src, this.ports)) {
         event.preventDefault();
         return;
       }
       page.consumed = true;
+      page.viewInstanceId = params.instanceId;
       delete preferences.preload;
       delete preferences.preloadURL;
       delete preferences.additionalArguments;
@@ -33,6 +37,12 @@ class BrowserHost {
       delete params.allowpopups;
     });
     parent.on('did-attach-webview', (_event, contents) => {
+      // Electron 45 copies params.instanceId onto the guest before this event.
+      // Reject an unknown identity rather than accepting another tab's guest.
+      const page = this.pages.values().find((entry) => entry.consumed
+        && entry.viewInstanceId === contents.viewInstanceId && !entry.attachedContents);
+      if (!page) { contents.close(); return; }
+      page.attachedContents = contents;
       this.attached.set(contents.id, contents);
       contents.setWindowOpenHandler(() => ({ action: 'deny' }));
       const limit = (event) => { if (!guestRequestAllowed(event.url, this.ports)) event.preventDefault(); };
@@ -42,7 +52,7 @@ class BrowserHost {
       contents.once('destroyed', () => {
         this.attached.delete(contents.id);
         for (const [key, page] of this.pages) {
-          if (page.contents !== contents) continue;
+          if (page.attachedContents !== contents) continue;
           this.pages.delete(key);
           this.emit(page, 'closed');
         }
@@ -119,6 +129,7 @@ class BrowserHost {
   }
 
   update(request) {
+    if (this.unavailable && request.visible) throw new Error(this.unavailable);
     const key = this.key(request);
     let page = this.pages.get(key);
     if (!page) {
@@ -150,8 +161,7 @@ class BrowserHost {
     const page = this.pages.get(key);
     const contents = this.attached.get(request.guestId);
     if (!page || page.pageInstance !== request.pageInstance || !page.consumed || !contents || contents.isDestroyed()
-      || contents.hostWebContents !== this.parent || contents.session !== this.session
-      || this.pages.values().some((other) => other !== page && other.contents === contents)) {
+      || page.attachedContents !== contents || contents.hostWebContents !== this.parent || contents.session !== this.session) {
       throw new Error('The browser page is no longer available.');
     }
     if (page.contents) {
@@ -198,7 +208,7 @@ class BrowserHost {
     if (!page) return {};
     this.pages.delete(key);
     this.emit(page, 'closed');
-    if (page.contents && !page.contents.isDestroyed()) page.contents.close();
+    if (page.attachedContents && !page.attachedContents.isDestroyed()) page.attachedContents.close();
     return {};
   }
 

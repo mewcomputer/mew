@@ -50,6 +50,19 @@ describe("InputArea", () => {
     switchPersonaMock.mockClear();
   });
 
+  it("keeps the home draft visible if creating a session succeeds but submission fails", async () => {
+    useSessionStore.setState({ sessionId: null });
+    const onSend = async () => {
+      act(() => useSessionStore.setState({ sessionId: "created-home-session" }));
+      throw new Error("submission rejected");
+    };
+    render(<InputArea draftId="new" onSend={onSend} onCancel={() => {}} connected />);
+    fireEvent.change(screen.getByRole("textbox", { name: "Message prompt" }), { target: { value: "keep this request" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send prompt" }));
+    await waitFor(() => expect(screen.getByText("submission rejected")).toBeTruthy());
+    expect((screen.getByRole("textbox", { name: "Message prompt" }) as HTMLTextAreaElement).value).toBe("keep this request");
+  });
+
   it("keeps composer controls inside the primary composer surface", () => {
     renderInputArea();
 
@@ -214,6 +227,23 @@ describe("InputArea", () => {
     act(() => useSessionStore.setState({ sessionId: "reading-source" }));
     expect((container.querySelector("textarea") as HTMLTextAreaElement).value).toBe("source prompt");
     expect(screen.getByText("reading.txt")).toBeTruthy();
+  });
+
+  it("keeps attachments and text if the session loses readiness during file conversion", async () => {
+    const onSend = vi.fn();
+    const onCancel = () => {};
+    const { container, rerender } = render(<InputArea onSend={onSend} onCancel={onCancel} connected />);
+    const input = container.querySelector("textarea")!;
+    fireEvent.change(input, { target: { value: "resume after reconnect" } });
+    fireEvent.change(container.querySelector('input[type="file"]')!, { target: { files: [new File(["data"], "keep.txt", { type: "text/plain" })] } });
+    const send = screen.getByRole("button", { name: "Send prompt" });
+    fireEvent.click(send);
+    expect(send.getAttribute("aria-busy")).toBe("true");
+    rerender(<InputArea onSend={onSend} onCancel={onCancel} connected={false} />);
+    await waitFor(() => expect(send.getAttribute("aria-busy")).toBe("false"));
+    expect(onSend).not.toHaveBeenCalled();
+    expect(input.value).toBe("resume after reconnect");
+    expect(screen.getByText("keep.txt")).toBeTruthy();
   });
 
   it("prevents double-submit while sending", async () => {

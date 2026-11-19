@@ -190,12 +190,16 @@ impl Agent {
             if let Some(max) = self.max_turns {
                 if turn_count >= max {
                     tracing::info!(turn_count, max, "max turns reached");
-                    let _ = ev_tx
-                        .send(AgentEvent::Error(format!(
-                            "max turns exceeded ({} turns)",
-                            turn_count
-                        )))
-                        .await;
+                    // Child runners report their turn limit after draining the
+                    // final response and its tool results.
+                    if self.child_guidance.is_none() {
+                        let _ = ev_tx
+                            .send(AgentEvent::Error(format!(
+                                "max turns exceeded ({} turns)",
+                                turn_count
+                            )))
+                            .await;
+                    }
                     return Ok(());
                 }
             }

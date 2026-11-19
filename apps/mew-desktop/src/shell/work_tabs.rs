@@ -395,12 +395,23 @@ impl DesktopShell {
             }
         }
         self.capture_session_view_state();
-        self.work_tab_scroll.scroll_to_item(self.work_tabs.active);
+        self.work_tab_scroll_pending = true;
         self.persist_layout();
         cx.notify();
     }
 
-    pub(super) fn render_work_tab_bar(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(super) fn render_work_tab_bar(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        if self.work_tab_scroll_pending {
+            self.work_tab_scroll_pending = false;
+            cx.on_next_frame(window, |shell, _, cx| {
+                shell.work_tab_scroll.scroll_to_item(shell.work_tabs.active);
+                cx.notify();
+            });
+        }
         let muted = theme_rgb(&self.theme, "text.muted");
         let body = theme_rgb(&self.theme, "text.body");
         let panel = theme_rgb(&self.theme, "panel.background");
@@ -834,12 +845,19 @@ mod tests {
             cx.notify();
         });
         cx.refresh().unwrap();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+        });
+        cx.refresh().unwrap();
         cx.run_until_parked();
         let selected = cx.debug_bounds("work-tab-6").unwrap();
         let plus = cx.debug_bounds("new-work-tab").unwrap();
         let pane = cx.debug_bounds("work-pane").unwrap();
         assert!(selected.origin.x >= pane.origin.x);
-        assert!(selected.right() <= plus.origin.x);
+        assert!(
+            selected.right() <= plus.origin.x,
+            "selected={selected:?}, plus={plus:?}, pane={pane:?}"
+        );
         assert!(plus.right() <= pane.right());
         shell.update(cx, |shell, _| shell.quitting = true);
     }

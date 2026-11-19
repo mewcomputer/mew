@@ -160,6 +160,26 @@ test("connect can be retried after the socket fails before opening", async () =>
   assert.equal(client.isConnected(), true);
 });
 
+test("a session request cannot hang behind an unopened socket", { timeout: 1000 }, async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const waiting = assert.rejects(client.attachSession("old"), /did not open/i);
+  const stalled = latest();
+  context.mock.timers.tick(10000);
+  await waiting;
+  assert.equal(client.isConnected(), false);
+
+  const replacement = client.attachSession("new");
+  const socket = latest();
+  assert.notEqual(socket, stalled);
+  socket.open();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(socket.sent, [{ type: "attach_session", session_id: "new", client_kind: "web" }]);
+  socket.peerSend({ type: "session_ready", session_id: "new" });
+  assert.equal(await replacement, "new");
+});
+
 test("connect creates a fresh socket after an established socket closes", async () => {
   const { factory, latest } = makeFactory();
   const client = new MewClient("ws://test/", { socketFactory: factory });
@@ -176,6 +196,215 @@ test("connect creates a fresh socket after an established socket closes", async 
   setImmediate(() => secondSocket.open());
   await second;
   assert.equal(client.isConnected(), true);
+});
+
+for (const operation of ["attach", "create"] as const) {
+  test(`${operation} interrupted by disconnect does not block later session commands`, async () => {
+    const { factory, latest } = makeFactory();
+    const client = new MewClient("ws://test/", { socketFactory: factory });
+    const initial = client.connect();
+    const first = latest();
+    first.open();
+    await initial;
+    const interrupted = operation === "attach" ? client.attachSession("old") : client.newSession();
+    const rejected = assert.rejects(interrupted, /connection|disconnect|closed/i);
+    await new Promise((resolve) => setImmediate(resolve));
+    first.peerClose(1006, "disconnected");
+    await Promise.race([
+      rejected,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("session command did not reject")), 500)),
+    ]);
+
+    const reconnect = client.connect();
+    const second = latest();
+    second.open();
+    await reconnect;
+    const attached = client.attachSession("new");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(second.sent.some((message) => message.type === "attach_session" && message.session_id === "new"));
+    second.peerSend({ type: "session_ready", session_id: "new" });
+    assert.equal(await attached, "new");
+    client.disconnect();
+  });
+}
+
+test("unscoped commands cannot reach a different session while an attach is pending", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connected = client.connect();
+  const socket = latest();
+  socket.open();
+  await connected;
+  socket.peerSend({ type: "session_ready", session_id: "a" });
+  const commandStates: boolean[] = [];
+  client.on("session-command-state", () => commandStates.push(
+    client.isSessionStable(client.getSessionId()!),
+  ));
+  assert.equal(client.isSessionStable("a"), true);
+  const attaching = client.attachSession("b");
+  const queued = client.attachSession("c");
+  assert.equal(client.isSessionAttached("a"), true);
+  assert.equal(client.isSessionStable("a"), false);
+  await new Promise((resolve) => setImmediate(resolve));
+  await assert.rejects(client.slashCommand("/clear"), /switching conversations/i);
+  assert.throws(() => client.cancel(), /switching conversations/i);
+  assert.ok(!socket.sent.some((message) => message.type === "slash_command" || message.type === "cancel"));
+  socket.peerSend({ type: "session_ready", session_id: "b" });
+  await attaching;
+  assert.equal(client.isSessionStable("b"), false);
+  await new Promise((resolve) => setImmediate(resolve));
+  socket.peerSend({ type: "session_ready", session_id: "c" });
+  await queued;
+  assert.equal(client.isSessionStable("c"), true);
+  assert.deepEqual(commandStates, [false, true]);
+  client.disconnect();
+});
+
+test("concurrent requests to attach the same session do not send a duplicate", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connected = client.connect();
+  const socket = latest();
+  socket.open();
+  await connected;
+  const first = client.attachSession("chat");
+  const second = client.attachSession("chat");
+  await new Promise((resolve) => setImmediate(resolve));
+  socket.peerSend({ type: "session_ready", session_id: "chat" });
+  assert.deepEqual(await Promise.race([
+    Promise.all([first, second]),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("duplicate attach waited forever")), 500)),
+  ]), ["chat", "chat"]);
+  assert.equal(socket.sent.filter((message) => message.type === "attach_session").length, 1);
+  client.disconnect();
+});
+
+test("a legacy error following a scoped failure does not reject the next session request", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connected = client.connect();
+  const socket = latest();
+  socket.open();
+  await connected;
+  const first = client.attachSession("missing");
+  const firstRejected = assert.rejects(first, /missing session/);
+  const second = client.attachSession("valid");
+  await new Promise((resolve) => setImmediate(resolve));
+  socket.peerSend({ type: "session_operation_failed", operation: "attach", session_id: "missing", message: "missing session" });
+  await firstRejected;
+  await new Promise((resolve) => setImmediate(resolve));
+  socket.peerSend({ type: "error", message: "missing session" });
+  socket.peerSend({ type: "session_ready", session_id: "valid" });
+  assert.equal(await second, "valid");
+  client.disconnect();
+});
+
+test("a daemon advertising scoped failures ignores unrelated errors during attach", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connected = client.connect();
+  const socket = latest();
+  socket.open();
+  await connected;
+  socket.peerSend({ type: "pong", version: "test", protocol_version: 3, scoped_session_failures: true });
+  const pending = client.attachSession("valid");
+  await new Promise((resolve) => setImmediate(resolve));
+  socket.peerSend({ type: "error", message: "unrelated command failed" });
+  socket.peerSend({ type: "session_ready", session_id: "valid" });
+  assert.equal(await pending, "valid");
+  client.disconnect();
+});
+
+test("a legacy v3 daemon rejects a failed attach and releases the queue", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connected = client.connect();
+  const socket = latest();
+  socket.open();
+  await connected;
+  socket.peerSend({ type: "pong", version: "old", protocol_version: 3 });
+  const missing = client.attachSession("missing");
+  const rejected = assert.rejects(missing, /missing session/);
+  const valid = client.attachSession("valid");
+  await new Promise((resolve) => setImmediate(resolve));
+  socket.peerSend({ type: "error", message: "missing session" });
+  await Promise.race([rejected, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("legacy error ignored")), 500))]);
+  await new Promise((resolve) => setImmediate(resolve));
+  socket.peerSend({ type: "session_ready", session_id: "valid" });
+  assert.equal(await valid, "valid");
+  client.disconnect();
+});
+
+for (const operation of ["attach", "create"] as const) {
+  test(`a failed ${operation} releases the session command queue`, async () => {
+    const { factory, latest } = makeFactory();
+    const client = new MewClient("ws://test/", { socketFactory: factory });
+    const connected = client.connect();
+    const socket = latest();
+    socket.open();
+    await connected;
+    const request = operation === "attach" ? client.attachSession("missing") : client.newSession();
+    await new Promise((resolve) => setImmediate(resolve));
+    socket.peerSend({ type: "session_operation_failed", operation, session_id: operation === "attach" ? "missing" : null, message: "cannot open session" });
+    await Promise.race([
+      assert.rejects(request, /cannot open session/),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("session failure was ignored")), 500)),
+    ]);
+    const next = client.attachSession("available");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(socket.sent.some((message) => message.type === "attach_session" && message.session_id === "available"));
+    socket.peerSend({ type: "session_ready", session_id: "available" });
+    assert.equal(await next, "available");
+    client.disconnect();
+  });
+}
+
+test("scoped prompts wait for the matching receipt and reject a different session", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connected = client.connect();
+  const socket = latest();
+  socket.open();
+  await connected;
+  socket.peerSend({ type: "pong", version: "test", protocol_version: 3 });
+  socket.peerSend({ type: "session_ready", session_id: "first" });
+  await assert.rejects(client.submitPrompt("other", "wrong workspace"), /attached|session/i);
+  const pending = client.submitPrompt("first", "hello");
+  const request = socket.sent.at(-1);
+  assert.equal(request?.type, "submit_prompt");
+  if (request?.type !== "submit_prompt") throw new Error("expected a scoped prompt");
+  assert.equal(request.session_id, "first");
+  socket.peerSend({ type: "prompt_receipt", session_id: "other", request_id: request.request_id, status: "accepted" });
+  let settled = false;
+  void pending.then(() => { settled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  socket.peerSend({ type: "prompt_receipt", session_id: "first", request_id: request.request_id, status: "accepted" });
+  await pending;
+
+  const rejected = client.submitPrompt("first", "busy");
+  const retry = socket.sent.at(-1);
+  if (retry?.type !== "submit_prompt") throw new Error("expected a scoped prompt");
+  socket.peerSend({ type: "prompt_receipt", session_id: "first", request_id: retry.request_id, status: "rejected", message: "turn already running" });
+  await assert.rejects(rejected, /turn already running/);
+  client.disconnect();
+});
+
+test("a disconnected prompt without a replacement socket reports uncertainty at its deadline", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connected = client.connect();
+  const first = latest();
+  first.open();
+  await connected;
+  first.peerSend({ type: "pong", version: "test", protocol_version: 3 });
+  first.peerSend({ type: "session_ready", session_id: "first" });
+  const pending = client.submitPrompt("first", "may have arrived");
+  const rejected = assert.rejects(pending, /could not be confirmed/i);
+  first.peerClose(1006, "dropped");
+  context.mock.timers.tick(15000);
+  await rejected;
 });
 
 test("connect can recover if an established socket emits an error", async () => {
@@ -386,13 +615,13 @@ test("a disconnect rejects session commands from that socket and does not block 
   assert.equal(await created, "new");
 });
 
-test("a revision 3 attach ignores unrelated errors and requires its own confirmation", async () => {
+test("a scoped attach ignores unrelated errors and requires its own confirmation", async () => {
   const { factory, latest } = makeFactory();
   const client = new MewClient("ws://test/", { socketFactory: factory });
   const connected = client.connect();
   latest().open();
   await connected;
-  latest().peerSend({ type: "pong", version: "test", protocol_version: 3 });
+  latest().peerSend({ type: "pong", version: "test", protocol_version: 3, scoped_session_failures: true });
   const first = client.attachSession("old");
   await new Promise((resolve) => setImmediate(resolve));
   latest().peerSend({ type: "error", message: "unrelated operation failed" });

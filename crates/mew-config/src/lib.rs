@@ -125,7 +125,7 @@ fn default_max_subagent_depth() -> u32 {
 }
 
 fn default_max_duration_secs() -> u64 {
-    300
+    600
 }
 
 fn default_leak_reminder_max() -> u32 {
@@ -984,9 +984,16 @@ responses_lite = true
         let cfg: Config = toml::from_str("").unwrap();
         assert_eq!(cfg.orchestration.max_concurrent_subagents, 4);
         assert_eq!(cfg.orchestration.max_subagent_depth, 1);
-        assert_eq!(cfg.orchestration.default_max_duration_secs, 300);
+        assert_eq!(cfg.orchestration.default_max_duration_secs, 600);
         assert!(cfg.orchestration.leak_reminder);
         assert_eq!(cfg.orchestration.leak_reminder_max, 2);
+    }
+
+    #[test]
+    fn test_orchestration_timeout_override() {
+        let cfg: Config =
+            toml::from_str("[orchestration]\ndefault_max_duration_secs = 1200\n").unwrap();
+        assert_eq!(cfg.orchestration.default_max_duration_secs, 1200);
     }
 
     #[test]
@@ -1464,17 +1471,7 @@ values = ["sk_test_deadbeef"]
     #[test]
     fn backup_state_file_creates_timestamped_sibling() {
         let tmp = tempfile::tempdir().unwrap();
-        // We can't override the path; use the real one but clean up after.
-        let real = state_file_path();
         let backup_dir = tmp.path().to_path_buf();
-        // Write a sentinel to the real state path so backup_state_file has
-        // something to copy.
-        let original = real.with_file_name("state.toml.test-original");
-        std::fs::write(&original, "last_provider = \"x\"\n").unwrap();
-        // Instead of exercising the real state_path (which would clobber
-        // the user's file), verify the backup naming + copy semantics by
-        // using save_state_to + std::fs::copy analogously. This keeps the
-        // user's state untouched in tests.
         let state_path = backup_dir.join("state.toml");
         save_state_to(&state_path, &state_with("", "x", vec![])).unwrap();
         let ts = std::time::SystemTime::now()
@@ -1486,7 +1483,5 @@ values = ["sk_test_deadbeef"]
         assert!(backup.exists());
         let content = std::fs::read_to_string(&backup).unwrap();
         assert!(content.contains("x"));
-        // Clean up the test artifact.
-        let _ = original; // unused; silence the warning
     }
 }

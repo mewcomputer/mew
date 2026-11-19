@@ -25,11 +25,15 @@ pub fn sample_plugin_path() -> PathBuf {
         return PathBuf::from(path);
     }
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let target = manifest
+    let workspace_root = manifest
         .parent()
         .and_then(|p| p.parent())
-        .unwrap_or(&manifest)
-        .join("target")
+        .unwrap_or(&manifest);
+    let target_dir = env::var_os("CARGO_TARGET_DIR").map_or_else(
+        || workspace_root.join("target"),
+        |dir| workspace_root.join(dir),
+    );
+    let target = target_dir
         .join("debug")
         .join("examples")
         .join("sample-plugin");
@@ -39,8 +43,15 @@ pub fn sample_plugin_path() -> PathBuf {
     }
 
     let status = Command::new("cargo")
-        .args(["build", "--example", "sample-plugin"])
-        .current_dir(&manifest)
+        .args([
+            "build",
+            "--locked",
+            "--example",
+            "sample-plugin",
+            "-p",
+            "mew-hooks-runtime",
+        ])
+        .current_dir(workspace_root)
         .status()
         .expect("cargo build example");
 
@@ -54,18 +65,14 @@ pub fn sample_plugin_path() -> PathBuf {
     target
 }
 
-/// Create a temp directory containing a copy of the sample plugin binary.
+/// Create a temp directory containing the sample plugin executable.
 pub fn make_plugin_dir_with_binary() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
     let src = sample_plugin_path();
     let dst = dir.path().join("sample-plugin");
-    std::fs::copy(&src, &dst).expect("copy plugin binary");
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&dst).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&dst, perms).unwrap();
-    }
+    std::os::unix::fs::symlink(&src, &dst).expect("link plugin binary");
+    #[cfg(not(unix))]
+    std::fs::copy(&src, &dst).expect("copy plugin binary");
     dir
 }

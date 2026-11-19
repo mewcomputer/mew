@@ -9,12 +9,8 @@ import { ProjectPickerModal } from "../components/session-rail";
 import { setClient } from "../lib/client-ref";
 import type { DirEntry } from "@mew/web-client";
 
-// Mock TanStack Router — SessionRail calls useRouter().navigate.
-vi.mock("@tanstack/react-router", () => ({
-  useRouter: () => ({
-    navigate: vi.fn(),
-  }),
-}));
+const router = vi.hoisted(() => ({ navigate: vi.fn(), state: { location: { pathname: "/session/original" } } }));
+vi.mock("@tanstack/react-router", () => ({ useRouter: () => router }));
 
 function makeSession(overrides: Partial<SessionInfo> = {}): SessionInfo {
   return {
@@ -129,6 +125,18 @@ describe("SessionRail workspace collapse", () => {
     renderRail({ newSession, listSessions: vi.fn().mockResolvedValue([]) } as never, false);
     await userEvent.setup().click(screen.getByRole("button", { name: "New chat" }));
     expect(newSession).toHaveBeenCalledOnce();
+  });
+
+  it("does not navigate to a new chat after the user selects another page", async () => {
+    let finish!: (id: string) => void;
+    const newSession = vi.fn(() => new Promise<string>((resolve) => { finish = resolve; }));
+    useSessionStore.setState({ connectionState: "connected" });
+    router.navigate.mockClear();
+    renderRail({ newSession, listSessions: vi.fn().mockResolvedValue([]) } as never, false);
+    await userEvent.setup().click(screen.getByRole("button", { name: "New chat" }));
+    router.state.location = { pathname: "/settings" };
+    await act(async () => { finish("late-chat"); await Promise.resolve(); });
+    expect(router.navigate).not.toHaveBeenCalled();
   });
 
   it("groups pinned chats ahead of recent chats in the notifications view", () => {

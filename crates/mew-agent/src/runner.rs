@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -475,7 +475,8 @@ impl SubagentRunner for SimpleRunner {
         // Set max_turns if specified, else apply the built-in default.
         // The turn count is the secondary safeguard; the wall-clock cap is
         // the primary one (catches stuck subagents in tight tool loops).
-        agent.max_turns = Some(def.max_turns.unwrap_or(mew_subagents::DEFAULT_MAX_TURNS));
+        let turn_limit = def.max_turns.unwrap_or(mew_subagents::DEFAULT_MAX_TURNS);
+        agent.max_turns = Some(turn_limit);
 
         let max_duration_secs = def
             .max_duration_secs
@@ -507,14 +508,11 @@ impl SubagentRunner for SimpleRunner {
         let child_cancel = cancel.child_token();
         let mut rx = agent.run_with_parts(prompt, vec![], Some(child_cancel.clone()));
         let mut result_text = String::new();
+        let mut message_open = false;
+        let mut text_parts = HashSet::new();
         let mut turns_used: u32 = 0;
         let mut last_error: Option<String> = None;
         let max_duration = std::time::Duration::from_secs(max_duration_secs);
-        // Map call_id → tool_name so we can emit SubagentEvent::ToolStart /
-        // ToolEnd (the AgentEvent variants don't carry the tool name; we
-        // pick it up from PartStart).
-        let mut tool_names: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
         // Live copy of every tool-call part the subagent has emitted. We
         // track these so we can (a) parse streamed arguments into `input`
         // ourselves (mirroring the agent's reconcile) and (b) read the
@@ -540,16 +538,29 @@ impl SubagentRunner for SimpleRunner {
                     match event {
                         crate::AgentEvent::ChildGuidanceContinuation => result_text.clear(),
                         crate::AgentEvent::Provider(mew_provider::ProviderEvent::PartStart {
-                            part: mew_message::Part::ToolCall(tc),
+                            part,
                         }) => {
-                            tool_names.insert(tc.call_id.clone(), tc.tool_name.clone());
-                            tool_parts.insert(tc.base.id, tc.clone());
-                            let _ = event_tx
-                                .send(SubagentEvent::ToolStart {
-                                    call_id: tc.call_id,
-                                    tool_name: tc.tool_name,
-                                })
-                                .await;
+                            if !message_open {
+                                result_text.clear();
+                                text_parts.clear();
+                                message_open = true;
+                            }
+                            match part {
+                                mew_message::Part::Text(text) => {
+                                    text_parts.insert(text.base.id);
+                                    result_text.push_str(&text.text);
+                                }
+                                mew_message::Part::ToolCall(tc) => {
+                                    tool_parts.insert(tc.base.id, tc.clone());
+                                    let _ = event_tx
+                                        .send(SubagentEvent::ToolStart {
+                                            call_id: tc.call_id,
+                                            tool_name: tc.tool_name,
+                                        })
+                                        .await;
+                                }
+                                _ => {}
+                            }
                         }
                         crate::AgentEvent::Provider(mew_provider::ProviderEvent::PartDelta {
                             part_id,
@@ -561,10 +572,10 @@ impl SubagentRunner for SimpleRunner {
                             }
                         }
                         crate::AgentEvent::Provider(mew_provider::ProviderEvent::PartDelta {
-                            field: "text",
+                            part_id,
+                            field,
                             delta,
-                            ..
-                        }) => {
+                        }) if matches!(field, "text" | "") && text_parts.contains(&part_id) => {
                             result_text.push_str(&delta);
                             let _ = event_tx
                                 .send(SubagentEvent::TextDelta { text: delta })
@@ -604,24 +615,10 @@ impl SubagentRunner for SimpleRunner {
                             }
                         }
                         crate::AgentEvent::Provider(mew_provider::ProviderEvent::MessageEnd {
-                            finish,
                             ..
                         }) => {
+                            message_open = false;
                             turns_used += 1;
-                            if finish == mew_message::Finish::Error {
-                                // The agent follows failed completion metadata with
-                                // the terminal error, even on the last allowed turn.
-                                continue;
-                            }
-                            if let Some(limit) =
-                                def.max_turns.or(Some(mew_subagents::DEFAULT_MAX_TURNS))
-                            {
-                                if turns_used >= limit {
-                                    // Hit the cap. Stop accumulating text after this
-                                    // turn; return what we have.
-                                    break;
-                                }
-                            }
                         }
                         crate::AgentEvent::ToolEnd { call_id, success } => {
                             let _ = event_tx
@@ -697,7 +694,6 @@ impl SubagentRunner for SimpleRunner {
                         }
                         crate::AgentEvent::Error(msg) => {
                             last_error = Some(msg);
-                            break;
                         }
                         _ => {}
                     }
@@ -706,21 +702,18 @@ impl SubagentRunner for SimpleRunner {
                 if cancel.is_cancelled() {
                     break 'runs;
                 }
-                // The run's stream ended (normally, or via a cap/exit/error
-                // break). Validate the effective final output against the def's
-                // output schema, if any, and give the child one corrective turn.
-                let effective_text = exit_answer.clone().unwrap_or_else(|| result_text.clone());
-                // Same effective limit the loop breaks on (MessageEnd), so a run
-                // that exhausted its budget never gets a corrective turn.
-                let turn_limit = def.max_turns.unwrap_or(mew_subagents::DEFAULT_MAX_TURNS);
-                let hit_turn_cap = turns_used >= turn_limit;
-                let can_correct = !correction_used && last_error.is_none() && !hit_turn_cap;
+                // The agent closes the stream after persisting terminal tool results.
+                let effective_text = exit_answer.as_deref().unwrap_or(&result_text);
+                let remaining_turns = turn_limit.saturating_sub(turns_used);
+                let can_correct = !correction_used && last_error.is_none() && remaining_turns > 0;
                 if let Some(schema) = &def.output_schema {
-                    match validate_against_schema(schema, &effective_text) {
+                    match validate_against_schema(schema, effective_text) {
                         SchemaCheck::Valid => {}
                         SchemaCheck::InvalidOutput(err) if can_correct => {
                             correction_used = true;
                             result_text.clear();
+                            text_parts.clear();
+                            message_open = false;
                             exit_answer = None;
                             let correction = format!(
                                 "Your final output did not satisfy the required output schema.\n\
@@ -729,6 +722,7 @@ impl SubagentRunner for SimpleRunner {
                                  schema — no prose, no code fences:\n{}",
                                 serde_json::to_string_pretty(schema).unwrap_or_default()
                             );
+                            agent.max_turns = Some(remaining_turns);
                             rx = agent.run_with_parts(
                                 correction,
                                 vec![],
@@ -800,10 +794,7 @@ impl SubagentRunner for SimpleRunner {
             return Ok(SubagentResult::Error { reason });
         }
 
-        let hit_turn_limit = def
-            .max_turns
-            .map(|limit| turns_used >= limit)
-            .unwrap_or(false);
+        let hit_turn_limit = turns_used >= turn_limit;
 
         // Apply the schema warning before the Finished event so both
         // observers of the run agree on the final output.
@@ -1064,9 +1055,9 @@ mod tests {
 
     #[tokio::test]
     async fn child_guidance_is_durable_at_its_next_request_and_retry_is_idempotent() {
-        for (boundary, expected) in [
-            (tool_turn("continue"), "continuefinished"),
-            (turn("clean stop"), "finished"),
+        for (boundary, previous_answer) in [
+            (tool_turn("continue"), "continue"),
+            (turn("clean stop"), "clean stop"),
         ] {
             let directory = tempfile::tempdir().unwrap();
             let parent = SessionId::new();
@@ -1180,6 +1171,9 @@ mod tests {
                     raw.iter().filter(|message| message.id == last.id).count(),
                     1
                 );
+                assert!(raw.iter().flat_map(|message| &message.parts).any(|part| {
+                    matches!(part, mew_message::Part::Text(text) if text.text == previous_answer)
+                }));
                 assert!(mew_session::Reader::has_prompt_receipt(
                     &child_root,
                     &child_session_id,
@@ -1202,7 +1196,7 @@ mod tests {
             .unwrap();
             assert!(matches!(
                 result.unwrap(),
-                SubagentResult::Complete { turns_used: 2, text, .. } if text == expected
+                SubagentResult::Complete { turns_used: 2, text, .. } if text == "finished"
             ));
         }
     }
@@ -1272,6 +1266,64 @@ mod tests {
             result.unwrap(),
             SubagentResult::Complete { turns_used: 1, .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn builtin_agents_use_configured_timeout_and_honor_per_agent_override() {
+        let root = tempfile::tempdir().unwrap();
+        for mut def in mew_subagents::Loader::builtin_defaults() {
+            for (override_secs, expected_timeout) in [(None, true), (Some(60), false)] {
+                if let Some(secs) = override_secs {
+                    def.max_duration_secs = Some(secs);
+                }
+                let provider = Arc::new(ScriptedProvider::new(vec![(
+                    Duration::from_millis(20),
+                    turn("done"),
+                )]));
+                let runner =
+                    SimpleRunner::new(provider, vec![], Arc::new(mew_hooks::NopDispatcher))
+                        .with_session_root(root.path().to_path_buf())
+                        .with_spawn_policy(vec![], 1, 4, 0);
+                let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+                let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+                let result = runner
+                    .run(SubagentRunOptions {
+                        def: &def,
+                        prompt: "prompt".into(),
+                        parent_call_id: "call".into(),
+                        parent_session_id: SessionId::new(),
+                        event_tx: tx,
+                        cancel: tokio_util::sync::CancellationToken::new(),
+                        model: None,
+                        parent_depth: 0,
+                    })
+                    .await
+                    .unwrap();
+                drain.abort();
+                if expected_timeout {
+                    assert!(
+                        matches!(&result, SubagentResult::Error { reason } if reason.contains("max_duration_secs")),
+                        "{} override={override_secs:?}: {result:?}",
+                        def.name,
+                    );
+                } else {
+                    assert!(
+                        matches!(&result, SubagentResult::Complete { .. }),
+                        "{} override={override_secs:?}: {result:?}",
+                        def.name,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn configured_default_matches_runner_default() {
+        assert_eq!(
+            mew_config::OrchestrationConfig::default().default_max_duration_secs,
+            600
+        );
+        assert_eq!(mew_subagents::DEFAULT_MAX_DURATION_SECS, 600);
     }
 
     #[tokio::test]
@@ -1394,7 +1446,7 @@ mod tests {
                 assert_eq!(turns_used, 2);
                 assert!(!hit_turn_limit);
                 assert!(!hit_time_limit);
-                assert!(text.contains("t0") && text.contains("t1"));
+                assert_eq!(text, "t1");
             }
             other => panic!("expected Complete, got {other:?}"),
         }
@@ -1403,7 +1455,7 @@ mod tests {
     #[tokio::test]
     async fn test_defaults_apply_when_def_omits_both_caps() {
         // No caps on the def. The runner should apply built-in defaults
-        // (500 turns, 300s) — neither will trip on a short script.
+        // (500 turns, 600s) — neither will trip on a short script.
         let scripts = vec![tool_turn("t0"), turn("t1")];
         let def = make_def(None, None);
         let (result, _) = run_provider_turns(scripts, def).await;
@@ -1651,6 +1703,11 @@ mod tests {
         assert!(
             system.contains("ROLE_MARKER investigate the thing"),
             "system prompt must include the def body"
+        );
+        assert!(
+            system.contains("The parent receives only that message")
+                && system.contains("including any requested JSON"),
+            "the fallback contract must require complete final results"
         );
         assert!(
             !system.contains("{{ "),
@@ -2130,7 +2187,11 @@ mod tests {
         let no_transcripts = tempfile::NamedTempFile::new().unwrap();
         let runner = SimpleRunner::new(
             provider.clone(),
-            vec![Arc::new(mew_tools::tools::echo::Echo)],
+            vec![
+                Arc::new(mew_tools::tools::echo::Echo),
+                Arc::new(mew_tools::tools::progress_update::ProgressUpdate),
+                exit_tool(),
+            ],
             Arc::new(mew_hooks::NopDispatcher),
         )
         .with_session_root(no_transcripts.path().to_path_buf());
@@ -2152,6 +2213,143 @@ mod tests {
             .unwrap();
         drain.abort();
         (result, provider)
+    }
+
+    #[tokio::test]
+    async fn final_json_is_validated_without_earlier_narration() {
+        let mut progress = turn("checking the data");
+        progress.pop();
+        progress.extend(mew_provider_fake::FakeProvider::tool_call(
+            "progress_update",
+            "progress",
+            serde_json::json!({"message": "checking"}),
+        ));
+        let def = typed_def(serde_json::json!({"type": "object", "required": ["answer"]}));
+        let (result, provider) =
+            run_provider_turns(vec![progress, turn("{\"answer\":42}")], def).await;
+        assert!(
+            matches!(result, SubagentResult::Complete { text, .. } if text == "{\"answer\":42}")
+        );
+        assert_eq!(
+            *provider.calls.lock().unwrap(),
+            2,
+            "valid final JSON must not trigger a correction"
+        );
+    }
+
+    #[tokio::test]
+    async fn exit_tool_returns_its_json_without_narration() {
+        let mut progress = turn("checking the data");
+        progress.pop();
+        progress.extend(mew_provider_fake::FakeProvider::tool_call(
+            "progress_update",
+            "progress",
+            serde_json::json!({"message": "checking"}),
+        ));
+        let mut finishing = turn("ready to report");
+        finishing.pop();
+        finishing.extend(exit_tool_script("exit", "{\"answer\":42}"));
+        let def = typed_def(serde_json::json!({"type": "object", "required": ["answer"]}));
+        let (result, provider) = run_provider_turns(vec![progress, finishing], def).await;
+        assert!(
+            matches!(result, SubagentResult::Complete { text, .. } if text == "{\"answer\":42}")
+        );
+        assert_eq!(*provider.calls.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn final_message_includes_every_text_part_and_initial_content() {
+        let mut first = turn(" first");
+        if let mew_provider::ProviderEvent::PartStart {
+            part: mew_message::Part::Text(text),
+        } = &mut first[0]
+        {
+            text.text = "initial".into();
+        } else {
+            panic!("expected a text part");
+        }
+        first.pop();
+        let mut second = turn(" second");
+        if let mew_provider::ProviderEvent::PartDelta { field, .. } = &mut second[1] {
+            *field = "";
+        }
+        first.extend(second);
+        let (result, _) = run_provider_turns(vec![first], make_def(Some(10), Some(60))).await;
+        assert!(
+            matches!(result, SubagentResult::Complete { text, .. } if text == "initial first second")
+        );
+    }
+
+    #[tokio::test]
+    async fn final_reasoning_is_not_returned_as_answer() {
+        let reasoning_id = mew_message::PartId::new();
+        let mut events = vec![
+            mew_provider::ProviderEvent::PartStart {
+                part: mew_message::Part::Reasoning(mew_message::ReasoningPart {
+                    base: mew_message::PartBase {
+                        id: reasoning_id,
+                        message_id: mew_message::MessageId::new(),
+                        session_id: mew_message::SessionId::new(),
+                    },
+                    text: String::new(),
+                    signature: None,
+                    encrypted_content: None,
+                    provider_item_id: None,
+                }),
+            },
+            mew_provider::ProviderEvent::PartDelta {
+                part_id: reasoning_id,
+                field: "text",
+                delta: "private reasoning".into(),
+            },
+            mew_provider::ProviderEvent::PartEnd {
+                part_id: reasoning_id,
+            },
+        ];
+        events.extend(turn("final answer"));
+        let (result, _) = run_provider_turns(vec![events], make_def(Some(10), Some(60))).await;
+        assert!(matches!(result, SubagentResult::Complete { text, .. } if text == "final answer"));
+    }
+
+    #[tokio::test]
+    async fn tool_only_last_message_does_not_reuse_earlier_narration() {
+        let mut first = turn("earlier status");
+        first.pop();
+        first.extend(mew_provider_fake::FakeProvider::tool_call(
+            "progress_update",
+            "first",
+            serde_json::json!({"message": "working"}),
+        ));
+        let last = mew_provider_fake::FakeProvider::tool_call(
+            "progress_update",
+            "last",
+            serde_json::json!({"message": "still working"}),
+        );
+        let (result, _) = run_provider_turns(vec![first, last], make_def(Some(2), Some(60))).await;
+        assert!(
+            matches!(result, SubagentResult::Complete { text, hit_turn_limit: true, .. } if text.is_empty())
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_final_message_does_not_reuse_earlier_narration() {
+        let mut first = turn("earlier status");
+        first.pop();
+        first.extend(mew_provider_fake::FakeProvider::tool_call(
+            "progress_update",
+            "progress",
+            serde_json::json!({"message": "working"}),
+        ));
+        let last = vec![mew_provider::ProviderEvent::MessageEnd {
+            finish: mew_message::Finish::Stop,
+            usage: mew_message::Tokens::default(),
+            cost: 0.0,
+        }];
+        let (result, _) = run_provider_turns(vec![first, last], make_def(Some(10), Some(60))).await;
+        assert!(
+            matches!(&result, SubagentResult::Error { reason } if reason == "no assistant message received"),
+            "unexpected result: {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -2280,6 +2478,46 @@ mod tests {
             *provider.calls.lock().unwrap(),
             mew_subagents::DEFAULT_MAX_TURNS as usize,
             "exhausted turn budget must not grant a corrective turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn exit_tool_can_finish_on_the_last_allowed_response() {
+        let responses = vec![exit_tool_script("exit", "final answer")];
+        let (result, provider) = run_provider_turns(responses, make_def(Some(1), Some(60))).await;
+
+        assert!(matches!(result, SubagentResult::Complete {
+                text, turns_used: 1, hit_turn_limit: true, ..
+            } if text == "final answer"));
+        assert_eq!(*provider.calls.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn schema_correction_uses_only_the_remaining_turn_budget() {
+        let def = SubagentDef {
+            max_turns: Some(2),
+            ..typed_def(serde_json::json!({"type": "object", "required": ["answer"]}))
+        };
+        let responses = vec![
+            turn("invalid initial answer"),
+            tool_turn("still working"),
+            turn(r#"{"answer":42}"#),
+        ];
+        let (result, provider) = run_provider_turns(responses, def).await;
+
+        assert!(matches!(result, SubagentResult::Complete {
+                text, turns_used: 2, hit_turn_limit: true, ..
+            } if text.starts_with("warning: schema_invalid")));
+        assert_eq!(*provider.calls.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn empty_final_text_is_a_successful_empty_answer() {
+        let responses = vec![tool_turn("earlier narration"), turn("")];
+        let (result, _) = run_provider_turns(responses, make_def(Some(3), Some(60))).await;
+
+        assert!(
+            matches!(result, SubagentResult::Complete { text, turns_used: 2, .. } if text.is_empty())
         );
     }
 

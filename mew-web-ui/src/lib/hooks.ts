@@ -1,4 +1,4 @@
-import { useEffect, useState, type RefObject } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore, type RefObject } from "react";
 import { useSessionStore } from "../stores/session";
 import { getClient, SESSION_ID_KEY } from "./client";
 
@@ -90,25 +90,44 @@ export function useComposerFocusShortcut(inputRef: RefObject<HTMLTextAreaElement
 
 /** Attach the selected session again after each confirmed connection. */
 export function useSessionAttach(sessionId: string) {
-  const connected = useSessionStore((s) => s.connectionState === "connected");
-  const [attachError, setAttachError] = useState<string | null>(null);
+  const client = getClient();
+  const connected = useSessionStore((state) => state.connectionState === "connected");
+  const [failure, setFailure] = useState<{ sessionId: string; message: string } | null>(null);
+  const subscribe = useCallback((notify: () => void) => {
+    client.on("session-command-state", notify);
+    client.on("session-ready", notify);
+    client.on("close", notify);
+    return () => {
+      client.off("session-command-state", notify);
+      client.off("session-ready", notify);
+      client.off("close", notify);
+    };
+  }, [client]);
+  const getSnapshot = useCallback(() => connected && client.isSessionStable(sessionId), [client, connected, sessionId]);
+  const ready = useSyncExternalStore(subscribe, getSnapshot);
 
   useEffect(() => {
-    setAttachError(null);
+    setFailure(null);
     if (!connected) return;
-    const client = getClient();
     const store = useSessionStore.getState();
-    if (store.sessionId !== sessionId) store.reset();
     let current = true;
-    void client.attachSession(sessionId).then(() => {
+
+    const confirm = () => {
       if (!current) return;
       localStorage.setItem(SESSION_ID_KEY, sessionId);
       store.clearAlertsForSession(sessionId);
-    }).catch((error: unknown) => {
+    };
+    if (client.isSessionStable(sessionId)) {
+      confirm();
+      return;
+    }
+    if (store.sessionId !== sessionId) store.reset();
+    void client.attachSession(sessionId).then(confirm).catch((error: unknown) => {
       if (!current || !client.isConnected()) return;
-      setAttachError(error instanceof Error ? error.message : "Could not open the conversation.");
+      setFailure({ sessionId, message: error instanceof Error ? error.message : "Could not open the conversation." });
     });
     return () => { current = false; };
-  }, [sessionId, connected]);
-  return attachError;
+  }, [client, connected, sessionId]);
+
+  return { ready, error: connected && failure?.sessionId === sessionId ? failure.message : null };
 }

@@ -94,6 +94,7 @@ pub(super) struct DesktopShell {
     pub(super) work_tabs: WorkTabs,
     pub(super) workbench_focus_handle: FocusHandle,
     pub(super) work_tab_scroll: gpui::ScrollHandle,
+    pub(super) work_tab_scroll_pending: bool,
     pub(super) transcript_list: gpui::ListState,
     pub(super) transcript_scrolled_away: bool,
     pub(super) transcript_scrollbar_grab_offset: Option<f32>,

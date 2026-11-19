@@ -334,3 +334,79 @@ async fn fake_builder_and_manager_restore_policy_and_todos_from_actual_storage()
         "restore this task"
     );
 }
+
+#[tokio::test]
+async fn thinking_selection_uses_the_active_provider_for_shared_model_ids() {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut cfg, mut catalog, _credential) = fixture();
+    let provider = cfg.providers["fixture"].clone();
+    cfg.providers.insert("other".into(), provider);
+    for (provider, levels) in [
+        ("fixture", vec!["none", "low", "high"]),
+        ("other", vec!["high"]),
+    ] {
+        let model = mew_catalog::Model {
+            id: "shared".into(),
+            provider: provider.into(),
+            text_output: true,
+            thinking_variants: levels
+                .into_iter()
+                .map(|name| mew_catalog::ThinkingVariant {
+                    name: name.into(),
+                    params: serde_json::json!({"reasoning_effort": name}),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        catalog
+            .providers
+            .entry(provider.into())
+            .or_default()
+            .insert("shared".into(), model.clone());
+        catalog.models.insert("shared".into(), model);
+    }
+    let server = build_daemon_server_with_config(
+        cfg,
+        Some(catalog),
+        false,
+        "fixture",
+        Some("first".into()),
+        false,
+        PermissionMode::Standard,
+    )
+    .unwrap();
+    let (mut agent, _, _) = (server.builder)(params(directory.path(), None).await).unwrap();
+    let switch = server.model_switcher.as_ref().unwrap();
+    let setter = server.thinking_setter.as_ref().unwrap();
+    switch(&mut agent, "fixture", "shared").unwrap();
+    setter(&mut agent, "shared", "low").unwrap();
+    assert_eq!(
+        agent.reasoning.as_ref().unwrap().params["reasoning_effort"],
+        "low"
+    );
+    setter(&mut agent, "shared", "off").unwrap();
+    assert_eq!(
+        agent.reasoning.as_ref().unwrap().params["reasoning_effort"],
+        "none"
+    );
+    switch(&mut agent, "other", "shared").unwrap();
+    assert!(setter(&mut agent, "shared", "low").is_err());
+    setter(&mut agent, "shared", "high").unwrap();
+    assert_eq!(
+        agent.reasoning.as_ref().unwrap().params["reasoning_effort"],
+        "high"
+    );
+    let models = (server.model_lister.as_ref().unwrap())();
+    let levels = |id: &str| {
+        models
+            .iter()
+            .find(|m| m.id == id)
+            .unwrap()
+            .thinking_variants
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(levels("fixture/shared"), vec!["low", "high"]);
+    assert_eq!(levels("other/shared"), vec!["high"]);
+}

@@ -199,9 +199,9 @@ fn thinking_mode_active(reasoning: Option<&mew_provider::ReasoningConfig>) -> bo
             return b;
         }
     }
-    // OpenAI-style reasoning effort implies a reasoning model.
-    if params.contains_key("reasoning_effort") {
-        return true;
+    // OpenAI-style reasoning effort can explicitly disable thinking.
+    if let Some(effort) = params.get("reasoning_effort") {
+        return effort.as_str() != Some("none");
     }
     // Object-style thinking config (GLM/MiniMax/Anthropic-shaped).
     if let Some(t) = params.get("thinking") {
@@ -1020,6 +1020,17 @@ mod tests {
 
     /// OpenCode endpoints identify the client and carry the conversation id;
     /// the same adapter pointed at a non-opencode base URL sends neither.
+    #[test]
+    fn reasoning_effort_none_disables_thinking_mode() {
+        let reasoning = mew_provider::ReasoningConfig {
+            params: serde_json::json!({"reasoning_effort": "none"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        };
+        assert!(!thinking_mode_active(Some(&reasoning)));
+    }
+
     #[test]
     fn opencode_headers_only_for_opencode_endpoints() {
         let mut adapter = Adapter::new(

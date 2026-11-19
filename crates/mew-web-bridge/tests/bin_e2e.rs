@@ -83,10 +83,13 @@ fn spawn_fake_daemon(
 ) -> Result<ChildGuard> {
     ChildGuard::spawn(
         Command::new(mew_bin)
+            .current_dir(home_dir)
             .arg("daemon")
             .arg("--fake-provider")
             .arg("--socket")
             .arg(socket_path)
+            .arg("--pidfile")
+            .arg(home_dir.join("mew.pid"))
             .env("MEW_CONFIG_DIR", home_dir.join("config"))
             .env("MEW_DATA_DIR", home_dir.join("data"))
             .env("MEW_SESSION_DIR", home_dir.join("sessions"))
@@ -345,7 +348,7 @@ async fn bin_e2e_daemon_plus_bridge_full_round_trip() -> Result<()> {
     // Spawn the daemon first. It must bind the socket before the
     // bridge can connect.
     let mut daemon = spawn_fake_daemon(&mew_bin, &socket_path, &home_dir)?;
-    wait_for_unix_socket(&socket_path, &mut daemon, Duration::from_secs(5)).await?;
+    wait_for_unix_socket(&socket_path, &mut daemon, Duration::from_secs(15)).await?;
     assert!(
         !home_dir.join("catalog-cache").exists(),
         "fake daemon must start without accessing real model catalogs"

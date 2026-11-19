@@ -47,6 +47,11 @@ asset, daemon, CDP or focus-control ports through HTTP or WebSocket aliases.
 Host IPC accepts only the trusted main frame. Permissions, popups and downloads
 are denied in this milestone.
 
+Browser guests cannot open while the attached daemon uses port 80 or 443. The
+host protects daemon ports across hostname aliases, which would otherwise block
+normal web traffic on those ports. The browser panel reports this limitation;
+chat remains available. Use a different daemon port to enable browser tabs.
+
 Guests are created on first visit and retained across tab/chat switches and
 pane transitions. Closing a tab destroys its guest. App restarts restore tab
 URLs and layout; they reload documents rather than serialize live DOM state.
