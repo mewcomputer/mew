@@ -4474,3 +4474,12 @@ the metadata and social card to the new headline.
 
 All 12 site tests passed. Checked the hero and install link at 390 and
 1280 pixels and inspected the 1200 × 630 social card.
+
+### 2026-11-19: Restore the homepage's original voice
+
+Restored the headline, section headings, and primary action. The body copy
+adds examples from Mew while keeping the original page structure. Restored
+the matching share card and updated its description.
+
+All 12 site tests passed. Checked the hero and install link at 390 and
+1280 pixels.
