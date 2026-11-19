@@ -111,7 +111,7 @@ jobs:
         run: pnpm --filter mew-web-ui build
 
       - name: Build site and validate documentation
-        run: pnpm --filter site build
+        run: pnpm --filter site test
 
       - name: Web-client tests
         run: pnpm --filter @mew/web-client test

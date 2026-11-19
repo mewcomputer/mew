@@ -29,6 +29,7 @@ export default defineConfig({
         PageTitle: "./src/components/overrides/PageTitle.astro",
       },
       sidebar: [
+        { label: "Overview", link: "/docs/" },
         {
           label: "Getting started",
           items: [

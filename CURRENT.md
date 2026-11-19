@@ -4421,3 +4421,15 @@ The homepage and install guide preselect Linux for desktop Linux browsers
 and use macOS as the fallback. Both platforms remain selectable. Verified
 ten site tests and switching on both pages in Chrome with macOS, Linux,
 and Android browser settings.
+
+### 2026-11-19: Public documentation audit
+
+Checked the public guides against the implementation and current nightly.
+Updated install, client setup, session behavior, provider routing, permissions,
+and development references. Added a docs overview and a macOS desktop guide.
+CI now checks that every public guide builds, appears in the sidebar, ships
+as raw Markdown, and links to existing pages and headings.
+
+Verified all 38 guides, the seven external links, the Apple silicon nightly
+installer, configuration examples, and both TUI capture modes. The site,
+Web UI, Web client, Electron unit tests, and Jianghu build passed.
