@@ -130,8 +130,9 @@ frontend → transport → daemon → session → agent → provider
 ```
 
 The built-in TUI is daemon-only: local mode was sunset. The `mew` chat command
-spawns a `mew daemon` on a loopback TCP port (if none is running) and connects
-via `runtime::daemon::DaemonTarget` and the persistent `runtime::client::TuiClient`
+starts an owned `mew daemon` on a private Unix socket and stops it when the TUI
+exits. `mew chat --connect` attaches to an independently managed daemon and
+leaves it running. The TUI connects via `runtime::daemon::DaemonTarget` and the persistent `runtime::client::TuiClient`
 actor. The actor drives the shared `mew-client-core::ClientEngine`, observes
 passive turns and reconciles uncertain submissions after reconnect. The daemon
 owns the `Agent`; required actions retain their session and request identities.

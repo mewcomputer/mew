@@ -4692,3 +4692,10 @@ attachment worked.
 The shared local transport accepts the documented `ws://unix:/absolute/path`
 form and rejects relative socket paths. Verified the transport tests and a real
 TUI attachment over a daemon's Unix socket.
+
+### 2026-11-20: Stop TUI-owned daemons on exit
+
+The TUI starts its daemon as an owned child on a private Unix socket, and
+stops and reaps it when the TUI exits. Explicitly attached daemons remain
+independent. Verified real TUI lifecycle tests, MCP subprocess cleanup, and a
+live code-mode background shell job that stopped with the owned daemon.

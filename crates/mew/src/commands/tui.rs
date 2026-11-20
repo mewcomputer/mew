@@ -246,21 +246,66 @@ pub(crate) async fn chat_cmd(
     raw: bool,
     mode: mew_hooks::PermissionMode,
 ) -> Result<()> {
-    // Local mode is sunset: the TUI always talks to a daemon. Spawn one if
-    // none is running, then connect. The daemon owns the agent and serializes
+    // The TUI talks to its owned daemon. The daemon owns the agent and serializes
     // turns, so concurrent-turn races cannot happen. The thinking variant is
     // a per-session UI setting and is not forwarded to the daemon.
     let _ = cfg;
-    let url = spawn_or_connect_daemon(&provider_flag, model_flag.as_deref(), raw, mode).await?;
-    chat_with_daemon(&url, None).await
+    let (url, mut daemon) = spawn_daemon(&provider_flag, model_flag.as_deref(), raw, mode).await?;
+    let result = chat_with_daemon(&url, None).await;
+    daemon.shutdown().await;
+    result
 }
 
-/// Bind a loopback TCP port and return it, so the spawned daemon can listen
-/// on `127.0.0.1:<port>` without colliding with anything.
-fn allocate_loopback_port() -> Result<std::net::SocketAddr> {
-    let listener =
-        std::net::TcpListener::bind(("127.0.0.1", 0)).context("bind loopback port for daemon")?;
-    Ok(listener.local_addr()?)
+struct OwnedDaemon {
+    child: std::process::Child,
+    _runtime_dir: tempfile::TempDir,
+}
+
+impl OwnedDaemon {
+    async fn shutdown(&mut self) {
+        if self.child.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        #[cfg(unix)]
+        if let Ok(pid) = i32::try_from(self.child.id()) {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGTERM,
+            );
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if self.child.try_wait().ok().flatten().is_some() {
+                return;
+            }
+            tokio::time::sleep(DAEMON_POLL_INTERVAL).await;
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for OwnedDaemon {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            #[cfg(unix)]
+            if let Ok(pid) = i32::try_from(self.child.id()) {
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(pid),
+                    nix::sys::signal::Signal::SIGTERM,
+                );
+            }
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                if self.child.try_wait().ok().flatten().is_some() {
+                    return;
+                }
+                std::thread::sleep(DAEMON_POLL_INTERVAL);
+            }
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
 }
 
 /// Probe whether a daemon is already healthy at the given WebSocket URL. A
@@ -276,28 +321,23 @@ async fn probe_daemon(url: &str) -> bool {
     }
 }
 
-/// Ensure a daemon is running and return its WebSocket URL. If one is already
-/// healthy on the chosen loopback port, attach to it; otherwise spawn a
-/// detached `mew daemon` as a child process and wait for it to come up. The
-/// CLI flags are forwarded so the daemon matches the requested provider/model/
-/// permission mode.
-async fn spawn_or_connect_daemon(
+/// Start an owned daemon on a private socket and wait for it to become healthy.
+async fn spawn_daemon(
     provider_flag: &str,
     model_flag: Option<&str>,
     raw: bool,
     mode: mew_hooks::PermissionMode,
-) -> Result<String> {
-    let addr = allocate_loopback_port()?;
-    let url = format!("ws://{addr}");
-
-    if probe_daemon(&url).await {
-        return Ok(url);
-    }
-
+) -> Result<(String, OwnedDaemon)> {
     let exe = std::env::current_exe().context("resolve current executable")?;
-    let port_arg = format!("127.0.0.1:{}", addr.port());
+    let runtime_dir = tempfile::tempdir().context("create daemon runtime directory")?;
+    let socket = runtime_dir.path().join("mew.sock");
+    let url = format!("ws://unix:{}", socket.display());
     let mut cmd = std::process::Command::new(&exe);
-    cmd.args(["daemon", "--port", &port_arg, "--background"]);
+    cmd.arg("daemon")
+        .arg("--socket")
+        .arg(&socket)
+        .arg("--pidfile")
+        .arg(runtime_dir.path().join("mew.pid"));
     if raw {
         cmd.arg("--raw");
     }
@@ -322,23 +362,28 @@ async fn spawn_or_connect_daemon(
         }
         mew_hooks::PermissionMode::Standard => {}
     }
-    let mut child = cmd
+    let child = cmd
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .with_context(|| format!("spawn daemon {exe:?} --port {port_arg}"))?;
+        .with_context(|| format!("spawn daemon {exe:?} on {}", socket.display()))?;
+    let mut daemon = OwnedDaemon {
+        child,
+        _runtime_dir: runtime_dir,
+    };
 
-    // `--background` double-forks and exits the immediate child quickly, so
-    // reap it while polling for the real daemon to come up.
     let deadline = Instant::now() + DAEMON_STARTUP_TIMEOUT;
     while Instant::now() < deadline {
+        if let Some(status) = daemon.child.try_wait()? {
+            anyhow::bail!("daemon exited during startup: {status}");
+        }
         if probe_daemon(&url).await {
-            return Ok(url);
+            return Ok((url, daemon));
         }
         tokio::time::sleep(DAEMON_POLL_INTERVAL).await;
     }
-    let _ = child.wait();
+    daemon.shutdown().await;
     anyhow::bail!(
         "spawned daemon did not become healthy at {url} within {DAEMON_STARTUP_TIMEOUT:?}"
     );
