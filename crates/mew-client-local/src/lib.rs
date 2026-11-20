@@ -6,7 +6,7 @@ use mew_client_core::{
     TransportError,
 };
 use mew_protocol::ClientMessage;
-use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{connect_async_with_config, WebSocketStream};
 use tungstenite::{protocol::WebSocketConfig, Message};
 
 #[derive(Debug, Clone)]
@@ -27,6 +27,30 @@ impl ClientTransport for LocalWebSocketTransport {
             max_frame_size: None,
             ..WebSocketConfig::default()
         };
+        #[cfg(unix)]
+        if let Some(path) = self.url.strip_prefix("ws://unix:") {
+            if !std::path::Path::new(path).is_absolute() {
+                return Err(TransportError::Other(
+                    "Unix socket path must be absolute".into(),
+                ));
+            }
+            let stream = tokio::net::UnixStream::connect(path)
+                .await
+                .map_err(|error| {
+                    TransportError::Other(format!("connect to {}: {error}", self.url))
+                })?;
+            let (socket, _) = tokio_tungstenite::client_async_with_config(
+                "ws://localhost/",
+                stream,
+                Some(config),
+            )
+            .await
+            .map_err(|error| TransportError::Other(format!("connect to {}: {error}", self.url)))?;
+            return Ok(Box::new(LocalWebSocketConnection {
+                socket,
+                closed: false,
+            }));
+        }
         let (socket, _) = connect_async_with_config(&self.url, Some(config), false)
             .await
             .map_err(|error| TransportError::Other(format!("connect to {}: {error}", self.url)))?;
@@ -37,15 +61,16 @@ impl ClientTransport for LocalWebSocketTransport {
     }
 }
 
-type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
-
-struct LocalWebSocketConnection {
-    socket: Socket,
+struct LocalWebSocketConnection<S> {
+    socket: WebSocketStream<S>,
     closed: bool,
 }
 
 #[async_trait::async_trait]
-impl ClientConnection for LocalWebSocketConnection {
+impl<S> ClientConnection for LocalWebSocketConnection<S>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     async fn send(&mut self, message: ClientMessage) -> Result<(), TransportError> {
         if self.closed {
             return Err(TransportError::Closed);
@@ -116,6 +141,56 @@ mod tests {
     use mew_protocol::ServerMessage;
     use tokio::net::TcpListener;
     use tokio_tungstenite::accept_async;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_transport_rejects_relative_paths() {
+        let error = LocalWebSocketTransport::new("ws://unix:relative.sock")
+            .connect()
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("absolute"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_transport_round_trips_typed_messages() {
+        let path = std::env::temp_dir().join(format!(
+            "mew-transport-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let text = socket.next().await.unwrap().unwrap().into_text().unwrap();
+            assert!(matches!(
+                mew_protocol::decode_json::<ClientMessage>(&text).unwrap(),
+                ClientMessage::Ping
+            ));
+            let response = mew_protocol::encode_json(&ServerMessage::Pong {
+                version: "unix".into(),
+                protocol_version: mew_protocol::PROTOCOL_VERSION,
+                browser_focus_preflight: false,
+                scoped_session_failures: false,
+            })
+            .unwrap();
+            socket.send(Message::Text(response)).await.unwrap();
+        });
+        let transport = LocalWebSocketTransport::new(format!("ws://unix:{}", path.display()));
+        let mut connection = transport.connect().await.unwrap();
+        connection.send(ClientMessage::Ping).await.unwrap();
+        assert!(
+            matches!(connection.receive().await.unwrap(), Some(ServerMessage::Pong { version, .. }) if version == "unix")
+        );
+        server.await.unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[tokio::test]
     async fn local_transport_round_trips_typed_messages() {
