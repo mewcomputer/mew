@@ -100,7 +100,7 @@ trait Transport: Send + Sync {
         false
     }
     async fn retire(&self) {}
-    async fn close(&mut self) -> Result<(), McpError>;
+    async fn close(&self) -> Result<(), McpError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -108,7 +108,11 @@ trait Transport: Send + Sync {
 // ---------------------------------------------------------------------------
 
 /// Parse an SSE (Server-Sent Events) response from an MCP server.
-async fn parse_sse_response(mut resp: reqwest::Response, id: u64) -> Result<Value, McpError> {
+async fn parse_sse_response(
+    transport: &HttpTransport,
+    mut resp: reqwest::Response,
+    id: u64,
+) -> Result<Value, McpError> {
     let mut buffer = Vec::new();
     let mut data_buffer = String::new();
     while let Some(chunk) = resp
@@ -138,8 +142,8 @@ async fn parse_sse_response(mut resp: reqwest::Response, id: u64) -> Result<Valu
                 }
                 data_buffer.push_str(data);
             } else if line.is_empty() && !data_buffer.is_empty() {
-                if let Some(result) = try_parse_sse_data(&data_buffer, id) {
-                    return result;
+                if let Some(result) = transport.handle_sse_data(&data_buffer, id).await? {
+                    return Ok(result);
                 }
                 data_buffer.clear();
             }
@@ -147,20 +151,28 @@ async fn parse_sse_response(mut resp: reqwest::Response, id: u64) -> Result<Valu
         buffer.drain(..consumed);
     }
     if !data_buffer.is_empty() {
-        if let Some(result) = try_parse_sse_data(&data_buffer, id) {
-            return result;
+        if let Some(result) = transport.handle_sse_data(&data_buffer, id).await? {
+            return Ok(result);
         }
     }
 
     Err(McpError::Protocol("no data in SSE response".into()))
 }
 
+fn server_request_reply(message: &Value) -> Option<Value> {
+    let method = message.get("method")?.as_str();
+    let id = message.get("id")?;
+    Some(if method == Some("ping") {
+        serde_json::json!({"jsonrpc":"2.0", "id":id, "result":{}})
+    } else {
+        serde_json::json!({"jsonrpc":"2.0", "id":id, "error":{"code":-32601,"message":"method not supported"}})
+    })
+}
+
 /// Try to parse accumulated SSE data as a JSON-RPC response. Returns
 /// `Some(Ok(...))` for a valid response, `Some(Err(...))` for a fatal error,
 /// or `None` to skip this event (e.g. it was a progress notification).
-fn try_parse_sse_data(data: &str, id: u64) -> Option<Result<Value, McpError>> {
-    let parsed: serde_json::Value = serde_json::from_str(data).ok()?;
-
+fn try_parse_sse_data(parsed: Value, id: u64) -> Option<Result<Value, McpError>> {
     // Check if it's a notification (has method but no id/result).
     if parsed.get("method").is_some() && parsed.get("id").is_none() {
         // Notification (e.g. progress) — skip, keep looking for response.
@@ -207,6 +219,7 @@ struct HttpTransport {
     protocol_version: StdMutex<String>,
     /// Optional session ID returned by the server.
     session_id: StdMutex<Option<String>>,
+    close_lock: tokio::sync::Mutex<Option<String>>,
 }
 
 impl HttpTransport {
@@ -233,12 +246,26 @@ impl HttpTransport {
         }
         Ok(Self {
             client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                    if attempt.previous().len() >= 10 {
+                        attempt.error("too many MCP redirects")
+                    } else if attempt
+                        .previous()
+                        .first()
+                        .is_some_and(|original| original.origin() == attempt.url().origin())
+                    {
+                        attempt.follow()
+                    } else {
+                        attempt.stop()
+                    }
+                }))
                 .default_headers(defaults)
                 .build()?,
-            url: url.trim_end_matches('/').to_string(),
+            url,
             request_id: AtomicU64::new(1),
             protocol_version: StdMutex::new(MAX_PROTOCOL_VERSION.into()),
             session_id: StdMutex::new(None),
+            close_lock: tokio::sync::Mutex::new(None),
         })
     }
 
@@ -282,6 +309,51 @@ impl HttpTransport {
     /// This is an inherent method used by update_from_response.
     fn set_protocol_version_inherent(&self, version: &str) {
         *self.protocol_version.lock().unwrap() = version.to_string();
+    }
+
+    async fn handle_sse_data(&self, data: &str, id: u64) -> Result<Option<Value>, McpError> {
+        let message: Value = match serde_json::from_str(data) {
+            Ok(message) => message,
+            Err(_) => return Ok(None),
+        };
+        if let Some(reply) = server_request_reply(&message) {
+            let body =
+                serde_json::to_vec(&reply).map_err(|e| McpError::Transport(e.to_string()))?;
+            let response = self.build_request(body).send().await?;
+            if !response.status().is_success() {
+                return Err(McpError::Transport(format!(
+                    "server request reply failed: HTTP {}",
+                    response.status()
+                )));
+            }
+            return Ok(None);
+        }
+        try_parse_sse_data(message, id).transpose()
+    }
+
+    fn take_close_request(&self) -> Option<reqwest::RequestBuilder> {
+        let id = self.session_id.lock().unwrap().take()?;
+        let version = self.protocol_version.lock().unwrap().clone();
+        Some(
+            self.client
+                .delete(&self.url)
+                .header("MCP-Session-Id", id)
+                .header("MCP-Protocol-Version", version),
+        )
+    }
+}
+
+impl Drop for HttpTransport {
+    fn drop(&mut self) {
+        if let (Some(request), Ok(runtime)) = (
+            self.take_close_request(),
+            tokio::runtime::Handle::try_current(),
+        ) {
+            runtime.spawn(async move {
+                let _ =
+                    tokio::time::timeout(std::time::Duration::from_secs(3), request.send()).await;
+            });
+        }
     }
 }
 
@@ -335,7 +407,7 @@ impl Transport for HttpTransport {
 
             // Handle SSE (text/event-stream) responses.
             if content_type.starts_with("text/event-stream") {
-                return parse_sse_response(resp, id).await;
+                return parse_sse_response(self, resp, id).await;
             }
 
             if resp
@@ -397,8 +469,32 @@ impl Transport for HttpTransport {
         Ok(())
     }
 
-    async fn close(&mut self) -> Result<(), McpError> {
-        Ok(())
+    async fn close(&self) -> Result<(), McpError> {
+        let mut previous_error = self.close_lock.lock().await;
+        if let Some(request) = self.take_close_request() {
+            let result = async {
+                let response =
+                    tokio::time::timeout(std::time::Duration::from_secs(3), request.send())
+                        .await
+                        .map_err(|_| McpError::Transport("session close timed out".into()))??;
+                if !response.status().is_success()
+                    && response.status() != reqwest::StatusCode::METHOD_NOT_ALLOWED
+                {
+                    return Err(McpError::Transport(format!(
+                        "session close failed: HTTP {}",
+                        response.status()
+                    )));
+                }
+                Ok(())
+            }
+            .await;
+            *previous_error = result.as_ref().err().map(ToString::to_string);
+            return result;
+        }
+        match previous_error.as_ref() {
+            Some(error) => Err(McpError::Transport(error.clone())),
+            None => Ok(()),
+        }
     }
 
     fn set_protocol_version(&self, version: &str) {
@@ -415,16 +511,92 @@ struct StdioTransport {
     #[cfg(unix)]
     process_group: Option<i32>,
     stdin: Arc<tokio::sync::Mutex<Option<tokio::process::ChildStdin>>>,
-    stdout: tokio::sync::Mutex<StdioOutput>,
+    pending: Arc<StdMutex<Option<StdioPending>>>,
+    reader_task: tokio::task::JoinHandle<()>,
     call_lock: Arc<tokio::sync::Mutex<()>>,
     request_id: AtomicU64,
     broken: Arc<AtomicBool>,
     retired: AtomicBool,
 }
 
-struct StdioOutput {
-    reader: BufReader<tokio::process::ChildStdout>,
-    line: Vec<u8>,
+type StdioPending = (
+    u64,
+    tokio::sync::oneshot::Sender<Result<JsonRpcResponse, McpError>>,
+);
+
+async fn read_stdio(
+    stdout: tokio::process::ChildStdout,
+    stdin: Arc<tokio::sync::Mutex<Option<tokio::process::ChildStdin>>>,
+    pending: Arc<StdMutex<Option<StdioPending>>>,
+    broken: Arc<AtomicBool>,
+) {
+    let result: Result<(), McpError> = async {
+        let mut reader = BufReader::new(stdout);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            let count = (&mut reader)
+                .take(MAX_MESSAGE_BYTES as u64 + 1)
+                .read_until(b'\n', &mut line)
+                .await
+                .map_err(|error| McpError::Transport(format!("read stdout: {error}")))?;
+            if count == 0 {
+                return Err(McpError::Transport("server closed stdout".into()));
+            }
+            if line.len() > MAX_MESSAGE_BYTES || line.last() != Some(&b'\n') {
+                return Err(McpError::Protocol(
+                    "stdio response too large or incomplete".into(),
+                ));
+            }
+            let message: Value = serde_json::from_slice(&line)
+                .map_err(|error| McpError::Transport(format!("parse response: {error}")))?;
+            if message.get("method").is_some() {
+                if let Some(reply) = server_request_reply(&message) {
+                    let mut body = serde_json::to_vec(&reply)
+                        .map_err(|error| McpError::Transport(error.to_string()))?;
+                    body.push(b'\n');
+                    tokio::time::timeout(STDIO_WRITE_TIMEOUT, async {
+                        let mut guard = stdin.lock().await;
+                        let stdin = guard
+                            .as_mut()
+                            .ok_or_else(|| McpError::Transport("stdin closed".into()))?;
+                        stdin
+                            .write_all(&body)
+                            .await
+                            .map_err(|error| McpError::Transport(format!("write stdin: {error}")))
+                    })
+                    .await
+                    .map_err(|_| McpError::Transport("write stdin timed out".into()))??;
+                }
+                continue;
+            }
+            let response: JsonRpcResponse = serde_json::from_value(message)
+                .map_err(|error| McpError::Transport(format!("parse response: {error}")))?;
+            let sender = {
+                let mut pending = pending.lock().unwrap();
+                if pending
+                    .as_ref()
+                    .is_some_and(|(id, _)| response.id == Some(*id))
+                {
+                    pending.take().map(|(_, sender)| sender)
+                } else {
+                    None
+                }
+            };
+            if let Some(sender) = sender {
+                let _ = sender.send(Ok(response));
+            }
+        }
+    }
+    .await;
+    let sender = {
+        let mut pending = pending.lock().unwrap();
+        broken.store(true, Ordering::Release);
+        pending.take().map(|(_, sender)| sender)
+    };
+    if let (Some(sender), Err(error)) = (sender, result) {
+        let _ = sender.send(Err(error));
+    }
 }
 
 impl StdioTransport {
@@ -440,18 +612,25 @@ impl StdioTransport {
             .take()
             .ok_or_else(|| McpError::Transport("child has no stdout".into()))?;
 
+        let stdin = Arc::new(tokio::sync::Mutex::new(Some(stdin)));
+        let pending = Arc::new(StdMutex::new(None));
+        let broken = Arc::new(AtomicBool::new(false));
+        let reader_task = tokio::spawn(read_stdio(
+            stdout,
+            stdin.clone(),
+            pending.clone(),
+            broken.clone(),
+        ));
         Ok(Self {
             child: tokio::sync::Mutex::new(child),
             #[cfg(unix)]
             process_group,
-            stdin: Arc::new(tokio::sync::Mutex::new(Some(stdin))),
-            stdout: tokio::sync::Mutex::new(StdioOutput {
-                reader: BufReader::new(stdout),
-                line: Vec::new(),
-            }),
+            stdin,
+            pending,
+            reader_task,
             call_lock: Arc::new(tokio::sync::Mutex::new(())),
             request_id: AtomicU64::new(1),
-            broken: Arc::new(AtomicBool::new(false)),
+            broken,
             retired: AtomicBool::new(false),
         })
     }
@@ -463,6 +642,7 @@ impl StdioTransport {
 
 impl Drop for StdioTransport {
     fn drop(&mut self) {
+        self.reader_task.abort();
         #[cfg(unix)]
         if let Some(pid) = self
             .process_group
@@ -482,12 +662,19 @@ struct StdioCancellation {
     armed: bool,
     call_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
     broken: Arc<AtomicBool>,
+    pending: Arc<StdMutex<Option<StdioPending>>>,
 }
 
 impl Drop for StdioCancellation {
     fn drop(&mut self) {
         if !self.armed {
             return;
+        }
+        {
+            let mut pending = self.pending.lock().unwrap();
+            if pending.as_ref().is_some_and(|(id, _)| *id == self.id) {
+                pending.take();
+            }
         }
         let stdin = self.stdin.clone();
         let call_guard = self.call_guard.take();
@@ -543,6 +730,14 @@ impl StdioTransport {
 
         debug!(%method, id, "mcp stdio request");
 
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        {
+            let mut pending = self.pending.lock().unwrap();
+            if self.is_broken() {
+                return Err(McpError::Transport("stdio connection is unusable".into()));
+            }
+            *pending = Some((id, response_tx));
+        }
         // Finish a frame even if the caller is cancelled during a write.
         let mut guard = self.stdin.clone().lock_owned().await;
         let mut cancellation = StdioCancellation {
@@ -551,6 +746,7 @@ impl StdioTransport {
             armed: true,
             call_guard: Some(call_guard),
             broken: self.broken.clone(),
+            pending: self.pending.clone(),
         };
         let broken = self.broken.clone();
         tokio::spawn(async move {
@@ -570,67 +766,19 @@ impl StdioTransport {
         .await
         .map_err(|error| McpError::Transport(format!("write task: {error}")))??;
 
-        let mut stdout = self.stdout.lock().await;
-        loop {
-            let StdioOutput { reader, line } = &mut *stdout;
-            let remaining = (16 * 1024 * 1024 + 1 - line.len()) as u64;
-            let count = reader
-                .take(remaining)
-                .read_until(b'\n', line)
-                .await
-                .map_err(|e| McpError::Transport(format!("read stdout: {e}")))?;
-            if count == 0 {
-                return Err(McpError::Transport("server closed stdout".into()));
-            }
-            if line.len() > 16 * 1024 * 1024 || line.last() != Some(&b'\n') {
-                line.clear();
-                return Err(McpError::Protocol(
-                    "stdio response too large or incomplete".into(),
-                ));
-            }
-            let message = serde_json::from_slice(line);
-            line.clear();
-            let message: Value =
-                message.map_err(|e| McpError::Transport(format!("parse response: {e}")))?;
-            if message.get("method").is_some() {
-                if let Some(request_id) = message.get("id") {
-                    let reply = serde_json::json!({"jsonrpc":"2.0", "id":request_id, "error":{"code":-32601,"message":"method not supported"}});
-                    let mut body = serde_json::to_vec(&reply)
-                        .map_err(|e| McpError::Transport(e.to_string()))?;
-                    body.push(b'\n');
-                    let mut guard = self.stdin.lock().await;
-                    let stdin = guard
-                        .as_mut()
-                        .ok_or_else(|| McpError::Transport("stdin closed".into()))?;
-                    match tokio::time::timeout(STDIO_WRITE_TIMEOUT, stdin.write_all(&body)).await {
-                        Ok(Ok(())) => {}
-                        Ok(Err(error)) => {
-                            return Err(McpError::Transport(format!("write stdin: {error}")))
-                        }
-                        Err(_) => {
-                            self.broken.store(true, Ordering::Release);
-                            return Err(McpError::Transport("write stdin timed out".into()));
-                        }
-                    }
-                }
-                continue;
-            }
-            let response: JsonRpcResponse = serde_json::from_value(message)
-                .map_err(|e| McpError::Transport(format!("parse response: {e}")))?;
-            if response.id != Some(id) {
-                continue;
-            }
-            cancellation.armed = false;
-            if let Some(err) = response.error {
-                return Err(McpError::Rpc {
-                    code: err.code,
-                    message: err.message,
-                });
-            }
-            return response
-                .result
-                .ok_or_else(|| McpError::Protocol("missing result in stdio response".into()));
+        let response = response_rx
+            .await
+            .map_err(|_| McpError::Transport("stdio response reader stopped".into()))??;
+        cancellation.armed = false;
+        if let Some(err) = response.error {
+            return Err(McpError::Rpc {
+                code: err.code,
+                message: err.message,
+            });
         }
+        response
+            .result
+            .ok_or_else(|| McpError::Protocol("missing result in stdio response".into()))
     }
 }
 
@@ -671,11 +819,14 @@ impl Transport for StdioTransport {
         Ok(())
     }
 
-    async fn close(&mut self) -> Result<(), McpError> {
+    async fn close(&self) -> Result<(), McpError> {
         self.stdin.lock().await.take();
         let mut child = self.child.lock().await;
         #[cfg(unix)]
-        if let Some(pid) = self.process_group.take() {
+        if let Some(pid) = self
+            .process_group
+            .filter(|_| !self.retired.swap(true, Ordering::AcqRel))
+        {
             let _ = nix::sys::signal::killpg(
                 nix::unistd::Pid::from_raw(pid),
                 nix::sys::signal::Signal::SIGKILL,
@@ -780,26 +931,89 @@ pub async fn connect_tools(
     configs: Vec<McpServerConfig>,
     cwd: &std::path::Path,
 ) -> Vec<Arc<dyn mew_tools::Tool>> {
+    connect_tools_until(configs, cwd, std::future::pending()).await
+}
+
+/// Discover tools until shutdown is requested, then stop unfinished servers.
+pub async fn connect_tools_until(
+    configs: Vec<McpServerConfig>,
+    cwd: &std::path::Path,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> Vec<Arc<dyn mew_tools::Tool>> {
+    connect_tools_with_timeout(configs, cwd, shutdown, MCP_DISCOVERY_TIMEOUT).await
+}
+
+async fn connect_tools_with_timeout(
+    configs: Vec<McpServerConfig>,
+    cwd: &std::path::Path,
+    shutdown: impl std::future::Future<Output = ()>,
+    timeout: std::time::Duration,
+) -> Vec<Arc<dyn mew_tools::Tool>> {
+    tokio::pin!(shutdown);
     let mut tasks = tokio::task::JoinSet::new();
+    let (cancel, _) = tokio::sync::watch::channel(false);
     for config in configs {
         if config.disabled {
             continue;
         }
         let cwd = cwd.to_path_buf();
+        let mut task_shutdown = cancel.subscribe();
         tasks.spawn(async move {
             let name = config.name.clone();
-            let result = tokio::time::timeout(MCP_DISCOVERY_TIMEOUT, async {
-                let client = Arc::new(McpClient::connect_configured(&config, &cwd).await?);
-                let definitions = client.list_tools().await?;
-                let client = Arc::new(ManagedClient::configured(client, config, cwd));
-                Ok::<_, McpError>((client, definitions))
-            })
-            .await;
+            let deadline = tokio::time::Instant::now() + timeout;
+            let mut init_shutdown = task_shutdown.clone();
+            let result = match McpClient::connect_configured_until(
+                &config, &cwd,
+                async move { let _ = init_shutdown.wait_for(|shutdown| *shutdown).await; },
+                Some(deadline),
+            ).await {
+                Ok(client) => {
+                    let client = Arc::new(client);
+                    let listing = tokio::select! {
+                        biased;
+                        _ = task_shutdown.wait_for(|shutdown| *shutdown) => Ok(Err(McpError::Transport("server startup cancelled".into()))),
+                        result = tokio::time::timeout_at(deadline, client.list_tools()) => result,
+                    };
+                    match listing {
+                        Ok(Ok(definitions)) => Ok(Ok((
+                            Arc::new(ManagedClient::configured(client, config, cwd)),
+                            definitions,
+                        ))),
+                        result => {
+                            let _ = client.shutdown().await;
+                            match result {
+                                Ok(Err(error)) => Ok(Err(error)),
+                                Err(error) => Err(error),
+                                Ok(Ok(_)) => unreachable!(),
+                            }
+                        }
+                    }
+                }
+                Err(error) => Ok(Err(error)),
+            };
             (name, result)
         });
     }
-    let mut connected = Vec::new();
-    while let Some(result) = tasks.join_next().await {
+    let mut connected: Vec<(String, Arc<ManagedClient>, Vec<McpToolDef>)> = Vec::new();
+    loop {
+        let result = tokio::select! {
+            _ = &mut shutdown => {
+                cancel.send_replace(true);
+                let mut closing = tokio::task::JoinSet::new();
+                for (_, client, _) in connected {
+                    closing.spawn(async move { let _ = client.shutdown().await; });
+                }
+                while let Some(result) = tasks.join_next().await {
+                    if let Ok((_, Ok(Ok((client, _))))) = result {
+                        closing.spawn(async move { let _ = client.shutdown().await; });
+                    }
+                }
+                while closing.join_next().await.is_some() {}
+                return Vec::new();
+            }
+            result = tasks.join_next() => result,
+        };
+        let Some(result) = result else { break };
         let (name, result) = match result {
             Ok(result) => result,
             Err(error) => {
@@ -830,7 +1044,9 @@ pub async fn connect_tools(
     connected.sort_by(|a, b| a.0.cmp(&b.0));
     let mut tools: Vec<Arc<dyn mew_tools::Tool>> = Vec::new();
     let mut names = std::collections::HashSet::new();
+    let mut unused = tokio::task::JoinSet::new();
     for (name, client, mut definitions) in connected {
+        let previous_count = tools.len();
         definitions.sort_by(|a, b| a.name.cmp(&b.name));
         for definition in definitions {
             let qualified = definition.qualified_name(&name);
@@ -855,7 +1071,13 @@ pub async fn connect_tools(
                 client.clone(),
             )));
         }
+        if tools.len() == previous_count {
+            unused.spawn(async move {
+                let _ = client.shutdown().await;
+            });
+        }
     }
+    while unused.join_next().await.is_some() {}
     tools.sort_by(|a, b| a.name().cmp(b.name()));
     tools
 }
@@ -870,6 +1092,14 @@ pub struct McpClient {
     transport: Box<dyn Transport + 'static>,
 }
 
+async fn wait_for_deadline(deadline: Option<tokio::time::Instant>) {
+    if let Some(deadline) = deadline {
+        tokio::time::sleep_until(deadline).await;
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
 impl McpClient {
     /// Connect to an MCP server over HTTP.
     pub async fn connect_http(name: &str, url: &str) -> Result<Self, McpError> {
@@ -881,12 +1111,22 @@ impl McpClient {
         url: &str,
         headers: &std::collections::HashMap<String, String>,
     ) -> Result<Self, McpError> {
+        Self::connect_http_until(name, url, headers, std::future::pending(), None).await
+    }
+
+    async fn connect_http_until(
+        name: &str,
+        url: &str,
+        headers: &std::collections::HashMap<String, String>,
+        shutdown: impl std::future::Future<Output = ()> + Send,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<Self, McpError> {
         let transport = HttpTransport::new(url.to_string(), headers)?;
         let mut client = Self {
             name: name.to_string(),
             transport: Box::new(transport),
         };
-        client.initialize().await?;
+        client.initialize_until(shutdown, deadline).await?;
         Ok(client)
     }
 
@@ -905,6 +1145,18 @@ impl McpClient {
         args: &[String],
         env: &std::collections::HashMap<String, String>,
         cwd: Option<&std::path::Path>,
+    ) -> Result<Self, McpError> {
+        Self::connect_stdio_until(name, command, args, env, cwd, std::future::pending(), None).await
+    }
+
+    async fn connect_stdio_until(
+        name: &str,
+        command: &str,
+        args: &[String],
+        env: &std::collections::HashMap<String, String>,
+        cwd: Option<&std::path::Path>,
+        shutdown: impl std::future::Future<Output = ()> + Send,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<Self, McpError> {
         let mut process = tokio::process::Command::new(command);
         process.args(args).envs(env);
@@ -926,11 +1178,10 @@ impl McpClient {
             name: name.to_string(),
             transport: Box::new(transport),
         };
-        // Ensure cleanup if initialization fails.
-        if let Err(e) = client.initialize().await {
-            let _ = client.shutdown().await;
-            return Err(McpError::Init(e.to_string()));
-        }
+        client
+            .initialize_until(shutdown, deadline)
+            .await
+            .map_err(|error| McpError::Init(error.to_string()))?;
         Ok(client)
     }
 
@@ -938,6 +1189,15 @@ impl McpClient {
     pub async fn connect_configured(
         config: &McpServerConfig,
         cwd: &std::path::Path,
+    ) -> Result<Self, McpError> {
+        Self::connect_configured_until(config, cwd, std::future::pending(), None).await
+    }
+
+    async fn connect_configured_until(
+        config: &McpServerConfig,
+        cwd: &std::path::Path,
+        shutdown: impl std::future::Future<Output = ()> + Send,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<Self, McpError> {
         match (
             config.type_.as_deref(),
@@ -949,15 +1209,18 @@ impl McpClient {
                 Some(url),
                 None,
             ) if config.env.is_empty() && config.args.is_empty() => {
-                Self::connect_http_with_headers(&config.name, url, &config.headers).await
+                Self::connect_http_until(&config.name, url, &config.headers, shutdown, deadline)
+                    .await
             }
             (None | Some("stdio"), None, Some(command)) if config.headers.is_empty() => {
-                Self::connect_stdio_with_env(
+                Self::connect_stdio_until(
                     &config.name,
                     command,
                     &config.args,
                     &config.env,
                     Some(cwd),
+                    shutdown,
+                    deadline,
                 )
                 .await
             }
@@ -966,6 +1229,23 @@ impl McpClient {
                 config.name
             ))),
         }
+    }
+
+    async fn initialize_until(
+        &mut self,
+        shutdown: impl std::future::Future<Output = ()> + Send,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<(), McpError> {
+        let result = tokio::select! {
+            biased;
+            _ = shutdown => Err(McpError::Transport("server startup cancelled".into())),
+            _ = wait_for_deadline(deadline) => Err(McpError::Transport("server startup timed out".into())),
+            result = self.initialize() => result,
+        };
+        if result.is_err() {
+            let _ = self.shutdown().await;
+        }
+        result
     }
 
     /// Perform the MCP handshake: initialize → get capabilities → send initialized.
@@ -1088,15 +1368,15 @@ impl McpClient {
             .map(|items| {
                 items
                     .iter()
-                    .filter_map(|item| item.get("text").and_then(|v| v.as_str()))
+                    .filter_map(|item| item.get("text").and_then(Value::as_str))
                     .collect::<Vec<_>>()
                     .join("\n")
             })
             .unwrap_or_default();
         let structured_content = result.get("structuredContent").cloned();
+        let content = content.cloned().unwrap_or_default();
         let images = content
-            .into_iter()
-            .flatten()
+            .iter()
             .filter_map(|item| {
                 if item.get("type").and_then(Value::as_str) != Some("image") {
                     return None;
@@ -1118,11 +1398,12 @@ impl McpClient {
             is_error,
             images,
             structured_content,
+            content,
         })
     }
 
     /// Shut down the server connection.
-    pub async fn shutdown(&mut self) -> Result<(), McpError> {
+    pub async fn shutdown(&self) -> Result<(), McpError> {
         info!(server = %self.name, "shutting down MCP server");
         self.transport.close().await
     }
@@ -1142,6 +1423,7 @@ pub struct ToolCallResult {
     pub is_error: bool,
     pub images: Vec<mew_message::ToolImage>,
     pub structured_content: Option<Value>,
+    pub content: Vec<Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1198,6 +1480,8 @@ struct ManagedClient {
     reconnect: Option<(McpServerConfig, std::path::PathBuf)>,
     reconnect_lock: tokio::sync::Mutex<()>,
     invalid: AtomicBool,
+    closed: tokio::sync::watch::Sender<bool>,
+    active_calls: tokio::sync::RwLock<()>,
 }
 
 impl ManagedClient {
@@ -1207,6 +1491,8 @@ impl ManagedClient {
             reconnect: None,
             reconnect_lock: tokio::sync::Mutex::new(()),
             invalid: AtomicBool::new(false),
+            closed: tokio::sync::watch::channel(false).0,
+            active_calls: tokio::sync::RwLock::new(()),
         }
     }
 
@@ -1221,59 +1507,136 @@ impl ManagedClient {
         }
     }
 
+    async fn call_tool_cancellable(
+        &self,
+        name: &str,
+        arguments: Value,
+        cancel: impl std::future::Future<Output = ()> + Send,
+    ) -> Result<ToolCallResult, McpError> {
+        self.call_tool_until(name, arguments, TOOL_CALL_TIMEOUT, cancel)
+            .await
+    }
+
+    #[cfg(test)]
     async fn call_tool(&self, name: &str, arguments: Value) -> Result<ToolCallResult, McpError> {
         self.call_tool_with_timeout(name, arguments, TOOL_CALL_TIMEOUT)
             .await
     }
 
+    async fn shutdown(&self) -> Result<(), McpError> {
+        self.closed.send_replace(true);
+        let original = self.current.read().await.clone();
+        let close_original = original.shutdown();
+        let close_replacement = async {
+            let _active = self.active_calls.write().await;
+            let _guard = self.reconnect_lock.lock().await;
+            let current = self.current.read().await.clone();
+            current.shutdown().await
+        };
+        let (original, replacement) = tokio::join!(close_original, close_replacement);
+        original.and(replacement)
+    }
+
+    #[cfg(test)]
     async fn call_tool_with_timeout(
         &self,
         name: &str,
         arguments: Value,
         timeout: std::time::Duration,
     ) -> Result<ToolCallResult, McpError> {
+        self.call_tool_until(name, arguments, timeout, std::future::pending())
+            .await
+    }
+
+    async fn call_tool_until(
+        &self,
+        name: &str,
+        arguments: Value,
+        timeout: std::time::Duration,
+        cancel: impl std::future::Future<Output = ()> + Send,
+    ) -> Result<ToolCallResult, McpError> {
+        let timed_out = AtomicBool::new(false);
+        let cancel = async {
+            tokio::select! {
+                _ = cancel => {}
+                _ = tokio::time::sleep(timeout) => timed_out.store(true, Ordering::Release),
+            }
+        };
+        tokio::pin!(cancel);
         let dispatched = Arc::new(AtomicBool::new(false));
         let selected = StdMutex::new(None::<Arc<McpClient>>);
         let operation = async {
+            let _active = tokio::select! {
+                biased;
+                _ = &mut cancel => return Err(McpError::Transport("MCP tool cancelled".into())),
+                active = self.active_calls.read() => active,
+            };
+            if *self.closed.borrow() {
+                return Err(McpError::Transport("MCP connection is shut down".into()));
+            }
             let current = self.current.read().await.clone();
             if let Some((config, cwd)) = self
                 .reconnect
                 .as_ref()
                 .filter(|_| self.invalid.load(Ordering::Acquire) || current.transport.is_broken())
             {
-                let _guard = self.reconnect_lock.lock().await;
+                let _guard = tokio::select! {
+                    biased;
+                    _ = &mut cancel => return Err(McpError::Transport("MCP tool cancelled".into())),
+                    guard = self.reconnect_lock.lock() => guard,
+                };
+                if *self.closed.borrow() {
+                    return Err(McpError::Transport("MCP connection is shut down".into()));
+                }
                 let current = self.current.read().await.clone();
                 if self.invalid.load(Ordering::Acquire) || current.transport.is_broken() {
                     current.transport.retire().await;
-                    let client = tokio::time::timeout(
-                        MCP_DISCOVERY_TIMEOUT,
-                        McpClient::connect_configured(config, cwd),
+                    let mut reconnect_shutdown = self.closed.subscribe();
+                    let client = McpClient::connect_configured_until(
+                        config,
+                        cwd,
+                        async {
+                            tokio::select! {
+                                _ = &mut cancel => {}
+                                _ = reconnect_shutdown.wait_for(|closed| *closed) => {}
+                            }
+                        },
+                        Some(tokio::time::Instant::now() + MCP_DISCOVERY_TIMEOUT),
                     )
-                    .await
-                    .map_err(|_| McpError::Transport("server reconnection timed out".into()))??;
+                    .await?;
+                    if *self.closed.borrow() {
+                        let _ = client.shutdown().await;
+                        return Err(McpError::Transport("MCP connection is shut down".into()));
+                    }
                     let mut current = self.current.write().await;
                     *current = Arc::new(client);
                     self.invalid.store(false, Ordering::Release);
                 }
             }
             let client = self.current.read().await.clone();
-            *selected.lock().unwrap() = Some(client.clone());
-            client
-                .call_tool_marked(name, arguments, Some(dispatched.clone()))
-                .await
-        };
-        let (result, invalidate) = match tokio::time::timeout(timeout, operation).await {
-            Ok(result) => {
-                let invalid = matches!(
-                    &result,
-                    Err(McpError::Transport(_) | McpError::Http(_) | McpError::Protocol(_))
-                );
-                (result, invalid)
+            if *self.closed.borrow() {
+                return Err(McpError::Transport("MCP connection is shut down".into()));
             }
-            Err(_) => (
-                Err(McpError::Transport("tool call timed out".into())),
-                dispatched.load(Ordering::Acquire),
-            ),
+            *selected.lock().unwrap() = Some(client.clone());
+            let mut closed = self.closed.subscribe();
+            tokio::select! {
+                biased;
+                _ = &mut cancel => Err(McpError::Transport("MCP tool cancelled".into())),
+                _ = closed.wait_for(|closed| *closed) => Err(McpError::Transport("MCP connection is shut down".into())),
+                result = client.call_tool_marked(name, arguments, Some(dispatched.clone())) => result,
+            }
+        };
+        let result = operation.await;
+        let expired = timed_out.load(Ordering::Acquire);
+        let invalidate = dispatched.load(Ordering::Acquire)
+            && matches!(
+                &result,
+                Err(McpError::Transport(_) | McpError::Http(_) | McpError::Protocol(_))
+            );
+        let result = if expired {
+            Err(McpError::Transport("tool call timed out".into()))
+        } else {
+            result
         };
         let selected = selected.into_inner().unwrap();
         if let Some(client) = selected.filter(|_| invalidate) {
@@ -1321,17 +1684,52 @@ impl mew_tools::Tool for McpTool {
         mew_tools::Sensitivity::Dangerous
     }
 
+    async fn shutdown(&self) -> Result<(), mew_tools::ToolError> {
+        self.client
+            .shutdown()
+            .await
+            .map_err(|error| mew_tools::ToolError::Execution(error.to_string()))
+    }
+
     async fn execute(
         &self,
         ctx: mew_tools::ToolCtx,
         input: Value,
     ) -> Result<mew_hooks::ToolOutput, mew_tools::ToolError> {
-        let result = tokio::select! {
-            _ = ctx.cancel.cancelled() => return Err(mew_tools::ToolError::Execution("MCP tool cancelled".into())),
-            result = self.client.call_tool(&self.tool_name, input) => result,
-        };
+        let cancel = ctx.cancel.clone();
+        let result = self
+            .client
+            .call_tool_cancellable(&self.tool_name, input, async move {
+                cancel.cancelled().await;
+            })
+            .await;
+        if ctx.cancel.is_cancelled() {
+            return Err(mew_tools::ToolError::Execution("MCP tool cancelled".into()));
+        }
         match result {
             Ok(mut result) => {
+                if result.content.iter().any(|item| {
+                    matches!(
+                        item.get("type").and_then(Value::as_str),
+                        Some("resource" | "resource_link")
+                    )
+                }) {
+                    result.text = result
+                        .content
+                        .iter_mut()
+                        .filter_map(|item| match item.get("type").and_then(Value::as_str) {
+                            Some("text") => {
+                                item.get("text").and_then(Value::as_str).map(str::to_owned)
+                            }
+                            Some("resource" | "resource_link") => {
+                                redact_structured(item, &ctx.secrets);
+                                serde_json::to_string(item).ok()
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                }
                 if let Some(value) = &mut result.structured_content {
                     redact_structured(value, &ctx.secrets);
                     if result.text.is_empty() {
@@ -1343,7 +1741,14 @@ impl mew_tools::Tool for McpTool {
                     mew_tools::secrets::redact_secret_words(&result.text, &ctx.secrets);
                 let text = mew_tools::secrets::annotate_redaction(text, count);
                 let (output, error) = if result.is_error {
-                    (String::new(), text)
+                    (
+                        String::new(),
+                        if text.is_empty() {
+                            "MCP tool returned an error".into()
+                        } else {
+                            text
+                        },
+                    )
                 } else {
                     (text, String::new())
                 };
@@ -2448,6 +2853,866 @@ for line in sys.stdin:
         .await
         .expect("partially written reply wedged the connection");
         assert!(next.is_err());
+    }
+
+    #[tokio::test]
+    async fn http_rejects_cross_origin_redirects_with_credentials() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let destination = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let source = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let destination_address = destination.local_addr().unwrap();
+        let source_address = source.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = source.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert!(stream.read(&mut request).await.unwrap() > 0);
+            stream.write_all(format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{destination_address}/stolen\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+        });
+        let forwarded = tokio::spawn(async move {
+            match tokio::time::timeout(std::time::Duration::from_millis(500), destination.accept())
+                .await
+            {
+                Ok(Ok((mut stream, _))) => {
+                    let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                    true
+                }
+                _ => false,
+            }
+        });
+        let headers =
+            std::collections::HashMap::from([("X-Api-Key".into(), "synthetic-secret".into())]);
+        let transport =
+            HttpTransport::new(format!("http://{source_address}/mcp"), &headers).unwrap();
+        let result = transport
+            .call("test", Some(serde_json::json!({"secret":"synthetic-body"})))
+            .await;
+        assert!(result.is_err());
+        assert!(
+            !forwarded.await.unwrap(),
+            "redirect forwarded a request to another origin"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn http_preserves_the_configured_endpoint_path() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let count = stream.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..count]);
+            assert!(request.starts_with("POST /mcp/ HTTP/1.1"), "{request}");
+            let body = r#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
+            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        });
+        let transport =
+            HttpTransport::new(format!("http://{address}/mcp/"), &Default::default()).unwrap();
+        transport.call("test", None).await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn http_allows_same_origin_redirects() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert!(first.read(&mut request).await.unwrap() > 0);
+            first.write_all(format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{address}/mcp/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+            let (mut second, _) =
+                tokio::time::timeout(std::time::Duration::from_secs(2), listener.accept())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let count = second.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..count]).to_lowercase();
+            assert!(request.starts_with("post /mcp/ http/1.1"), "{request}");
+            assert!(request.contains("x-api-key: synthetic-secret"), "{request}");
+            let body = r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#;
+            second.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        });
+        let headers =
+            std::collections::HashMap::from([("X-Api-Key".into(), "synthetic-secret".into())]);
+        let transport = HttpTransport::new(format!("http://{address}/mcp"), &headers).unwrap();
+        assert_eq!(transport.call("test", None).await.unwrap()["ok"], true);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stdio_rejects_malformed_response_without_waiting_for_timeout() {
+        let server = r#"
+import json, sys
+for line in sys.stdin:
+    req = json.loads(line)
+    if 'id' not in req: continue
+    if req['method'] == 'initialize':
+        result = {'protocolVersion':'2025-11-25','capabilities':{},'serverInfo':{'name':'test','version':'1'}}
+        print(json.dumps({'jsonrpc':'2.0','id':req['id'],'result':result}),flush=True)
+    else:
+        print('42', flush=True)
+"#;
+        let client = McpClient::connect_stdio(
+            "test",
+            "python3",
+            &["-u".into(), "-c".into(), server.into()],
+        )
+        .await
+        .unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.call_tool("test", serde_json::json!({})),
+        )
+        .await
+        .expect("malformed response left the call waiting");
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn stdio_replies_to_ping_while_idle() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("ping-replied");
+        let server = r#"
+import json, pathlib, sys
+marker = pathlib.Path(sys.argv[1])
+for line in sys.stdin:
+    req = json.loads(line)
+    if req.get('method') == 'initialize':
+        result = {'protocolVersion':'2025-11-25','capabilities':{},'serverInfo':{'name':'test','version':'1'}}
+        print(json.dumps({'jsonrpc':'2.0','id':req['id'],'result':result}),flush=True)
+    elif req.get('method') == 'notifications/initialized':
+        print(json.dumps({'jsonrpc':'2.0','id':'idle-ping','method':'ping'}),flush=True)
+        reply = json.loads(sys.stdin.readline())
+        if reply == {'jsonrpc':'2.0','id':'idle-ping','result':{}}: marker.write_text('received')
+"#;
+        let _client = McpClient::connect_stdio(
+            "test",
+            "python3",
+            &[
+                "-u".into(),
+                "-c".into(),
+                server.into(),
+                marker.to_string_lossy().into_owned(),
+            ],
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !marker.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("idle server did not receive its ping response");
+    }
+
+    #[tokio::test]
+    async fn stdio_responds_to_server_ping_during_a_tool_call() {
+        let server = r#"
+import json, sys
+for line in sys.stdin:
+    req = json.loads(line)
+    if 'id' not in req: continue
+    if req['method'] == 'initialize':
+        result = {'protocolVersion':'2025-11-25','capabilities':{},'serverInfo':{'name':'test','version':'1'}}
+    else:
+        print(json.dumps({'jsonrpc':'2.0','id':'server-ping','method':'ping'}), flush=True)
+        reply = json.loads(sys.stdin.readline())
+        result = {'content':[{'type':'text','text':json.dumps(reply)}]}
+    print(json.dumps({'jsonrpc':'2.0','id':req['id'],'result':result}),flush=True)
+"#;
+        let client = McpClient::connect_stdio(
+            "test",
+            "python3",
+            &["-u".into(), "-c".into(), server.into()],
+        )
+        .await
+        .unwrap();
+        let result = client
+            .call_tool("test", serde_json::json!({}))
+            .await
+            .unwrap();
+        let reply: Value = serde_json::from_str(&result.text).unwrap();
+        assert_eq!(
+            reply,
+            serde_json::json!({"jsonrpc":"2.0","id":"server-ping","result":{}})
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_embedded_resources_redact_secrets_before_json_encoding() {
+        let directory = tempfile::tempdir().unwrap();
+        let server = r#"
+import json, sys
+for line in sys.stdin:
+    req = json.loads(line)
+    if 'id' not in req: continue
+    if req['method'] == 'initialize':
+        result = {'protocolVersion':'2025-11-25','capabilities':{'tools':{}},'serverInfo':{'name':'test','version':'1'}}
+    elif req['method'] == 'tools/list':
+        result = {'tools':[{'name':'test','inputSchema':{'type':'object'}}]}
+    else:
+        result = {'content':[{'type':'resource','resource':{'uri':'file:///fixture','text':'key"\nsecret'}}]}
+    print(json.dumps({'jsonrpc':'2.0','id':req['id'],'result':result}),flush=True)
+"#;
+        let config = McpServerConfig {
+            name: "test".into(),
+            type_: None,
+            url: None,
+            command: Some("python3".into()),
+            args: vec!["-u".into(), "-c".into(), server.into()],
+            env: Default::default(),
+            headers: Default::default(),
+            disabled: false,
+        };
+        let tools = connect_tools(vec![config], directory.path()).await;
+        let secrets = mew_tools::SecretSet {
+            words: vec!["key\"\nsecret".into()],
+            globs: vec![],
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let ctx = mew_tools::ToolCtx::new(
+            Arc::new(mew_tools::ToolCtxShared {
+                secrets: Arc::new(secrets),
+                ..Default::default()
+            }),
+            "call".into(),
+            Default::default(),
+            tx,
+        );
+        let result = tools[0].execute(ctx, serde_json::json!({})).await.unwrap();
+        let resource: Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(resource["resource"]["text"], "[REDACTED]");
+    }
+
+    #[tokio::test]
+    async fn mcp_tool_preserves_resource_content_and_empty_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let server = r#"
+import json, sys
+for line in sys.stdin:
+    req = json.loads(line)
+    if 'id' not in req: continue
+    if req['method'] == 'initialize':
+        result = {'protocolVersion':'2025-11-25','capabilities':{'tools':{}},'serverInfo':{'name':'test','version':'1'}}
+    elif req['method'] == 'tools/list':
+        result = {'tools':[{'name':'test','inputSchema':{'type':'object'}}]}
+    elif req['params']['arguments'].get('error'):
+        result = {'isError':True,'content':[]}
+    else:
+        result = {'content':[{'type':'resource','resource':{'uri':'file:///fixture','mimeType':'text/plain','text':'embedded contents'}},{'type':'resource_link','uri':'file:///linked','name':'linked file'}]}
+    print(json.dumps({'jsonrpc':'2.0','id':req['id'],'result':result}),flush=True)
+"#;
+        let config = McpServerConfig {
+            name: "test".into(),
+            type_: None,
+            url: None,
+            command: Some("python3".into()),
+            args: vec!["-u".into(), "-c".into(), server.into()],
+            env: Default::default(),
+            headers: Default::default(),
+            disabled: false,
+        };
+        let tools = connect_tools(vec![config], directory.path()).await;
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let shared = Arc::new(mew_tools::ToolCtxShared::default());
+        let ctx = || {
+            mew_tools::ToolCtx::new(
+                shared.clone(),
+                "call".into(),
+                Default::default(),
+                tx.clone(),
+            )
+        };
+        let result = tools[0]
+            .execute(ctx(), serde_json::json!({"error":true}))
+            .await
+            .unwrap();
+        assert!(
+            !result.error.is_empty(),
+            "server error was reported as success"
+        );
+        let result = tools[0]
+            .execute(ctx(), serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(
+            result.output.contains("embedded contents"),
+            "{}",
+            result.output
+        );
+        assert!(
+            result.output.contains("file:///linked"),
+            "{}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn http_replies_to_server_ping_before_the_tool_response() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert!(stream.read(&mut request).await.unwrap() > 0);
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
+            let ping = "data: {\"jsonrpc\":\"2.0\",\"id\":\"server-ping\",\"method\":\"ping\"}\n\n";
+            stream
+                .write_all(format!("{:X}\r\n{ping}\r\n", ping.len()).as_bytes())
+                .await
+                .unwrap();
+            let response =
+                tokio::time::timeout(std::time::Duration::from_millis(500), listener.accept())
+                    .await;
+            let mut reply = String::new();
+            if let Ok(Ok((mut incoming, _))) = response {
+                let count = incoming.read(&mut request).await.unwrap();
+                reply = String::from_utf8_lossy(&request[..count]).into_owned();
+                incoming
+                    .write_all(
+                        b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .unwrap();
+            }
+            let result = "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n\n";
+            stream
+                .write_all(format!("{:X}\r\n{result}\r\n0\r\n\r\n", result.len()).as_bytes())
+                .await
+                .unwrap();
+            reply
+        });
+        let transport =
+            HttpTransport::new(format!("http://{address}/mcp"), &Default::default()).unwrap();
+        assert_eq!(transport.call("test", None).await.unwrap()["ok"], true);
+        let reply = server.await.unwrap();
+        let body = reply
+            .split_once("\r\n\r\n")
+            .expect("missing ping response")
+            .1;
+        assert_eq!(
+            serde_json::from_str::<Value>(body).unwrap(),
+            serde_json::json!({"jsonrpc":"2.0","id":"server-ping","result":{}})
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_discovery_awaits_cleanup_of_an_initialized_session() {
+        check_discovery_cleanup(false).await;
+    }
+
+    #[tokio::test]
+    async fn timed_out_discovery_awaits_cleanup_of_an_initialized_session() {
+        check_discovery_cleanup(true).await;
+    }
+
+    async fn check_discovery_cleanup(timeout: bool) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (listing_tx, listing_rx) = tokio::sync::oneshot::channel();
+        let (close_tx, close_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut data = [0; 4096];
+            let (mut init, _) = listener.accept().await.unwrap();
+            assert!(init.read(&mut data).await.unwrap() > 0);
+            let body = r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"test","version":"1"}}}"#;
+            init.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMCP-Session-Id: startup\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            let (mut initialized, _) = listener.accept().await.unwrap();
+            assert!(initialized.read(&mut data).await.unwrap() > 0);
+            initialized
+                .write_all(
+                    b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            let (mut listing, _) = listener.accept().await.unwrap();
+            assert!(listing.read(&mut data).await.unwrap() > 0);
+            listing_tx.send(()).unwrap();
+            loop {
+                let (mut incoming, _) = listener.accept().await.unwrap();
+                let count = incoming.read(&mut data).await.unwrap();
+                let request = String::from_utf8_lossy(&data[..count]).to_lowercase();
+                if request.starts_with("delete ") {
+                    assert!(request.contains("mcp-session-id: startup"));
+                    close_tx.send(()).unwrap();
+                    release_rx.await.unwrap();
+                    incoming
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await
+                        .unwrap();
+                    break;
+                }
+                incoming
+                    .write_all(
+                        b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .unwrap();
+            }
+            drop(listing);
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let config = McpServerConfig {
+            name: "test".into(),
+            type_: None,
+            url: Some(format!("http://{address}/mcp")),
+            command: None,
+            args: vec![],
+            env: Default::default(),
+            headers: Default::default(),
+            disabled: false,
+        };
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        let path = directory.path().to_path_buf();
+        let mut discovery = tokio::spawn(async move {
+            connect_tools_with_timeout(
+                vec![config],
+                &path,
+                async {
+                    let _ = cancel_rx.await;
+                },
+                if timeout {
+                    std::time::Duration::from_millis(300)
+                } else {
+                    MCP_DISCOVERY_TIMEOUT
+                },
+            )
+            .await
+        });
+        listing_rx.await.unwrap();
+        if !timeout {
+            cancel_tx.send(()).unwrap();
+        }
+        close_rx.await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut discovery)
+                .await
+                .is_err(),
+            "discovery returned before cleanup completed"
+        );
+        release_tx.send(()).unwrap();
+        assert!(discovery.await.unwrap().is_empty());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn discovery_closes_sessions_without_usable_tools_before_returning() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for result in [
+            r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"failed"}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"bad space","inputSchema":null}]}}"#,
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let mut request = [0; 4096];
+                let init = r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"test","version":"1"}}}"#;
+                for (body, extra) in [
+                    (init, "MCP-Session-Id: session-1\r\n"),
+                    ("", ""),
+                    (result, ""),
+                ] {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    assert!(stream.read(&mut request).await.unwrap() > 0);
+                    let status = if body.is_empty() {
+                        "202 Accepted"
+                    } else {
+                        "200 OK"
+                    };
+                    stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                }
+                let (mut close, _) =
+                    tokio::time::timeout(std::time::Duration::from_secs(3), listener.accept())
+                        .await
+                        .expect("session was not closed")
+                        .unwrap();
+                let count = close.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..count]).to_lowercase();
+                assert!(request.starts_with("delete /mcp http/1.1"), "{request}");
+                started_tx.send(()).unwrap();
+                release_rx.await.unwrap();
+                close
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+            });
+            let directory = tempfile::tempdir().unwrap();
+            let config = McpServerConfig {
+                name: "test".into(),
+                type_: None,
+                url: Some(format!("http://{address}/mcp")),
+                command: None,
+                args: vec![],
+                env: Default::default(),
+                headers: Default::default(),
+                disabled: false,
+            };
+            let path = directory.path().to_path_buf();
+            let mut discovery =
+                tokio::spawn(async move { connect_tools(vec![config], &path).await });
+            started_rx.await.unwrap();
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(100), &mut discovery)
+                    .await
+                    .is_err(),
+                "discovery returned before closing its unused session"
+            );
+            release_tx.send(()).unwrap();
+            assert!(discovery.await.unwrap().is_empty());
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn shutting_down_cancels_an_in_flight_http_tool_call() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut init, _) = listener.accept().await.unwrap();
+            let mut data = [0; 4096];
+            assert!(init.read(&mut data).await.unwrap() > 0);
+            let body = r#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
+            init.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMCP-Session-Id: active\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            let (mut call, _) = listener.accept().await.unwrap();
+            assert!(call.read(&mut data).await.unwrap() > 0);
+            started_tx.send(()).unwrap();
+            loop {
+                let (mut incoming, _) = listener.accept().await.unwrap();
+                let count = incoming.read(&mut data).await.unwrap();
+                let request = String::from_utf8_lossy(&data[..count]).to_lowercase();
+                incoming
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+                if request.starts_with("delete ") {
+                    break;
+                }
+            }
+            let _ = release_rx.await;
+            drop(call);
+        });
+        let transport =
+            HttpTransport::new(format!("http://{address}/mcp"), &Default::default()).unwrap();
+        transport.call("initialize", None).await.unwrap();
+        let client = Arc::new(McpClient {
+            name: "test".into(),
+            transport: Box::new(transport),
+        });
+        let managed = Arc::new(ManagedClient::new(client));
+        let call = {
+            let managed = managed.clone();
+            tokio::spawn(async move { managed.call_tool("test", serde_json::json!({})).await })
+        };
+        started_rx.await.unwrap();
+        managed.shutdown().await.unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), call)
+            .await
+            .expect("shutdown left the tool call running")
+            .unwrap();
+        assert!(result.is_err());
+        release_tx.send(()).unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutting_down_waits_for_and_closes_a_reconnecting_session() {
+        check_reconnecting_session_cleanup(0).await;
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_reconnect_waits_for_session_cleanup() {
+        check_reconnecting_session_cleanup(1).await;
+    }
+
+    #[tokio::test]
+    async fn timing_out_a_reconnect_waits_for_session_cleanup() {
+        check_reconnecting_session_cleanup(2).await;
+    }
+
+    async fn check_reconnecting_session_cleanup(mode: u8) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (close_tx, close_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut init, _) = listener.accept().await.unwrap();
+            let mut data = [0; 4096];
+            assert!(init.read(&mut data).await.unwrap() > 0);
+            let body = r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{},"serverInfo":{"name":"test","version":"1"}}}"#;
+            init.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMCP-Session-Id: reconnected\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            let (mut notification, _) = listener.accept().await.unwrap();
+            assert!(notification.read(&mut data).await.unwrap() > 0);
+            started_tx.send(()).unwrap();
+            let (mut close, _) =
+                tokio::time::timeout(std::time::Duration::from_secs(3), listener.accept())
+                    .await
+                    .expect("reconnected session was not closed")
+                    .unwrap();
+            let count = close.read(&mut data).await.unwrap();
+            let request = String::from_utf8_lossy(&data[..count]).to_lowercase();
+            assert!(request.starts_with("delete /mcp http/1.1"), "{request}");
+            assert!(request.contains("mcp-session-id: reconnected"), "{request}");
+            close_tx.send(()).unwrap();
+            release_rx.await.unwrap();
+            close
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let url = format!("http://{address}/mcp");
+        let config = McpServerConfig {
+            name: "test".into(),
+            type_: None,
+            url: Some(url.clone()),
+            command: None,
+            args: vec![],
+            env: Default::default(),
+            headers: Default::default(),
+            disabled: false,
+        };
+        let original = Arc::new(McpClient {
+            name: "test".into(),
+            transport: Box::new(HttpTransport::new(url, &Default::default()).unwrap()),
+        });
+        let managed = Arc::new(ManagedClient::configured(
+            original,
+            config,
+            directory.path().to_path_buf(),
+        ));
+        managed.invalid.store(true, Ordering::Release);
+        let definition = McpToolDef {
+            name: "test".into(),
+            description: String::new(),
+            input_schema: serde_json::json!({"type":"object"}),
+        };
+        let tool = Arc::new(McpTool::with_client("test", &definition, managed.clone()));
+        let (call, cancel) = {
+            let tool = tool.clone();
+            let (tx, _rx) = tokio::sync::mpsc::channel(1);
+            let ctx = mew_tools::ToolCtx::new(
+                Arc::new(mew_tools::ToolCtxShared::default()),
+                "call".into(),
+                Default::default(),
+                tx,
+            );
+            let cancel = ctx.cancel.clone();
+            let call = tokio::spawn(async move {
+                if mode == 2 {
+                    managed
+                        .call_tool_with_timeout(
+                            "test",
+                            serde_json::json!({}),
+                            std::time::Duration::from_millis(300),
+                        )
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                } else {
+                    mew_tools::Tool::execute(tool.as_ref(), ctx, serde_json::json!({}))
+                        .await
+                        .map_err(|error| error.to_string())
+                        .and_then(|output| {
+                            if output.error.is_empty() {
+                                Ok(())
+                            } else {
+                                Err(output.error)
+                            }
+                        })
+                }
+            });
+            (call, cancel)
+        };
+        started_rx.await.unwrap();
+        if mode != 0 {
+            let mut call = call;
+            if mode == 1 {
+                cancel.cancel();
+            }
+            close_rx.await.unwrap();
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(100), &mut call)
+                    .await
+                    .is_err(),
+                "call returned before reconnect cleanup completed"
+            );
+            release_tx.send(()).unwrap();
+            let error = call.await.unwrap().unwrap_err();
+            if mode == 2 {
+                assert!(error.contains("timed out"), "{error}");
+            }
+        } else {
+            let mut shutdown =
+                tokio::spawn(async move { mew_tools::Tool::shutdown(tool.as_ref()).await });
+            close_rx.await.unwrap();
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(100), &mut shutdown)
+                    .await
+                    .is_err(),
+                "shutdown returned before reconnect finished"
+            );
+            release_tx.send(()).unwrap();
+            shutdown.await.unwrap().unwrap();
+            assert!(call.await.unwrap().is_err());
+        }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_http_shutdowns_wait_for_the_same_session_close() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for success in [true, false] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let mut data = [0; 4096];
+                let (mut init, _) = listener.accept().await.unwrap();
+                assert!(init.read(&mut data).await.unwrap() > 0);
+                let body = r#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
+                init.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMCP-Session-Id: session-1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                let (mut close, _) = listener.accept().await.unwrap();
+                let count = close.read(&mut data).await.unwrap();
+                assert!(String::from_utf8_lossy(&data[..count]).starts_with("DELETE /mcp "));
+                started_tx.send(()).unwrap();
+                release_rx.await.unwrap();
+                let status = if success {
+                    "200 OK"
+                } else {
+                    "500 Internal Server Error"
+                };
+                close
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            });
+            let transport = Arc::new(
+                HttpTransport::new(format!("http://{address}/mcp"), &Default::default()).unwrap(),
+            );
+            transport.call("initialize", None).await.unwrap();
+            let first = {
+                let transport = transport.clone();
+                tokio::spawn(async move { transport.close().await })
+            };
+            started_rx.await.unwrap();
+            let mut second = {
+                let transport = transport.clone();
+                tokio::spawn(async move { transport.close().await })
+            };
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(100), &mut second)
+                    .await
+                    .is_err(),
+                "second close returned before the session closed"
+            );
+            release_tx.send(()).unwrap();
+            assert_eq!(first.await.unwrap().is_ok(), success);
+            assert_eq!(second.await.unwrap().is_ok(), success);
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn shutting_down_an_mcp_tool_closes_the_shared_http_session() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert!(stream.read(&mut request).await.unwrap() > 0);
+            let body = r#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
+            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMCP-Session-Id: session-1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            let (mut stream, _) =
+                tokio::time::timeout(std::time::Duration::from_secs(2), listener.accept())
+                    .await
+                    .expect("tool shutdown did not close the session")
+                    .unwrap();
+            let count = stream.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..count]).to_lowercase();
+            assert!(request.starts_with("delete /mcp http/1.1"), "{request}");
+            assert!(request.contains("mcp-session-id: session-1"), "{request}");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let transport =
+            HttpTransport::new(format!("http://{address}/mcp"), &Default::default()).unwrap();
+        transport.call("test", None).await.unwrap();
+        let client = Arc::new(McpClient {
+            name: "test".into(),
+            transport: Box::new(transport),
+        });
+        let definition = McpToolDef {
+            name: "test".into(),
+            description: String::new(),
+            input_schema: serde_json::json!({"type":"object"}),
+        };
+        let tool = McpTool::new("test", &definition, client);
+        mew_tools::Tool::shutdown(&tool).await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn closing_or_dropping_http_transport_closes_the_server_session() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for explicit in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                assert!(stream.read(&mut request).await.unwrap() > 0);
+                let body = r#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
+                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMCP-Session-Id: session-1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                let (mut stream, _) =
+                    tokio::time::timeout(std::time::Duration::from_secs(2), listener.accept())
+                        .await
+                        .expect("session not closed")
+                        .unwrap();
+                let count = stream.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..count]).to_lowercase();
+                assert!(request.starts_with("delete /mcp http/1.1"), "{request}");
+                assert!(request.contains("mcp-session-id: session-1"), "{request}");
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+            });
+            let transport =
+                HttpTransport::new(format!("http://{address}/mcp"), &Default::default()).unwrap();
+            transport.call("test", None).await.unwrap();
+            if explicit {
+                transport.close().await.unwrap();
+            }
+            drop(transport);
+            server.await.unwrap();
+        }
     }
 
     #[tokio::test]

@@ -64,8 +64,12 @@ restart that server before a later call. Failed calls are not automatically
 replayed, since they may have already changed external state.
 
 Configured secret words are redacted from text and structured tool results.
-Configure any sensitive values for redaction separately. MCP support currently
-exposes tools, not resources or prompts. HTTP authentication can be supplied
-through configured headers.
+Configure any sensitive values for redaction separately. MCP support exposes
+tools but does not expose separate resource or prompt APIs. Embedded resources
+and resource links returned by tools are included in their output. HTTP
+authentication can be supplied through configured headers. Redirects are
+followed only within the same origin.
+Mew closes stateful HTTP sessions during normal shutdown; forced termination or
+an unresponsive server can leave a session for the server to expire.
 
 For protocol details, see the [MCP specification](https://modelcontextprotocol.io/).
