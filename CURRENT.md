@@ -4708,3 +4708,11 @@ under a short temporary path. Persistent shells now stop their process group on
 shutdown or timeout. Verified the TUI lifecycle, shell and CLI tests, including
 terminal restoration, MCP cleanup during startup, long temporary paths, and a
 live foreground command stopped by `/quit`.
+
+### 2026-11-20: Finish TUI startup shutdown handling
+
+SIGINT, SIGTERM, and SIGHUP now interrupt daemon startup and client setup.
+The owned daemon uses the configured temporary directory when its socket path
+fits, falling back to a short path otherwise. Verified the CLI and lifecycle
+tests, stalled handshakes and startup signals, and a real macOS sandbox with
+writable TMPDIR and restricted /tmp.

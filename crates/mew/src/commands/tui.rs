@@ -26,6 +26,7 @@ pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) ->
 }
 
 struct TuiSignals {
+    interrupt: tokio::signal::unix::Signal,
     terminate: tokio::signal::unix::Signal,
     hangup: tokio::signal::unix::Signal,
 }
@@ -34,13 +35,14 @@ impl TuiSignals {
     fn new() -> Result<Self> {
         use tokio::signal::unix::{signal, SignalKind};
         Ok(Self {
+            interrupt: signal(SignalKind::interrupt())?,
             terminate: signal(SignalKind::terminate())?,
             hangup: signal(SignalKind::hangup())?,
         })
     }
 
     async fn recv(&mut self) {
-        tokio::select! { _ = self.terminate.recv() => {}, _ = self.hangup.recv() => {} }
+        tokio::select! { _ = self.interrupt.recv() => {}, _ = self.terminate.recv() => {}, _ = self.hangup.recv() => {} }
     }
 }
 
@@ -49,56 +51,64 @@ async fn chat_with_daemon_until_signal(
     attach: Option<&str>,
     signals: &mut TuiSignals,
 ) -> Result<()> {
-    let (client, mut updates) = crate::runtime::client::TuiClient::connect(connect_url).await?;
+    let setup = async {
+        let (client, updates) = crate::runtime::client::TuiClient::connect(connect_url).await?;
 
-    if let Some(session_id) = attach {
-        client
-            .send(mew_protocol::ClientMessage::AttachSession {
-                session_id: session_id.into(),
-                client_kind: mew_protocol::ClientKind::Tui,
-            })
-            .await?;
-    } else {
-        client
-            .send(mew_protocol::ClientMessage::NewSession {
-                cwd: Some(
-                    std::env::current_dir()
-                        .context("resolve terminal workspace")?
-                        .to_string_lossy()
-                        .into_owned(),
-                ),
-                client_kind: mew_protocol::ClientKind::Tui,
-            })
-            .await?;
-    }
+        if let Some(session_id) = attach {
+            client
+                .send(mew_protocol::ClientMessage::AttachSession {
+                    session_id: session_id.into(),
+                    client_kind: mew_protocol::ClientKind::Tui,
+                })
+                .await?;
+        } else {
+            client
+                .send(mew_protocol::ClientMessage::NewSession {
+                    cwd: Some(
+                        std::env::current_dir()
+                            .context("resolve terminal workspace")?
+                            .to_string_lossy()
+                            .into_owned(),
+                    ),
+                    client_kind: mew_protocol::ClientKind::Tui,
+                })
+                .await?;
+        }
 
-    let mut app = mew_tui::App::new();
-    app.daemon_mode = true;
-    app.attaching_session = true;
-    // Load theme from state/config (best-effort; daemon client may not
-    // have full config available).
-    let state = mew_config::load_state().unwrap_or_default();
-    let cfg = mew_config::load().unwrap_or_default();
-    let theme_name = if !state.theme.is_empty() {
-        &state.theme
-    } else {
-        &cfg.tui.theme
+        let mut app = mew_tui::App::new();
+        app.daemon_mode = true;
+        app.attaching_session = true;
+        // Load theme from state/config (best-effort; daemon client may not
+        // have full config available).
+        let state = mew_config::load_state().unwrap_or_default();
+        let cfg = mew_config::load().unwrap_or_default();
+        let theme_name = if !state.theme.is_empty() {
+            &state.theme
+        } else {
+            &cfg.tui.theme
+        };
+        app.theme = mew_tui::theme::Theme::load(theme_name);
+        app.sidebar_finished_ttl = cfg.tui.sidebar_finished_ttl_secs;
+        app.status.model = "daemon".to_string();
+        app.status.provider = "mewd".to_string();
+        app.recent_models = state.recent_models.clone();
+
+        // Request the session list so the sidebar rail is populated immediately.
+        client
+            .send(mew_protocol::ClientMessage::ListSessions {})
+            .await?;
+        // Request the model list so the model picker and thinking-variant
+        // picker are populated in daemon mode.
+        client
+            .send(mew_protocol::ClientMessage::ListModels {})
+            .await?;
+
+        Ok::<_, anyhow::Error>((client, updates, app))
     };
-    app.theme = mew_tui::theme::Theme::load(theme_name);
-    app.sidebar_finished_ttl = cfg.tui.sidebar_finished_ttl_secs;
-    app.status.model = "daemon".to_string();
-    app.status.provider = "mewd".to_string();
-    app.recent_models = state.recent_models.clone();
-
-    // Request the session list so the sidebar rail is populated immediately.
-    client
-        .send(mew_protocol::ClientMessage::ListSessions {})
-        .await?;
-    // Request the model list so the model picker and thinking-variant
-    // picker are populated in daemon mode.
-    client
-        .send(mew_protocol::ClientMessage::ListModels {})
-        .await?;
+    let (client, mut updates, mut app) = tokio::select! {
+        result = setup => result?,
+        _ = signals.recv() => return Ok(()),
+    };
 
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -362,10 +372,29 @@ async fn spawn_daemon(
     mode: mew_hooks::PermissionMode,
 ) -> Result<(String, OwnedDaemon)> {
     let exe = std::env::current_exe().context("resolve current executable")?;
+    use std::os::unix::ffi::OsStrExt;
     let runtime_dir = tempfile::Builder::new()
         .prefix("mew-")
-        .tempdir_in("/tmp")
+        .tempdir()
         .context("create daemon runtime directory")?;
+    let socket_capacity = unsafe { std::mem::zeroed::<libc::sockaddr_un>() }
+        .sun_path
+        .len();
+    let runtime_dir = if runtime_dir
+        .path()
+        .join("mew.sock")
+        .as_os_str()
+        .as_bytes()
+        .len()
+        < socket_capacity
+    {
+        runtime_dir
+    } else {
+        tempfile::Builder::new()
+            .prefix("mew-")
+            .tempdir_in("/tmp")
+            .context("create short daemon runtime directory")?
+    };
     let socket = runtime_dir.path().join("mew.sock");
     let url = format!("ws://unix:{}", socket.display());
     let mut cmd = std::process::Command::new(&exe);

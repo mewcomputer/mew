@@ -218,7 +218,7 @@ fn quit_leaves_an_attached_daemon_running() {
 
 #[test]
 fn termination_signals_stop_owned_daemon() {
-    for signal in [libc::SIGTERM, libc::SIGHUP] {
+    for signal in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT] {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(root.path().join("cache")).unwrap();
         std::fs::write(root.path().join("cache/catalog.json"), "{}").unwrap();
@@ -270,6 +270,12 @@ fn termination_signals_stop_owned_daemon() {
 
 #[test]
 fn signal_during_startup_stops_owned_daemon_and_mcp() {
+    for signal in [libc::SIGHUP, libc::SIGINT] {
+        check_signal_during_startup(signal);
+    }
+}
+
+fn check_signal_during_startup(signal: i32) {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(root.path().join("cache")).unwrap();
     std::fs::write(root.path().join("cache/catalog.json"), "{}").unwrap();
@@ -290,9 +296,19 @@ fn signal_during_startup_stops_owned_daemon_and_mcp() {
     });
     wait_until(|| marker.exists());
     let mcp_pid: i32 = std::fs::read_to_string(marker).unwrap().parse().unwrap();
-    assert_eq!(unsafe { libc::kill(-(tui.id() as i32), libc::SIGHUP) }, 0);
+    assert_eq!(unsafe { libc::kill(-(tui.id() as i32), signal) }, 0);
     wait_until(|| tui.try_wait().unwrap().is_some());
-    wait_until(|| unsafe { libc::kill(daemon_pid.unwrap(), 0) } != 0);
+    let daemon_pid = daemon_pid.unwrap();
+    let daemon_deadline = Instant::now() + Duration::from_secs(5);
+    while unsafe { libc::kill(daemon_pid, 0) } == 0 && Instant::now() < daemon_deadline {
+        thread::sleep(Duration::from_millis(50));
+    }
+    let daemon_alive = unsafe { libc::kill(daemon_pid, 0) } == 0;
+    if daemon_alive {
+        unsafe {
+            libc::kill(daemon_pid, libc::SIGTERM);
+        }
+    }
     let deadline = Instant::now() + Duration::from_secs(5);
     while unsafe { libc::kill(mcp_pid, 0) } == 0 && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(50));
@@ -303,7 +319,8 @@ fn signal_during_startup_stops_owned_daemon_and_mcp() {
             libc::kill(mcp_pid, libc::SIGKILL);
         }
     }
-    assert!(!alive, "MCP server survived group SIGHUP");
+    assert!(!daemon_alive, "daemon survived startup signal {signal}");
+    assert!(!alive, "MCP server survived startup signal {signal}");
 }
 
 #[test]
@@ -353,7 +370,7 @@ fn termination_signals_leave_attached_daemon_running() {
             .unwrap(),
     );
     wait_until(|| std::net::TcpStream::connect(address).is_ok());
-    for signal in [libc::SIGTERM, libc::SIGHUP] {
+    for signal in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT] {
         let (mut tui, _input, output) =
             terminal(command(root.path()).args(["chat", "--connect", &format!("ws://{address}")]));
         wait_until(|| output.lock().unwrap().contains("connected"));
@@ -368,4 +385,57 @@ fn termination_signals_leave_attached_daemon_running() {
         libc::kill(daemon.id() as i32, libc::SIGTERM);
     }
     wait_success(&mut daemon);
+}
+
+#[test]
+fn signal_interrupts_stalled_websocket_handshake() {
+    for signal in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT] {
+        let root = tempfile::tempdir().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (mut tui, _input, _output) =
+            terminal(command(root.path()).args(["chat", "--connect", &format!("ws://{address}")]));
+        let (_stream, _) = listener.accept().unwrap();
+        assert_eq!(unsafe { libc::kill(tui.id() as i32, signal) }, 0);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut status = None;
+        while status.is_none() && Instant::now() < deadline {
+            status = tui.try_wait().unwrap();
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(status.is_some(), "TUI ignored signal during handshake");
+    }
+}
+
+#[test]
+fn owned_daemon_uses_writable_short_tmpdir() {
+    let root = tempfile::tempdir().unwrap();
+    let temp = root.path().join("temp");
+    std::fs::create_dir_all(&temp).unwrap();
+    std::fs::create_dir_all(root.path().join("cache")).unwrap();
+    std::fs::write(root.path().join("cache/catalog.json"), "{}").unwrap();
+    let (mut tui, mut input, output) = terminal(command(root.path()).env("TMPDIR", &temp).args([
+        "chat",
+        "--provider",
+        "opencode-go",
+        "--model",
+        "hy4-flash-free",
+    ]));
+    let mut daemon_pid = None;
+    wait_until(|| {
+        daemon_pid = child_daemon(tui.id());
+        daemon_pid.is_some()
+    });
+    wait_until(|| output.lock().unwrap().contains("connected"));
+    let ps = Command::new("ps")
+        .args(["-o", "command=", "-p", &daemon_pid.unwrap().to_string()])
+        .output()
+        .unwrap();
+    let command = String::from_utf8_lossy(&ps.stdout);
+    assert!(
+        command.contains(temp.to_str().unwrap()),
+        "daemon did not use TMPDIR: {command}"
+    );
+    input.write_all(b"/quit\r").unwrap();
+    wait_success(&mut tui);
 }
