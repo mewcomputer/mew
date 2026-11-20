@@ -275,6 +275,94 @@ fn code_mode_follows_the_selected_provider_and_model() {
 }
 
 #[test]
+fn deepseek_models_default_to_code_mode_across_providers() {
+    let mut agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    for (provider, model) in [
+        ("deepseek", "deepseek-chat"),
+        ("deepseek", "deepseek-reasoner"),
+        ("opencode-go", "deepseek-v4.1-flash"),
+        ("opencode-zen", "deepseek-v4.1-flash-free"),
+        ("openrouter", "deepseek/deepseek-r1"),
+        ("together", "deepseek-ai/DeepSeek-V3"),
+    ] {
+        agent.set_model_info(model, provider);
+        assert!(agent.uses_code_mode(), "{provider}/{model}");
+    }
+    for (provider, model) in [
+        ("opencode-go", "glm-5.3-flash"),
+        ("deepseek", "other-model"),
+        ("other", "not-deepseek-v4"),
+        ("other", "deepseeker-v4"),
+    ] {
+        agent.set_model_info(model, provider);
+        assert!(!agent.uses_code_mode(), "{provider}/{model}");
+    }
+}
+
+#[test]
+fn deepseek_default_yields_to_explicit_model_and_global_settings() {
+    let mut agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    agent.set_model_info("deepseek-v4.1-flash", "opencode-go");
+    agent.code_mode.mode = Some(mew_config::CodeMode::Off);
+    assert!(!agent.uses_code_mode());
+    agent.code_mode.models.insert(
+        "opencode-go/deepseek-v4.1-flash".into(),
+        mew_config::CodeMode::Full,
+    );
+    assert!(agent.uses_code_mode());
+    agent.code_mode.mode = Some(mew_config::CodeMode::Full);
+    agent.code_mode.models.insert(
+        "opencode-go/deepseek-v4.1-flash".into(),
+        mew_config::CodeMode::Off,
+    );
+    assert!(!agent.uses_code_mode());
+}
+
+#[tokio::test]
+async fn deepseek_default_executes_nested_tools_through_python() {
+    let provider = Arc::new(CapturingProvider::new(vec![
+        FakeProvider::tool_call(
+            "python",
+            "py",
+            serde_json::json!({"source":"text(tools.echo({'input':'hello'})['output'])"}),
+        ),
+        FakeProvider::text_response("done"),
+    ]));
+    let mut agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![Arc::new(mew_tools::tools::echo::Echo)],
+        None,
+    );
+    agent.set_model_info("deepseek-v4.1-flash", "opencode-go");
+    agent.code_mode.isolated = false;
+    let mut events = agent.run("run".into());
+    while let Some(event) = events.recv().await {
+        if let AgentEvent::PermissionRequest { tx, .. } = event {
+            let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
+        }
+    }
+    assert_eq!(provider.captured.lock().unwrap()[0].tools[0].name, "python");
+    let messages = agent.messages.lock().await;
+    assert!(messages.iter().flat_map(|m| &m.parts).any(|part| matches!(part,
+        Part::ToolCall(call) if call.call_id == "py" && call.state.output().is_some_and(|out| out.contains("hello"))
+    )));
+}
+
+#[test]
 fn codex_catalog_preference_yields_to_explicit_model_and_global_settings() {
     let mut agent = Agent::new(
         Arc::new(FakeProvider::new(vec![])),

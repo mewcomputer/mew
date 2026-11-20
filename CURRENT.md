@@ -4651,3 +4651,10 @@ while retaining their output and exit status. Added shell-session and bash-tool
 regressions, including a follow-up command in the same session.
 
 Verified the `mew-tools` test suite, workspace formatting, and crate clippy.
+
+### 2026-11-20: Default DeepSeek models to code mode
+
+DeepSeek model IDs now default to Python code mode across providers. Explicit
+global and provider-qualified model settings still take precedence.
+
+Verified the full `mew-agent` test suite, workspace formatting, and crate clippy.

@@ -543,7 +543,14 @@ impl Agent {
 
     pub(crate) fn uses_code_mode_for(&self, provider: &str, model: &str) -> bool {
         self.code_mode.for_model(provider, model).map_or_else(
-            || provider == "codex" && self.codex_code_mode_models.contains(model),
+            || {
+                provider == "codex" && self.codex_code_mode_models.contains(model)
+                    || model
+                        .rsplit('/')
+                        .next()
+                        .and_then(|name| name.split_once('-'))
+                        .is_some_and(|(family, _)| family.eq_ignore_ascii_case("deepseek"))
+            },
             |mode| mode == mew_config::CodeMode::Full,
         )
     }

@@ -53,7 +53,7 @@ sidebar_finished_ttl_secs = 180
 | `plan_path` | string | `"plans/"` | Each `write_plan` call creates a new file such as `plans/vale-nori.md`. Use the returned path with `edit_plan`. Set a different relative or absolute path to use a fixed file |
 | `providers` | table | (built-in) | Provider definitions keyed by provider ID |
 | `models` | array | `[]` | Custom model entries that override or extend the catalog |
-| `code_mode` | table | (catalog preference) | Run tools through a persistent Python session. See [Python code mode](#python-code-mode) |
+| `code_mode` | table | (model default) | Run tools through a persistent Python session. See [Python code mode](#python-code-mode) |
 | `permissions` | table | (empty) | Permission rules and classifier config. See [Permissions](/docs/using-mew/permissions/) |
 | `secrets` | table | (empty) | Secret files and words for redaction |
 | `workspace` | table | (empty) | Workspace roots for file access and shell permission checks |
@@ -75,9 +75,11 @@ Polytoken. See [Personas](/docs/using-mew/personas/) for details.
 
 Code mode gives the model a single `python` tool. Python runs in a persistent
 session and calls Mew's available tools through `tools`. By default, Mew enables
-it for Codex models whose catalog entry specifies `code_mode_only`. Other models,
-and Codex models without that catalog hint, use the existing tool interface.
-The Codex catalog is loaded for OAuth users or from a project catalog override.
+it for DeepSeek models across providers and for Codex models whose catalog entry
+specifies `code_mode_only`. DeepSeek model names start with `deepseek-`, including
+namespaced names such as `deepseek/deepseek-r1`. Other models use the existing
+tool interface. The Codex catalog is loaded for OAuth users or from a project
+catalog override.
 
 Choose a global mode and optional provider-qualified overrides in `config.toml`:
 
@@ -94,7 +96,7 @@ max_idle_workers = 3  # default: retained top-level Python workers per daemon
 ```
 
 The per-model setting takes priority, followed by the global setting and the
-catalog hint. Omit `mode` to follow the catalog. Set `mode = "full"` to enable
+model default. Omit `mode` to use the model default. Set `mode = "full"` to enable
 it for every model, or `mode = "off"` to disable it globally, then use model
 overrides for exceptions. `python` defaults to `python3` on the daemon's `PATH`. Use a
 virtual environment's Python executable to make its installed packages
