@@ -5,7 +5,6 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::fs::File;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -105,7 +104,7 @@ pub struct Session {
     /// Sessions root directory (for meta persistence).
     pub session_dir: PathBuf,
     // Keep the lease until the runtime and its current operations release it.
-    writer_lease: Option<File>,
+    writer_lease: Option<mew_session::WriterLease>,
 }
 
 impl Session {
