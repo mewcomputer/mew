@@ -753,12 +753,49 @@ pub fn save_state(state: &State) -> Result<(), ConfigError> {
 
 /// Writes state to an arbitrary path (useful for tests).
 pub fn save_state_to(path: &std::path::Path, state: &State) -> Result<(), ConfigError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    use std::io::Write;
+
+    let mut destination = path.to_path_buf();
+    for depth in 0..=40 {
+        match std::fs::symlink_metadata(&destination) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                if depth == 40 {
+                    return Err(io::Error::other("too many state file symlinks").into());
+                }
+                let target = std::fs::read_link(&destination)?;
+                destination = if target.is_absolute() {
+                    target
+                } else {
+                    destination
+                        .parent()
+                        .unwrap_or_else(|| std::path::Path::new("."))
+                        .join(target)
+                };
+            }
+            Ok(_) => break,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error.into()),
+        }
     }
+    let path = destination.as_path();
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::create_dir_all(parent)?;
     let data =
         toml::to_string_pretty(state).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    std::fs::write(path, data)?;
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    match std::fs::metadata(path) {
+        Ok(metadata) => {
+            std::fs::OpenOptions::new().write(true).open(path)?;
+            file.as_file().set_permissions(metadata.permissions())?;
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    file.write_all(data.as_bytes())?;
+    file.persist(path).map_err(|error| error.error)?;
     debug!(?path, "state saved");
     Ok(())
 }
@@ -1375,6 +1412,92 @@ values = ["sk_test_deadbeef"]
             load_state_from(&path).expect("load_state_from should not fail when file missing");
         assert!(state.last_model.is_empty());
         assert!(state.last_provider.is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn saving_state_preserves_symlink_and_updates_its_target() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("actual.toml");
+        let link = tmp.path().join("state.toml");
+        symlink("actual.toml", &link).unwrap();
+        let state = State {
+            last_model: "model".into(),
+            ..Default::default()
+        };
+        save_state_to(&link, &state).unwrap();
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(load_state_from(&target).unwrap().last_model, "model");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn saving_state_respects_existing_read_only_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("state.toml");
+        std::fs::write(&path, "last_model = \"before\"\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let state = State {
+            last_model: "after".into(),
+            ..Default::default()
+        };
+        let can_write = std::fs::OpenOptions::new().write(true).open(&path).is_ok();
+        assert_eq!(save_state_to(&path, &state).is_ok(), can_write);
+        assert_eq!(
+            load_state_from(&path).unwrap().last_model,
+            if can_write { "after" } else { "before" }
+        );
+    }
+
+    #[test]
+    fn concurrent_state_saves_never_expose_partial_toml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("state.toml");
+        let initial = State {
+            last_model: "initial".into(),
+            last_provider: "initial".into(),
+            ..Default::default()
+        };
+        save_state_to(&path, &initial).unwrap();
+        let barrier = std::sync::Barrier::new(5);
+        std::thread::scope(|scope| {
+            let writers = (0..4)
+                .map(|index| {
+                    let path = &path;
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        let value = format!("{index}-{}", "x".repeat(32768 + index * 1000));
+                        let state = State {
+                            last_model: value.clone(),
+                            last_provider: value,
+                            ..Default::default()
+                        };
+                        barrier.wait();
+                        for _ in 0..60 {
+                            save_state_to(path, &state).unwrap();
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            barrier.wait();
+            for _ in 0..400 {
+                let state = load_state_from(&path)
+                    .unwrap_or_else(|_| panic!("a concurrent save exposed invalid TOML"));
+                assert_eq!(
+                    state.last_provider, state.last_model,
+                    "a concurrent save exposed partial state"
+                );
+                assert!(!state.last_model.is_empty());
+            }
+            for writer in writers {
+                writer.join().unwrap();
+            }
+        });
     }
 
     #[test]
