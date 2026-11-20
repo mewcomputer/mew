@@ -18,6 +18,17 @@ fn daemon_startup_timeout_leaves_room_for_mcp_discovery() {
     assert!(DAEMON_STARTUP_TIMEOUT >= mew_mcp::MCP_DISCOVERY_TIMEOUT + Duration::from_secs(10));
 }
 
+#[cfg(test)]
+#[test]
+fn socket_directory_rejects_non_utf8_paths() {
+    use std::os::unix::ffi::OsStringExt;
+    let path = std::path::PathBuf::from(std::ffi::OsString::from_vec(b"/tmp/mew-\xff".to_vec()));
+    assert!(!socket_directory_usable(&path));
+    assert!(socket_directory_usable(std::path::Path::new(
+        "/tmp/mew-test"
+    )));
+}
+
 /// Run the TUI connected to a mew daemon. The daemon owns the agent;
 /// the TUI is a pure frontend that sends commands and projects shared client state.
 pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) -> Result<()> {
@@ -364,6 +375,16 @@ async fn probe_daemon(url: &str) -> bool {
     }
 }
 
+fn socket_directory_usable(directory: &std::path::Path) -> bool {
+    let socket_capacity = unsafe { std::mem::zeroed::<libc::sockaddr_un>() }
+        .sun_path
+        .len();
+    directory
+        .join("mew.sock")
+        .to_str()
+        .is_some_and(|path| path.len() < socket_capacity)
+}
+
 /// Start an owned daemon on a private socket and wait for it to become healthy.
 async fn spawn_daemon(
     provider_flag: &str,
@@ -372,22 +393,11 @@ async fn spawn_daemon(
     mode: mew_hooks::PermissionMode,
 ) -> Result<(String, OwnedDaemon)> {
     let exe = std::env::current_exe().context("resolve current executable")?;
-    use std::os::unix::ffi::OsStrExt;
     let runtime_dir = tempfile::Builder::new()
         .prefix("mew-")
         .tempdir()
         .context("create daemon runtime directory")?;
-    let socket_capacity = unsafe { std::mem::zeroed::<libc::sockaddr_un>() }
-        .sun_path
-        .len();
-    let runtime_dir = if runtime_dir
-        .path()
-        .join("mew.sock")
-        .as_os_str()
-        .as_bytes()
-        .len()
-        < socket_capacity
-    {
+    let runtime_dir = if socket_directory_usable(runtime_dir.path()) {
         runtime_dir
     } else {
         tempfile::Builder::new()

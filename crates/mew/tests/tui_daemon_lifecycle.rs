@@ -439,3 +439,32 @@ fn owned_daemon_uses_writable_short_tmpdir() {
     input.write_all(b"/quit\r").unwrap();
     wait_success(&mut tui);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn owned_daemon_starts_with_non_utf8_tmpdir() {
+    use std::os::unix::ffi::OsStringExt;
+    let root = tempfile::tempdir().unwrap();
+    let temp = root
+        .path()
+        .join(std::ffi::OsString::from_vec(b"temp-\xff".to_vec()));
+    std::fs::create_dir(&temp).unwrap();
+    std::fs::create_dir_all(root.path().join("cache")).unwrap();
+    std::fs::write(root.path().join("cache/catalog.json"), "{}").unwrap();
+    let (mut tui, mut input, output) = terminal(command(root.path()).env("TMPDIR", &temp).args([
+        "chat",
+        "--provider",
+        "opencode-go",
+        "--model",
+        "hy4-flash-free",
+    ]));
+    wait_until(|| {
+        assert!(
+            tui.try_wait().unwrap().is_none(),
+            "TUI exited before connection"
+        );
+        output.lock().unwrap().contains("connected")
+    });
+    input.write_all(b"/quit\r").unwrap();
+    wait_success(&mut tui);
+}

@@ -4716,3 +4716,10 @@ The owned daemon uses the configured temporary directory when its socket path
 fits, falling back to a short path otherwise. Verified the CLI and lifecycle
 tests, stalled handshakes and startup signals, and a real macOS sandbox with
 writable TMPDIR and restricted /tmp.
+
+### 2026-11-20: Handle non-UTF-8 socket paths
+
+Socket selection uses a short UTF-8 path when the configured temporary path
+cannot be passed through the daemon CLI and WebSocket URL. Verified CLI and
+lifecycle tests on macOS and exercised the exact selection helper with a real
+non-UTF-8 directory and Unix socket in Linux. A Linux full-app test is included.
