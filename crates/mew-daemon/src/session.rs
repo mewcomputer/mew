@@ -592,7 +592,7 @@ impl SessionManager {
                 .models
                 .values()
                 .any(|mode| *mode == mew_config::CodeMode::Full)
-            || (agent.code_mode.mode.is_none() && !agent.codex_code_mode_models.is_empty());
+            || agent.code_mode.mode.is_none();
         if !may_use_code_mode {
             return;
         }
@@ -1275,6 +1275,46 @@ impl Drop for Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn python_session_is_shared_when_a_later_model_may_use_code_mode() {
+        let directory = tempfile::tempdir().unwrap();
+        let server = crate::DaemonServer::with_session_dir(
+            Arc::new(|params| {
+                Ok((
+                    Agent::new(
+                        Arc::new(mew_provider_fake::FakeProvider::new(Vec::new())),
+                        Arc::new(mew_hooks::NopDispatcher),
+                        Some(params.writer),
+                        Vec::new(),
+                        None,
+                    ),
+                    None,
+                    None,
+                ))
+            }),
+            directory.path().to_path_buf(),
+        );
+        let mut agent = Agent::new(
+            Arc::new(mew_provider_fake::FakeProvider::new(Vec::new())),
+            Arc::new(mew_hooks::NopDispatcher),
+            None,
+            Vec::new(),
+            None,
+        );
+        agent.set_model_info("glm-5.3-flash", "opencode-go");
+        server
+            .session_manager
+            .restore_python_session("session", &mut agent)
+            .await;
+        assert!(server.session_manager.python_cache.get().is_some());
+        assert!(server
+            .session_manager
+            .python_sessions
+            .lock()
+            .await
+            .contains_key("session"));
+    }
 
     #[tokio::test]
     async fn detached_runtime_keeps_running_shell_jobs_until_they_finish() {

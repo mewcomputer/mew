@@ -4658,3 +4658,10 @@ DeepSeek model IDs now default to Python code mode across providers. Explicit
 global and provider-qualified model settings still take precedence.
 
 Verified the full `mew-agent` test suite, workspace formatting, and crate clippy.
+
+### 2026-11-20: Retain Python sessions for model defaults
+
+The daemon now shares the Python worker cache when model defaults can enable
+code mode, including after switching to a DeepSeek model.
+
+Verified the daemon suite and Python state across unload and reattachment.
