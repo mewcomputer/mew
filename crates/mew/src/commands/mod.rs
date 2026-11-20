@@ -6,6 +6,7 @@ pub mod desktop_host;
 pub mod ext;
 pub mod funfact;
 pub mod run;
+mod run_output;
 pub mod theme;
 pub mod tui;
 pub mod tui_capture;

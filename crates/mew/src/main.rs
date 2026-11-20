@@ -267,6 +267,7 @@ async fn async_main(cli: Cli, daemonized: bool) -> Result<()> {
             model,
             variant,
             raw,
+            format,
             permissive,
             auto,
             auto_plus,
@@ -281,6 +282,7 @@ async fn async_main(cli: Cli, daemonized: bool) -> Result<()> {
                 model,
                 variant,
                 raw,
+                format,
                 resolve_mode(permissive, auto, auto_plus, dangerously_skip_permissions),
                 prompt,
             )

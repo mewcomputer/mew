@@ -2506,6 +2506,7 @@ impl App {
             AgentEvent::TodosUpdated { todos } => {
                 self.todos = todos;
             }
+            AgentEvent::NestedToolStart { .. } | AgentEvent::NestedToolEnd { .. } => {}
             AgentEvent::ToolStart { call_id } => {
                 // Find the tool call part and mark as running.
                 for msg in self.messages.iter_mut().rev() {

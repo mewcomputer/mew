@@ -4619,3 +4619,14 @@ Fixed OpenCode Go's noninteractive session identity and added an opt-in live
 provider regression. Verified the failure against the real API before the fix,
 the live check and session identity after it, both Hy task reruns, and the
 noninteractive MCP-discovery interruption test.
+
+### 2026-11-19: Stream structured noninteractive events
+
+`mew run --format jsonl` emits model responses, tool calls, nested Python tool
+calls, permission decisions, subagent lifecycle and a final usage summary.
+Tool results report text sizes without copying their content into the stream.
+Configured secret words are redacted from structured errors.
+
+Verified JSONL success and failure paths, nested tool success and failure,
+secret redaction, live model runs, 720 CLI/agent/daemon tests, Linux agent tests
+with Bubblewrap, clippy, architecture checks and documentation tests.

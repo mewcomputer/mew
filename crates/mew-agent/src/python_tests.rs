@@ -1291,3 +1291,88 @@ async fn dropping_unrestricted_python_terminates_its_background_processes() {
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     assert_eq!(std::fs::read_to_string(marker).unwrap(), "");
 }
+
+#[tokio::test]
+async fn python_reports_nested_tool_calls_and_failures() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("data.txt"), "hello").unwrap();
+    let mut agent = crate::Agent::new(
+        Arc::new(mew_provider_fake::FakeProvider::new(vec![])),
+        Arc::new(mew_hooks::NopDispatcher),
+        None,
+        vec![Arc::new(mew_tools::tools::read::Read)],
+        None,
+    );
+    agent.code_mode.isolated = false;
+    agent.cwd = directory.path().to_path_buf();
+    agent.workspace_roots = vec![directory.path().to_path_buf()];
+    agent.secrets = Arc::new(mew_tools::SecretSet {
+        words: vec!["synthetic-secret".into()],
+        globs: vec![],
+    });
+    let ctx = mew_tools::ToolCtx::new(
+        Arc::new(mew_tools::ToolCtxShared {
+            secrets: agent.secrets.clone(),
+            ..Default::default()
+        }),
+        "outer".into(),
+        Default::default(),
+        tokio::sync::mpsc::channel(1).0,
+    );
+    let (events, mut receiver) = tokio::sync::mpsc::channel(32);
+    let result = agent
+        .execute_python(
+            &ctx,
+            json!({"source": "tools.read({'path':'data.txt'})\ntools.read({'path':'synthetic-secret.txt'})"}),
+            &events,
+        )
+        .await
+        .unwrap();
+    assert!(result.error.is_empty(), "{}", result.error);
+    drop(events);
+    let mut observed = Vec::new();
+    let mut errors = Vec::new();
+    let mut sizes = Vec::new();
+    while let Some(event) = receiver.recv().await {
+        match event {
+            crate::AgentEvent::NestedToolStart {
+                parent_call_id,
+                call_id,
+                tool_name,
+            } => {
+                observed.push((parent_call_id, call_id, tool_name, None));
+            }
+            crate::AgentEvent::NestedToolEnd {
+                parent_call_id,
+                call_id,
+                success,
+                error,
+                output_bytes,
+            } => {
+                if let Some(error) = error {
+                    errors.push(error);
+                }
+                sizes.push(output_bytes);
+                observed.push((parent_call_id, call_id, String::new(), Some(success)));
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(observed.len(), 4);
+    assert_eq!(observed[0].0, "outer");
+    assert_eq!(observed[0].2, "read");
+    assert_eq!(observed[0].1, observed[1].1);
+    assert_eq!(observed[1].3, Some(true));
+    assert_eq!(observed[2].2, "read");
+    assert_eq!(observed[2].1, observed[3].1);
+    assert_ne!(observed[0].1, observed[2].1);
+    assert_eq!(observed[3].3, Some(false));
+    assert!(sizes[0].is_some_and(|size| size >= 5));
+    assert_eq!(sizes[1], None);
+    assert!(
+        errors
+            .iter()
+            .all(|error| !error.contains("synthetic-secret")),
+        "{errors:?}"
+    );
+}

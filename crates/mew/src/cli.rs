@@ -2,7 +2,14 @@
 //!
 //! All clap derive types live here so main.rs stays small.
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum RunFormat {
+    #[default]
+    Text,
+    Jsonl,
+}
 
 /// The top-level CLI.
 #[derive(Parser)]
@@ -16,8 +23,8 @@ pub struct Cli {
 
 #[cfg(test)]
 mod tests {
-    use super::Cli;
-    use clap::CommandFactory;
+    use super::{Cli, Commands, RunFormat};
+    use clap::{CommandFactory, Parser};
 
     #[test]
     fn cli_exposes_workspace_version() {
@@ -25,6 +32,23 @@ mod tests {
             Cli::command().get_version(),
             Some(env!("CARGO_PKG_VERSION"))
         );
+    }
+
+    #[test]
+    fn run_format_defaults_to_text_and_accepts_jsonl() {
+        for (args, expected) in [
+            (vec!["mew", "run", "hello"], RunFormat::Text),
+            (
+                vec!["mew", "run", "--format", "jsonl", "hello"],
+                RunFormat::Jsonl,
+            ),
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(
+                matches!(cli.command, Some(Commands::Run { format, .. }) if format == expected)
+            );
+        }
+        assert!(Cli::try_parse_from(["mew", "run", "--format", "bad", "hello"]).is_err());
     }
 }
 
@@ -49,6 +73,10 @@ pub enum Commands {
         /// Dump raw request/response to stderr
         #[arg(long)]
         raw: bool,
+
+        /// Output text or a stream of JSON events
+        #[arg(long, value_enum, default_value = "text")]
+        format: RunFormat,
 
         /// Auto-allow Mutating tools (write/edit/etc.); bash still prompts.
         /// Equivalent to `/permissions permissive`. `-D` and `-A` win if set.

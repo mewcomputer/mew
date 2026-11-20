@@ -4338,6 +4338,7 @@ async fn translate_event(
         AgentEvent::ToolProgress { call_id, chunk } => {
             vec![ServerMessage::ToolProgress { call_id, chunk }]
         }
+        AgentEvent::NestedToolStart { .. } | AgentEvent::NestedToolEnd { .. } => vec![],
         AgentEvent::Error(msg) => {
             vec![ServerMessage::ErrorEvent { message: msg }]
         }

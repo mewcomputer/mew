@@ -835,7 +835,24 @@ impl crate::agent::Agent {
                 }
                 Some("tool") => {
                     let name = message["name"].as_str().unwrap_or("");
+                    let call_id = format!("{}:{}", ctx.call_id, message["id"]);
+                    let _ = events
+                        .send(crate::AgentEvent::NestedToolStart {
+                            parent_call_id: ctx.call_id.clone(),
+                            call_id: call_id.clone(),
+                            tool_name: name.to_owned(),
+                        })
+                        .await;
                     if !self.tool_available(name) {
+                        let _ = events
+                            .send(crate::AgentEvent::NestedToolEnd {
+                                parent_call_id: ctx.call_id.clone(),
+                                call_id,
+                                success: false,
+                                error: Some("tool unavailable".into()),
+                                output_bytes: None,
+                            })
+                            .await;
                         let response = serde_json::json!({"type":"tool_result","cell":cell,"id":message["id"],"result":{"output":"","error":"tool unavailable"}});
                         if let Err(error) = process.send(&response).await {
                             *worker = None;
@@ -846,7 +863,6 @@ impl crate::agent::Agent {
                         }
                         continue;
                     }
-                    let call_id = format!("{}:{}", ctx.call_id, message["id"]);
                     let part_id = ulid::Ulid::new();
                     let message_id = ulid::Ulid::new();
                     let tc = mew_message::ToolCallPart {
@@ -878,14 +894,14 @@ impl crate::agent::Agent {
                         assistant: None,
                     });
                     let (nested_tx, mut nested_rx) = tokio::sync::mpsc::channel(32);
-                    let events = events.clone();
+                    let forwarded_events = events.clone();
                     let parent = ctx.call_id.clone();
                     let name_for_event = name.to_owned();
                     let forwarder = tokio::spawn(async move {
                         while let Some(event) = nested_rx.recv().await {
                             match event {
                                 crate::AgentEvent::ToolStart { .. } => {
-                                    let _ = events
+                                    let _ = forwarded_events
                                         .send(crate::AgentEvent::ToolProgress {
                                             call_id: parent.clone(),
                                             chunk: format!("[{name_for_event}]\n"),
@@ -896,7 +912,7 @@ impl crate::agent::Agent {
                                 crate::AgentEvent::PartUpdated { ref part, .. } if !matches!(part, mew_message::Part::ToolCall(call) if call.tool_name == "exit_tool" || (call.tool_name == "progress_update" && matches!(call.state, mew_message::ToolState::Completed(_)))) =>
                                     {}
                                 crate::AgentEvent::ToolProgress { chunk, .. } => {
-                                    let _ = events
+                                    let _ = forwarded_events
                                         .send(crate::AgentEvent::ToolProgress {
                                             call_id: parent.clone(),
                                             chunk,
@@ -904,7 +920,7 @@ impl crate::agent::Agent {
                                         .await;
                                 }
                                 other => {
-                                    let _ = events.send(other).await;
+                                    let _ = forwarded_events.send(other).await;
                                 }
                             }
                         }
@@ -919,6 +935,30 @@ impl crate::agent::Agent {
                             mew_message::Part::ToolCall(call) => Some(&call.state),
                             _ => None,
                         });
+                    let _ = events
+                        .send(crate::AgentEvent::NestedToolEnd {
+                            parent_call_id: ctx.call_id.clone(),
+                            call_id: call_id.clone(),
+                            success: matches!(state, Some(mew_message::ToolState::Completed(_))),
+                            output_bytes: match state {
+                                Some(mew_message::ToolState::Completed(result)) => {
+                                    Some(result.output.len())
+                                }
+                                _ => None,
+                            },
+                            error: match state {
+                                Some(mew_message::ToolState::Error(error)) => {
+                                    let (message, count) = mew_tools::secrets::redact_secret_words(
+                                        &error.error,
+                                        &ctx.secrets,
+                                    );
+                                    Some(mew_tools::secrets::annotate_redaction(message, count))
+                                }
+                                Some(mew_message::ToolState::Completed(_)) => None,
+                                _ => Some("tool did not finish".into()),
+                            },
+                        })
+                        .await;
                     if let Some(mew_message::ToolState::Completed(state)) = state {
                         if name == "exit_tool" {
                             *self.python_exit.lock().await = true;

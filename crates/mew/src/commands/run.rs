@@ -15,6 +15,8 @@ use mew_hooks::NopDispatcher;
 use mew_message::{Part, PartId};
 use mew_session::Writer as SessionWriter;
 
+use super::run_output::{emit_jsonl, RunMetrics};
+use crate::cli::RunFormat;
 use crate::setup::agent::{build_session_agent, wire_subagents};
 use crate::setup::providers::{build_provider, load_catalog, resolve_model, resolve_reasoning};
 
@@ -52,51 +54,77 @@ pub(crate) fn resolve_mode(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_cmd(
     cfg: mew_config::Config,
     provider_flag: String,
     model_flag: Option<String>,
     variant_flag: Option<String>,
     raw: bool,
+    format: RunFormat,
     mode: mew_hooks::PermissionMode,
     prompt_parts: Vec<String>,
 ) -> Result<()> {
-    let prompt = prompt_parts.join(" ");
-    if prompt.is_empty() {
-        anyhow::bail!("missing prompt");
+    let mut metrics = RunMetrics::new();
+    metrics.secrets = crate::setup::agent::build_secret_set(&cfg);
+    let result = async {
+        let prompt = prompt_parts.join(" ");
+        if prompt.is_empty() {
+            anyhow::bail!("missing prompt");
+        }
+        let cat = load_catalog(&cfg).await;
+        build_and_run(
+            &cfg,
+            cat.as_ref(),
+            &provider_flag,
+            model_flag,
+            variant_flag,
+            raw,
+            format,
+            mode,
+            prompt,
+            &mut metrics,
+        )
+        .await
     }
-
-    let cat = load_catalog(&cfg).await;
-
-    build_and_run(
-        &cfg,
-        cat.as_ref(),
-        &provider_flag,
-        model_flag,
-        variant_flag,
-        raw,
-        mode,
-        prompt,
-    )
-    .await
+    .await;
+    if format == RunFormat::Jsonl {
+        let error = result.as_ref().err().map(|error| format!("{error:#}"));
+        emit_jsonl(&metrics.summary(
+            if error.is_some() {
+                "failed"
+            } else {
+                "completed"
+            },
+            error.as_deref(),
+        ))?;
+    }
+    result
 }
 
 /// Resolve @mentions in `text`. Text files are inlined into the model-facing
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn build_and_run(
+async fn build_and_run(
     cfg: &Config,
     cat: Option<&Catalog>,
     provider_flag: &str,
     model_flag: Option<String>,
     variant_flag: Option<String>,
     raw: bool,
+    format: RunFormat,
     mode: mew_hooks::PermissionMode,
     prompt: String,
+    metrics: &mut RunMetrics,
 ) -> Result<()> {
     let (provider_id, model_id) = resolve_model(cfg, cat, provider_flag, model_flag);
 
     let session_id = ulid::Ulid::new();
     let session_key = session_id.to_string();
+    if format == RunFormat::Jsonl {
+        emit_jsonl(
+            &serde_json::json!({"type":"run_started", "version":1, "session_id":session_key, "provider":provider_id, "model":model_id}),
+        )?;
+    }
     let sessions = mew_session::session_dir();
     let _lease = mew_session::try_writer_lease(&sessions, &session_key)
         .await
@@ -203,6 +231,12 @@ pub(crate) async fn build_and_run(
                 }
             };
             let Some(event) = event else { break };
+            if format == RunFormat::Jsonl {
+                if let Some(mut record) = metrics.observe(&event) {
+                    record["elapsed_ms"] = serde_json::json!(metrics.started.elapsed().as_millis());
+                    emit_jsonl(&record)?;
+                }
+            }
             match event {
                 mew_agent::AgentEvent::Provider(ev) => match ev {
                     mew_provider::ProviderEvent::PartStart { part } => {
@@ -230,10 +264,11 @@ pub(crate) async fn build_and_run(
                             eprint!("{}", delta);
                             let _ = std::io::stderr().flush();
                         }
-                        Some(&"text") => {
+                        Some(&"text") if format == RunFormat::Text => {
                             print!("{}", delta);
                             let _ = std::io::stdout().flush();
                         }
+                        Some(&"text") => {}
                         Some(&"tool") => {}
                         _ => {}
                     },
@@ -281,6 +316,8 @@ pub(crate) async fn build_and_run(
                     }
                 }
                 mew_agent::AgentEvent::ToolProgress { .. } => {}
+                mew_agent::AgentEvent::NestedToolStart { .. }
+                | mew_agent::AgentEvent::NestedToolEnd { .. } => {}
                 mew_agent::AgentEvent::Error(msg) => {
                     anyhow::bail!("agent error: {}", msg);
                 }
