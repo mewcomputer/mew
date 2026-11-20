@@ -4523,3 +4523,18 @@ active approval waits, reaper cleanup, session reload, config parsing, and the
 agent, daemon session-lifetime, and documentation tests.
 The state-loss notice is retained for the lifetime of the daemon.
 Python-focused tests also passed on Linux with Bubblewrap.
+
+### 2026-11-19: Harden code mode and MCP lifecycle
+
+Restricted personas and subagents now run Python in isolation, and worker
+policy changes stop incompatible cached workers. Python uses the session
+workspace and redacts results and worker diagnostics.
+
+MCP preserves resource results and errors, handles server pings, limits HTTP
+redirects to the same origin, and closes sessions during cancellation and
+shutdown. Desktop-owned daemons get a bounded graceful shutdown. State saves
+now replace files atomically while preserving symlinks.
+
+Verified the focused agent, configuration, MCP and supervisor tests, the
+JavaScript suites on Node 24 and 26, and daemon shutdown against a real MCP SDK
+server. The wider verification is in progress.
