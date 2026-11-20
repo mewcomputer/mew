@@ -183,7 +183,15 @@ fn main() -> Result<()> {
         .enable_all()
         .build()?;
 
-    runtime.block_on(async_main(cli, daemonized))
+    let result = runtime.block_on(async_main(cli, daemonized));
+    if let Err(error) = &result {
+        if let Some(interrupted) = error.downcast_ref::<commands::run::Interrupted>() {
+            let status = 128 + interrupted.0;
+            drop(runtime);
+            std::process::exit(status);
+        }
+    }
+    result
 }
 
 fn close_inherited_descriptors() -> Result<()> {

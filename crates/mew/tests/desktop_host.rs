@@ -36,6 +36,189 @@ fn fixture() -> tempfile::TempDir {
     root
 }
 
+#[cfg(unix)]
+#[test]
+fn local_daemon_shuts_down_cleanly_on_sigint() {
+    let root = fixture();
+    let address = unused_address();
+    let mut daemon = Daemon(
+        command(root.path())
+            .args(["daemon", "--fake-provider", "--port", &address.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while TcpStream::connect(address).is_err() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        unsafe { libc::kill(daemon.0.id() as libc::pid_t, libc::SIGINT) },
+        0
+    );
+    loop {
+        if let Some(status) = daemon.0.try_wait().unwrap() {
+            assert!(
+                status.success(),
+                "daemon did not shut down cleanly: {status}"
+            );
+            break;
+        }
+        assert!(Instant::now() < deadline, "daemon did not stop");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn interrupting_daemon_discovery_stops_the_started_server() {
+    struct ServerPid(libc::pid_t);
+    impl Drop for ServerPid {
+        fn drop(&mut self) {
+            unsafe {
+                libc::kill(self.0, libc::SIGKILL);
+            }
+        }
+    }
+    let root = fixture();
+    let marker = root.path().join("server-pid");
+    std::fs::write(root.path().join("config/config.toml"),
+        "[providers.local]\nshape = \"openai\"\nbase_url = \"http://127.0.0.1:1/v1\"\ncredential_ref = \"PROBE\"\n").unwrap();
+    let server = "import os,pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(60)";
+    std::fs::write(
+        root.path().join("mcp.json"),
+        json!({"mcpServers":{"slow":{"command":"python3","args":["-u","-c",server, marker]}}})
+            .to_string(),
+    )
+    .unwrap();
+    let address = unused_address();
+    let mut daemon = Daemon(
+        command(root.path())
+            .args([
+                "daemon",
+                "--provider",
+                "local",
+                "--model",
+                "test",
+                "--port",
+                &address.to_string(),
+            ])
+            .env("MEW_CRED_PROBE", "fixture")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !marker.exists() {
+        assert!(Instant::now() < deadline, "MCP server did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let server = ServerPid(std::fs::read_to_string(marker).unwrap().parse().unwrap());
+    assert_eq!(
+        unsafe { libc::kill(daemon.0.id() as libc::pid_t, libc::SIGTERM) },
+        0
+    );
+    loop {
+        if daemon.0.try_wait().unwrap().is_some() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "daemon did not stop");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let child_deadline = Instant::now() + Duration::from_secs(3);
+    while unsafe { libc::kill(server.0, 0) } == 0 {
+        assert!(
+            Instant::now() < child_deadline,
+            "MCP server survived daemon shutdown"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn interrupting_run_discovery_stops_the_started_server() {
+    for signal in [libc::SIGINT, libc::SIGTERM] {
+        interrupt_run_discovery(signal);
+    }
+}
+
+#[cfg(unix)]
+fn interrupt_run_discovery(signal: libc::c_int) {
+    struct ServerPid(libc::pid_t);
+    impl Drop for ServerPid {
+        fn drop(&mut self) {
+            unsafe {
+                libc::kill(self.0, libc::SIGKILL);
+            }
+        }
+    }
+    let root = fixture();
+    let marker = root.path().join("server-pid");
+    std::fs::write(root.path().join("config/config.toml"),
+        "[providers.local]\nshape = \"openai\"\nbase_url = \"http://127.0.0.1:1/v1\"\ncredential_ref = \"PROBE\"\n").unwrap();
+    let server = "import os,pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(60)";
+    std::fs::write(
+        root.path().join("mcp.json"),
+        json!({"mcpServers":{"slow":{"command":"python3","args":["-u","-c",server, marker]}}})
+            .to_string(),
+    )
+    .unwrap();
+    let mut process = Daemon(
+        command(root.path())
+            .args([
+                "run",
+                "--provider",
+                "local",
+                "--model",
+                "test",
+                "-D",
+                "hello",
+            ])
+            .env("MEW_CRED_PROBE", "fixture")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !marker.exists() {
+        assert!(Instant::now() < deadline, "MCP server did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let server = ServerPid(std::fs::read_to_string(marker).unwrap().parse().unwrap());
+    assert_eq!(
+        unsafe { libc::kill(process.0.id() as libc::pid_t, signal) },
+        0
+    );
+    loop {
+        if let Some(status) = process.0.try_wait().unwrap() {
+            assert_eq!(
+                status.code(),
+                Some(128 + signal),
+                "unexpected interrupted exit status"
+            );
+            break;
+        }
+        assert!(Instant::now() < deadline, "run did not stop");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let child_deadline = Instant::now() + Duration::from_secs(3);
+    while unsafe { libc::kill(server.0, 0) } == 0 {
+        assert!(
+            Instant::now() < child_deadline,
+            "MCP server survived interrupted run"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn unused_address() -> SocketAddr {
     TcpListener::bind("127.0.0.1:0")
         .unwrap()

@@ -20,9 +20,23 @@ use mew_hooks::Dispatcher;
 /// Connect MCP servers configured for the current process workspace.
 pub(crate) async fn discover_mcp_tools(
     cwd: &std::path::Path,
+    shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<Vec<Arc<dyn mew_tools::Tool>>> {
     let servers = mew_mcp::load_servers(cwd, &mew_config::config_dir())?;
-    Ok(mew_mcp::connect_tools(servers, cwd).await)
+    Ok(mew_mcp::connect_tools_until(servers, cwd, shutdown).await)
+}
+
+pub(crate) async fn shutdown_mcp_tools(tools: &[Arc<dyn mew_tools::Tool>]) {
+    let mut tasks = tokio::task::JoinSet::new();
+    for tool in tools {
+        let tool = tool.clone();
+        tasks.spawn(async move {
+            if let Err(error) = tool.shutdown().await {
+                tracing::warn!(tool = %tool.name(), %error, "MCP shutdown failed");
+            }
+        });
+    }
+    while tasks.join_next().await.is_some() {}
 }
 
 /// Apply catalog pricing and prompt-cache retention for the active model.

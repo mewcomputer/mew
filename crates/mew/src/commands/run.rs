@@ -18,6 +18,17 @@ use mew_session::Writer as SessionWriter;
 use crate::setup::agent::{build_session_agent, wire_subagents};
 use crate::setup::providers::{build_provider, load_catalog, resolve_model, resolve_reasoning};
 
+#[derive(Debug)]
+pub(crate) struct Interrupted(pub(crate) libc::c_int);
+
+impl std::fmt::Display for Interrupted {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("interrupted")
+    }
+}
+
+impl std::error::Error for Interrupted {}
+
 /// Resolve the initial permission mode from CLI flags. Precedence:
 /// `-D` (Dangerous) > `--auto-plus` (Auto+) > `-A` (Auto) >
 /// `-P` (Permissive) > Standard. Dangerous and the Auto family both
@@ -106,191 +117,223 @@ pub(crate) async fn build_and_run(
 
     let provider =
         build_provider(cfg, cat, &provider_id, &model_id, raw, None).context("build provider")?;
-    let mcp_tools = crate::setup::agent::discover_mcp_tools(&cwd)
-        .await
-        .context("load MCP servers")?;
-
-    // Build the full session agent (provider, tools, personas, skills,
-    // subagents, context files, pricing, etc.) via the shared builder.
-    let mut agent = build_session_agent(
-        cfg,
-        cat,
-        provider,
-        &provider_id,
-        &model_id,
-        raw,
-        mode,
-        Some(session_writer),
-        None,
-        None,
-        dispatcher.clone(),
-        todos_path.clone(),
-        &discovered,
-        &mcp_tools,
-    )?;
-
-    // Register plugin-discovered tools (no-op for NopDispatcher).
-    agent.register_plugin_tools().await;
-
-    // Refresh subagent wiring now that plugin tools are registered.
-    wire_subagents(
-        &mut agent,
-        cfg,
-        cat,
-        &provider_id,
-        raw,
-        dispatcher.clone(),
-        &discovered,
-    );
-
-    // Load the saved todo list (if any) into the agent.
-    if let Some(ref tp) = todos_path {
-        if let Ok(list) = mew_agent::TodoList::load(tp).await {
-            *agent.todos.lock().await = list;
+    let (mut shutdown, signal_task) = super::daemon::monitor_shutdown()?;
+    let mut discovery_shutdown = shutdown.clone();
+    let mcp_tools = match crate::setup::agent::discover_mcp_tools(&cwd, async move {
+        let _ = discovery_shutdown.wait_for(Option::is_some).await;
+    })
+    .await
+    {
+        Ok(tools) => tools,
+        Err(error) => {
+            signal_task.abort();
+            return Err(error.context("load MCP servers"));
         }
+    };
+    let interrupted = *shutdown.borrow();
+    if let Some(signal) = interrupted {
+        crate::setup::agent::shutdown_mcp_tools(&mcp_tools).await;
+        signal_task.abort();
+        return Err(Interrupted(signal).into());
     }
 
-    // Apply reasoning variant from catalog or CLI flag.
-    let reasoning = resolve_reasoning(cat, &provider_id, &model_id, variant_flag.as_deref())
-        .map(|(config, _)| config);
-    if let Some(r) = reasoning {
-        agent.set_reasoning(Some(r));
-        info!(variant = ?variant_flag, model = %model_id, "enabled thinking variant");
-    }
+    let result = async {
+        // Build the full session agent (provider, tools, personas, skills,
+        // subagents, context files, pricing, etc.) via the shared builder.
+        let mut agent = build_session_agent(
+            cfg,
+            cat,
+            provider,
+            &provider_id,
+            &model_id,
+            raw,
+            mode,
+            Some(session_writer),
+            None,
+            None,
+            dispatcher.clone(),
+            todos_path.clone(),
+            &discovered,
+            &mcp_tools,
+        )?;
 
-    let mut rx = agent.run(prompt);
+        // Register plugin-discovered tools (no-op for NopDispatcher).
+        agent.register_plugin_tools().await;
 
-    let mut part_types: std::collections::HashMap<PartId, &'static str> =
-        std::collections::HashMap::new();
+        // Refresh subagent wiring now that plugin tools are registered.
+        wire_subagents(
+            &mut agent,
+            cfg,
+            cat,
+            &provider_id,
+            raw,
+            dispatcher.clone(),
+            &discovered,
+        );
 
-    while let Some(event) = rx.recv().await {
-        match event {
-            mew_agent::AgentEvent::Provider(ev) => match ev {
-                mew_provider::ProviderEvent::PartStart { part } => {
-                    let id = part.id();
-                    match &part {
-                        Part::Text(_) => {
-                            part_types.insert(id, "text");
-                        }
-                        Part::Reasoning(_) => {
-                            part_types.insert(id, "reasoning");
-                            eprintln!("\n[thinking]");
-                        }
-                        Part::ToolCall(_) => {
-                            part_types.insert(id, "tool");
-                        }
-                        _ => {}
-                    }
+        // Load the saved todo list (if any) into the agent.
+        if let Some(ref tp) = todos_path {
+            if let Ok(list) = mew_agent::TodoList::load(tp).await {
+                *agent.todos.lock().await = list;
+            }
+        }
+
+        // Apply reasoning variant from catalog or CLI flag.
+        let reasoning = resolve_reasoning(cat, &provider_id, &model_id, variant_flag.as_deref())
+            .map(|(config, _)| config);
+        if let Some(r) = reasoning {
+            agent.set_reasoning(Some(r));
+            info!(variant = ?variant_flag, model = %model_id, "enabled thinking variant");
+        }
+
+        let cancel = agent.cancel_token.clone();
+        let mut rx = agent.run_with_parts(prompt, vec![], Some(cancel.clone()));
+
+        let mut part_types: std::collections::HashMap<PartId, &'static str> =
+            std::collections::HashMap::new();
+
+        loop {
+            let event = tokio::select! {
+                event = rx.recv() => event,
+                signal = shutdown.wait_for(Option::is_some) => {
+                    cancel.cancel();
+                    let signal = signal.ok().and_then(|signal| *signal).unwrap_or(libc::SIGINT);
+                    return Err(Interrupted(signal).into());
                 }
-                mew_provider::ProviderEvent::PartDelta {
-                    part_id,
-                    field: _,
-                    delta,
-                } => match part_types.get(&part_id) {
-                    Some(&"reasoning") => {
-                        eprint!("{}", delta);
-                        let _ = std::io::stderr().flush();
+            };
+            let Some(event) = event else { break };
+            match event {
+                mew_agent::AgentEvent::Provider(ev) => match ev {
+                    mew_provider::ProviderEvent::PartStart { part } => {
+                        let id = part.id();
+                        match &part {
+                            Part::Text(_) => {
+                                part_types.insert(id, "text");
+                            }
+                            Part::Reasoning(_) => {
+                                part_types.insert(id, "reasoning");
+                                eprintln!("\n[thinking]");
+                            }
+                            Part::ToolCall(_) => {
+                                part_types.insert(id, "tool");
+                            }
+                            _ => {}
+                        }
                     }
-                    Some(&"text") => {
-                        print!("{}", delta);
-                        let _ = std::io::stdout().flush();
+                    mew_provider::ProviderEvent::PartDelta {
+                        part_id,
+                        field: _,
+                        delta,
+                    } => match part_types.get(&part_id) {
+                        Some(&"reasoning") => {
+                            eprint!("{}", delta);
+                            let _ = std::io::stderr().flush();
+                        }
+                        Some(&"text") => {
+                            print!("{}", delta);
+                            let _ = std::io::stdout().flush();
+                        }
+                        Some(&"tool") => {}
+                        _ => {}
+                    },
+                    mew_provider::ProviderEvent::PartEnd { part_id } => {
+                        match part_types.get(&part_id) {
+                            Some(&"reasoning") => eprintln!("\n[/thinking]"),
+                            Some(&"tool") => eprintln!(),
+                            _ => {}
+                        }
+                        part_types.remove(&part_id);
                     }
-                    Some(&"tool") => {}
-                    _ => {}
+                    mew_provider::ProviderEvent::MessageEnd { .. } => {}
+                    mew_provider::ProviderEvent::RetryWait {
+                        attempt,
+                        max_attempts,
+                        delay_secs,
+                        reason,
+                    } => {
+                        eprintln!(
+                            "\n[retry] attempt {}/{} in {}s: {}",
+                            attempt, max_attempts, delay_secs, reason
+                        );
+                    }
+                    mew_provider::ProviderEvent::Error(e) => {
+                        eprintln!("\n[error] {:?}", e);
+                    }
                 },
-                mew_provider::ProviderEvent::PartEnd { part_id } => {
-                    match part_types.get(&part_id) {
-                        Some(&"reasoning") => eprintln!("\n[/thinking]"),
-                        Some(&"tool") => eprintln!(),
-                        _ => {}
-                    }
-                    part_types.remove(&part_id);
+                mew_agent::AgentEvent::PermissionRequest { call, tx } => {
+                    eprintln!("\n[permission] {}: {:?}", call.tool_name, call.input);
+                    let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
                 }
-                mew_provider::ProviderEvent::MessageEnd { .. } => {}
-                mew_provider::ProviderEvent::RetryWait {
-                    attempt,
-                    max_attempts,
-                    delay_secs,
-                    reason,
-                } => {
-                    eprintln!(
-                        "\n[retry] attempt {}/{} in {}s: {}",
-                        attempt, max_attempts, delay_secs, reason
-                    );
+                mew_agent::AgentEvent::ToolStart { call_id } => {
+                    eprintln!("\n[tool start: {}]", call_id);
                 }
-                mew_provider::ProviderEvent::Error(e) => {
-                    eprintln!("\n[error] {:?}", e);
+                mew_agent::AgentEvent::ToolEnd { call_id, success } => {
+                    eprintln!("[tool end: {}] success={}", call_id, success);
                 }
-            },
-            mew_agent::AgentEvent::PermissionRequest { call, tx } => {
-                eprintln!("\n[permission] {}: {:?}", call.tool_name, call.input);
-                let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
-            }
-            mew_agent::AgentEvent::ToolStart { call_id } => {
-                eprintln!("\n[tool start: {}]", call_id);
-            }
-            mew_agent::AgentEvent::ToolEnd { call_id, success } => {
-                eprintln!("[tool end: {}] success={}", call_id, success);
-            }
-            mew_agent::AgentEvent::PartUpdated { part_id: _, part } => {
-                if let Part::ToolCall(tc) = &part {
-                    if let mew_message::ToolState::Completed(c) = &tc.state {
-                        if let Some(ref diff) = c.diff {
-                            eprintln!("[diff] {}", diff);
+                mew_agent::AgentEvent::PartUpdated { part_id: _, part } => {
+                    if let Part::ToolCall(tc) = &part {
+                        if let mew_message::ToolState::Completed(c) = &tc.state {
+                            if let Some(ref diff) = c.diff {
+                                eprintln!("[diff] {}", diff);
+                            }
                         }
                     }
                 }
-            }
-            mew_agent::AgentEvent::ToolProgress { .. } => {}
-            mew_agent::AgentEvent::Error(msg) => {
-                anyhow::bail!("agent error: {}", msg);
-            }
-            mew_agent::AgentEvent::SubagentStart { .. } => {}
-            mew_agent::AgentEvent::SubagentProgress { .. } => {}
-            mew_agent::AgentEvent::SubagentStatus { .. } => {}
-            mew_agent::AgentEvent::SubagentEnd { .. } => {}
-            mew_agent::AgentEvent::SubagentPermissionRequest { call, tx, .. } => {
-                let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
-                let _ = call;
-            }
-            mew_agent::AgentEvent::WorkspacePermissionRequest { tx, .. } => {
-                // Non-interactive mode: auto-allow workspace access.
-                let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
-            }
-            mew_agent::AgentEvent::AskUser { tx, .. }
-            | mew_agent::AgentEvent::SubagentAskUser { tx, .. } => {
-                // Non-interactive mode: no TUI to answer. Dropping `tx`
-                // cancels the call so the model gets a clear "cancelled"
-                // result instead of hanging.
-                eprintln!("\n[ask_user_question: cancelled — no TUI in non-interactive mode]");
-                drop(tx);
-            }
-            mew_agent::AgentEvent::TodosUpdated { .. } => {
-                // No sidebar in non-interactive mode; nothing to update.
-            }
-            mew_agent::AgentEvent::JobUpdate { .. } => {
-                // No sidebar in non-interactive mode; the job's output is
-                // surfaced through its own tool result when it finishes.
-            }
-            mew_agent::AgentEvent::FileDelta { .. } => {
-                // Diff stats are accumulated daemon-side; no-op in CLI mode.
-            }
-            mew_agent::AgentEvent::ChildGuidanceContinuation => {}
-            mew_agent::AgentEvent::FlaggedFilesChanged { .. } => {
-                // Flagged files visibility is web-UI only.
-            }
-            mew_agent::AgentEvent::GoalProposed { tx, .. } => {
-                // Non-interactive mode: no TUI to approve the goal. Dropping
-                // `tx` cancels the call so the model gets a clear "rejected"
-                // result instead of hanging.
-                eprintln!("\n[propose_goal: cancelled — no TUI in non-interactive mode]");
-                drop(tx);
+                mew_agent::AgentEvent::ToolProgress { .. } => {}
+                mew_agent::AgentEvent::Error(msg) => {
+                    anyhow::bail!("agent error: {}", msg);
+                }
+                mew_agent::AgentEvent::SubagentStart { .. } => {}
+                mew_agent::AgentEvent::SubagentProgress { .. } => {}
+                mew_agent::AgentEvent::SubagentStatus { .. } => {}
+                mew_agent::AgentEvent::SubagentEnd { .. } => {}
+                mew_agent::AgentEvent::SubagentPermissionRequest { call, tx, .. } => {
+                    let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
+                    let _ = call;
+                }
+                mew_agent::AgentEvent::WorkspacePermissionRequest { tx, .. } => {
+                    // Non-interactive mode: auto-allow workspace access.
+                    let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
+                }
+                mew_agent::AgentEvent::AskUser { tx, .. }
+                | mew_agent::AgentEvent::SubagentAskUser { tx, .. } => {
+                    // Non-interactive mode: no TUI to answer. Dropping `tx`
+                    // cancels the call so the model gets a clear "cancelled"
+                    // result instead of hanging.
+                    eprintln!("\n[ask_user_question: cancelled — no TUI in non-interactive mode]");
+                    drop(tx);
+                }
+                mew_agent::AgentEvent::TodosUpdated { .. } => {
+                    // No sidebar in non-interactive mode; nothing to update.
+                }
+                mew_agent::AgentEvent::JobUpdate { .. } => {
+                    // No sidebar in non-interactive mode; the job's output is
+                    // surfaced through its own tool result when it finishes.
+                }
+                mew_agent::AgentEvent::FileDelta { .. } => {
+                    // Diff stats are accumulated daemon-side; no-op in CLI mode.
+                }
+                mew_agent::AgentEvent::ChildGuidanceContinuation => {}
+                mew_agent::AgentEvent::FlaggedFilesChanged { .. } => {
+                    // Flagged files visibility is web-UI only.
+                }
+                mew_agent::AgentEvent::GoalProposed { tx, .. } => {
+                    // Non-interactive mode: no TUI to approve the goal. Dropping
+                    // `tx` cancels the call so the model gets a clear "rejected"
+                    // result instead of hanging.
+                    eprintln!("\n[propose_goal: cancelled — no TUI in non-interactive mode]");
+                    drop(tx);
+                }
             }
         }
-    }
 
-    agent.dispatcher.on_stop().await;
-    Ok(())
+        agent.dispatcher.on_stop().await;
+        Ok(())
+    }
+    .await;
+    crate::setup::agent::shutdown_mcp_tools(&mcp_tools).await;
+    signal_task.abort();
+    result
 }
 
 #[cfg(test)]

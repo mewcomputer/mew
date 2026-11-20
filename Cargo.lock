@@ -5276,6 +5276,7 @@ dependencies = [
  "anyhow",
  "libc",
  "mew-protocol",
+ "tempfile",
  "tungstenite",
 ]
 
