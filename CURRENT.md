@@ -4675,3 +4675,20 @@ replay while a turn is active. Protocol revision 4 carries the live events.
 Verified the affected Rust suites, TUI frames and reconnect/cancellation paths,
 provider request builders, TypeScript client, and a live Hy permission denial
 through the daemon with history reattachment.
+
+### 2026-11-20: Restore tool activity after TUI reattachment
+
+Replayed the current tool state when attaching during a turn and rendered saved
+output, diffs, and errors from tool history. Verified the TUI and daemon suites,
+and used live Hy TUI sessions to check nested reads, write approval and denial,
+reattachment during approval, and restored Python output.
+
+Separately observed: the `mew chat --connect` help advertises a `ws://unix:`
+URL, but that URL failed hostname resolution in a live attach attempt. TCP
+attachment worked.
+
+### 2026-11-20: Connect the TUI over Unix sockets
+
+The shared local transport accepts the documented `ws://unix:/absolute/path`
+form and rejects relative socket paths. Verified the transport tests and a real
+TUI attachment over a daemon's Unix socket.

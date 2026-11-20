@@ -1454,7 +1454,7 @@ where
                                 None
                             }
                         };
-                        provider_replay.send_nested(&client_tx);
+                        provider_replay.send_tool_activity(&client_tx);
                         drop(provider_replay);
 
                         // Replay current flagged-files set so the UI has it

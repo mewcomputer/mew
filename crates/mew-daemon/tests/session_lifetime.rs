@@ -420,6 +420,16 @@ async fn check_nested_python_permission_replay(cancel: bool) {
         matches!(message, ServerMessage::SessionHistoryPage { .. })
     })
     .await;
+    receive(&mut socket, |message| {
+        matches!(
+            message,
+            ServerMessage::PartUpdated {
+                part: mew_message::Part::ToolCall(call),
+                ..
+            } if call.call_id == "py" && matches!(call.state, mew_message::ToolState::Running(_))
+        )
+    })
+    .await;
     let replay = receive(&mut socket, |message| {
         matches!(message, ServerMessage::NestedToolStart { .. })
     })
