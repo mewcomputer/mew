@@ -15,6 +15,35 @@ const WORKER: &str = include_str!("python_worker.py");
 const MAX_FRAME_BYTES: u64 = 16 * 1024 * 1024;
 pub(crate) const PYTHON_IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
+fn redact_nested_input(value: &Value, secrets: &mew_tools::SecretSet) -> Value {
+    if secrets.words.is_empty() {
+        return value.clone();
+    }
+    match value {
+        Value::String(value) => {
+            Value::String(mew_tools::secrets::redact_secret_words(value, secrets).0)
+        }
+        Value::Array(values) => Value::Array(
+            values
+                .iter()
+                .map(|value| redact_nested_input(value, secrets))
+                .collect(),
+        ),
+        Value::Object(values) => Value::Object(
+            values
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        mew_tools::secrets::redact_secret_words(key, secrets).0,
+                        redact_nested_input(value, secrets),
+                    )
+                })
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
+}
+
 pub(crate) struct PythonTool {
     pub isolated: bool,
 }
@@ -685,7 +714,7 @@ impl crate::agent::Agent {
         events: &tokio::sync::mpsc::Sender<crate::AgentEvent>,
     ) -> Result<mew_hooks::ToolOutput, ToolError> {
         let worker = self.python_session.lock().await;
-        self.execute_python_with_guard(ctx, input, events, worker)
+        self.execute_python_with_guard(ctx, input, events, worker, &mut Vec::new())
             .await
     }
 
@@ -695,6 +724,7 @@ impl crate::agent::Agent {
         input: Value,
         events: &tokio::sync::mpsc::Sender<crate::AgentEvent>,
         mut worker: PythonSessionGuard<'_>,
+        nested_calls: &mut Vec<mew_message::NestedToolCall>,
     ) -> Result<mew_hooks::ToolOutput, ToolError> {
         if ctx.cancel.is_cancelled() {
             return Err(ToolError::Execution("Python was cancelled".into()));
@@ -836,14 +866,28 @@ impl crate::agent::Agent {
                 Some("tool") => {
                     let name = message["name"].as_str().unwrap_or("");
                     let call_id = format!("{}:{}", ctx.call_id, message["id"]);
+                    let input = redact_nested_input(&message["input"], &ctx.secrets);
+                    nested_calls.push(mew_message::NestedToolCall {
+                        parent_call_id: ctx.call_id.clone(),
+                        call_id: call_id.clone(),
+                        tool_name: name.to_owned(),
+                        input: input.clone(),
+                        status: mew_message::NestedToolStatus::Running,
+                        error: None,
+                        output_bytes: None,
+                    });
                     let _ = events
                         .send(crate::AgentEvent::NestedToolStart {
                             parent_call_id: ctx.call_id.clone(),
                             call_id: call_id.clone(),
                             tool_name: name.to_owned(),
+                            input,
                         })
                         .await;
                     if !self.tool_available(name) {
+                        let call = nested_calls.last_mut().expect("nested call added");
+                        call.status = mew_message::NestedToolStatus::Error;
+                        call.error = Some("tool unavailable".into());
                         let _ = events
                             .send(crate::AgentEvent::NestedToolEnd {
                                 parent_call_id: ctx.call_id.clone(),
@@ -896,19 +940,11 @@ impl crate::agent::Agent {
                     let (nested_tx, mut nested_rx) = tokio::sync::mpsc::channel(32);
                     let forwarded_events = events.clone();
                     let parent = ctx.call_id.clone();
-                    let name_for_event = name.to_owned();
                     let forwarder = tokio::spawn(async move {
                         while let Some(event) = nested_rx.recv().await {
                             match event {
-                                crate::AgentEvent::ToolStart { .. } => {
-                                    let _ = forwarded_events
-                                        .send(crate::AgentEvent::ToolProgress {
-                                            call_id: parent.clone(),
-                                            chunk: format!("[{name_for_event}]\n"),
-                                        })
-                                        .await;
-                                }
-                                crate::AgentEvent::ToolEnd { .. } => {}
+                                crate::AgentEvent::ToolStart { .. }
+                                | crate::AgentEvent::ToolEnd { .. } => {}
                                 crate::AgentEvent::PartUpdated { ref part, .. } if !matches!(part, mew_message::Part::ToolCall(call) if call.tool_name == "exit_tool" || (call.tool_name == "progress_update" && matches!(call.state, mew_message::ToolState::Completed(_)))) =>
                                     {}
                                 crate::AgentEvent::ToolProgress { chunk, .. } => {
@@ -935,28 +971,34 @@ impl crate::agent::Agent {
                             mew_message::Part::ToolCall(call) => Some(&call.state),
                             _ => None,
                         });
+                    let call = nested_calls.last_mut().expect("nested call added");
+                    call.status = if matches!(state, Some(mew_message::ToolState::Completed(_))) {
+                        mew_message::NestedToolStatus::Completed
+                    } else {
+                        mew_message::NestedToolStatus::Error
+                    };
+                    call.error = match state {
+                        Some(mew_message::ToolState::Error(error)) => {
+                            let (message, count) =
+                                mew_tools::secrets::redact_secret_words(&error.error, &ctx.secrets);
+                            Some(mew_tools::secrets::annotate_redaction(message, count))
+                        }
+                        Some(mew_message::ToolState::Completed(_)) => None,
+                        _ => Some("tool did not finish".into()),
+                    };
+                    call.output_bytes = match state {
+                        Some(mew_message::ToolState::Completed(result)) => {
+                            Some(result.output.len())
+                        }
+                        _ => None,
+                    };
                     let _ = events
                         .send(crate::AgentEvent::NestedToolEnd {
                             parent_call_id: ctx.call_id.clone(),
                             call_id: call_id.clone(),
                             success: matches!(state, Some(mew_message::ToolState::Completed(_))),
-                            output_bytes: match state {
-                                Some(mew_message::ToolState::Completed(result)) => {
-                                    Some(result.output.len())
-                                }
-                                _ => None,
-                            },
-                            error: match state {
-                                Some(mew_message::ToolState::Error(error)) => {
-                                    let (message, count) = mew_tools::secrets::redact_secret_words(
-                                        &error.error,
-                                        &ctx.secrets,
-                                    );
-                                    Some(mew_tools::secrets::annotate_redaction(message, count))
-                                }
-                                Some(mew_message::ToolState::Completed(_)) => None,
-                                _ => Some("tool did not finish".into()),
-                            },
+                            output_bytes: call.output_bytes,
+                            error: call.error.clone(),
                         })
                         .await;
                     if let Some(mew_message::ToolState::Completed(state)) = state {

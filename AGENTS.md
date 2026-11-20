@@ -168,9 +168,10 @@ browser tools become available. Native packaging bundles the
 standalone `agent-browser` executable, version 0.34 or newer, beside the daemon.
 Remote profiles do not register native browser pages.
 
-Native clients negotiate protocol revision 3 before session commands. Scoped
-prompt receipts require revision 3; browser registration and session-diff commands
-were added in revision 2. Extension wire revision is independent. Review reads
+Native clients negotiate protocol revision 4 before session commands. Nested
+Python tool events were added in revision 4; scoped prompt receipts require
+revision 3, and browser registration and session-diff commands were added in
+revision 2. Extension wire revision is independent. Review reads
 the requested daemon session's workspace, and replies carry both session and
 request IDs. Workspace watches detect worktree,
 HEAD and index changes without traversing `.git` objects.

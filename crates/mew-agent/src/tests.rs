@@ -360,6 +360,15 @@ async fn deepseek_default_executes_nested_tools_through_python() {
     assert!(messages.iter().flat_map(|m| &m.parts).any(|part| matches!(part,
         Part::ToolCall(call) if call.call_id == "py" && call.state.output().is_some_and(|out| out.contains("hello"))
     )));
+    let nested = messages
+        .iter()
+        .filter_map(|message| message.assistant.as_ref())
+        .flat_map(|meta| &meta.nested_tool_calls)
+        .next()
+        .unwrap();
+    assert!(serde_json::to_value(nested).unwrap()["output_bytes"]
+        .as_u64()
+        .is_some_and(|size| size >= 5));
 }
 
 #[test]
@@ -428,12 +437,12 @@ async fn code_mode_denied_nested_write_does_not_touch_the_workspace() {
         FakeProvider::tool_call(
             "python",
             "py",
-            serde_json::json!({"source":"r=tools.write({'path':'blocked.txt','content':'changed'})\ntext(r['error'])"}),
+            serde_json::json!({"source":"r=tools.write({'path':'blocked.txt','content':'synthetic-secret'})\ntext(r['error'])"}),
         ),
         FakeProvider::text_response("done"),
     ]));
     let mut agent = Agent::new(
-        provider,
+        provider.clone(),
         Arc::new(NopDispatcher),
         None,
         vec![Arc::new(mew_tools::tools::write::Write)],
@@ -441,6 +450,10 @@ async fn code_mode_denied_nested_write_does_not_touch_the_workspace() {
     );
     agent.cwd = directory.path().to_path_buf();
     agent.workspace_roots = vec![directory.path().to_path_buf()];
+    agent.secrets = Arc::new(mew_tools::SecretSet {
+        words: vec!["synthetic-secret".into()],
+        globs: vec![],
+    });
     agent.code_mode = mew_config::CodeModeConfig {
         mode: Some(mew_config::CodeMode::Full),
         isolated: false,
@@ -462,6 +475,67 @@ async fn code_mode_denied_nested_write_does_not_touch_the_workspace() {
     assert!(messages.iter().flat_map(|message| &message.parts).any(|part| matches!(part,
         Part::ToolCall(call) if call.call_id == "py" && call.state.output().is_some_and(|output| output.contains("permission denied"))
     )));
+    let nested = messages
+        .iter()
+        .filter_map(|message| message.assistant.as_ref())
+        .map(|meta| serde_json::to_value(meta).unwrap())
+        .find_map(|meta| meta.get("nested_tool_calls").cloned())
+        .expect("nested call should be saved with the assistant message");
+    assert_eq!(nested[0]["parent_call_id"], "py");
+    assert_eq!(nested[0]["tool_name"], "write");
+    assert_eq!(nested[0]["input"]["path"], "blocked.txt");
+    assert_eq!(nested[0]["input"]["content"], "[REDACTED]");
+    assert_eq!(nested[0]["status"], "error");
+    assert!(nested[0]["error"].as_str().unwrap().contains("denied"));
+    assert!(!provider
+        .captured
+        .lock()
+        .unwrap()
+        .iter()
+        .flat_map(|request| &request.messages)
+        .flat_map(|message| &message.parts)
+        .any(|part| matches!(part, Part::ToolCall(call) if call.tool_name == "write")));
+}
+
+#[tokio::test]
+async fn failed_python_cell_retains_completed_nested_call() {
+    let provider = Arc::new(CapturingProvider::new(vec![
+        FakeProvider::tool_call(
+            "python",
+            "py",
+            serde_json::json!({
+                "source":"tools.echo({'input':'hello'})\nraise ValueError('cell failed')"
+            }),
+        ),
+        FakeProvider::text_response("done"),
+    ]));
+    let mut agent = Agent::new(
+        provider,
+        Arc::new(NopDispatcher),
+        None,
+        vec![Arc::new(mew_tools::tools::echo::Echo)],
+        None,
+    );
+    agent.code_mode.mode = Some(mew_config::CodeMode::Full);
+    agent.code_mode.isolated = false;
+    let mut events = agent.run("run".into());
+    while let Some(event) = events.recv().await {
+        if let AgentEvent::PermissionRequest { tx, .. } = event {
+            tx.send(mew_hooks::PermissionDecision::AllowOnce).unwrap();
+        }
+    }
+    let messages = agent.messages.lock().await;
+    assert!(messages.iter().flat_map(|message| &message.parts).any(|part| matches!(part,
+        Part::ToolCall(call) if call.call_id == "py" && matches!(&call.state, ToolState::Error(error) if error.error.contains("cell failed"))
+    )));
+    let call = messages
+        .iter()
+        .filter_map(|message| message.assistant.as_ref())
+        .flat_map(|meta| &meta.nested_tool_calls)
+        .next()
+        .unwrap();
+    assert_eq!(call.tool_name, "echo");
+    assert_eq!(call.status, mew_message::NestedToolStatus::Completed);
 }
 
 #[tokio::test]

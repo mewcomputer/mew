@@ -93,6 +93,95 @@ fn passive_turn_streams_and_finishes_without_a_local_prompt_receiver() {
 }
 
 #[test]
+fn nested_tool_activity_projects_live_and_from_session_history() {
+    let mut app = App::new();
+    app.daemon_mode = true;
+    let mut state = ClientState::default();
+    apply(&mut app, &mut state, ready("a", "/tmp/a"));
+    apply(
+        &mut app,
+        &mut state,
+        ServerMessage::Provider {
+            event: ProviderEventWire::PartStart {
+                part: Part::ToolCall(mew_message::ToolCallPart {
+                    base: PartBase {
+                        id: ulid::Ulid::new(),
+                        message_id: ulid::Ulid::new(),
+                        session_id: ulid::Ulid::new(),
+                    },
+                    tool_name: "python".into(),
+                    call_id: "py".into(),
+                    state: mew_message::ToolState::Pending(mew_message::ToolStatePending {
+                        input: serde_json::json!({"source":"pass"}),
+                        time: mew_message::ToolTime {
+                            start: 0,
+                            end: None,
+                        },
+                    }),
+                    raw_input: String::new(),
+                }),
+            },
+        },
+    );
+    apply(
+        &mut app,
+        &mut state,
+        ServerMessage::UserMessage {
+            text: "follow-up".into(),
+            request_id: None,
+        },
+    );
+    apply(
+        &mut app,
+        &mut state,
+        ServerMessage::NestedToolStart {
+            parent_call_id: "py".into(),
+            call_id: "py:1".into(),
+            tool_name: "read".into(),
+            input: serde_json::json!({"path":"notes.txt"}),
+        },
+    );
+    apply(
+        &mut app,
+        &mut state,
+        ServerMessage::NestedToolEnd {
+            parent_call_id: "py".into(),
+            call_id: "py:1".into(),
+            success: true,
+            error: None,
+            output_bytes: Some(4),
+        },
+    );
+    let nested = &app
+        .messages()
+        .iter()
+        .find_map(|message| message.assistant.as_ref())
+        .unwrap()
+        .nested_tool_calls;
+    assert_eq!(nested.len(), 1);
+    assert_eq!(nested[0].status, mew_message::NestedToolStatus::Completed);
+    assert_eq!(nested[0].input["path"], "notes.txt");
+    assert_eq!(nested[0].output_bytes, Some(4));
+
+    let messages = state.session("a").unwrap().messages.clone();
+    apply(
+        &mut app,
+        &mut state,
+        ServerMessage::SessionHistory { messages },
+    );
+    let nested = &app
+        .messages()
+        .iter()
+        .find_map(|message| message.assistant.as_ref())
+        .unwrap()
+        .nested_tool_calls;
+    assert_eq!(nested.len(), 1);
+    assert_eq!(nested[0].tool_name, "read");
+    assert_eq!(nested[0].status, mew_message::NestedToolStatus::Completed);
+    assert_eq!(nested[0].output_bytes, Some(4));
+}
+
+#[test]
 fn confirmed_project_changes_replace_local_discovery_and_file_catalog() {
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();

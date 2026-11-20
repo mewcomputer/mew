@@ -2606,6 +2606,8 @@ fn translate_message(
         }
         ServerMessage::ToolStart { .. }
         | ServerMessage::ToolEnd { .. }
+        | ServerMessage::NestedToolStart { .. }
+        | ServerMessage::NestedToolEnd { .. }
         | ServerMessage::ToolProgress { .. }
         | ServerMessage::SubagentStart { .. }
         | ServerMessage::SubagentStatus { .. }
@@ -4902,6 +4904,70 @@ mod tests {
         );
         assert_eq!(session.pending_actions.len(), 1);
         assert_eq!(session.pending_actions[0].request_id, "request-1");
+    }
+
+    #[test]
+    fn test_nested_tool_events_update_shared_session_state() {
+        let conn = Arc::new(ConnState::new());
+        let daemon_id = "node-abc".to_string();
+        let mut last_prompt = None;
+        let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let session_ulid = ulid::Ulid::from_string(session_id).unwrap();
+        let message_id = ulid::Ulid::new();
+        for message in [
+            ServerMessage::SessionReady {
+                session_id: session_id.into(),
+                cwd: None,
+                model: None,
+                provider: None,
+                permission_mode: None,
+            },
+            ServerMessage::Provider {
+                event: mew_message::ProviderEventWire::PartStart {
+                    part: mew_message::Part::ToolCall(mew_message::ToolCallPart {
+                        base: mew_message::PartBase {
+                            id: ulid::Ulid::new(),
+                            message_id,
+                            session_id: session_ulid,
+                        },
+                        tool_name: "python".into(),
+                        call_id: "py".into(),
+                        state: mew_message::ToolState::Pending(mew_message::ToolStatePending {
+                            input: serde_json::json!({"source":"pass"}),
+                            time: mew_message::ToolTime {
+                                start: 0,
+                                end: None,
+                            },
+                        }),
+                        raw_input: String::new(),
+                    }),
+                },
+            },
+            ServerMessage::NestedToolStart {
+                parent_call_id: "py".into(),
+                call_id: "py:1".into(),
+                tool_name: "read".into(),
+                input: serde_json::json!({"path":"notes.txt"}),
+            },
+            ServerMessage::NestedToolEnd {
+                parent_call_id: "py".into(),
+                call_id: "py:1".into(),
+                success: true,
+                error: None,
+                output_bytes: Some(4),
+            },
+        ] {
+            translate_message(&message, &conn, &mut last_prompt, &daemon_id);
+        }
+        let client = conn.client_state.lock().unwrap();
+        let calls = &client.session(session_id).unwrap().messages[0]
+            .assistant
+            .as_ref()
+            .unwrap()
+            .nested_tool_calls;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].status, mew_message::NestedToolStatus::Completed);
+        assert_eq!(calls[0].output_bytes, Some(4));
     }
 
     #[test]

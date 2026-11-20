@@ -1454,6 +1454,7 @@ where
                                 None
                             }
                         };
+                        provider_replay.send_nested(&client_tx);
                         drop(provider_replay);
 
                         // Replay current flagged-files set so the UI has it
@@ -4338,7 +4339,30 @@ async fn translate_event(
         AgentEvent::ToolProgress { call_id, chunk } => {
             vec![ServerMessage::ToolProgress { call_id, chunk }]
         }
-        AgentEvent::NestedToolStart { .. } | AgentEvent::NestedToolEnd { .. } => vec![],
+        AgentEvent::NestedToolStart {
+            parent_call_id,
+            call_id,
+            tool_name,
+            input,
+        } => vec![ServerMessage::NestedToolStart {
+            parent_call_id,
+            call_id,
+            tool_name,
+            input,
+        }],
+        AgentEvent::NestedToolEnd {
+            parent_call_id,
+            call_id,
+            success,
+            error,
+            output_bytes,
+        } => vec![ServerMessage::NestedToolEnd {
+            parent_call_id,
+            call_id,
+            success,
+            error,
+            output_bytes,
+        }],
         AgentEvent::Error(msg) => {
             vec![ServerMessage::ErrorEvent { message: msg }]
         }

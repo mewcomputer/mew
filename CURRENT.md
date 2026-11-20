@@ -4665,3 +4665,13 @@ The daemon now shares the Python worker cache when model defaults can enable
 code mode, including after switching to a DeepSeek model.
 
 Verified the daemon suite and Python state across unload and reattachment.
+
+### 2026-11-20: Show nested Python tools in the TUI
+
+Python cells display their source and nested tool activity, including permission
+failures. Nested call details persist outside the model-facing transcript and
+replay while a turn is active. Protocol revision 4 carries the live events.
+
+Verified the affected Rust suites, TUI frames and reconnect/cancellation paths,
+provider request builders, TypeScript client, and a live Hy permission denial
+through the daemon with history reattachment.

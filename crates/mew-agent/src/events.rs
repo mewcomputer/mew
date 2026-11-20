@@ -225,6 +225,7 @@ impl Agent {
                 finish: None,
                 error: None,
                 manifest,
+                nested_tool_calls: Vec::new(),
             }),
         }
     }

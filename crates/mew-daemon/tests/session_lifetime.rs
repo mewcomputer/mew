@@ -350,6 +350,148 @@ async fn close(mut socket: Ws, task: JoinHandle<()>) {
         .unwrap();
 }
 
+#[tokio::test]
+async fn nested_python_permission_replays_and_persists_in_history() {
+    for cancel in [false, true] {
+        check_nested_python_permission_replay(cancel).await;
+    }
+}
+
+async fn check_nested_python_permission_replay(cancel: bool) {
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().to_path_buf();
+    let root = workspace.clone();
+    let server = DaemonServer::with_session_dir(
+        Arc::new(move |params| {
+            let script = FakeProvider::tool_call(
+                "python",
+                "py",
+                serde_json::json!({"source":"result = tools.write({'path':'blocked.txt','content':'no'})\ntext(result['error'])"}),
+            );
+            let mut agent = Agent::new(
+                Arc::new(FakeProvider::new(script)),
+                Arc::new(NopDispatcher),
+                Some(params.writer),
+                vec![Arc::new(mew_tools::tools::write::Write)],
+                None,
+            );
+            agent.cwd = root.clone();
+            agent.workspace_roots = vec![root.clone()];
+            agent.code_mode.mode = Some(mew_config::CodeMode::Full);
+            agent.max_turns = Some(1);
+            Ok((agent, Some("fake".into()), Some("fake".into())))
+        }),
+        workspace.join("sessions"),
+    );
+    let (mut socket, task) = connect(&server).await;
+    let session_id = new_session(&mut socket, Some(workspace.display().to_string())).await;
+    prompt(&mut socket).await;
+    let start = receive(&mut socket, |message| {
+        matches!(message, ServerMessage::NestedToolStart { .. })
+    })
+    .await;
+    let ServerMessage::NestedToolStart {
+        call_id,
+        tool_name,
+        input,
+        ..
+    } = start
+    else {
+        unreachable!()
+    };
+    assert_eq!(tool_name, "write");
+    assert_eq!(input["path"], "blocked.txt");
+    let request = receive(&mut socket, |message| matches!(message, ServerMessage::PermissionRequest { tool_name, .. } if tool_name == "write")).await;
+    let ServerMessage::PermissionRequest { request_id, .. } = request else {
+        unreachable!()
+    };
+    close(socket, task).await;
+
+    let (mut socket, task) = connect(&server).await;
+    send(
+        &mut socket,
+        ClientMessage::AttachSession {
+            session_id: session_id.clone(),
+            client_kind: ClientKind::Tui,
+        },
+    )
+    .await;
+    receive(&mut socket, |message| {
+        matches!(message, ServerMessage::SessionHistoryPage { .. })
+    })
+    .await;
+    let replay = receive(&mut socket, |message| {
+        matches!(message, ServerMessage::NestedToolStart { .. })
+    })
+    .await;
+    assert!(
+        matches!(replay, ServerMessage::NestedToolStart { call_id: replay_id, .. } if replay_id == call_id)
+    );
+    let replayed = receive(&mut socket, |message| {
+        matches!(message, ServerMessage::PermissionRequest { .. })
+    })
+    .await;
+    assert!(
+        matches!(replayed, ServerMessage::PermissionRequest { request_id: id, .. } if id == request_id)
+    );
+    let response = if cancel {
+        ClientMessage::Cancel
+    } else {
+        ClientMessage::PermissionResponse {
+            request_id,
+            decision: mew_protocol::PermissionDecision::Deny,
+        }
+    };
+    send(&mut socket, response).await;
+    let end = receive(&mut socket, |message| {
+        matches!(message, ServerMessage::NestedToolEnd { .. })
+    })
+    .await;
+    assert!(
+        matches!(end, ServerMessage::NestedToolEnd { call_id: ended, success: false, .. } if ended == call_id)
+    );
+    receive(&mut socket, |message| {
+        matches!(
+            message,
+            ServerMessage::SessionActivityChanged {
+                activity: SessionState::Idle,
+                ..
+            }
+        )
+    })
+    .await;
+    assert!(!workspace.join("blocked.txt").exists());
+    close(socket, task).await;
+    server.session_manager.remove(&session_id).await;
+
+    let (mut socket, task) = connect(&server).await;
+    send(
+        &mut socket,
+        ClientMessage::AttachSession {
+            session_id,
+            client_kind: ClientKind::Tui,
+        },
+    )
+    .await;
+    let page = receive(&mut socket, |message| {
+        matches!(message, ServerMessage::SessionHistoryPage { .. })
+    })
+    .await;
+    let ServerMessage::SessionHistoryPage { messages, .. } = page else {
+        unreachable!()
+    };
+    let calls: Vec<_> = messages
+        .iter()
+        .filter_map(|message| message.assistant.as_ref())
+        .flat_map(|meta| &meta.nested_tool_calls)
+        .collect();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].call_id, call_id);
+    assert_eq!(calls[0].status, mew_message::NestedToolStatus::Error);
+    assert!(calls[0].error.as_deref().unwrap().contains("denied"));
+    close(socket, task).await;
+}
+
 async fn weak_session(server: &DaemonServer, session_id: &str) -> std::sync::Weak<Session> {
     Arc::downgrade(&server.session_manager.attach(session_id).await.unwrap())
 }

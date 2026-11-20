@@ -63,6 +63,7 @@ pub enum AgentEvent {
         parent_call_id: String,
         call_id: String,
         tool_name: String,
+        input: serde_json::Value,
     },
     /// A tool invoked by a Python cell has finished.
     NestedToolEnd {
@@ -196,6 +197,7 @@ impl std::fmt::Debug for AgentEvent {
                 parent_call_id,
                 call_id,
                 tool_name,
+                input: _,
             } => f
                 .debug_struct("NestedToolStart")
                 .field("parent_call_id", parent_call_id)

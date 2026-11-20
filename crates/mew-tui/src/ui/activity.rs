@@ -164,21 +164,27 @@ pub(super) fn draw_activity(f: &mut Frame, app: &mut App, area: Rect) {
                 message_id,
                 part_id,
             } => {
-                let call = app
-                    .messages
-                    .iter()
-                    .find(|message| &message.id == message_id)
-                    .and_then(|message| {
-                        message.parts.iter().find_map(|part| match part {
-                            mew_message::Part::ToolCall(call) if &call.base.id == part_id => {
-                                Some(call)
-                            }
-                            _ => None,
-                        })
-                    });
-                if let Some(call) = call {
+                let call =
+                    app.messages
+                        .iter()
+                        .find(|message| &message.id == message_id)
+                        .and_then(|message| {
+                            message.parts.iter().find_map(|part| match part {
+                                mew_message::Part::ToolCall(call) if &call.base.id == part_id => {
+                                    Some((
+                                        call,
+                                        message.assistant.as_ref().map_or(&[][..], |meta| {
+                                            meta.nested_tool_calls.as_slice()
+                                        }),
+                                    ))
+                                }
+                                _ => None,
+                            })
+                        });
+                if let Some((call, nested)) = call {
                     cache_rows(&mut view.rendered, width, app.chat_dirty, |rows| {
-                        tool_rows(rows, call, width, surface)
+                        tool_rows(rows, call, width, surface);
+                        nested_tool_rows(rows, nested, &call.call_id, width, surface);
                     });
                     include_content = true;
                     let status = match &call.state {
@@ -406,7 +412,18 @@ fn transcript_rows(
                 Part::Reasoning(reasoning) if !reasoning.text.is_empty() => {
                     detail(rows, "Reasoning", &reasoning.text, width)
                 }
-                Part::ToolCall(call) => tool_rows(rows, call, width, surface),
+                Part::ToolCall(call) => {
+                    tool_rows(rows, call, width, surface);
+                    if let Some(meta) = &message.assistant {
+                        nested_tool_rows(
+                            rows,
+                            &meta.nested_tool_calls,
+                            &call.call_id,
+                            width,
+                            surface,
+                        );
+                    }
+                }
                 Part::File(file) => detail(rows, "File", &file.url, width),
                 Part::Compaction(compaction) => detail(
                     rows,
@@ -416,6 +433,37 @@ fn transcript_rows(
                 ),
                 _ => {}
             }
+        }
+    }
+}
+
+fn nested_tool_rows(
+    rows: &mut Vec<Line<'static>>,
+    calls: &[mew_message::NestedToolCall],
+    parent_call_id: &str,
+    width: u16,
+    surface: ratatui::style::Color,
+) {
+    for call in calls
+        .iter()
+        .filter(|call| call.parent_call_id == parent_call_id)
+    {
+        let state = match call.status {
+            mew_message::NestedToolStatus::Running => "running",
+            mew_message::NestedToolStatus::Completed => "completed",
+            mew_message::NestedToolStatus::Error => "failed",
+        };
+        detail(
+            rows,
+            &format!("↳ {} · {state}", call.tool_name),
+            &serde_json::to_string_pretty(&call.input).unwrap_or_default(),
+            width,
+        );
+        if let Some(error) = &call.error {
+            detail(rows, "Error", "", width);
+            output_rows(rows, error, width, surface);
+        } else if let Some(size) = call.output_bytes {
+            detail(rows, "Result", &format!("{size} bytes"), width);
         }
     }
 }

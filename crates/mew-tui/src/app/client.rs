@@ -196,6 +196,36 @@ impl App {
                         chunk: chunk.clone(),
                     });
                 }
+                ClientEvent::NestedToolStart {
+                    session_id,
+                    parent_call_id,
+                    call_id,
+                    tool_name,
+                    input,
+                } if session_id == &self.status.session_id => {
+                    self.handle_agent_event(AgentEvent::NestedToolStart {
+                        parent_call_id: parent_call_id.clone(),
+                        call_id: call_id.clone(),
+                        tool_name: tool_name.clone(),
+                        input: input.clone(),
+                    });
+                }
+                ClientEvent::NestedToolEnd {
+                    session_id,
+                    parent_call_id,
+                    call_id,
+                    success,
+                    error,
+                    output_bytes,
+                } if session_id == &self.status.session_id => {
+                    self.handle_agent_event(AgentEvent::NestedToolEnd {
+                        parent_call_id: parent_call_id.clone(),
+                        call_id: call_id.clone(),
+                        success: *success,
+                        error: error.clone(),
+                        output_bytes: *output_bytes,
+                    });
+                }
                 ClientEvent::RetryWait { session_id, retry }
                     if session_id == &self.status.session_id =>
                 {
@@ -558,6 +588,11 @@ impl App {
                 self.handle_agent_event(AgentEvent::Provider(ProviderEvent::PartStart {
                     part: part.clone(),
                 }));
+            }
+        }
+        if let Some(meta) = &message.assistant {
+            for call in &meta.nested_tool_calls {
+                self.upsert_nested_tool_call(call.clone());
             }
         }
     }

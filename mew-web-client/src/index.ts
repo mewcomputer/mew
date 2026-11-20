@@ -484,6 +484,17 @@ export interface AssistantMeta {
   finish?: string | null;
   error?: MessageError | null;
   manifest?: TurnManifest | null;
+  nested_tool_calls?: NestedToolCall[];
+}
+
+export interface NestedToolCall {
+  parent_call_id: string;
+  call_id: string;
+  tool_name: string;
+  input: unknown;
+  status: "running" | "completed" | "error";
+  error?: string;
+  output_bytes?: number;
 }
 
 /** Token usage breakdown. */
@@ -569,6 +580,8 @@ export type ServerMessage =
   | { type: "user_message"; text: string; request_id?: string }
   | { type: "tool_start"; call_id: string }
   | { type: "tool_end"; call_id: string; success: boolean }
+  | { type: "nested_tool_start"; parent_call_id: string; call_id: string; tool_name: string; input: unknown }
+  | { type: "nested_tool_end"; parent_call_id: string; call_id: string; success: boolean; error?: string; output_bytes?: number }
   | { type: "part_updated"; part_id: string; part: Part }
   | { type: "tool_progress"; call_id: string; chunk: string }
   | { type: "error_event"; message: string }
@@ -756,6 +769,8 @@ export interface MewClientEvents {
   "user-message": (data: { text: string }) => void;
   "tool-start": (data: { call_id: string }) => void;
   "tool-end": (data: { call_id: string; success: boolean }) => void;
+  "nested-tool-start": (data: { parent_call_id: string; call_id: string; tool_name: string; input: unknown }) => void;
+  "nested-tool-end": (data: { parent_call_id: string; call_id: string; success: boolean; error?: string; output_bytes?: number }) => void;
   "part-updated": (data: { part_id: string; part: Part }) => void;
   "tool-progress": (data: { call_id: string; chunk: string }) => void;
 
@@ -1722,6 +1737,18 @@ export class MewClient {
         break;
       case "tool_end":
         this.emit("tool-end", { call_id: msg.call_id, success: msg.success });
+        break;
+      case "nested_tool_start":
+        this.emit("nested-tool-start", {
+          parent_call_id: msg.parent_call_id, call_id: msg.call_id,
+          tool_name: msg.tool_name, input: msg.input,
+        });
+        break;
+      case "nested_tool_end":
+        this.emit("nested-tool-end", {
+          parent_call_id: msg.parent_call_id, call_id: msg.call_id,
+          success: msg.success, error: msg.error, output_bytes: msg.output_bytes,
+        });
         break;
       case "part_updated":
         this.emit("part-updated", { part_id: msg.part_id, part: msg.part });

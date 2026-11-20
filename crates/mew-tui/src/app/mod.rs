@@ -2041,7 +2041,7 @@ impl App {
         self.mark_chat_dirty();
     }
 
-    /// Toggle bash output expansion.
+    /// Toggle bash output and Python call details.
     pub fn toggle_bash_expanded(&mut self) {
         self.bash_expanded = !self.bash_expanded;
         self.mark_chat_dirty();
@@ -2309,6 +2309,23 @@ impl App {
         self.mark_chat_dirty();
     }
 
+    fn upsert_nested_tool_call(&mut self, call: mew_message::NestedToolCall) {
+        for message in self.messages.iter_mut().rev() {
+            if message.parts.iter().any(|part| {
+                matches!(part, Part::ToolCall(parent) if parent.call_id == call.parent_call_id)
+            }) {
+                let calls = &mut message.assistant.get_or_insert_with(Default::default).nested_tool_calls;
+                if let Some(existing) = calls.iter_mut().find(|existing| existing.call_id == call.call_id) {
+                    *existing = call;
+                } else {
+                    calls.push(call);
+                }
+                self.mark_chat_dirty();
+                break;
+            }
+        }
+    }
+
     /// Process an agent event and update state.
     pub fn handle_agent_event(&mut self, event: AgentEvent) {
         match event {
@@ -2506,7 +2523,47 @@ impl App {
             AgentEvent::TodosUpdated { todos } => {
                 self.todos = todos;
             }
-            AgentEvent::NestedToolStart { .. } | AgentEvent::NestedToolEnd { .. } => {}
+            AgentEvent::NestedToolStart {
+                parent_call_id,
+                call_id,
+                tool_name,
+                input,
+            } => {
+                self.upsert_nested_tool_call(mew_message::NestedToolCall {
+                    parent_call_id,
+                    call_id,
+                    tool_name,
+                    input,
+                    status: mew_message::NestedToolStatus::Running,
+                    error: None,
+                    output_bytes: None,
+                });
+            }
+            AgentEvent::NestedToolEnd {
+                parent_call_id,
+                call_id,
+                success,
+                error,
+                output_bytes,
+            } => {
+                for message in self.messages.iter_mut().rev() {
+                    if let Some(call) = message.assistant.as_mut().and_then(|meta| {
+                        meta.nested_tool_calls.iter_mut().find(|call| {
+                            call.parent_call_id == parent_call_id && call.call_id == call_id
+                        })
+                    }) {
+                        call.status = if success {
+                            mew_message::NestedToolStatus::Completed
+                        } else {
+                            mew_message::NestedToolStatus::Error
+                        };
+                        call.error = error;
+                        call.output_bytes = output_bytes;
+                        self.mark_chat_dirty();
+                        break;
+                    }
+                }
+            }
             AgentEvent::ToolStart { call_id } => {
                 // Find the tool call part and mark as running.
                 for msg in self.messages.iter_mut().rev() {

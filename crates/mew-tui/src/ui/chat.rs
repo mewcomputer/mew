@@ -583,7 +583,18 @@ pub(crate) fn build_chat_lines(
                         } else {
                             unreachable!()
                         };
-                        render_single_tool_call(&mut sel_ctx, app, tc, tool_width, tool_bg_style);
+                        let nested = msg
+                            .assistant
+                            .as_ref()
+                            .map_or(&[][..], |meta| meta.nested_tool_calls.as_slice());
+                        render_single_tool_call(
+                            &mut sel_ctx,
+                            app,
+                            tc,
+                            nested,
+                            tool_width,
+                            tool_bg_style,
+                        );
                     }
                 } else {
                     // Collapsed batch summary row.
@@ -929,6 +940,7 @@ fn render_single_tool_call(
     sel_ctx: &mut ChatLineCtx<'_>,
     app: &App,
     tc: &mew_message::ToolCallPart,
+    nested_calls: &[mew_message::NestedToolCall],
     tool_width: u16,
     tool_bg_style: Style,
 ) {
@@ -968,6 +980,109 @@ fn render_single_tool_call(
             ],
             tool_bg_style,
         ));
+    }
+
+    if tc.tool_name == "python" {
+        if let Some(source) = tc
+            .state
+            .input()
+            .get("source")
+            .and_then(|value| value.as_str())
+        {
+            let limit = if app.bash_expanded {
+                usize::MAX
+            } else {
+                TOOL_LINES_MAX
+            };
+            let mut lines = source.lines();
+            for line in lines.by_ref().take(limit) {
+                sel_ctx.push_tool_output(tool_width, Line::raw(line.to_owned()), "      ", tool_bg);
+            }
+            let remaining = lines.count();
+            if remaining > 0 {
+                sel_ctx.push_tool_output(
+                    tool_width,
+                    Line::raw(format!("... ({remaining} more lines; ctrl-o to expand)")),
+                    "      ",
+                    tool_bg,
+                );
+            }
+        }
+    }
+
+    let calls = nested_calls
+        .iter()
+        .filter(|call| call.parent_call_id == tc.call_id);
+    if !app.bash_expanded && calls.clone().next().is_some() {
+        sel_ctx.push_tool_output(
+            tool_width,
+            Line::styled(
+                "nested tools · ctrl-o for details",
+                Style::default().fg(app.theme.resolve("text.muted")),
+            ),
+            "      ",
+            tool_bg,
+        );
+    }
+    for call in calls {
+        let (label, color) = match call.status {
+            mew_message::NestedToolStatus::Running => ("▶", app.theme.resolve("text.warning")),
+            mew_message::NestedToolStatus::Completed => ("✓", app.theme.resolve("text.success")),
+            mew_message::NestedToolStatus::Error => ("✗", app.theme.resolve("text.error")),
+        };
+        let args = tool_args_summary(&call.tool_name, &call.input).unwrap_or_else(|| {
+            let json = call.input.to_string();
+            let (head, truncated) = truncate_chars(&json, 80);
+            if truncated {
+                format!("{head}...")
+            } else {
+                head
+            }
+        });
+        let output_size = call
+            .output_bytes
+            .map(|size| format!(" · {size} B"))
+            .unwrap_or_default();
+        sel_ctx.push_tool_output(
+            tool_width,
+            Line::from(vec![
+                Span::styled(
+                    format!("↳ {label} {}", call.tool_name),
+                    Style::default().fg(color),
+                ),
+                Span::styled(
+                    format!(" {args}{output_size}"),
+                    Style::default().fg(app.theme.resolve("text.muted")),
+                ),
+            ]),
+            "      ",
+            tool_bg,
+        );
+        if app.bash_expanded {
+            if let Ok(input) = serde_json::to_string_pretty(&call.input) {
+                for line in input.lines() {
+                    sel_ctx.push_tool_output(
+                        tool_width,
+                        Line::raw(line.to_owned()),
+                        "        ",
+                        tool_bg,
+                    );
+                }
+            }
+        }
+        if let Some(error) = &call.error {
+            for line in error.lines() {
+                sel_ctx.push_tool_output(
+                    tool_width,
+                    Line::styled(
+                        line.to_owned(),
+                        Style::default().fg(app.theme.resolve("text.error")),
+                    ),
+                    "        ",
+                    tool_bg,
+                );
+            }
+        }
     }
 
     if let ToolState::Running(ref running) = tc.state {
@@ -1409,8 +1524,11 @@ fn truncate_chars(s: &str, max: usize) -> (String, bool) {
 }
 
 fn tool_call_args_summary(tc: &mew_message::ToolCallPart) -> Option<String> {
-    let input = tc.state.input();
-    match tc.tool_name.as_str() {
+    tool_args_summary(&tc.tool_name, tc.state.input())
+}
+
+fn tool_args_summary(name: &str, input: &serde_json::Value) -> Option<String> {
+    match name {
         "read" | "write" | "edit" => input
             .get("path")
             .and_then(|v| v.as_str())
@@ -1919,6 +2037,121 @@ mod tests {
             }),
             raw_input: String::new(),
         }
+    }
+
+    #[test]
+    fn python_cell_renders_source_and_nested_permission_failure() {
+        let mut app = App::new();
+        let python = tool_call_part("python", serde_json::json!({"source": "text('hello')"}));
+        app.push_message(mew_message::Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: mew_message::Role::Assistant,
+            parts: vec![Part::ToolCall(python)],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: Some(mew_message::AssistantMeta {
+                nested_tool_calls: vec![mew_message::NestedToolCall {
+                    parent_call_id: "call-1".into(),
+                    call_id: "call-1:0".into(),
+                    tool_name: "read".into(),
+                    input: serde_json::json!({"path": "input.txt"}),
+                    status: mew_message::NestedToolStatus::Completed,
+                    error: None,
+                    output_bytes: Some(4),
+                }, mew_message::NestedToolCall {
+                    parent_call_id: "call-1".into(),
+                    call_id: "call-1:1".into(),
+                    tool_name: "write".into(),
+                    input: serde_json::json!({"path": "blocked.txt", "content": "expanded-only"}),
+                    status: mew_message::NestedToolStatus::Error,
+                    error: Some("permission denied\nrule blocked".into()),
+                    output_bytes: None,
+                }],
+                ..Default::default()
+            }),
+        });
+        let built = build_chat_lines(&mut app, 78, 80);
+        let rendered = built
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("text('hello')"), "{rendered}");
+        assert!(rendered.contains("4 B"), "{rendered}");
+        assert!(rendered.contains("write"), "{rendered}");
+        assert!(rendered.contains("blocked.txt"), "{rendered}");
+        assert!(rendered.contains("permission denied"), "{rendered}");
+        assert!(
+            built.lines.iter().any(|line| {
+                let text = line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>();
+                text.contains("rule blocked") && !text.contains("permission denied")
+            }),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("expanded-only"), "{rendered}");
+        app.toggle_bash_expanded();
+        let expanded = build_chat_lines(&mut app, 78, 80)
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(expanded.contains("expanded-only"), "{expanded}");
+    }
+
+    #[test]
+    fn python_source_can_be_expanded() {
+        let mut app = App::new();
+        let source = (0..25)
+            .map(|i| format!("line_{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let python = tool_call_part("python", serde_json::json!({"source": source}));
+        app.push_message(mew_message::Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: mew_message::Role::Assistant,
+            parts: vec![Part::ToolCall(python)],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        });
+        let text = |app: &mut App| {
+            build_chat_lines(app, 78, 80)
+                .lines
+                .iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert!(!text(&mut app).contains("line_24"));
+        app.toggle_bash_expanded();
+        assert!(text(&mut app).contains("line_24"));
     }
 
     #[test]

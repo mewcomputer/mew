@@ -705,17 +705,25 @@ impl Agent {
             }
 
             tracing::info!(tool = %tc.tool_name, call_id = %call_id, input = %input, "executing tool");
+            let mut nested_calls = Vec::new();
             let exec_result = if is_python {
                 self.execute_python_with_guard(
                     &ctx,
                     input.clone(),
                     ev_tx,
                     python_guard.expect("Python session checked out"),
+                    &mut nested_calls,
                 )
                 .await
             } else {
                 tool.execute(ctx, input.clone()).await
             };
+            if let Some(meta) = assistant_msg
+                .as_mut()
+                .and_then(|message| message.assistant.as_mut())
+            {
+                meta.nested_tool_calls.extend(nested_calls);
+            }
             let tool_output = match exec_result {
                 Ok(out) => {
                     tracing::info!(tool = %tc.tool_name, call_id = %call_id, output = %out.output, error = %out.error, "tool executed successfully");

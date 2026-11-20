@@ -488,7 +488,18 @@ mod tests {
                 created: 0,
                 completed: None,
             },
-            assistant: None,
+            assistant: Some(mew_message::AssistantMeta {
+                nested_tool_calls: vec![mew_message::NestedToolCall {
+                    parent_call_id: "call_123".into(),
+                    call_id: "call_123:1".into(),
+                    tool_name: "read".into(),
+                    input: json!({"path":"private-nested-input"}),
+                    status: mew_message::NestedToolStatus::Completed,
+                    error: None,
+                    output_bytes: Some(4),
+                }],
+                ..Default::default()
+            }),
         };
 
         let req = Request {
@@ -511,6 +522,7 @@ mod tests {
         assert_eq!(input[0]["call_id"], "call_123");
         assert_eq!(input[0]["name"], "bash");
         assert!(input[0]["arguments"].is_string());
+        assert!(!v.to_string().contains("private-nested-input"));
     }
 
     #[tokio::test]

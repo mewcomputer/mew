@@ -129,6 +129,12 @@ model. Calls from Python threads are serialized through the tool dispatcher.
 Nested tool calls use the same permission checks as direct calls.
 Configured MCP tools are also available; see [MCP Servers](/docs/using-mew/mcp-servers/).
 
+The TUI shows each Python cell and the tools it calls, including permission
+prompts and errors. Press Ctrl-O to expand the cell and nested arguments. Nested
+call details remain in session history. Nested results are not saved separately;
+the cell can emit results worth retaining. Successful calls show the result's
+byte count.
+
 Threads can call tools only during the cell that started them. In-flight calls
 finish before the cell returns; later calls from work that has not started are
 rejected. Join threads that call tools and await thread-pool tasks before

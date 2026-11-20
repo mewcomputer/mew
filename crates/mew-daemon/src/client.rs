@@ -696,6 +696,31 @@ async fn translate_server_message(
             }]
         }
 
+        ServerMessage::NestedToolStart {
+            parent_call_id,
+            call_id,
+            tool_name,
+            input,
+        } => vec![AgentEvent::NestedToolStart {
+            parent_call_id: parent_call_id.clone(),
+            call_id: call_id.clone(),
+            tool_name: tool_name.clone(),
+            input: input.clone(),
+        }],
+        ServerMessage::NestedToolEnd {
+            parent_call_id,
+            call_id,
+            success,
+            error,
+            output_bytes,
+        } => vec![AgentEvent::NestedToolEnd {
+            parent_call_id: parent_call_id.clone(),
+            call_id: call_id.clone(),
+            success: *success,
+            error: error.clone(),
+            output_bytes: *output_bytes,
+        }],
+
         ServerMessage::PartUpdated { part_id, part } => {
             vec![AgentEvent::PartUpdated {
                 part_id: *part_id,

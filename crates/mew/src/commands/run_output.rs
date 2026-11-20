@@ -145,6 +145,7 @@ impl RunMetrics {
                 parent_call_id,
                 call_id,
                 tool_name,
+                ..
             } => {
                 self.nested_tool_calls += 1;
                 Some(
@@ -390,6 +391,7 @@ mod structured_tests {
                 parent_call_id: "outer".into(),
                 call_id: "nested".into(),
                 tool_name: "mcp__files__read".into(),
+                input: serde_json::json!({}),
             })
             .unwrap();
         let end = metrics

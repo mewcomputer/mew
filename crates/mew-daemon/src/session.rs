@@ -428,6 +428,11 @@ impl Session {
                 replay.record(event);
                 Some(replay)
             }
+            ServerMessage::NestedToolStart { .. } | ServerMessage::NestedToolEnd { .. } => {
+                let mut replay = self.provider_replay.lock().await;
+                replay.nested.push(msg.clone());
+                Some(replay)
+            }
             ServerMessage::ErrorEvent { .. } => {
                 let mut replay = self.provider_replay.lock().await;
                 replay.clear();
@@ -496,13 +501,23 @@ impl Session {
 /// The events needed to render the current provider response from its start.
 /// Drop the replay once that response is available through ordinary history.
 #[derive(Default)]
-pub(crate) struct ProviderReplay(Vec<ProviderEventWire>);
+pub(crate) struct ProviderReplay {
+    provider: Vec<ProviderEventWire>,
+    nested: Vec<ServerMessage>,
+}
 
 impl ProviderReplay {
     fn record(&mut self, event: &ProviderEventWire) {
         match event {
-            ProviderEventWire::MessageEnd { .. } | ProviderEventWire::Error(_) => self.clear(),
+            ProviderEventWire::MessageEnd { .. } | ProviderEventWire::Error(_) => {
+                self.provider.clear()
+            }
             ProviderEventWire::RetryWait { .. } => {}
+            ProviderEventWire::PartStart { .. } if self.provider.is_empty() => {
+                // The previous tool batch is already in session history.
+                self.nested.clear();
+                self.provider.push(event.clone());
+            }
             ProviderEventWire::PartDelta {
                 part_id,
                 field,
@@ -512,25 +527,26 @@ impl ProviderReplay {
                     part_id: previous_id,
                     field: previous_field,
                     delta: previous_delta,
-                }) = self.0.last_mut()
+                }) = self.provider.last_mut()
                 {
                     if previous_id == part_id && previous_field == field {
                         previous_delta.push_str(delta);
                         return;
                     }
                 }
-                self.0.push(event.clone());
+                self.provider.push(event.clone());
             }
-            _ => self.0.push(event.clone()),
+            _ => self.provider.push(event.clone()),
         }
     }
 
     pub(crate) fn clear(&mut self) {
-        self.0.clear();
+        self.provider.clear();
+        self.nested.clear();
     }
 
     pub(crate) fn present_in(&self, history: &[Message]) -> bool {
-        let first_part = self.0.iter().find_map(|event| match event {
+        let first_part = self.provider.iter().find_map(|event| match event {
             ProviderEventWire::PartStart { part } => Some(part.id()),
             _ => None,
         });
@@ -544,10 +560,16 @@ impl ProviderReplay {
     }
 
     pub(crate) fn send(&self, client: &ClientSender) {
-        for event in &self.0 {
+        for event in &self.provider {
             let _ = client.send(ServerMessage::Provider {
                 event: event.clone(),
             });
+        }
+    }
+
+    pub(crate) fn send_nested(&self, client: &ClientSender) {
+        for event in &self.nested {
+            let _ = client.send(event.clone());
         }
     }
 }

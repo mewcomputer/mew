@@ -1333,14 +1333,18 @@ async fn python_reports_nested_tool_calls_and_failures() {
     let mut observed = Vec::new();
     let mut errors = Vec::new();
     let mut sizes = Vec::new();
+    let mut inputs = Vec::new();
+    let mut progress = Vec::new();
     while let Some(event) = receiver.recv().await {
         match event {
             crate::AgentEvent::NestedToolStart {
                 parent_call_id,
                 call_id,
                 tool_name,
+                input,
             } => {
                 observed.push((parent_call_id, call_id, tool_name, None));
+                inputs.push(input);
             }
             crate::AgentEvent::NestedToolEnd {
                 parent_call_id,
@@ -1355,6 +1359,7 @@ async fn python_reports_nested_tool_calls_and_failures() {
                 sizes.push(output_bytes);
                 observed.push((parent_call_id, call_id, String::new(), Some(success)));
             }
+            crate::AgentEvent::ToolProgress { chunk, .. } => progress.push(chunk),
             _ => {}
         }
     }
@@ -1369,6 +1374,9 @@ async fn python_reports_nested_tool_calls_and_failures() {
     assert_eq!(observed[3].3, Some(false));
     assert!(sizes[0].is_some_and(|size| size >= 5));
     assert_eq!(sizes[1], None);
+    assert_eq!(inputs[0]["path"], "data.txt");
+    assert_eq!(inputs[1]["path"], "[REDACTED].txt");
+    assert!(!progress.iter().any(|chunk| chunk == "[read]\n"));
     assert!(
         errors
             .iter()

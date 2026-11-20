@@ -164,6 +164,50 @@ fn tool_call_collapsed() {
     );
 }
 
+#[test]
+fn python_nested_permission() {
+    let mut h = Harness::new(80, 24);
+    let message_id = ulid::Ulid::new();
+    let session_id = ulid::Ulid::new();
+    h.agent(mew_agent::AgentEvent::Provider(mew_provider::ProviderEvent::PartStart {
+        part: mew_message::Part::ToolCall(mew_message::ToolCallPart {
+            base: mew_message::PartBase { id: ulid::Ulid::new(), message_id, session_id },
+            tool_name: "python".into(), call_id: "py".into(),
+            state: mew_message::ToolState::Running(mew_message::ToolStateRunning {
+                input: serde_json::json!({"source":"result = tools.write({'path': 'notes.txt', 'content': 'hello'})\ntext(result['error'])"}),
+                output: String::new(), time: mew_message::ToolTime { start: 0, end: None },
+            }),
+            raw_input: String::new(),
+        }),
+    }));
+    h.agent(mew_agent::AgentEvent::NestedToolStart {
+        parent_call_id: "py".into(),
+        call_id: "py:1".into(),
+        tool_name: "write".into(),
+        input: serde_json::json!({"path":"notes.txt", "content":"hello"}),
+    });
+    h.agent(mew_agent::AgentEvent::NestedToolEnd {
+        parent_call_id: "py".into(),
+        call_id: "py:1".into(),
+        success: false,
+        error: Some("permission denied".into()),
+        output_bytes: None,
+    });
+    let rendered = normalize_frame(&h.render());
+    let path = golden_dir().join("python_nested_permission.frame");
+    if std::env::var("MEW_UPDATE_GOLDEN")
+        .map(|value| {
+            value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
+        })
+        .unwrap_or(false)
+    {
+        fs::write(path, rendered).unwrap();
+    } else {
+        let expected = fs::read_to_string(path).expect("nested Python golden frame");
+        assert_eq!(rendered.trim_end(), expected.trim_end());
+    }
+}
+
 /// Reasoning block display.
 /// Uses the Harness API directly (not the script DSL) because say_reasoning
 /// is a Harness method not recognized by the script DSL.

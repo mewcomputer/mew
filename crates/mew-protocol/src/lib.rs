@@ -16,7 +16,7 @@ pub use mew_message::SubagentQuestionSource;
 use serde::{Deserialize, Serialize};
 
 /// Wire revision required by native clients. Increment for incompatible changes.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 pub const DEFAULT_HISTORY_PAGE_LIMIT: usize = 24;
 
@@ -788,6 +788,25 @@ pub enum ServerMessage {
     ToolEnd {
         call_id: String,
         success: bool,
+    },
+
+    /// A Python cell started a nested tool call.
+    NestedToolStart {
+        parent_call_id: String,
+        call_id: String,
+        tool_name: String,
+        input: serde_json::Value,
+    },
+
+    /// A Python cell finished a nested tool call.
+    NestedToolEnd {
+        parent_call_id: String,
+        call_id: String,
+        success: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_bytes: Option<usize>,
     },
 
     /// A part's content or state has changed.
@@ -2618,6 +2637,29 @@ mod tests {
             }
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn server_message_nested_tool_roundtrip() {
+        let start = ServerMessage::NestedToolStart {
+            parent_call_id: "python-call".into(),
+            call_id: "python-call:1".into(),
+            tool_name: "write".into(),
+            input: serde_json::json!({"path": "notes.txt"}),
+        };
+        let end = ServerMessage::NestedToolEnd {
+            parent_call_id: "python-call".into(),
+            call_id: "python-call:1".into(),
+            success: false,
+            error: Some("permission denied".into()),
+            output_bytes: None,
+        };
+        assert!(
+            matches!(round_trip(&start), ServerMessage::NestedToolStart { input, .. } if input["path"] == "notes.txt")
+        );
+        assert!(
+            matches!(round_trip(&end), ServerMessage::NestedToolEnd { success: false, error: Some(error), .. } if error == "permission denied")
+        );
     }
 
     #[test]

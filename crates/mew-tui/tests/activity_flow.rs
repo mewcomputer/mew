@@ -4,6 +4,56 @@ use crossterm::event::{
 use mew_tui::{app::Mode, events::handle_input_event, harness::Harness};
 
 #[test]
+fn python_tool_details_include_nested_calls() {
+    let mut h = Harness::new(100, 40);
+    let message_id = ulid::Ulid::new();
+    let session_id = ulid::Ulid::new();
+    let part_id = ulid::Ulid::new();
+    h.app.push_message(mew_message::Message {
+        id: message_id,
+        session_id,
+        role: mew_message::Role::Assistant,
+        parts: vec![mew_message::Part::ToolCall(mew_message::ToolCallPart {
+            base: mew_message::PartBase {
+                id: part_id,
+                message_id,
+                session_id,
+            },
+            tool_name: "python".into(),
+            call_id: "py".into(),
+            state: mew_message::ToolState::Pending(mew_message::ToolStatePending {
+                input: serde_json::json!({"source":"tools.read(...)"}),
+                time: mew_message::ToolTime {
+                    start: 0,
+                    end: None,
+                },
+            }),
+            raw_input: String::new(),
+        })],
+        time: mew_message::Time {
+            created: 0,
+            completed: None,
+        },
+        assistant: Some(mew_message::AssistantMeta {
+            nested_tool_calls: vec![mew_message::NestedToolCall {
+                parent_call_id: "py".into(),
+                call_id: "py:1".into(),
+                tool_name: "read".into(),
+                input: serde_json::json!({"path":"visible-notes.txt"}),
+                status: mew_message::NestedToolStatus::Completed,
+                error: None,
+                output_bytes: Some(4),
+            }],
+            ..Default::default()
+        }),
+    });
+    h.app.open_tool(message_id, part_id);
+    let frame = h.render();
+    assert!(frame.contains("read · completed"), "{frame}");
+    assert!(frame.contains("visible-notes.txt"), "{frame}");
+}
+
+#[test]
 fn activity_details_do_not_follow_an_id_into_another_session() {
     let mut h = Harness::new(80, 24);
     h.app.status.session_id = "first-session".into();
@@ -462,6 +512,40 @@ fn subagent_surface_has_no_outline_and_shows_recorded_calls_and_assignment() {
         frame.contains("fixture unavailable") && frame.contains("Esc close"),
         "{frame}"
     );
+}
+
+#[test]
+fn subagent_history_shows_nested_python_calls() {
+    let mut h = Harness::new(128, 40);
+    open_trace(&mut h);
+    let request = h
+        .app
+        .take_activity_request(std::time::Instant::now())
+        .unwrap();
+    let mut messages = trace_messages();
+    if let mew_message::Part::ToolCall(call) = &mut messages[1].parts[1] {
+        call.tool_name = "python".into();
+    } else {
+        panic!("expected Python tool call");
+    }
+    messages[1].assistant = Some(mew_message::AssistantMeta {
+        nested_tool_calls: vec![mew_message::NestedToolCall {
+            parent_call_id: "read-owner".into(),
+            call_id: "read-owner:1".into(),
+            tool_name: "write".into(),
+            input: serde_json::json!({"path":"child-output.txt"}),
+            status: mew_message::NestedToolStatus::Error,
+            error: Some("permission denied".into()),
+            output_bytes: None,
+        }],
+        ..Default::default()
+    });
+    h.app
+        .apply_daemon_notification(&trace_reply(request, messages, None));
+    let frame = h.render();
+    assert!(frame.contains("write · failed"), "{frame}");
+    assert!(frame.contains("child-output.txt"), "{frame}");
+    assert!(frame.contains("permission denied"), "{frame}");
 }
 
 #[test]
