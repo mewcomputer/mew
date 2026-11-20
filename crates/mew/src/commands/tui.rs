@@ -21,6 +21,34 @@ fn daemon_startup_timeout_leaves_room_for_mcp_discovery() {
 /// Run the TUI connected to a mew daemon. The daemon owns the agent;
 /// the TUI is a pure frontend that sends commands and projects shared client state.
 pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) -> Result<()> {
+    let mut signals = TuiSignals::new()?;
+    chat_with_daemon_until_signal(connect_url, attach, &mut signals).await
+}
+
+struct TuiSignals {
+    terminate: tokio::signal::unix::Signal,
+    hangup: tokio::signal::unix::Signal,
+}
+
+impl TuiSignals {
+    fn new() -> Result<Self> {
+        use tokio::signal::unix::{signal, SignalKind};
+        Ok(Self {
+            terminate: signal(SignalKind::terminate())?,
+            hangup: signal(SignalKind::hangup())?,
+        })
+    }
+
+    async fn recv(&mut self) {
+        tokio::select! { _ = self.terminate.recv() => {}, _ = self.hangup.recv() => {} }
+    }
+}
+
+async fn chat_with_daemon_until_signal(
+    connect_url: &str,
+    attach: Option<&str>,
+    signals: &mut TuiSignals,
+) -> Result<()> {
     let (client, mut updates) = crate::runtime::client::TuiClient::connect(connect_url).await?;
 
     if let Some(session_id) = attach {
@@ -111,6 +139,7 @@ pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) ->
         }
 
         let event = tokio::select! {
+            _ = signals.recv() => break Ok(()),
             ev = event_rx.recv() => match ev {
                 Some(e) => e,
                 None => break Ok(()),
@@ -250,8 +279,12 @@ pub(crate) async fn chat_cmd(
     // turns, so concurrent-turn races cannot happen. The thinking variant is
     // a per-session UI setting and is not forwarded to the daemon.
     let _ = cfg;
-    let (url, mut daemon) = spawn_daemon(&provider_flag, model_flag.as_deref(), raw, mode).await?;
-    let result = chat_with_daemon(&url, None).await;
+    let mut signals = TuiSignals::new()?;
+    let (url, mut daemon) = tokio::select! {
+        result = spawn_daemon(&provider_flag, model_flag.as_deref(), raw, mode) => result?,
+        _ = signals.recv() => return Ok(()),
+    };
+    let result = chat_with_daemon_until_signal(&url, None, &mut signals).await;
     daemon.shutdown().await;
     result
 }
@@ -329,10 +362,18 @@ async fn spawn_daemon(
     mode: mew_hooks::PermissionMode,
 ) -> Result<(String, OwnedDaemon)> {
     let exe = std::env::current_exe().context("resolve current executable")?;
-    let runtime_dir = tempfile::tempdir().context("create daemon runtime directory")?;
+    let runtime_dir = tempfile::Builder::new()
+        .prefix("mew-")
+        .tempdir_in("/tmp")
+        .context("create daemon runtime directory")?;
     let socket = runtime_dir.path().join("mew.sock");
     let url = format!("ws://unix:{}", socket.display());
     let mut cmd = std::process::Command::new(&exe);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     cmd.arg("daemon")
         .arg("--socket")
         .arg(&socket)

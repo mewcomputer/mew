@@ -4699,3 +4699,12 @@ The TUI starts its daemon as an owned child on a private Unix socket, and
 stops and reaps it when the TUI exits. Explicitly attached daemons remain
 independent. Verified real TUI lifecycle tests, MCP subprocess cleanup, and a
 live code-mode background shell job that stopped with the owned daemon.
+
+### 2026-11-20: Harden TUI shutdown
+
+Handle termination and hangup signals through the TUI cleanup path, keep the
+owned daemon outside the terminal's process group, and place its private socket
+under a short temporary path. Persistent shells now stop their process group on
+shutdown or timeout. Verified the TUI lifecycle, shell and CLI tests, including
+terminal restoration, MCP cleanup during startup, long temporary paths, and a
+live foreground command stopped by `/quit`.

@@ -95,6 +95,8 @@ impl ShellSession {
         // Suppress bash's job control messages in interactive mode.
         cmd.env("PS1", "");
         cmd.env("BASH_ENV", "");
+        #[cfg(unix)]
+        cmd.process_group(0);
 
         let mut child = cmd.spawn().map_err(ShellError::Spawn)?;
         let stdin = child.stdin.take().ok_or(ShellError::NoStdin)?;
@@ -163,7 +165,7 @@ impl ShellSession {
             if remaining.is_zero() {
                 // Timeout. Kill the shell process entirely.
                 if let Some(ref mut child) = self.child {
-                    let _ = child.start_kill();
+                    stop_shell(child);
                 }
                 self.child = None;
                 self.stdin = None;
@@ -199,7 +201,7 @@ impl ShellSession {
                     stdout_done = true;
                     // Kill the child if it's somehow still around.
                     if let Some(ref mut child) = self.child {
-                        let _ = child.start_kill();
+                        stop_shell(child);
                     }
                 }
                 Ok(Err(_)) => {
@@ -211,7 +213,7 @@ impl ShellSession {
                     // sentinel would pollute the next call's output.
                     // `ensure_started` will re-spawn on the next call.
                     if let Some(ref mut child) = self.child {
-                        let _ = child.start_kill();
+                        stop_shell(child);
                     }
                     self.child = None;
                     self.stdin = None;
@@ -249,7 +251,7 @@ impl ShellSession {
     /// Kill the shell process if it's running.
     pub async fn kill(&mut self) {
         if let Some(ref mut child) = self.child {
-            let _ = child.kill().await;
+            stop_shell(child);
             let _ = child.wait().await;
         }
         self.child = None;
@@ -262,10 +264,20 @@ impl ShellSession {
 impl Drop for ShellSession {
     fn drop(&mut self) {
         if let Some(ref mut child) = self.child {
-            // Best-effort kill; can't await in Drop.
-            let _ = child.start_kill();
+            stop_shell(child);
         }
     }
+}
+
+fn stop_shell(child: &mut Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id().and_then(|id| i32::try_from(id).ok()) {
+        let _ = nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(pid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+    let _ = child.start_kill();
 }
 
 /// Result of a shell command execution.
@@ -312,6 +324,99 @@ pub fn shared_session(cwd: std::path::PathBuf) -> SharedShellSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_an_active_session_stops_its_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("child.pid");
+        let cwd = dir.path().to_path_buf();
+        let task = tokio::spawn(async move {
+            let mut session = ShellSession::new(cwd);
+            let _ = session
+                .execute("sh -c 'echo $$ > child.pid; exec sleep 60'", 90)
+                .await;
+        });
+        let pid: i32 = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Ok(text) = std::fs::read_to_string(&marker) {
+                    if let Ok(pid) = text.trim().parse() {
+                        break pid;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        task.abort();
+        let _ = task.await;
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let output = std::process::Command::new("ps")
+                    .args(["-o", "stat=", "-p", &pid.to_string()])
+                    .output()
+                    .unwrap();
+                if !output.status.success()
+                    || String::from_utf8_lossy(&output.stdout)
+                        .trim()
+                        .starts_with('Z')
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        if stopped.is_err() {
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .status();
+        }
+        assert!(stopped.is_ok(), "foreground child survived session drop");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timed_out_session_stops_its_foreground_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = ShellSession::new(dir.path().to_path_buf());
+        let result = session
+            .execute("sh -c 'echo $$ > child.pid; exec sleep 60'", 1)
+            .await
+            .unwrap();
+        assert!(result.timed_out);
+        let pid: i32 = std::fs::read_to_string(dir.path().join("child.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let output = std::process::Command::new("ps")
+                    .args(["-o", "stat=", "-p", &pid.to_string()])
+                    .output()
+                    .unwrap();
+                if !output.status.success()
+                    || String::from_utf8_lossy(&output.stdout)
+                        .trim()
+                        .starts_with('Z')
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        if stopped.is_err() {
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .status();
+        }
+        assert!(stopped.is_ok(), "foreground child survived timeout");
+        let result = session.execute("echo recovered", 5).await.unwrap();
+        assert_eq!(result.stdout.trim(), "recovered");
+    }
 
     #[tokio::test]
     async fn test_shell_session_echo() {
