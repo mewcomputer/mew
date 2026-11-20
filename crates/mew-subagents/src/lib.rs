@@ -292,6 +292,10 @@ pub trait SubagentRunner: Send + Sync {
 #[async_trait::async_trait]
 pub trait ModelResolver: Send + Sync {
     async fn resolve(&self, model: &str) -> Result<Arc<dyn mew_provider::Provider>, String>;
+
+    fn resolved_model(&self, model: &str) -> String {
+        model.to_owned()
+    }
 }
 
 pub struct Loader {

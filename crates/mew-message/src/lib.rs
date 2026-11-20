@@ -57,7 +57,7 @@ pub struct Time {
     pub completed: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct AssistantMeta {
     pub provider_id: String,
     pub model_id: String,
@@ -69,6 +69,30 @@ pub struct AssistantMeta {
     pub error: Option<MessageError>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manifest: Option<TurnManifest>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nested_tool_calls: Vec<NestedToolCall>,
+}
+
+/// A tool call made inside a Python cell, retained for presentation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NestedToolCall {
+    pub parent_call_id: String,
+    pub call_id: String,
+    pub tool_name: String,
+    pub input: serde_json::Value,
+    pub status: NestedToolStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_bytes: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NestedToolStatus {
+    Running,
+    Completed,
+    Error,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
@@ -775,6 +799,7 @@ mod tests {
                 finish: Some(Finish::ToolUse),
                 error: None,
                 manifest: None,
+                nested_tool_calls: Vec::new(),
             }),
         };
         roundtrip("msg with tool calls", &m);
@@ -808,9 +833,31 @@ mod tests {
                     message: "cancelled".into(),
                 }),
                 manifest: None,
+                nested_tool_calls: Vec::new(),
             }),
         };
         roundtrip("msg with error", &m);
+    }
+
+    #[test]
+    fn assistant_nested_tool_history_roundtrips_and_old_history_loads() {
+        let old = serde_json::json!({
+            "provider_id":"test", "model_id":"test", "cost":0.0,
+            "tokens":{"input":0,"output":0,"reasoning":0,"cache_read":0,"cache_write":0},
+            "finish":null, "error":null, "manifest":null
+        });
+        let mut meta: AssistantMeta = serde_json::from_value(old).unwrap();
+        assert!(meta.nested_tool_calls.is_empty());
+        meta.nested_tool_calls.push(NestedToolCall {
+            parent_call_id: "py".into(),
+            call_id: "py:1".into(),
+            tool_name: "read".into(),
+            input: serde_json::json!({"path":"notes.txt"}),
+            status: NestedToolStatus::Completed,
+            error: None,
+            output_bytes: Some(4),
+        });
+        roundtrip("assistant nested tool history", &meta);
     }
 
     // -----------------------------------------------------------------------

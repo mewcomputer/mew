@@ -65,6 +65,30 @@ mew run --provider opencode-zen "explain what this project does"
 This runs a single turn, prints the response, and exits. Useful for
 scripting and quick questions.
 
+For a machine-readable stream, use `mew run --format jsonl "prompt"`.
+Each stdout line is a JSON event. `run_started` identifies the session and
+model; `text_delta` contains response text; `model_response` reports a model
+response and its usage; `tool_start`/`tool_end` and
+`nested_tool_start`/`nested_tool_end` track tool calls. The final
+`run_finished` event reports status, elapsed milliseconds, call counts, usage
+and cost. Events after `run_started` carry elapsed milliseconds. Early command
+or configuration errors can occur before the stream starts; check the exit
+status and stderr as well. Diagnostic output stays on stderr.
+
+Tool-end events report text output size in bytes when available. The summary
+records the largest top-level and nested text outputs separately. A nested output
+stays inside Python unless the cell prints it, so its size is not necessarily
+the amount sent to the model.
+
+The stream also reports retries, permission decisions, cancelled questions and
+goals, and subagent starts and finishes. Noninteractive runs automatically
+allow permission prompts.
+
+Usage and call totals cover the top-level agent, including tools called from
+Python. They do not include child subagent usage. Usage and cost come from the
+provider and may be incomplete. Tool inputs and outputs are not included in
+the event stream; the response text and error messages can contain task data.
+
 ## 4. Switch models
 
 Inside the TUI, press `Ctrl+Space` to open the command palette, then select

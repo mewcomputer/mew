@@ -1871,7 +1871,7 @@ pub fn draw_help_overlay(f: &mut Frame, app: &mut App, area: Rect) {
         Line::from(Span::styled("Tools & Sidebar", header_style)),
         Line::from(vec![
             Span::styled("  Ctrl+O     ", key_style),
-            Span::styled("expand/collapse bash output", desc_style),
+            Span::styled("expand bash output / Python details", desc_style),
         ]),
         Line::from(vec![
             Span::styled("  Ctrl+Alt+T ", key_style),

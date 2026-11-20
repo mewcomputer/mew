@@ -1,5 +1,11 @@
 import "@testing-library/jest-dom/vitest";
 
+// Node's experimental localStorage can shadow the jsdom storage object.
+Object.defineProperty(globalThis, "localStorage", {
+  configurable: true,
+  value: (globalThis as typeof globalThis & { jsdom: { window: Window } }).jsdom.window.localStorage,
+});
+
 // jsdom doesn't implement matchMedia — required by use-mobile hook.
 Object.defineProperty(window, "matchMedia", {
   writable: true,

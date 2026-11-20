@@ -132,6 +132,11 @@ impl Drop for ActiveChild<'_> {
 #[derive(Clone)]
 pub struct SimpleRunner {
     default_provider: Arc<dyn Provider>,
+    default_provider_id: String,
+    default_model_id: String,
+    code_mode: mew_config::CodeModeConfig,
+    codex_code_mode_models: Arc<std::collections::HashSet<String>>,
+    secrets: Arc<mew_tools::SecretSet>,
     tools: HashMap<String, Arc<dyn Tool>>,
     dispatcher: Arc<dyn Dispatcher>,
     cwd: PathBuf,
@@ -172,6 +177,11 @@ impl SimpleRunner {
             .collect();
         Self {
             default_provider: provider,
+            default_provider_id: String::new(),
+            default_model_id: String::new(),
+            code_mode: mew_config::CodeModeConfig::default(),
+            codex_code_mode_models: Arc::default(),
+            secrets: Arc::new(mew_tools::SecretSet::default()),
             tools: tools_map,
             dispatcher,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -191,6 +201,11 @@ impl SimpleRunner {
 
     /// Keep active children addressable when a parent replaces its runner.
     pub fn with_agent_registry(mut self, agent: &mut crate::Agent) -> Self {
+        self.code_mode = agent.code_mode.clone();
+        self.codex_code_mode_models = agent.codex_code_mode_models.clone();
+        self.secrets = agent.secrets.clone();
+        self.default_provider_id = agent.provider_id.clone();
+        self.default_model_id = agent.model_id.clone();
         self.active_children = agent
             .child_guidance_registry
             .get_or_insert_with(|| self.active_children.clone())
@@ -277,11 +292,22 @@ impl SimpleRunner {
     /// call-time `model` override beats the def's `model`; either beats the
     /// default provider. A literal value of `"micro"`, `"deci"`, or `"nano"`
     /// is resolved by the `ModelResolver` against the active router's tiers.
-    async fn resolve_provider(&self, def: &SubagentDef, model: Option<&str>) -> Arc<dyn Provider> {
+    async fn resolve_provider(
+        &self,
+        def: &SubagentDef,
+        model: Option<&str>,
+    ) -> (Arc<dyn Provider>, String, String) {
+        let default = || {
+            (
+                self.default_provider.clone(),
+                self.default_provider_id.clone(),
+                self.default_model_id.clone(),
+            )
+        };
         let model = model.or(def.model.as_deref());
 
         let Some(model) = model else {
-            return self.default_provider.clone();
+            return default();
         };
 
         let Some(ref resolver) = self.model_resolver else {
@@ -290,10 +316,16 @@ impl SimpleRunner {
                 model = %model,
                 "subagent has model override but no resolver configured; using default provider"
             );
-            return self.default_provider.clone();
+            return default();
         };
         match resolver.resolve(model).await {
-            Ok(p) => p,
+            Ok(p) => {
+                let resolved = resolver.resolved_model(model);
+                let (provider, model) = resolved
+                    .split_once('/')
+                    .unwrap_or((&self.default_provider_id, &resolved));
+                (p, provider.to_owned(), model.to_owned())
+            }
             Err(e) => {
                 tracing::warn!(
                     subagent = %def.name,
@@ -301,7 +333,7 @@ impl SimpleRunner {
                     error = %e,
                     "failed to resolve subagent model override; using default provider"
                 );
-                self.default_provider.clone()
+                default()
             }
         }
     }
@@ -406,13 +438,23 @@ impl SubagentRunner for SimpleRunner {
             }
         };
 
+        let (provider, provider_id, model_id) = self.resolve_provider(def, model).await;
         let mut agent = crate::Agent::new(
-            self.resolve_provider(def, model).await,
+            provider,
             self.dispatcher.clone(),
             session_writer,
             tools,
             Some(session_id),
         );
+
+        agent.code_mode = self.code_mode.clone();
+        agent.active_tool_names = def
+            .tools
+            .as_ref()
+            .map(|names| names.iter().cloned().collect());
+        agent.codex_code_mode_models = self.codex_code_mode_models.clone();
+        agent.secrets = self.secrets.clone();
+        agent.set_model_info(&model_id, &provider_id);
 
         agent.cwd = self.cwd.clone();
         agent.workspace_roots = self.workspace_roots.clone();
@@ -632,6 +674,26 @@ impl SubagentRunner for SimpleRunner {
                             part: mew_message::Part::ToolCall(tc),
                             ..
                         } => {
+                            if tc.tool_name == "progress_update"
+                                && !tool_parts.contains_key(&tc.base.id)
+                                && matches!(tc.state, mew_message::ToolState::Completed(_))
+                            {
+                                if let Some(message) = tc
+                                    .state
+                                    .input()
+                                    .get("message")
+                                    .and_then(|v| v.as_str())
+                                    .filter(|message| !message.is_empty())
+                                {
+                                    let _ = event_tx
+                                        .send(SubagentEvent::Progress {
+                                            call_id: tc.call_id.clone(),
+                                            tool_name: tc.tool_name.clone(),
+                                            message: message.to_owned(),
+                                        })
+                                        .await;
+                                }
+                            }
                             // Keep our copy of the part in sync with the agent's.
                             // This catches the Completed state for exit_tool; for
                             // progress_update we already handled it at PartEnd.
@@ -1658,6 +1720,262 @@ mod tests {
                 assert_eq!(turns_used, 1, "should have stopped after one turn");
                 assert!(!hit_turn_limit);
                 assert!(!hit_time_limit);
+            }
+            other => panic!("expected Complete, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn code_mode_subagent_returns_the_nested_exit_result() {
+        check_code_mode_subagent(false).await;
+        check_code_mode_subagent(true).await;
+    }
+
+    #[tokio::test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    async fn tool_restricted_subagent_isolates_python() {
+        let directory = tempfile::tempdir().unwrap();
+        let secret = directory.path().join("private.txt");
+        std::fs::write(&secret, "private fixture").unwrap();
+        let source = format!("try:\n result=open({:?}).read()\nexcept OSError:\n result='denied'\ntools.exit_tool({{'final_answer':result}})", secret.to_string_lossy());
+        let provider = Arc::new(ScriptedProvider::new(vec![(
+            Duration::ZERO,
+            mew_provider_fake::FakeProvider::tool_call(
+                "python",
+                "py",
+                serde_json::json!({"source":source}),
+            ),
+        )]));
+        let tools = vec![exit_tool()];
+        let mut parent = crate::Agent::new(
+            provider.clone(),
+            Arc::new(mew_hooks::NopDispatcher),
+            None,
+            tools.clone(),
+            None,
+        );
+        parent.code_mode.mode = Some(mew_config::CodeMode::Full);
+        parent.code_mode.isolated = false;
+        let runner = SimpleRunner::new(provider, tools, Arc::new(mew_hooks::NopDispatcher))
+            .with_agent_registry(&mut parent)
+            .with_session_root(directory.path().to_path_buf());
+        let def = SubagentDef {
+            tools: Some(vec!["exit_tool".into()]),
+            ..make_def(Some(10), Some(60))
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let drain = tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                if let SubagentEvent::PermissionRequest { tx, .. } = event {
+                    let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
+                }
+            }
+        });
+        let result = runner
+            .run(SubagentRunOptions {
+                def: &def,
+                prompt: "prompt".into(),
+                parent_call_id: "parent".into(),
+                parent_session_id: SessionId::new(),
+                event_tx: tx,
+                cancel: Default::default(),
+                model: None,
+                parent_depth: 0,
+            })
+            .await
+            .unwrap();
+        drain.await.unwrap();
+        let SubagentResult::Complete { text, .. } = result else {
+            panic!("expected completed child");
+        };
+        assert_eq!(text, "denied");
+    }
+
+    #[tokio::test]
+    async fn code_mode_subagent_forwards_progress_to_parent() {
+        let directory = tempfile::tempdir().unwrap();
+        let provider = Arc::new(ScriptedProvider::new(vec![(
+            Duration::ZERO,
+            mew_provider_fake::FakeProvider::tool_call(
+                "python",
+                "py",
+                serde_json::json!({"source":"tools.progress_update({'message':'scanning files'})\ntools.exit_tool({'final_answer':'done'})"}),
+            ),
+        )]));
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(mew_tools::tools::progress_update::ProgressUpdate),
+            exit_tool(),
+        ];
+        let mut parent = crate::Agent::new(
+            provider.clone(),
+            Arc::new(mew_hooks::NopDispatcher),
+            None,
+            tools.clone(),
+            None,
+        );
+        parent.code_mode.mode = Some(mew_config::CodeMode::Full);
+        parent.code_mode.isolated = false;
+        let runner = SimpleRunner::new(provider, tools, Arc::new(mew_hooks::NopDispatcher))
+            .with_agent_registry(&mut parent)
+            .with_session_root(directory.path().to_path_buf());
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let drain = tokio::spawn(async move {
+            let mut messages = Vec::new();
+            while let Some(event) = rx.recv().await {
+                match event {
+                    SubagentEvent::PermissionRequest { tx, .. } => {
+                        let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
+                    }
+                    SubagentEvent::Progress { message, .. } => messages.push(message),
+                    _ => {}
+                }
+            }
+            messages
+        });
+        runner
+            .run(SubagentRunOptions {
+                def: &make_def(Some(10), Some(60)),
+                prompt: "prompt".into(),
+                parent_call_id: "parent".into(),
+                parent_session_id: SessionId::new(),
+                event_tx: tx,
+                cancel: Default::default(),
+                model: None,
+                parent_depth: 0,
+            })
+            .await
+            .unwrap();
+        assert_eq!(drain.await.unwrap(), ["scanning files"]);
+    }
+
+    #[tokio::test]
+    async fn subagent_tool_results_redact_parent_secrets() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("data.txt"), "token=secret-value").unwrap();
+        let provider = Arc::new(ScriptedProvider::new(vec![(
+            Duration::ZERO,
+            mew_provider_fake::FakeProvider::tool_call(
+                "python",
+                "py",
+                serde_json::json!({"source":"r = tools.read({'path':'data.txt'})\ntools.exit_tool({'final_answer':str(r)})"}),
+            ),
+        )]));
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(mew_tools::tools::read::Read), exit_tool()];
+        let mut parent = crate::Agent::new(
+            provider.clone(),
+            Arc::new(mew_hooks::NopDispatcher),
+            None,
+            tools.clone(),
+            None,
+        );
+        parent.code_mode.mode = Some(mew_config::CodeMode::Full);
+        parent.code_mode.isolated = false;
+        parent.secrets = Arc::new(mew_tools::SecretSet {
+            words: vec!["secret-value".into()],
+            globs: vec![],
+        });
+        let runner = SimpleRunner::new(provider, tools, Arc::new(mew_hooks::NopDispatcher))
+            .with_agent_registry(&mut parent)
+            .with_workspace(
+                directory.path().to_path_buf(),
+                vec![directory.path().to_path_buf()],
+                None,
+            )
+            .with_session_root(directory.path().to_path_buf());
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let drain = tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                if let SubagentEvent::PermissionRequest { tx, .. } = event {
+                    let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
+                }
+            }
+        });
+        let result = runner
+            .run(SubagentRunOptions {
+                def: &make_def(Some(10), Some(60)),
+                prompt: "prompt".into(),
+                parent_call_id: "parent".into(),
+                parent_session_id: SessionId::new(),
+                event_tx: tx,
+                cancel: Default::default(),
+                model: None,
+                parent_depth: 0,
+            })
+            .await
+            .unwrap();
+        drain.await.unwrap();
+        let SubagentResult::Complete { text, .. } = result else {
+            panic!("expected completed child");
+        };
+        assert!(text.contains("[REDACTED]"), "{text}");
+        assert!(!text.contains("secret-value"), "{text}");
+    }
+
+    async fn check_code_mode_subagent(from_catalog: bool) {
+        let directory = tempfile::tempdir().unwrap();
+        let unwanted = directory.path().join("after-exit");
+        let source = format!("tools.exit_tool({{'final_answer':'the answer is 42'}})\nopen({:?}, 'w').write('wrong')", unwanted.to_string_lossy());
+        let script = vec![(
+            Duration::from_millis(0),
+            mew_provider_fake::FakeProvider::tool_call(
+                "python",
+                "py",
+                serde_json::json!({"source":source}),
+            ),
+        )];
+        let def = make_def(Some(10), Some(60));
+        let provider = Arc::new(ScriptedProvider::new(script));
+        let mut parent = crate::Agent::new(
+            provider.clone(),
+            Arc::new(mew_hooks::NopDispatcher),
+            None,
+            vec![exit_tool()],
+            None,
+        );
+        parent.code_mode.isolated = false;
+        parent.set_model_info("gpt-6-luna", "codex");
+        if from_catalog {
+            parent.codex_code_mode_models =
+                Arc::new(std::collections::HashSet::from(["gpt-6-luna".to_string()]));
+        } else {
+            parent.code_mode.mode = Some(mew_config::CodeMode::Full);
+        }
+        let runner = SimpleRunner::new(
+            provider,
+            vec![exit_tool()],
+            Arc::new(mew_hooks::NopDispatcher),
+        )
+        .with_agent_registry(&mut parent)
+        .with_session_root(directory.path().to_path_buf());
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let drain = tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                if let mew_subagents::SubagentEvent::PermissionRequest { tx, .. } = event {
+                    let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
+                }
+            }
+        });
+        let result = runner
+            .run(SubagentRunOptions {
+                def: &def,
+                prompt: "prompt".into(),
+                parent_call_id: "parent".into(),
+                parent_session_id: SessionId::new(),
+                event_tx: tx,
+                cancel: tokio_util::sync::CancellationToken::new(),
+                model: None,
+                parent_depth: 0,
+            })
+            .await
+            .unwrap();
+        drain.abort();
+        assert!(!unwanted.exists(), "code after exit_tool must not run");
+        match result {
+            SubagentResult::Complete {
+                text, turns_used, ..
+            } => {
+                assert_eq!(text, "the answer is 42");
+                assert_eq!(turns_used, 1);
             }
             other => panic!("expected Complete, got {other:?}"),
         }

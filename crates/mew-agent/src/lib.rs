@@ -58,6 +58,21 @@ pub enum AgentEvent {
     ToolStart { call_id: String },
     /// A tool execution has finished.
     ToolEnd { call_id: String, success: bool },
+    /// A tool invoked by a Python cell has started.
+    NestedToolStart {
+        parent_call_id: String,
+        call_id: String,
+        tool_name: String,
+        input: serde_json::Value,
+    },
+    /// A tool invoked by a Python cell has finished.
+    NestedToolEnd {
+        parent_call_id: String,
+        call_id: String,
+        success: bool,
+        error: Option<String>,
+        output_bytes: Option<usize>,
+    },
     /// A part's content or state has changed (e.g. tool-call state transition).
     PartUpdated { part_id: PartId, part: Part },
     /// A tool produced intermediate output while running.
@@ -177,6 +192,31 @@ impl std::fmt::Debug for AgentEvent {
                 .debug_struct("ToolEnd")
                 .field("call_id", call_id)
                 .field("success", success)
+                .finish(),
+            AgentEvent::NestedToolStart {
+                parent_call_id,
+                call_id,
+                tool_name,
+                input: _,
+            } => f
+                .debug_struct("NestedToolStart")
+                .field("parent_call_id", parent_call_id)
+                .field("call_id", call_id)
+                .field("tool_name", tool_name)
+                .finish(),
+            AgentEvent::NestedToolEnd {
+                parent_call_id,
+                call_id,
+                success,
+                error,
+                output_bytes,
+            } => f
+                .debug_struct("NestedToolEnd")
+                .field("parent_call_id", parent_call_id)
+                .field("call_id", call_id)
+                .field("success", success)
+                .field("error", error)
+                .field("output_bytes", output_bytes)
                 .finish(),
             AgentEvent::PartUpdated { part_id, part } => f
                 .debug_struct("PartUpdated")
@@ -300,6 +340,9 @@ mod child_guidance;
 mod events;
 pub mod manifest;
 mod prompt_cache;
+mod python;
+#[cfg(test)]
+mod python_tests;
 mod reasoning_truncator;
 pub mod runner;
 mod subagent_registry;
@@ -311,6 +354,7 @@ mod workspace;
 pub use agent::{AcceptedPrompt, Agent, PromptAdmissionError};
 pub use mew_subagents::SubagentOutcome;
 pub use prompt_cache::PromptCacheRetention;
+pub use python::{PythonSession, PythonWorkerCache};
 pub use reasoning_truncator::{
     ReasoningTruncator, DEFAULT_REASONING_TRUNCATION_THRESHOLD, TRUNCATION_ACK_TEXT,
 };

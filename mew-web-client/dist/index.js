@@ -841,6 +841,18 @@ export class MewClient {
             case "tool_end":
                 this.emit("tool-end", { call_id: msg.call_id, success: msg.success });
                 break;
+            case "nested_tool_start":
+                this.emit("nested-tool-start", {
+                    parent_call_id: msg.parent_call_id, call_id: msg.call_id,
+                    tool_name: msg.tool_name, input: msg.input,
+                });
+                break;
+            case "nested_tool_end":
+                this.emit("nested-tool-end", {
+                    parent_call_id: msg.parent_call_id, call_id: msg.call_id,
+                    success: msg.success, error: msg.error, output_bytes: msg.output_bytes,
+                });
+                break;
             case "part_updated":
                 this.emit("part-updated", { part_id: msg.part_id, part: msg.part });
                 break;

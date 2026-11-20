@@ -1355,6 +1355,7 @@ export function bridgeClientToStore(client: MewClient) {
   client.on("tool-start", (data) => store.getState().onToolStart(data.call_id));
   client.on("tool-end", (data) => store.getState().onToolEnd(data.call_id, data.success));
   client.on("tool-progress", (data) => store.getState().onToolProgress(data.call_id, data.chunk));
+  client.on("nested-tool-start", (data) => store.getState().onToolProgress(data.parent_call_id, `[${data.tool_name}]\n`));
 
   client.on("part-updated", (data) => store.getState().onPartUpdated(data.part_id, data.part));
 

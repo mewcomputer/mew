@@ -176,6 +176,62 @@ fn daemon_permission(
 }
 
 #[test]
+fn nested_tool_updates_stay_attached_to_the_python_call() {
+    let mut app = App::new();
+    let session_id = ulid::Ulid::new();
+    let message_id = ulid::Ulid::new();
+    app.push_message(mew_message::Message {
+        id: message_id,
+        session_id,
+        role: mew_message::Role::Assistant,
+        parts: vec![mew_message::Part::ToolCall(mew_message::ToolCallPart {
+            base: mew_message::PartBase {
+                id: ulid::Ulid::new(),
+                message_id,
+                session_id,
+            },
+            tool_name: "python".into(),
+            call_id: "py".into(),
+            state: mew_message::ToolState::Pending(mew_message::ToolStatePending {
+                input: serde_json::json!({"source":"pass"}),
+                time: mew_message::ToolTime {
+                    start: 0,
+                    end: None,
+                },
+            }),
+            raw_input: String::new(),
+        })],
+        time: mew_message::Time {
+            created: 0,
+            completed: None,
+        },
+        assistant: None,
+    });
+    app.handle_agent_event(AgentEvent::NestedToolStart {
+        parent_call_id: "py".into(),
+        call_id: "py:1".into(),
+        tool_name: "write".into(),
+        input: serde_json::json!({"path":"blocked.txt"}),
+    });
+    app.handle_agent_event(AgentEvent::NestedToolEnd {
+        parent_call_id: "py".into(),
+        call_id: "py:1".into(),
+        success: false,
+        error: Some("permission denied".into()),
+        output_bytes: None,
+    });
+    let calls = &app.messages()[0]
+        .assistant
+        .as_ref()
+        .unwrap()
+        .nested_tool_calls;
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].tool_name, "write");
+    assert_eq!(calls[0].status, mew_message::NestedToolStatus::Error);
+    assert_eq!(calls[0].error.as_deref(), Some("permission denied"));
+}
+
+#[test]
 fn daemon_required_actions_deduplicate_and_resolve_only_matching_ids() {
     let mut app = App::new();
     app.daemon_mode = true;

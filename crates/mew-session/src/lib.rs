@@ -613,8 +613,23 @@ pub fn session_dir() -> PathBuf {
     mew_config::data_dir().join("sessions")
 }
 
-/// Try to reserve the top-level session's writer until the returned file drops.
-pub async fn try_writer_lease(root: &Path, session_id: &str) -> Result<Option<File>, SessionError> {
+/// Exclusive ownership of a top-level session writer.
+pub struct WriterLease(File);
+
+impl Drop for WriterLease {
+    fn drop(&mut self) {
+        // A forked subprocess may briefly hold an inherited copy of the descriptor.
+        if let Err(error) = self.0.unlock() {
+            tracing::warn!(%error, "could not release session writer lease");
+        }
+    }
+}
+
+/// Try to reserve a session writer until the lease is dropped.
+pub async fn try_writer_lease(
+    root: &Path,
+    session_id: &str,
+) -> Result<Option<WriterLease>, SessionError> {
     if !Path::new(session_id)
         .file_name()
         .is_some_and(|name| name == session_id)
@@ -634,7 +649,7 @@ pub async fn try_writer_lease(root: &Path, session_id: &str) -> Result<Option<Fi
             .truncate(false)
             .open(directory.join(session_id))?;
         match lease.try_lock() {
-            Ok(()) => Ok(Some(lease)),
+            Ok(()) => Ok(Some(WriterLease(lease))),
             Err(TryLockError::WouldBlock) => Ok(None),
             Err(TryLockError::Error(error)) => Err(error.into()),
         }
@@ -793,6 +808,28 @@ mod tests {
             },
             assistant: None,
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn writer_lease_is_released_even_when_its_descriptor_is_duplicated() {
+        let root = tempfile::tempdir().unwrap();
+        let lease = try_writer_lease(root.path(), "session")
+            .await
+            .unwrap()
+            .unwrap();
+        let inherited = lease.0.try_clone().unwrap();
+        assert!(try_writer_lease(root.path(), "session")
+            .await
+            .unwrap()
+            .is_none());
+
+        drop(lease);
+        assert!(try_writer_lease(root.path(), "session")
+            .await
+            .unwrap()
+            .is_some());
+        drop(inherited);
     }
 
     #[tokio::test]

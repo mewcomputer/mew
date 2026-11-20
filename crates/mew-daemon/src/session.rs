@@ -5,7 +5,6 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::fs::File;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -105,7 +104,7 @@ pub struct Session {
     /// Sessions root directory (for meta persistence).
     pub session_dir: PathBuf,
     // Keep the lease until the runtime and its current operations release it.
-    writer_lease: Option<File>,
+    writer_lease: Option<mew_session::WriterLease>,
 }
 
 impl Session {
@@ -429,6 +428,11 @@ impl Session {
                 replay.record(event);
                 Some(replay)
             }
+            ServerMessage::NestedToolStart { .. } | ServerMessage::NestedToolEnd { .. } => {
+                let mut replay = self.provider_replay.lock().await;
+                replay.nested.push(msg.clone());
+                Some(replay)
+            }
             ServerMessage::ErrorEvent { .. } => {
                 let mut replay = self.provider_replay.lock().await;
                 replay.clear();
@@ -497,13 +501,23 @@ impl Session {
 /// The events needed to render the current provider response from its start.
 /// Drop the replay once that response is available through ordinary history.
 #[derive(Default)]
-pub(crate) struct ProviderReplay(Vec<ProviderEventWire>);
+pub(crate) struct ProviderReplay {
+    provider: Vec<ProviderEventWire>,
+    nested: Vec<ServerMessage>,
+}
 
 impl ProviderReplay {
     fn record(&mut self, event: &ProviderEventWire) {
         match event {
-            ProviderEventWire::MessageEnd { .. } | ProviderEventWire::Error(_) => self.clear(),
+            ProviderEventWire::MessageEnd { .. } | ProviderEventWire::Error(_) => {
+                self.provider.clear()
+            }
             ProviderEventWire::RetryWait { .. } => {}
+            ProviderEventWire::PartStart { .. } if self.provider.is_empty() => {
+                // The previous tool batch is already in session history.
+                self.nested.clear();
+                self.provider.push(event.clone());
+            }
             ProviderEventWire::PartDelta {
                 part_id,
                 field,
@@ -513,25 +527,26 @@ impl ProviderReplay {
                     part_id: previous_id,
                     field: previous_field,
                     delta: previous_delta,
-                }) = self.0.last_mut()
+                }) = self.provider.last_mut()
                 {
                     if previous_id == part_id && previous_field == field {
                         previous_delta.push_str(delta);
                         return;
                     }
                 }
-                self.0.push(event.clone());
+                self.provider.push(event.clone());
             }
-            _ => self.0.push(event.clone()),
+            _ => self.provider.push(event.clone()),
         }
     }
 
     pub(crate) fn clear(&mut self) {
-        self.0.clear();
+        self.provider.clear();
+        self.nested.clear();
     }
 
     pub(crate) fn present_in(&self, history: &[Message]) -> bool {
-        let first_part = self.0.iter().find_map(|event| match event {
+        let first_part = self.provider.iter().find_map(|event| match event {
             ProviderEventWire::PartStart { part } => Some(part.id()),
             _ => None,
         });
@@ -545,10 +560,16 @@ impl ProviderReplay {
     }
 
     pub(crate) fn send(&self, client: &ClientSender) {
-        for event in &self.0 {
+        for event in &self.provider {
             let _ = client.send(ServerMessage::Provider {
                 event: event.clone(),
             });
+        }
+    }
+
+    pub(crate) fn send_nested(&self, client: &ClientSender) {
+        for event in &self.nested {
+            let _ = client.send(event.clone());
         }
     }
 }
@@ -573,6 +594,8 @@ pub struct SessionManager {
     pub(crate) session_dir: PathBuf,
     pub(crate) project_pins: Arc<ProjectPinsStore>,
     pub(crate) active: Mutex<HashMap<String, Arc<Session>>>,
+    python_sessions: Mutex<HashMap<String, mew_agent::PythonSession>>,
+    python_cache: std::sync::OnceLock<mew_agent::PythonWorkerCache>,
     loading: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub(crate) defaults_lock: Mutex<()>,
     pub remote_devices: std::sync::OnceLock<crate::remote::RemoteDeviceManager>,
@@ -584,6 +607,30 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
+    async fn restore_python_session(&self, session_id: &str, agent: &mut Agent) {
+        let may_use_code_mode = agent.code_mode.mode == Some(mew_config::CodeMode::Full)
+            || agent
+                .code_mode
+                .models
+                .values()
+                .any(|mode| *mode == mew_config::CodeMode::Full)
+            || agent.code_mode.mode.is_none();
+        if !may_use_code_mode {
+            return;
+        }
+        let cache = self
+            .python_cache
+            .get_or_init(|| mew_agent::PythonWorkerCache::new(agent.code_mode.max_idle_workers));
+        let session = self
+            .python_sessions
+            .lock()
+            .await
+            .entry(session_id.to_owned())
+            .or_insert_with(|| cache.session())
+            .clone();
+        agent.set_python_session(session);
+    }
+
     pub fn new(
         builder: AgentBuilder,
         session_dir: PathBuf,
@@ -598,6 +645,8 @@ impl SessionManager {
             session_dir,
             project_pins,
             active: Mutex::new(HashMap::new()),
+            python_sessions: Mutex::new(HashMap::new()),
+            python_cache: std::sync::OnceLock::new(),
             loading: Mutex::new(HashMap::new()),
             defaults_lock: Mutex::new(()),
             remote_devices: std::sync::OnceLock::new(),
@@ -622,12 +671,13 @@ impl SessionManager {
         let writer = mew_session::Writer::open_at_with_meta(&self.session_dir, &session_id, meta)
             .await
             .context("open session writer")?;
-        let (agent, model, provider) = (self.builder)(AgentBuildParams {
+        let (mut agent, model, provider) = (self.builder)(AgentBuildParams {
             session_id: session_id.clone(),
             writer,
             cwd,
             policy,
         })?;
+        self.restore_python_session(&session_id, &mut agent).await;
         load_todos(&agent).await?;
         let mut session = Session::new(
             session_id.clone(),
@@ -786,7 +836,7 @@ impl SessionManager {
             .context("open session writer for resume")
             .map_err(AttachError::BuildAgent)?;
 
-        let (agent, model, provider) = (self.builder)(AgentBuildParams {
+        let (mut agent, model, provider) = (self.builder)(AgentBuildParams {
             session_id: session_id.to_string(),
             writer,
             cwd,
@@ -794,6 +844,7 @@ impl SessionManager {
         })
         .context("build agent for resume")
         .map_err(AttachError::BuildAgent)?;
+        self.restore_python_session(session_id, &mut agent).await;
         load_todos(&agent).await.map_err(AttachError::BuildAgent)?;
 
         // The writer has already migrated and repaired the log. Reuse the
@@ -919,6 +970,7 @@ impl SessionManager {
             session.browser_access.clear();
         }
         drop(active);
+        self.python_sessions.lock().await.remove(session_id);
         drop(_load);
         if let Err(error) = tokio::fs::remove_dir_all(tombstone).await {
             tracing::warn!(%session_id, %error, "could not clean up deleted session files");
@@ -1245,6 +1297,46 @@ impl Drop for Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn python_session_is_shared_when_a_later_model_may_use_code_mode() {
+        let directory = tempfile::tempdir().unwrap();
+        let server = crate::DaemonServer::with_session_dir(
+            Arc::new(|params| {
+                Ok((
+                    Agent::new(
+                        Arc::new(mew_provider_fake::FakeProvider::new(Vec::new())),
+                        Arc::new(mew_hooks::NopDispatcher),
+                        Some(params.writer),
+                        Vec::new(),
+                        None,
+                    ),
+                    None,
+                    None,
+                ))
+            }),
+            directory.path().to_path_buf(),
+        );
+        let mut agent = Agent::new(
+            Arc::new(mew_provider_fake::FakeProvider::new(Vec::new())),
+            Arc::new(mew_hooks::NopDispatcher),
+            None,
+            Vec::new(),
+            None,
+        );
+        agent.set_model_info("glm-5.3-flash", "opencode-go");
+        server
+            .session_manager
+            .restore_python_session("session", &mut agent)
+            .await;
+        assert!(server.session_manager.python_cache.get().is_some());
+        assert!(server
+            .session_manager
+            .python_sessions
+            .lock()
+            .await
+            .contains_key("session"));
+    }
 
     #[tokio::test]
     async fn detached_runtime_keeps_running_shell_jobs_until_they_finish() {

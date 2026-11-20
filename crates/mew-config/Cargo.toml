@@ -20,6 +20,4 @@ globset = { workspace = true }
 shell-words = { workspace = true }
 mew-hooks = { workspace = true }
 mew-tools = { workspace = true }
-
-[dev-dependencies]
 tempfile = "3"

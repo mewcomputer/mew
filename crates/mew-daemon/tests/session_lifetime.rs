@@ -18,6 +18,204 @@ use tokio_tungstenite::WebSocketStream;
 
 type Ws = WebSocketStream<DuplexStream>;
 
+async fn python_result(agent: &Agent) -> String {
+    let mut events = agent.run("test".into());
+    let mut result = String::new();
+    while let Some(event) = events.recv().await {
+        match event {
+            mew_agent::AgentEvent::PermissionRequest { tx, .. } => {
+                tx.send(mew_hooks::PermissionDecision::AllowOnce).unwrap();
+            }
+            mew_agent::AgentEvent::PartUpdated {
+                part: mew_message::Part::ToolCall(call),
+                ..
+            } if call.call_id == "py" => match call.state {
+                mew_message::ToolState::Completed(state) => result = state.output,
+                mew_message::ToolState::Error(state) => result = state.error,
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    result
+}
+
+#[tokio::test]
+async fn python_state_survives_unloading_and_reattaching_the_same_session() {
+    for default in ["explicit", "codex", "deepseek"] {
+        check_python_state_survives_unload(default).await;
+    }
+}
+
+async fn check_python_state_survives_unload(default: &'static str) {
+    let directory = tempfile::tempdir().unwrap();
+    let builder: mew_daemon::AgentBuilder = Arc::new(move |params| {
+        let script = FakeProvider::tool_call(
+            "python",
+            "py",
+            serde_json::json!({"source":"saved = globals().get('saved', 40) + 1\ntext(saved)"}),
+        );
+        let mut agent = Agent::new(
+            Arc::new(FakeProvider::new(script)),
+            Arc::new(NopDispatcher),
+            Some(params.writer),
+            vec![],
+            None,
+        );
+        agent.code_mode.isolated = false;
+        agent.set_model_info("gpt-6-luna", "codex");
+        match default {
+            "codex" => {
+                agent.set_model_info("gpt-6-luna", "other");
+                agent.codex_code_mode_models =
+                    Arc::new(std::collections::HashSet::from(["gpt-6-luna".to_string()]));
+            }
+            "deepseek" => agent.set_model_info("glm-5.3-flash", "opencode-go"),
+            _ => agent.code_mode.mode = Some(mew_config::CodeMode::Full),
+        }
+        agent.max_turns = Some(1);
+        Ok((agent, Some("fake".into()), Some("fake".into())))
+    });
+    let server = DaemonServer::with_session_dir(builder, directory.path().join("sessions"));
+    let session = server.session_manager.create(None).await.unwrap();
+    let id = session.id.clone();
+    async fn run(agent: &Agent) -> String {
+        let mut events = agent.run("test".into());
+        let mut output = String::new();
+        while let Some(event) = events.recv().await {
+            match event {
+                mew_agent::AgentEvent::PermissionRequest { tx, .. } => {
+                    tx.send(mew_hooks::PermissionDecision::AllowOnce).unwrap();
+                }
+                mew_agent::AgentEvent::PartUpdated {
+                    part: mew_message::Part::ToolCall(call),
+                    ..
+                } if call.call_id == "py" => {
+                    if let Some(value) = call.state.output() {
+                        output = value.to_owned();
+                    }
+                }
+                _ => {}
+            }
+        }
+        output
+    }
+    let mut agent = session.agent.lock().await.clone();
+    match default {
+        "codex" => agent.set_model_info("gpt-6-luna", "codex"),
+        "deepseek" => agent.set_model_info("deepseek-v4.1-flash", "opencode-go"),
+        _ => {}
+    }
+    assert_eq!(run(&agent).await, "41\n");
+    drop(agent);
+    drop(session);
+    server.session_manager.remove(&id).await;
+    let session = server.session_manager.attach(&id).await.unwrap();
+    let mut agent = session.agent.lock().await.clone();
+    match default {
+        "codex" => agent.set_model_info("gpt-6-luna", "codex"),
+        "deepseek" => agent.set_model_info("deepseek-v4.1-flash", "opencode-go"),
+        _ => {}
+    }
+    assert_eq!(run(&agent).await, "42\n");
+}
+
+#[tokio::test]
+async fn idle_python_worker_expires_across_session_unload_and_reports_lost_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let workspace_file = directory.path().join("workspace.txt");
+    std::fs::write(&workspace_file, "keep").unwrap();
+    let builder: mew_daemon::AgentBuilder = Arc::new(move |params| {
+        let script = FakeProvider::tool_call(
+            "python",
+            "py",
+            serde_json::json!({"source":"saved = globals().get('saved', 40) + 1\ntext(saved)"}),
+        );
+        let mut agent = Agent::new(
+            Arc::new(FakeProvider::new(script)),
+            Arc::new(NopDispatcher),
+            Some(params.writer),
+            vec![],
+            None,
+        );
+        agent.code_mode.mode = Some(mew_config::CodeMode::Full);
+        agent.code_mode.isolated = false;
+        agent.max_turns = Some(1);
+        Ok((agent, Some("fake".into()), Some("fake".into())))
+    });
+    let server = DaemonServer::with_session_dir(builder, directory.path().join("sessions"));
+    let session = server.session_manager.create(None).await.unwrap();
+    let id = session.id.clone();
+    let agent = session.agent.lock().await.clone();
+    assert_eq!(python_result(&agent).await, "41\n");
+    drop(agent);
+    drop(session);
+    server.session_manager.remove(&id).await;
+
+    tokio::time::pause();
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_secs(24 * 60 * 60)).await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::resume();
+
+    let session = server.session_manager.attach(&id).await.unwrap();
+    let agent = session.agent.lock().await.clone();
+    let notice = python_result(&agent).await;
+    assert!(notice.contains("idle"), "{notice}");
+    assert!(
+        notice.contains("state") && notice.contains("lost"),
+        "{notice}"
+    );
+    assert_eq!(python_result(&agent).await, "41\n");
+    assert_eq!(std::fs::read_to_string(workspace_file).unwrap(), "keep");
+}
+
+#[tokio::test]
+async fn daemon_evicts_the_least_recently_used_idle_python_worker() {
+    let directory = tempfile::tempdir().unwrap();
+    let builder: mew_daemon::AgentBuilder = Arc::new(move |params| {
+        let script = FakeProvider::tool_call(
+            "python",
+            "py",
+            serde_json::json!({"source":"saved = globals().get('saved', 40) + 1\ntext(saved)"}),
+        );
+        let mut agent = Agent::new(
+            Arc::new(FakeProvider::new(script)),
+            Arc::new(NopDispatcher),
+            Some(params.writer),
+            vec![],
+            None,
+        );
+        agent.code_mode.mode = Some(mew_config::CodeMode::Full);
+        agent.code_mode.isolated = false;
+        agent.code_mode.max_idle_workers = 2;
+        agent.max_turns = Some(1);
+        Ok((agent, Some("fake".into()), Some("fake".into())))
+    });
+    let server = DaemonServer::with_session_dir(builder, directory.path().join("sessions"));
+    let a = server.session_manager.create(None).await.unwrap();
+    let b = server.session_manager.create(None).await.unwrap();
+    let c = server.session_manager.create(None).await.unwrap();
+    let a = a.agent.lock().await.clone();
+    let b = b.agent.lock().await.clone();
+    let c = c.agent.lock().await.clone();
+    assert_eq!(python_result(&a).await, "41\n");
+    assert_eq!(python_result(&b).await, "41\n");
+    assert_eq!(python_result(&a).await, "42\n");
+    assert_eq!(python_result(&c).await, "41\n");
+    let notice = python_result(&b).await;
+    assert!(
+        notice.contains("state") && notice.contains("lost"),
+        "{notice}"
+    );
+    assert_eq!(python_result(&a).await, "43\n");
+    assert_eq!(python_result(&b).await, "41\n");
+}
+
 fn daemon(ask_user: bool) -> (tempfile::TempDir, DaemonServer) {
     let directory = tempfile::tempdir().unwrap();
     let builder: mew_daemon::AgentBuilder = Arc::new(move |params| {
@@ -150,6 +348,148 @@ async fn close(mut socket: Ws, task: JoinHandle<()>) {
         .await
         .unwrap()
         .unwrap();
+}
+
+#[tokio::test]
+async fn nested_python_permission_replays_and_persists_in_history() {
+    for cancel in [false, true] {
+        check_nested_python_permission_replay(cancel).await;
+    }
+}
+
+async fn check_nested_python_permission_replay(cancel: bool) {
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().to_path_buf();
+    let root = workspace.clone();
+    let server = DaemonServer::with_session_dir(
+        Arc::new(move |params| {
+            let script = FakeProvider::tool_call(
+                "python",
+                "py",
+                serde_json::json!({"source":"result = tools.write({'path':'blocked.txt','content':'no'})\ntext(result['error'])"}),
+            );
+            let mut agent = Agent::new(
+                Arc::new(FakeProvider::new(script)),
+                Arc::new(NopDispatcher),
+                Some(params.writer),
+                vec![Arc::new(mew_tools::tools::write::Write)],
+                None,
+            );
+            agent.cwd = root.clone();
+            agent.workspace_roots = vec![root.clone()];
+            agent.code_mode.mode = Some(mew_config::CodeMode::Full);
+            agent.max_turns = Some(1);
+            Ok((agent, Some("fake".into()), Some("fake".into())))
+        }),
+        workspace.join("sessions"),
+    );
+    let (mut socket, task) = connect(&server).await;
+    let session_id = new_session(&mut socket, Some(workspace.display().to_string())).await;
+    prompt(&mut socket).await;
+    let start = receive(&mut socket, |message| {
+        matches!(message, ServerMessage::NestedToolStart { .. })
+    })
+    .await;
+    let ServerMessage::NestedToolStart {
+        call_id,
+        tool_name,
+        input,
+        ..
+    } = start
+    else {
+        unreachable!()
+    };
+    assert_eq!(tool_name, "write");
+    assert_eq!(input["path"], "blocked.txt");
+    let request = receive(&mut socket, |message| matches!(message, ServerMessage::PermissionRequest { tool_name, .. } if tool_name == "write")).await;
+    let ServerMessage::PermissionRequest { request_id, .. } = request else {
+        unreachable!()
+    };
+    close(socket, task).await;
+
+    let (mut socket, task) = connect(&server).await;
+    send(
+        &mut socket,
+        ClientMessage::AttachSession {
+            session_id: session_id.clone(),
+            client_kind: ClientKind::Tui,
+        },
+    )
+    .await;
+    receive(&mut socket, |message| {
+        matches!(message, ServerMessage::SessionHistoryPage { .. })
+    })
+    .await;
+    let replay = receive(&mut socket, |message| {
+        matches!(message, ServerMessage::NestedToolStart { .. })
+    })
+    .await;
+    assert!(
+        matches!(replay, ServerMessage::NestedToolStart { call_id: replay_id, .. } if replay_id == call_id)
+    );
+    let replayed = receive(&mut socket, |message| {
+        matches!(message, ServerMessage::PermissionRequest { .. })
+    })
+    .await;
+    assert!(
+        matches!(replayed, ServerMessage::PermissionRequest { request_id: id, .. } if id == request_id)
+    );
+    let response = if cancel {
+        ClientMessage::Cancel
+    } else {
+        ClientMessage::PermissionResponse {
+            request_id,
+            decision: mew_protocol::PermissionDecision::Deny,
+        }
+    };
+    send(&mut socket, response).await;
+    let end = receive(&mut socket, |message| {
+        matches!(message, ServerMessage::NestedToolEnd { .. })
+    })
+    .await;
+    assert!(
+        matches!(end, ServerMessage::NestedToolEnd { call_id: ended, success: false, .. } if ended == call_id)
+    );
+    receive(&mut socket, |message| {
+        matches!(
+            message,
+            ServerMessage::SessionActivityChanged {
+                activity: SessionState::Idle,
+                ..
+            }
+        )
+    })
+    .await;
+    assert!(!workspace.join("blocked.txt").exists());
+    close(socket, task).await;
+    server.session_manager.remove(&session_id).await;
+
+    let (mut socket, task) = connect(&server).await;
+    send(
+        &mut socket,
+        ClientMessage::AttachSession {
+            session_id,
+            client_kind: ClientKind::Tui,
+        },
+    )
+    .await;
+    let page = receive(&mut socket, |message| {
+        matches!(message, ServerMessage::SessionHistoryPage { .. })
+    })
+    .await;
+    let ServerMessage::SessionHistoryPage { messages, .. } = page else {
+        unreachable!()
+    };
+    let calls: Vec<_> = messages
+        .iter()
+        .filter_map(|message| message.assistant.as_ref())
+        .flat_map(|meta| &meta.nested_tool_calls)
+        .collect();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].call_id, call_id);
+    assert_eq!(calls[0].status, mew_message::NestedToolStatus::Error);
+    assert!(calls[0].error.as_deref().unwrap().contains("denied"));
+    close(socket, task).await;
 }
 
 async fn weak_session(server: &DaemonServer, session_id: &str) -> std::sync::Weak<Session> {

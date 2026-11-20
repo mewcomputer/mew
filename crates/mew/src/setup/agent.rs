@@ -17,6 +17,28 @@ use mew_ext_broker::{
 };
 use mew_hooks::Dispatcher;
 
+/// Connect MCP servers configured for the current process workspace.
+pub(crate) async fn discover_mcp_tools(
+    cwd: &std::path::Path,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> Result<Vec<Arc<dyn mew_tools::Tool>>> {
+    let servers = mew_mcp::load_servers(cwd, &mew_config::config_dir())?;
+    Ok(mew_mcp::connect_tools_until(servers, cwd, shutdown).await)
+}
+
+pub(crate) async fn shutdown_mcp_tools(tools: &[Arc<dyn mew_tools::Tool>]) {
+    let mut tasks = tokio::task::JoinSet::new();
+    for tool in tools {
+        let tool = tool.clone();
+        tasks.spawn(async move {
+            if let Err(error) = tool.shutdown().await {
+                tracing::warn!(tool = %tool.name(), %error, "MCP shutdown failed");
+            }
+        });
+    }
+    while tasks.join_next().await.is_some() {}
+}
+
 /// Apply catalog pricing and prompt-cache retention for the active model.
 pub(crate) fn apply_catalog_pricing(agent: &mut Agent, cat: Option<&Catalog>, model_id: &str) {
     let model = cat.and_then(|catalog| catalog.lookup(model_id));
@@ -31,6 +53,14 @@ pub(crate) fn apply_catalog_pricing(agent: &mut Agent, cat: Option<&Catalog>, mo
 }
 
 fn apply_model_metadata(agent: &mut Agent, cat: Option<&Catalog>, model_id: &str) {
+    agent.codex_code_mode_models = Arc::new(
+        cat.and_then(|catalog| catalog.providers.get("codex"))
+            .into_iter()
+            .flat_map(|models| models.values())
+            .filter(|model| model.codex_code_mode_only)
+            .map(|model| model.id.clone())
+            .collect(),
+    );
     agent.supports_vision = cat.is_none_or(|catalog| catalog.supports_vision(model_id));
     agent.context_window = cat.map_or(0, |catalog| catalog.context_window(model_id).max(0) as u32);
     agent.default_max_output_tokens = cat
@@ -504,6 +534,7 @@ pub(crate) fn switch_session_model(
     raw: bool,
 ) {
     agent.provider = provider;
+    agent.code_mode = cfg.code_mode.clone();
     agent.set_model_info(model_id, provider_id);
     apply_model_metadata(agent, cat, model_id);
     let dispatcher = agent.dispatcher.clone();
@@ -540,6 +571,7 @@ pub(crate) fn build_session_agent(
     dispatcher: Arc<dyn Dispatcher>,
     todos_path: Option<std::path::PathBuf>,
     discovered_extensions: &[mew_ext_broker::DiscoveredExtension],
+    mcp_tools: &[Arc<dyn mew_tools::Tool>],
 ) -> Result<Agent> {
     let cwd = session_cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
@@ -576,6 +608,7 @@ pub(crate) fn build_session_agent(
         cfg.plan_path.clone(),
     );
     tools.extend(mew_tools::tools::browser::tools());
+    tools.extend(mcp_tools.iter().cloned());
 
     let flagged_files: Arc<tokio::sync::Mutex<Vec<FlaggedFile>>> =
         Arc::new(tokio::sync::Mutex::new(Vec::new()));
@@ -588,6 +621,12 @@ pub(crate) fn build_session_agent(
         .as_ref()
         .and_then(|w| w.path().parent().map(|p| p.join("subagent_tasks.json")));
     let mut agent = Agent::new(provider, dispatcher.clone(), writer, tools, session_id);
+    agent.code_mode = cfg.code_mode.clone();
+    if cfg.code_mode.max_idle_workers != mew_config::CodeModeConfig::default().max_idle_workers {
+        agent.set_python_session(
+            mew_agent::PythonWorkerCache::new(cfg.code_mode.max_idle_workers).session(),
+        );
+    }
     agent.cwd = cwd.clone();
     agent.subagent_registry_path = subagent_registry_path;
     agent.set_model_info(model_id, provider_id);
@@ -771,6 +810,7 @@ pub(crate) fn build_system_prompt_snapshot(
             Arc::new(mew_hooks::NopDispatcher),
             None,
             &discovered,
+            &[],
         )
     });
     let agent = agent?;
@@ -791,6 +831,36 @@ mod tests {
         let provider = Arc::new(FakeProvider::new(vec![]));
         let dispatcher: Arc<dyn mew_hooks::Dispatcher> = Arc::new(mew_hooks::NopDispatcher);
         mew_agent::Agent::new(provider, dispatcher, None, vec![], None)
+    }
+
+    #[test]
+    fn model_metadata_installs_only_codex_code_mode_recommendations() {
+        let mut agent = make_agent();
+        let mut catalog = Catalog::empty();
+        catalog.merge_local(vec![
+            Model {
+                id: "recommended".into(),
+                provider: "codex".into(),
+                codex_code_mode_only: true,
+                ..Default::default()
+            },
+            Model {
+                id: "ordinary".into(),
+                provider: "codex".into(),
+                ..Default::default()
+            },
+            Model {
+                id: "other-provider".into(),
+                provider: "other".into(),
+                codex_code_mode_only: true,
+                ..Default::default()
+            },
+        ]);
+        apply_model_metadata(&mut agent, Some(&catalog), "recommended");
+        assert_eq!(agent.codex_code_mode_models.len(), 1);
+        assert!(agent.codex_code_mode_models.contains("recommended"));
+        apply_model_metadata(&mut agent, None, "recommended");
+        assert!(agent.codex_code_mode_models.is_empty());
     }
 
     #[test]

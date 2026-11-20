@@ -404,6 +404,21 @@ pub enum ClientEvent {
         call_id: String,
         chunk: String,
     },
+    NestedToolStart {
+        session_id: String,
+        parent_call_id: String,
+        call_id: String,
+        tool_name: String,
+        input: serde_json::Value,
+    },
+    NestedToolEnd {
+        session_id: String,
+        parent_call_id: String,
+        call_id: String,
+        success: bool,
+        error: Option<String>,
+        output_bytes: Option<usize>,
+    },
     ProviderMessageEnded {
         session_id: String,
         cost: f64,
@@ -963,6 +978,82 @@ impl ClientState {
                                 chunk,
                             }];
                         }
+                    }
+                }
+                Vec::new()
+            }
+            ServerMessage::NestedToolStart {
+                parent_call_id,
+                call_id,
+                tool_name,
+                input,
+            } => {
+                let Some(session_id) = self.attached_session.clone() else {
+                    return Vec::new();
+                };
+                let session = self.session_mut(&session_id);
+                if let Some(message) = session.messages.iter_mut().rev().find(|message| {
+                    message.parts.iter().any(|part| {
+                        matches!(part, Part::ToolCall(call) if call.call_id == parent_call_id)
+                    })
+                }) {
+                    let calls = &mut message
+                        .assistant
+                        .get_or_insert_with(AssistantMeta::default)
+                        .nested_tool_calls;
+                    if !calls.iter().any(|call| call.call_id == call_id) {
+                        calls.push(mew_message::NestedToolCall {
+                            parent_call_id: parent_call_id.clone(),
+                            call_id: call_id.clone(),
+                            tool_name: tool_name.clone(),
+                            input: input.clone(),
+                            status: mew_message::NestedToolStatus::Running,
+                            error: None,
+                            output_bytes: None,
+                        });
+                        return vec![ClientEvent::NestedToolStart {
+                            session_id,
+                            parent_call_id,
+                            call_id,
+                            tool_name,
+                            input,
+                        }];
+                    }
+                }
+                Vec::new()
+            }
+            ServerMessage::NestedToolEnd {
+                parent_call_id,
+                call_id,
+                success,
+                error,
+                output_bytes,
+            } => {
+                let Some(session_id) = self.attached_session.clone() else {
+                    return Vec::new();
+                };
+                let session = self.session_mut(&session_id);
+                for message in session.messages.iter_mut().rev() {
+                    if let Some(call) = message.assistant.as_mut().and_then(|meta| {
+                        meta.nested_tool_calls.iter_mut().find(|call| {
+                            call.parent_call_id == parent_call_id && call.call_id == call_id
+                        })
+                    }) {
+                        call.status = if success {
+                            mew_message::NestedToolStatus::Completed
+                        } else {
+                            mew_message::NestedToolStatus::Error
+                        };
+                        call.error = error.clone();
+                        call.output_bytes = output_bytes;
+                        return vec![ClientEvent::NestedToolEnd {
+                            session_id,
+                            parent_call_id,
+                            call_id,
+                            success,
+                            error,
+                            output_bytes,
+                        }];
                     }
                 }
                 Vec::new()
@@ -1543,6 +1634,7 @@ impl ClientState {
                         finish: None,
                         error: None,
                         manifest: None,
+                        nested_tool_calls: Vec::new(),
                     });
                     assistant.cost += cost;
                     assistant.tokens = usage;
@@ -1977,6 +2069,64 @@ mod tests {
             &state.session(&session_id).unwrap().messages[0].parts[0],
             Part::ToolCall(part) if part.state.output() == Some("/tmp/mew\n")
         ));
+    }
+
+    #[test]
+    fn nested_tool_events_update_the_parent_message_and_survive_replay() {
+        let mut state = ClientState::default();
+        session_ready(&mut state);
+        let session_id = state.attached_session.clone().unwrap();
+        let session_ulid = Ulid::from_string(&session_id).unwrap();
+        state.apply_server_message(ServerMessage::Provider {
+            event: ProviderEventWire::PartStart {
+                part: Part::ToolCall(ToolCallPart {
+                    base: PartBase {
+                        id: Ulid::new(),
+                        message_id: Ulid::new(),
+                        session_id: session_ulid,
+                    },
+                    tool_name: "python".into(),
+                    call_id: "outer".into(),
+                    state: ToolState::Running(ToolStateRunning {
+                        input: serde_json::json!({"source": "tools.write(...)"}),
+                        output: String::new(),
+                        time: ToolTime {
+                            start: 0,
+                            end: None,
+                        },
+                    }),
+                    raw_input: String::new(),
+                }),
+            },
+        });
+        let start = ServerMessage::NestedToolStart {
+            parent_call_id: "outer".into(),
+            call_id: "outer:1".into(),
+            tool_name: "write".into(),
+            input: serde_json::json!({"path": "note.txt"}),
+        };
+        let events = state.apply_server_message(start.clone());
+        assert!(matches!(
+            events.as_slice(),
+            [ClientEvent::NestedToolStart { .. }]
+        ));
+        state.apply_server_message(ServerMessage::NestedToolEnd {
+            parent_call_id: "outer".into(),
+            call_id: "outer:1".into(),
+            success: false,
+            error: Some("permission denied".into()),
+            output_bytes: None,
+        });
+        state.apply_server_message(start);
+        let calls = &state.session(&session_id).unwrap().messages[0]
+            .assistant
+            .as_ref()
+            .unwrap()
+            .nested_tool_calls;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].input["path"], "note.txt");
+        assert_eq!(calls[0].status, mew_message::NestedToolStatus::Error);
+        assert_eq!(calls[0].error.as_deref(), Some("permission denied"));
     }
 
     #[test]

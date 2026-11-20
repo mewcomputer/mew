@@ -357,6 +357,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_persistent_bash_output_without_trailing_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = Bash;
+        let mut ctx = dummy_ctx(dir.path().to_path_buf());
+        std::sync::Arc::make_mut(&mut ctx.shared).shell_session = Some(
+            crate::tools::shell_session::shared_session(dir.path().to_path_buf()),
+        );
+        let input = serde_json::json!({"command": "printf partial; false", "timeout": 1});
+        let result = tool.execute(ctx, input).await.unwrap();
+        assert_eq!(
+            result.output.split("\n--- stderr ---\n").next(),
+            Some("partial")
+        );
+        assert_eq!(result.error, "exit code 1");
+    }
+
+    #[tokio::test]
     async fn test_bash_timeout_preserves_partial_output() {
         let dir = tempfile::tempdir().unwrap();
         let tool = Bash;

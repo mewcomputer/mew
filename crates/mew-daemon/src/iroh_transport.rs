@@ -321,6 +321,7 @@ pub struct IrohListenerConfig {
     pub remote_token: Option<String>,
     pub remote_store: Option<Arc<RemoteAccessStore>>,
     pub remote_mode: crate::remote::RemoteMode,
+    pub shutdown: Option<tokio::sync::watch::Receiver<Option<i32>>>,
 }
 
 pub async fn run_iroh(
@@ -342,13 +343,21 @@ pub async fn run_iroh(
     // Bring the endpoint online (waits for relay connection).
     // Timeout prevents hanging forever if relays are unreachable.
     info!("connecting to iroh relay servers...");
-    tokio::time::timeout(std::time::Duration::from_secs(15), endpoint.online())
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!(
+    let mut startup_shutdown = config.shutdown.clone();
+    tokio::select! {
+        online = tokio::time::timeout(std::time::Duration::from_secs(15), endpoint.online()) => {
+            online.map_err(|_| anyhow::anyhow!(
                 "iroh endpoint failed to come online within 15s — check network connectivity"
-            )
-        })?;
+            ))?;
+        }
+        _ = async {
+            if let Some(shutdown) = &mut startup_shutdown {
+                let _ = shutdown.wait_for(Option::is_some).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        } => return Ok(()),
+    }
 
     let node_id = endpoint.id();
     info!(node_id = %node_id, "mew daemon listening (iroh)");
@@ -388,6 +397,7 @@ pub async fn run_iroh(
     // Wait for shutdown signal.
     let mut sig_term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .context("install SIGTERM handler")?;
+    let mut shutdown = config.shutdown.clone();
 
     tokio::select! {
         _ = sig_term.recv() => {
@@ -396,6 +406,13 @@ pub async fn run_iroh(
         _ = tokio::signal::ctrl_c() => {
             info!("received Ctrl+C, shutting down iroh listener");
         }
+        _ = async {
+            if let Some(shutdown) = &mut shutdown {
+                let _ = shutdown.wait_for(Option::is_some).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        } => {}
     }
 
     if let Some(store) = &config.remote_store {

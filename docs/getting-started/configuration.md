@@ -53,6 +53,7 @@ sidebar_finished_ttl_secs = 180
 | `plan_path` | string | `"plans/"` | Each `write_plan` call creates a new file such as `plans/vale-nori.md`. Use the returned path with `edit_plan`. Set a different relative or absolute path to use a fixed file |
 | `providers` | table | (built-in) | Provider definitions keyed by provider ID |
 | `models` | array | `[]` | Custom model entries that override or extend the catalog |
+| `code_mode` | table | (model default) | Run tools through a persistent Python session. See [Python code mode](#python-code-mode) |
 | `permissions` | table | (empty) | Permission rules and classifier config. See [Permissions](/docs/using-mew/permissions/) |
 | `secrets` | table | (empty) | Secret files and words for redaction |
 | `workspace` | table | (empty) | Workspace roots for file access and shell permission checks |
@@ -69,6 +70,98 @@ Personas and skills accept `polytoken:` as an alias for `mew:` in their
 frontmatter. This is for compatibility with personas authored for
 Polytoken. See [Personas](/docs/using-mew/personas/) for details.
 :::
+
+### Python code mode
+
+Code mode gives the model a single `python` tool. Python runs in a persistent
+session and calls Mew's available tools through `tools`. By default, Mew enables
+it for DeepSeek models across providers and for Codex models whose catalog entry
+specifies `code_mode_only`. DeepSeek model names start with `deepseek-`, including
+namespaced names such as `deepseek/deepseek-r1`. Other models use the existing
+tool interface. The Codex catalog is loaded for OAuth users or from a project
+catalog override.
+
+Choose a global mode and optional provider-qualified overrides in `config.toml`:
+
+```toml
+[code_mode]
+mode = "off"       # optional: "off" or "full"
+isolated = true    # default
+max_idle_workers = 3  # default: retained top-level Python workers per daemon
+# python = "/path/to/venv/bin/python"
+
+[code_mode.models]
+"codex/gpt-6-luna" = "full"
+"opencode-go/hy4-flash-free" = "full"
+```
+
+The per-model setting takes priority, followed by the global setting and the
+model default. Omit `mode` to use the model default. Set `mode = "full"` to enable
+it for every model, or `mode = "off"` to disable it globally, then use model
+overrides for exceptions. `python` defaults to `python3` on the daemon's `PATH`. Use a
+virtual environment's Python executable to make its installed packages
+available. The interpreter and its installed packages must be trusted.
+
+Python variables persist across calls in the same session, including when an
+idle session is unloaded and reattached, while its worker remains cached. By
+default, Mew retains up to three idle top-level Python workers per daemon.
+When the limit is exceeded, it stops the least recently used idle worker.
+`max_idle_workers` changes that limit; `0` stops each worker as soon as its
+call finishes. Restart the daemon after changing the setting. Running Python
+calls, including calls waiting for approval, are not evicted. Active subagents
+have separate Python sessions and are not counted against this idle limit.
+
+Mew also stops a worker after one hour without a Python call, measured from the
+end of its last call. When a worker stops because of inactivity or cache
+capacity, the next Python call reports that session state was lost before
+running any code, as long as the daemon has not restarted in the meantime.
+Variables and temporary scratch files are lost; chat history and workspace
+files remain. Save results you want to keep to the workspace through Mew tools;
+live Python objects are not restored automatically. State also does not survive
+daemon restarts,
+session deletion, cancellation, a worker crash, or a ten-minute period without
+a worker response. Approval waits do not count toward the ten-minute timeout.
+
+The model can call tools with `tools.read({"path": "file.txt"})`, inspect
+their definitions in `ALL_TOOLS`, and use `text(value)` to return output.
+`emit_image(result["images"][0])` returns a tool's image to a vision-capable
+model. Calls from Python threads are serialized through the tool dispatcher.
+Nested tool calls use the same permission checks as direct calls.
+Configured MCP tools are also available; see [MCP Servers](/docs/using-mew/mcp-servers/).
+
+The TUI shows each Python cell and the tools it calls, including permission
+prompts and errors. Press Ctrl-O to expand the cell and nested arguments. Nested
+call details remain in session history. Nested results are not saved separately;
+the cell can emit results worth retaining. Successful calls show the result's
+byte count.
+
+Threads can call tools only during the cell that started them. In-flight calls
+finish before the cell returns; later calls from work that has not started are
+rejected. Join threads that call tools and await thread-pool tasks before
+returning from a cell. If one remains running, the cell fails and the Python
+session resets. Thread pools can be reused across cells. Output from background
+work that outlives its cell does not appear in later cells.
+
+With `isolated = true`, Mew runs Python in a macOS Seatbelt sandbox or a Linux
+Bubblewrap sandbox. Linux requires `bwrap` and working unprivileged user
+namespaces. The worker can read the selected Python environment and system
+libraries and use a private scratch directory. Other workspace files and the
+network are inaccessible directly.
+Access through Mew tools remains governed by their permissions. This uses the
+host kernel and does not impose CPU or memory quotas. If isolation cannot start,
+the call fails instead of running without it.
+
+Some scientific packages fall back to serial execution when the sandbox
+restricts subprocesses or synchronization primitives.
+
+Setting `isolated = false` lets Python access the host directly, including files,
+network, and subprocesses, without passing those operations through Mew's tool
+permissions. Mew marks each unrestricted Python call as dangerous for the
+permission engine. Personas and subagents that restrict tools always use
+isolated Python, even when this setting is false. An explicit persona denial
+of `python` or an empty tool allowlist disables Python. Changing the effective
+isolation stops the existing worker after any active cell finishes and reports
+the lost state on the next call.
 
 ### Provider configuration
 
@@ -218,6 +311,6 @@ the built-in default. The last-used model and provider are saved back to
 
 ## MCP servers
 
-MCP support is experimental library functionality. See
-[MCP Servers](/docs/using-mew/mcp-servers/) for the library and transport
-configuration.
+Configure stdio and streamable HTTP servers in `mcp.json`. See
+[MCP Servers](/docs/using-mew/mcp-servers/) for discovery, permissions, and
+the server trust boundary.

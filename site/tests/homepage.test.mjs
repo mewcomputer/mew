@@ -9,7 +9,7 @@ const readPage = (path) => readFile(new URL(path, dist), 'utf8');
 test('the built homepage serves the garden and leads readers to an existing docs page', async () => {
   const home = await readPage('index.html');
   assert.ok(home.includes('<h1>Mew is an agent harness designed for your work.</h1>'));
-  assert.match(home, /<p class="lede">Moddable with skills, personas, and experimental plugins\.<\/p>/);
+  assert.match(home, /<p class="lede">An extensible, moddable harness for all your needs\.<\/p>/);
   assert.deepEqual(
     Array.from(home.matchAll(/<section[^>]+data-focus="([^"]+)"/g), ([, stop]) => stop),
     ['garden', 'hall', 'pavilion', 'gallery', 'wall', 'gate', 'tower'],

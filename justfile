@@ -30,8 +30,12 @@ test-js:
     pnpm --filter mew-web-ui test
     pnpm --filter @mew/electron test:unit
 
-# Run tests for both Rust and the TypeScript client.
-test-all: test-rs test-js
+# Run the evaluation runner's deterministic tests.
+test-evals:
+    python3 -B -m unittest discover -s evals/tests
+
+# Run Rust, JavaScript and evaluation runner tests.
+test-all: test-rs test-js test-evals
 
 # Build the TypeScript library (produces dist/ with .d.ts + .js).
 build-js:

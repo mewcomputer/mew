@@ -1195,6 +1195,15 @@ mod tests {
                 finish: None,
                 error: None,
                 manifest: None,
+                nested_tool_calls: vec![mew_message::NestedToolCall {
+                    parent_call_id: "call_123".into(),
+                    call_id: "call_123:1".into(),
+                    tool_name: "read".into(),
+                    input: serde_json::json!({"path":"private-nested-input"}),
+                    status: mew_message::NestedToolStatus::Completed,
+                    error: None,
+                    output_bytes: Some(4),
+                }],
             }),
         };
         let wire = adapter
@@ -1205,6 +1214,9 @@ mod tests {
         assert!(wire[0]["tool_calls"].is_array());
         assert_eq!(wire[0]["tool_calls"][0]["id"], "call_123");
         assert_eq!(wire[0]["tool_calls"][0]["function"]["name"], "echo");
+        assert!(!serde_json::to_string(&wire)
+            .unwrap()
+            .contains("private-nested-input"));
     }
 
     #[tokio::test]
@@ -1255,6 +1267,7 @@ mod tests {
                 finish: None,
                 error: None,
                 manifest: None,
+                nested_tool_calls: Vec::new(),
             }),
         };
         let wire = adapter
@@ -1323,6 +1336,7 @@ mod tests {
                 finish: None,
                 error: None,
                 manifest: None,
+                nested_tool_calls: Vec::new(),
             }),
         };
         let wire = adapter
@@ -1386,6 +1400,7 @@ mod tests {
                 finish: None,
                 error: None,
                 manifest: None,
+                nested_tool_calls: Vec::new(),
             }),
         };
         let wire = adapter

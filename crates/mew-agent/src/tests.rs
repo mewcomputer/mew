@@ -17,6 +17,737 @@ use mew_tools::{Sensitivity, Tool, ToolCtx};
 use crate::Agent;
 use crate::AgentEvent;
 
+#[tokio::test]
+async fn code_mode_respects_persona_restrictions_on_python() {
+    for config in [
+        mew_personas::PersonaConfig {
+            tools: Some(vec![]),
+            ..Default::default()
+        },
+        mew_personas::PersonaConfig {
+            tools_deny: Some(vec!["python".into()]),
+            ..Default::default()
+        },
+    ] {
+        let provider = Arc::new(CapturingProvider::new(vec![FakeProvider::tool_call(
+            "python",
+            "py",
+            serde_json::json!({"source":"text('executed')"}),
+        )]));
+        let mut agent = Agent::new(
+            provider.clone(),
+            Arc::new(NopDispatcher),
+            None,
+            vec![],
+            None,
+        );
+        agent.code_mode.mode = Some(mew_config::CodeMode::Full);
+        agent.code_mode.isolated = false;
+        agent.max_turns = Some(1);
+        agent.apply_persona(&mew_personas::Persona {
+            name: "restricted".into(),
+            description: String::new(),
+            body: String::new(),
+            path: Default::default(),
+            config,
+        });
+        let mut events = agent.run("run".into());
+        while let Some(event) = events.recv().await {
+            if let AgentEvent::PermissionRequest { tx, .. } = event {
+                let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
+            }
+        }
+        assert!(!provider.captured.lock().unwrap()[0]
+            .tools
+            .iter()
+            .any(|tool| tool.name == "python"));
+        assert!(!provider.captured.lock().unwrap()[0]
+            .system
+            .contains("The only direct tool is `python`"));
+        let messages = agent.messages.lock().await;
+        assert!(!messages.iter().flat_map(|m| &m.parts).any(|part| matches!(part,
+            Part::ToolCall(call) if call.call_id == "py" && call.state.output() == Some("executed\n")
+        )));
+    }
+}
+
+#[tokio::test]
+async fn code_mode_keeps_persona_allowed_tools_accessible_through_python() {
+    let provider = Arc::new(CapturingProvider::new(vec![
+        FakeProvider::tool_call(
+            "python",
+            "py",
+            serde_json::json!({"source":"text(tools.echo({'input':'hello'})['output'])"}),
+        ),
+        FakeProvider::text_response("done"),
+    ]));
+    let mut agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![Arc::new(mew_tools::tools::echo::Echo)],
+        None,
+    );
+    agent.code_mode.mode = Some(mew_config::CodeMode::Full);
+    agent.code_mode.isolated = false;
+    agent.active_tool_names = Some(std::collections::HashSet::from(["echo".into()]));
+    let mut events = agent.run("run".into());
+    while let Some(event) = events.recv().await {
+        if let AgentEvent::PermissionRequest { tx, .. } = event {
+            let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
+        }
+    }
+    assert_eq!(provider.captured.lock().unwrap()[0].tools[0].name, "python");
+    let messages = agent.messages.lock().await;
+    assert!(messages.iter().flat_map(|m| &m.parts).any(|part| matches!(part,
+        Part::ToolCall(call) if call.call_id == "py" && call.state.output().is_some_and(|out| out.contains("hello"))
+    )));
+}
+
+#[tokio::test]
+async fn code_mode_exposes_one_tool_and_keeps_python_state_between_calls() {
+    let provider = Arc::new(CapturingProvider::new(vec![
+        FakeProvider::tool_call("python", "py1", serde_json::json!({"source":"saved = 41"})),
+        FakeProvider::tool_call(
+            "python",
+            "py2",
+            serde_json::json!({"source":"text(saved + 1)"}),
+        ),
+        FakeProvider::text_response("done"),
+    ]));
+    let mut agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![Arc::new(mew_tools::tools::echo::Echo)],
+        None,
+    );
+    agent.code_mode = mew_config::CodeModeConfig {
+        mode: Some(mew_config::CodeMode::Full),
+        isolated: false,
+        ..Default::default()
+    };
+    let mut events = agent.run("calculate".into());
+    while let Some(event) = events.recv().await {
+        if let AgentEvent::PermissionRequest { tx, .. } = event {
+            tx.send(mew_hooks::PermissionDecision::AllowOnce).unwrap();
+        }
+    }
+    {
+        let requests = provider.captured.lock().unwrap();
+        assert_eq!(
+            requests[0]
+                .tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["python"]
+        );
+        assert!(requests[0]
+            .system
+            .contains("tools.read({\"path\": \"file.txt\"})"));
+        assert!(requests[0].system.contains("60 minutes of inactivity"));
+        assert!(requests[0].system.contains("idle worker limit"));
+    }
+    let messages = agent.messages.lock().await;
+    let outputs: Vec<_> = messages
+        .iter()
+        .flat_map(|m| &m.parts)
+        .filter_map(|part| match part {
+            Part::ToolCall(call) if call.call_id == "py2" => call.state.output(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(outputs, vec!["42\n"]);
+}
+
+#[tokio::test]
+async fn code_mode_resets_a_worker_with_an_unfinished_tool_thread() {
+    let source = "import threading\nsaved = 42\nstarted = threading.Event()\nrelease = threading.Event()\nclass Arguments(dict):\n def items(self):\n  started.set()\n  return super().items()\ndef later():\n tools.echo(Arguments(input='hello'))\n release.wait()\nthreading.Thread(target=later, daemon=True).start()\nassert started.wait(2)";
+    let provider = Arc::new(CapturingProvider::new(vec![
+        FakeProvider::tool_call("python", "py1", serde_json::json!({"source":source})),
+        FakeProvider::tool_call(
+            "python",
+            "py2",
+            serde_json::json!({"source":"text('saved' in globals())"}),
+        ),
+        FakeProvider::text_response("done"),
+    ]));
+    let mut agent = Agent::new(
+        provider,
+        Arc::new(NopDispatcher),
+        None,
+        vec![Arc::new(mew_tools::tools::echo::Echo)],
+        None,
+    );
+    agent.code_mode.mode = Some(mew_config::CodeMode::Full);
+    agent.code_mode.isolated = false;
+    let mut events = agent.run("run".into());
+    while let Some(event) = events.recv().await {
+        if let AgentEvent::PermissionRequest { tx, .. } = event {
+            tx.send(mew_hooks::PermissionDecision::AllowOnce).unwrap();
+        }
+    }
+    let messages = agent.messages.lock().await;
+    let calls: Vec<_> = messages
+        .iter()
+        .flat_map(|message| &message.parts)
+        .filter_map(|part| match part {
+            Part::ToolCall(call) if call.call_id == "py1" || call.call_id == "py2" => Some(call),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        matches!(&calls[0].state, ToolState::Error(state) if state.error.contains("session state was lost"))
+    );
+    assert_eq!(calls[1].state.output(), Some("false\n"));
+}
+
+#[tokio::test]
+async fn code_mode_dispatches_nested_tools_with_their_permission() {
+    let provider = Arc::new(CapturingProvider::new(vec![
+        FakeProvider::tool_call(
+            "python",
+            "py",
+            serde_json::json!({"source":"result = tools.echo({'input':'hello'})\ntext(result['error'])"}),
+        ),
+        FakeProvider::text_response("done"),
+    ]));
+    let mut agent = Agent::new(
+        provider,
+        Arc::new(NopDispatcher),
+        None,
+        vec![Arc::new(EchoTool::mutating())],
+        None,
+    );
+    agent.code_mode = mew_config::CodeModeConfig {
+        mode: Some(mew_config::CodeMode::Full),
+        isolated: false,
+        ..Default::default()
+    };
+    let mut events = agent.run("run".into());
+    let mut permissions = Vec::new();
+    while let Some(event) = events.recv().await {
+        if let AgentEvent::PermissionRequest { call, tx } = event {
+            permissions.push(call.tool_name.clone());
+            let decision = if call.tool_name == "echo" {
+                mew_hooks::PermissionDecision::Deny
+            } else {
+                mew_hooks::PermissionDecision::AllowOnce
+            };
+            tx.send(decision).unwrap();
+        }
+    }
+    assert_eq!(permissions, vec!["python", "echo"]);
+    let messages = agent.messages.lock().await;
+    assert!(messages
+        .iter()
+        .flat_map(|m| &m.parts)
+        .any(|part| match part {
+            Part::ToolCall(call) if call.call_id == "py" => call
+                .state
+                .output()
+                .is_some_and(|s| s.contains("permission denied")),
+            _ => false,
+        }));
+}
+
+#[test]
+fn code_mode_follows_the_selected_provider_and_model() {
+    let mut agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    agent.code_mode.mode = Some(mew_config::CodeMode::Off);
+    agent
+        .code_mode
+        .models
+        .insert("codex/gpt-6-luna".into(), mew_config::CodeMode::Full);
+    agent.set_model_info("gpt-6-luna", "codex");
+    assert!(agent.uses_code_mode());
+    agent.set_model_info("gpt-6-luna", "another");
+    assert!(!agent.uses_code_mode());
+    agent.set_model_info("other", "codex");
+    assert!(!agent.uses_code_mode());
+}
+
+#[test]
+fn deepseek_models_default_to_code_mode_across_providers() {
+    let mut agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    for (provider, model) in [
+        ("deepseek", "deepseek-chat"),
+        ("deepseek", "deepseek-reasoner"),
+        ("opencode-go", "deepseek-v4.1-flash"),
+        ("opencode-zen", "deepseek-v4.1-flash-free"),
+        ("openrouter", "deepseek/deepseek-r1"),
+        ("together", "deepseek-ai/DeepSeek-V3"),
+    ] {
+        agent.set_model_info(model, provider);
+        assert!(agent.uses_code_mode(), "{provider}/{model}");
+    }
+    for (provider, model) in [
+        ("opencode-go", "glm-5.3-flash"),
+        ("deepseek", "other-model"),
+        ("other", "not-deepseek-v4"),
+        ("other", "deepseeker-v4"),
+    ] {
+        agent.set_model_info(model, provider);
+        assert!(!agent.uses_code_mode(), "{provider}/{model}");
+    }
+}
+
+#[test]
+fn deepseek_default_yields_to_explicit_model_and_global_settings() {
+    let mut agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    agent.set_model_info("deepseek-v4.1-flash", "opencode-go");
+    agent.code_mode.mode = Some(mew_config::CodeMode::Off);
+    assert!(!agent.uses_code_mode());
+    agent.code_mode.models.insert(
+        "opencode-go/deepseek-v4.1-flash".into(),
+        mew_config::CodeMode::Full,
+    );
+    assert!(agent.uses_code_mode());
+    agent.code_mode.mode = Some(mew_config::CodeMode::Full);
+    agent.code_mode.models.insert(
+        "opencode-go/deepseek-v4.1-flash".into(),
+        mew_config::CodeMode::Off,
+    );
+    assert!(!agent.uses_code_mode());
+}
+
+#[tokio::test]
+async fn deepseek_default_executes_nested_tools_through_python() {
+    let provider = Arc::new(CapturingProvider::new(vec![
+        FakeProvider::tool_call(
+            "python",
+            "py",
+            serde_json::json!({"source":"text(tools.echo({'input':'hello'})['output'])"}),
+        ),
+        FakeProvider::text_response("done"),
+    ]));
+    let mut agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![Arc::new(mew_tools::tools::echo::Echo)],
+        None,
+    );
+    agent.set_model_info("deepseek-v4.1-flash", "opencode-go");
+    agent.code_mode.isolated = false;
+    let mut events = agent.run("run".into());
+    while let Some(event) = events.recv().await {
+        if let AgentEvent::PermissionRequest { tx, .. } = event {
+            let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
+        }
+    }
+    assert_eq!(provider.captured.lock().unwrap()[0].tools[0].name, "python");
+    let messages = agent.messages.lock().await;
+    assert!(messages.iter().flat_map(|m| &m.parts).any(|part| matches!(part,
+        Part::ToolCall(call) if call.call_id == "py" && call.state.output().is_some_and(|out| out.contains("hello"))
+    )));
+    let nested = messages
+        .iter()
+        .filter_map(|message| message.assistant.as_ref())
+        .flat_map(|meta| &meta.nested_tool_calls)
+        .next()
+        .unwrap();
+    assert!(serde_json::to_value(nested).unwrap()["output_bytes"]
+        .as_u64()
+        .is_some_and(|size| size >= 5));
+}
+
+#[test]
+fn codex_catalog_preference_yields_to_explicit_model_and_global_settings() {
+    let mut agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    agent.codex_code_mode_models =
+        Arc::new(std::collections::HashSet::from(["gpt-6-luna".to_string()]));
+    agent.set_model_info("gpt-6-luna", "codex");
+    assert!(agent.uses_code_mode());
+    agent.set_model_info("gpt-6-luna", "other");
+    assert!(!agent.uses_code_mode());
+    agent.set_model_info("unknown", "codex");
+    assert!(!agent.uses_code_mode());
+    agent.set_model_info("gpt-6-luna", "codex");
+    agent.code_mode.mode = Some(mew_config::CodeMode::Off);
+    assert!(!agent.uses_code_mode());
+    agent
+        .code_mode
+        .models
+        .insert("codex/gpt-6-luna".into(), mew_config::CodeMode::Full);
+    assert!(agent.uses_code_mode());
+    agent.code_mode.mode = Some(mew_config::CodeMode::Full);
+    agent
+        .code_mode
+        .models
+        .insert("codex/gpt-6-luna".into(), mew_config::CodeMode::Off);
+    assert!(!agent.uses_code_mode());
+}
+
+#[tokio::test]
+async fn code_mode_rejects_direct_tool_calls_from_the_provider() {
+    let provider = Arc::new(CapturingProvider::new(vec![
+        FakeProvider::tool_call("echo", "direct", serde_json::json!({"input":"hello"})),
+        FakeProvider::text_response("done"),
+    ]));
+    let mut agent = Agent::new(
+        provider,
+        Arc::new(NopDispatcher),
+        None,
+        vec![Arc::new(mew_tools::tools::echo::Echo)],
+        None,
+    );
+    agent.code_mode.mode = Some(mew_config::CodeMode::Full);
+    let mut events = agent.run("run".into());
+    while let Some(event) = events.recv().await {
+        if let AgentEvent::PermissionRequest { tx, .. } = event {
+            tx.send(mew_hooks::PermissionDecision::AllowOnce).unwrap();
+        }
+    }
+    let messages = agent.messages.lock().await;
+    assert!(messages.iter().flat_map(|message| &message.parts).any(|part| matches!(part,
+        Part::ToolCall(call) if call.call_id == "direct" && matches!(&call.state, ToolState::Error(state) if state.error.contains("code mode"))
+    )));
+}
+
+#[tokio::test]
+async fn code_mode_denied_nested_write_does_not_touch_the_workspace() {
+    let directory = tempfile::tempdir().unwrap();
+    let provider = Arc::new(CapturingProvider::new(vec![
+        FakeProvider::tool_call(
+            "python",
+            "py",
+            serde_json::json!({"source":"r=tools.write({'path':'blocked.txt','content':'synthetic-secret'})\ntext(r['error'])"}),
+        ),
+        FakeProvider::text_response("done"),
+    ]));
+    let mut agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![Arc::new(mew_tools::tools::write::Write)],
+        None,
+    );
+    agent.cwd = directory.path().to_path_buf();
+    agent.workspace_roots = vec![directory.path().to_path_buf()];
+    agent.secrets = Arc::new(mew_tools::SecretSet {
+        words: vec!["synthetic-secret".into()],
+        globs: vec![],
+    });
+    agent.code_mode = mew_config::CodeModeConfig {
+        mode: Some(mew_config::CodeMode::Full),
+        isolated: false,
+        ..Default::default()
+    };
+    let mut events = agent.run("write".into());
+    while let Some(event) = events.recv().await {
+        if let AgentEvent::PermissionRequest { call, tx } = event {
+            let decision = if call.tool_name == "write" {
+                mew_hooks::PermissionDecision::Deny
+            } else {
+                mew_hooks::PermissionDecision::AllowOnce
+            };
+            tx.send(decision).unwrap();
+        }
+    }
+    assert!(!directory.path().join("blocked.txt").exists());
+    let messages = agent.messages.lock().await;
+    assert!(messages.iter().flat_map(|message| &message.parts).any(|part| matches!(part,
+        Part::ToolCall(call) if call.call_id == "py" && call.state.output().is_some_and(|output| output.contains("permission denied"))
+    )));
+    let nested = messages
+        .iter()
+        .filter_map(|message| message.assistant.as_ref())
+        .map(|meta| serde_json::to_value(meta).unwrap())
+        .find_map(|meta| meta.get("nested_tool_calls").cloned())
+        .expect("nested call should be saved with the assistant message");
+    assert_eq!(nested[0]["parent_call_id"], "py");
+    assert_eq!(nested[0]["tool_name"], "write");
+    assert_eq!(nested[0]["input"]["path"], "blocked.txt");
+    assert_eq!(nested[0]["input"]["content"], "[REDACTED]");
+    assert_eq!(nested[0]["status"], "error");
+    assert!(nested[0]["error"].as_str().unwrap().contains("denied"));
+    assert!(!provider
+        .captured
+        .lock()
+        .unwrap()
+        .iter()
+        .flat_map(|request| &request.messages)
+        .flat_map(|message| &message.parts)
+        .any(|part| matches!(part, Part::ToolCall(call) if call.tool_name == "write")));
+}
+
+#[tokio::test]
+async fn failed_python_cell_retains_completed_nested_call() {
+    let provider = Arc::new(CapturingProvider::new(vec![
+        FakeProvider::tool_call(
+            "python",
+            "py",
+            serde_json::json!({
+                "source":"tools.echo({'input':'hello'})\nraise ValueError('cell failed')"
+            }),
+        ),
+        FakeProvider::text_response("done"),
+    ]));
+    let mut agent = Agent::new(
+        provider,
+        Arc::new(NopDispatcher),
+        None,
+        vec![Arc::new(mew_tools::tools::echo::Echo)],
+        None,
+    );
+    agent.code_mode.mode = Some(mew_config::CodeMode::Full);
+    agent.code_mode.isolated = false;
+    let mut events = agent.run("run".into());
+    while let Some(event) = events.recv().await {
+        if let AgentEvent::PermissionRequest { tx, .. } = event {
+            tx.send(mew_hooks::PermissionDecision::AllowOnce).unwrap();
+        }
+    }
+    let messages = agent.messages.lock().await;
+    assert!(messages.iter().flat_map(|message| &message.parts).any(|part| matches!(part,
+        Part::ToolCall(call) if call.call_id == "py" && matches!(&call.state, ToolState::Error(error) if error.error.contains("cell failed"))
+    )));
+    let call = messages
+        .iter()
+        .filter_map(|message| message.assistant.as_ref())
+        .flat_map(|meta| &meta.nested_tool_calls)
+        .next()
+        .unwrap();
+    assert_eq!(call.tool_name, "echo");
+    assert_eq!(call.status, mew_message::NestedToolStatus::Completed);
+}
+
+#[tokio::test]
+async fn code_mode_can_emit_an_image_from_a_nested_tool() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("image.png"), b"image bytes").unwrap();
+    let provider = Arc::new(CapturingProvider::new(vec![
+        FakeProvider::tool_call(
+            "python",
+            "py",
+            serde_json::json!({"source":"r = tools.read({'path':'image.png'})\nemit_image(r['images'][0])"}),
+        ),
+        FakeProvider::text_response("done"),
+    ]));
+    let mut agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![Arc::new(mew_tools::tools::read::Read)],
+        None,
+    );
+    agent.cwd = directory.path().to_path_buf();
+    agent.workspace_roots = vec![directory.path().to_path_buf()];
+    agent.supports_vision = true;
+    agent.code_mode = mew_config::CodeModeConfig {
+        mode: Some(mew_config::CodeMode::Full),
+        isolated: false,
+        ..Default::default()
+    };
+    let mut events = agent.run("view image".into());
+    while let Some(event) = events.recv().await {
+        if let AgentEvent::PermissionRequest { tx, .. } = event {
+            tx.send(mew_hooks::PermissionDecision::AllowOnce).unwrap();
+        }
+    }
+    let messages = agent.messages.lock().await;
+    assert!(messages.iter().flat_map(|message| &message.parts).any(|part| matches!(part,
+        Part::ToolCall(call) if call.call_id == "py" && matches!(&call.state, ToolState::Completed(state) if state.images.len() == 1 && state.images[0].mime == "image/png" && state.images[0].data == "aW1hZ2UgYnl0ZXM=")
+    )));
+}
+
+#[tokio::test]
+async fn code_mode_rejects_tool_calls_left_over_from_a_previous_cell() {
+    let directory = tempfile::tempdir().unwrap();
+    let provider = Arc::new(CapturingProvider::new(vec![
+        FakeProvider::tool_call(
+            "python",
+            "first",
+            serde_json::json!({"source":"import __main__\n__main__.send({'type':'result','output':'early','images':[]})\n__main__.send({'type':'tool','id':999,'name':'write','input':{'path':'stale.txt','content':'bad'}})"}),
+        ),
+        FakeProvider::tool_call(
+            "python",
+            "second",
+            serde_json::json!({"source":"text('second')"}),
+        ),
+        FakeProvider::text_response("done"),
+    ]));
+    let mut agent = Agent::new(
+        provider,
+        Arc::new(NopDispatcher),
+        None,
+        vec![Arc::new(mew_tools::tools::write::Write)],
+        None,
+    );
+    agent.cwd = directory.path().to_path_buf();
+    agent.workspace_roots = vec![directory.path().to_path_buf()];
+    agent.code_mode = mew_config::CodeModeConfig {
+        mode: Some(mew_config::CodeMode::Full),
+        isolated: false,
+        ..Default::default()
+    };
+    let mut events = agent.run("run".into());
+    let mut permitted_write = false;
+    while let Some(event) = events.recv().await {
+        if let AgentEvent::PermissionRequest { call, tx } = event {
+            permitted_write |= call.tool_name == "write";
+            tx.send(mew_hooks::PermissionDecision::AllowOnce).unwrap();
+        }
+    }
+    assert!(!permitted_write);
+    assert!(!directory.path().join("stale.txt").exists());
+    let messages = agent.messages.lock().await;
+    assert!(messages.iter().flat_map(|message| &message.parts).any(|part| matches!(part,
+        Part::ToolCall(call) if call.call_id == "second" && matches!(&call.state, ToolState::Error(state) if state.error.contains("stale"))
+    )));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelling_during_python_startup_stops_the_turn_promptly() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let interpreter = directory.path().join("slow-python");
+    std::fs::write(&interpreter, "#!/bin/sh\nexec /bin/sleep 10\n").unwrap();
+    std::fs::set_permissions(&interpreter, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let provider = Arc::new(CapturingProvider::new(vec![FakeProvider::tool_call(
+        "python",
+        "py",
+        serde_json::json!({"source":"text('hello')"}),
+    )]));
+    let mut agent = Agent::new(provider, Arc::new(NopDispatcher), None, vec![], None);
+    agent.code_mode = mew_config::CodeModeConfig {
+        mode: Some(mew_config::CodeMode::Full),
+        isolated: false,
+        python: Some(interpreter),
+        ..Default::default()
+    };
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let mut events = agent.run_with_parts("run".into(), vec![], Some(cancel.clone()));
+    while let Some(event) = events.recv().await {
+        if let AgentEvent::PermissionRequest { tx, .. } = event {
+            tx.send(mew_hooks::PermissionDecision::AllowOnce).unwrap();
+            break;
+        }
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    cancel.cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while events.recv().await.is_some() {}
+    })
+    .await
+    .expect("cancellation did not stop Python startup");
+}
+
+#[tokio::test]
+async fn code_mode_restarts_after_the_worker_disconnects_during_a_tool_call() {
+    let provider = Arc::new(CapturingProvider::new(vec![
+        FakeProvider::tool_call(
+            "python",
+            "first",
+            serde_json::json!({"source":"import os\nos.close(0)\ntools.echo({'input':'hello'})"}),
+        ),
+        FakeProvider::tool_call(
+            "python",
+            "second",
+            serde_json::json!({"source":"text('restarted')"}),
+        ),
+        FakeProvider::text_response("done"),
+    ]));
+    let mut agent = Agent::new(
+        provider,
+        Arc::new(NopDispatcher),
+        None,
+        vec![Arc::new(mew_tools::tools::echo::Echo)],
+        None,
+    );
+    agent.code_mode = mew_config::CodeModeConfig {
+        mode: Some(mew_config::CodeMode::Full),
+        isolated: false,
+        ..Default::default()
+    };
+    let mut events = agent.run("run".into());
+    while let Some(event) = events.recv().await {
+        if let AgentEvent::PermissionRequest { tx, .. } = event {
+            tx.send(mew_hooks::PermissionDecision::AllowOnce).unwrap();
+        }
+    }
+    let messages = agent.messages.lock().await;
+    assert!(messages.iter().flat_map(|message| &message.parts).any(|part| matches!(part,
+        Part::ToolCall(call) if call.call_id == "second" && call.state.output() == Some("restarted\n")
+    )));
+}
+
+#[tokio::test]
+async fn code_mode_routes_questions_and_todos_through_the_agent() {
+    let provider = Arc::new(CapturingProvider::new(vec![
+        FakeProvider::tool_call(
+            "python",
+            "py",
+            serde_json::json!({"source":"tools.todo_create({'todos':[{'content':'test'}]})\nr=tools.ask_user_question({'questions':[{'prompt':'pick','options':[{'label':'a','description':''},{'label':'b','description':''}]}]})\ntext(r['output'])"}),
+        ),
+        FakeProvider::text_response("done"),
+    ]));
+    let mut agent = Agent::new(
+        provider,
+        Arc::new(NopDispatcher),
+        None,
+        vec![
+            Arc::new(mew_tools::tools::todo::TodoCreate),
+            Arc::new(mew_tools::tools::ask_user::AskUser),
+        ],
+        None,
+    );
+    agent.code_mode = mew_config::CodeModeConfig {
+        mode: Some(mew_config::CodeMode::Full),
+        isolated: false,
+        ..Default::default()
+    };
+    let mut events = agent.run("ask".into());
+    let mut saw_todo = false;
+    let mut saw_question = false;
+    while let Some(event) = events.recv().await {
+        match event {
+            AgentEvent::PermissionRequest { tx, .. } => {
+                tx.send(mew_hooks::PermissionDecision::AllowOnce).unwrap();
+            }
+            AgentEvent::AskUser { questions, tx, .. } => {
+                saw_question = true;
+                assert_eq!(questions[0].prompt, "pick");
+                tx.send(vec!["a".into()]).unwrap();
+            }
+            AgentEvent::TodosUpdated { .. } => saw_todo = true,
+            _ => {}
+        }
+    }
+    assert!(saw_todo && saw_question);
+    let messages = agent.messages.lock().await;
+    assert!(messages.iter().flat_map(|message| &message.parts).any(|part| matches!(part,
+        Part::ToolCall(call) if call.call_id == "py" && call.state.output().is_some_and(|output| output.contains("a"))
+    )));
+}
+
 #[test]
 fn agent_clones_share_pending_browser_registration_and_revocation() {
     let agent = Agent::new(
@@ -3949,6 +4680,141 @@ async fn test_default_max_output_caps_at_32k_logic_directly() {
 
 /// A provider that always returns an error on `stream`.
 struct ErroringProvider;
+
+#[tokio::test]
+async fn fallback_code_mode_respects_persona_python_denial() {
+    let fallback = Arc::new(CapturingProvider::new(vec![FakeProvider::text_response(
+        "done",
+    )]));
+    let mut agent = Agent::new(
+        Arc::new(ErroringProvider),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    agent.code_mode.mode = Some(mew_config::CodeMode::Full);
+    agent.denied_tool_names.insert("python".into());
+    agent.fallback_models = Some(vec!["test/fallback".into()]);
+    let provider = fallback.clone();
+    agent.set_provider_builder(Box::new(move |_| Ok(provider.clone())));
+    let mut events = agent.run("run".into());
+    while events.recv().await.is_some() {}
+    let requests = fallback.captured.lock().unwrap();
+    assert!(requests[0].tools.is_empty());
+    assert!(!requests[0]
+        .system
+        .contains("The only direct tool is `python`"));
+}
+
+#[tokio::test]
+async fn fallback_uses_its_own_code_mode_for_requests_and_execution() {
+    for fallback_mode in [mew_config::CodeMode::Full, mew_config::CodeMode::Off] {
+        let call = if fallback_mode == mew_config::CodeMode::Full {
+            FakeProvider::tool_call(
+                "python",
+                "fallback-call",
+                serde_json::json!({"source":"text('from python')"}),
+            )
+        } else {
+            FakeProvider::tool_call(
+                "echo",
+                "fallback-call",
+                serde_json::json!({"input":"from echo"}),
+            )
+        };
+        let fallback = Arc::new(CapturingProvider::new(vec![
+            call,
+            FakeProvider::text_response("done"),
+        ]));
+        let mut agent = Agent::new(
+            Arc::new(ErroringProvider),
+            Arc::new(NopDispatcher),
+            None,
+            vec![Arc::new(mew_tools::tools::echo::Echo)],
+            None,
+        );
+        agent.set_model_info("primary", "test");
+        agent.code_mode.mode = Some(if fallback_mode == mew_config::CodeMode::Full {
+            mew_config::CodeMode::Off
+        } else {
+            mew_config::CodeMode::Full
+        });
+        agent.code_mode.isolated = false;
+        agent
+            .code_mode
+            .models
+            .insert("test/fallback".into(), fallback_mode);
+        agent.fallback_models = Some(vec!["test/fallback".into()]);
+        let provider = fallback.clone();
+        agent.set_provider_builder(Box::new(move |_| Ok(provider.clone())));
+        let mut events = agent.run("run".into());
+        while let Some(event) = events.recv().await {
+            if let AgentEvent::PermissionRequest { tx, .. } = event {
+                tx.send(mew_hooks::PermissionDecision::AllowOnce).unwrap();
+            }
+        }
+        {
+            let requests = fallback.captured.lock().unwrap();
+            let names: Vec<_> = requests[0]
+                .tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect();
+            assert_eq!(
+                names,
+                if fallback_mode == mew_config::CodeMode::Full {
+                    vec!["python"]
+                } else {
+                    vec!["echo"]
+                }
+            );
+            assert_eq!(
+                requests[0]
+                    .system
+                    .contains("tools.read({\"path\": \"file.txt\"})"),
+                fallback_mode == mew_config::CodeMode::Full
+            );
+        }
+        let messages = agent.messages.lock().await;
+        assert!(messages.iter().flat_map(|message| &message.parts).any(|part| matches!(part, Part::ToolCall(call) if call.call_id == "fallback-call" && matches!(&call.state, ToolState::Completed(_)))));
+    }
+}
+
+#[tokio::test]
+async fn fallback_uses_codex_catalog_recommendation() {
+    let fallback = Arc::new(CapturingProvider::new(vec![
+        FakeProvider::tool_call(
+            "python",
+            "fallback-call",
+            serde_json::json!({"source":"text('from python')"}),
+        ),
+        FakeProvider::text_response("done"),
+    ]));
+    let mut agent = Agent::new(
+        Arc::new(ErroringProvider),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    agent.set_model_info("primary", "test");
+    agent.codex_code_mode_models =
+        Arc::new(std::collections::HashSet::from(["gpt-6-luna".to_string()]));
+    agent.code_mode.isolated = false;
+    agent.fallback_models = Some(vec!["codex/gpt-6-luna".into()]);
+    let provider = fallback.clone();
+    agent.set_provider_builder(Box::new(move |_| Ok(provider.clone())));
+    let mut events = agent.run("run".into());
+    while let Some(event) = events.recv().await {
+        if let AgentEvent::PermissionRequest { tx, .. } = event {
+            tx.send(mew_hooks::PermissionDecision::AllowOnce).unwrap();
+        }
+    }
+    assert_eq!(fallback.captured.lock().unwrap()[0].tools[0].name, "python");
+    let messages = agent.messages.lock().await;
+    assert!(messages.iter().flat_map(|message| &message.parts).any(|part| matches!(part, Part::ToolCall(call) if call.call_id == "fallback-call" && call.state.output() == Some("from python\n"))));
+}
 
 #[async_trait::async_trait]
 impl Provider for ErroringProvider {

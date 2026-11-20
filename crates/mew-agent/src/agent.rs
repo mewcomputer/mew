@@ -195,6 +195,10 @@ pub struct Agent {
     pub dispatcher: Arc<dyn Dispatcher>,
     pub session: Option<SessionWriter>,
     pub tools: HashMap<String, Arc<dyn Tool>>,
+    pub code_mode: mew_config::CodeModeConfig,
+    pub codex_code_mode_models: Arc<std::collections::HashSet<String>>,
+    pub(crate) python_session: crate::PythonSession,
+    pub(crate) python_exit: Arc<tokio::sync::Mutex<bool>>,
     pub messages: Arc<tokio::sync::Mutex<Vec<Message>>>,
     pub session_id: SessionId,
     pub cwd: PathBuf,
@@ -418,6 +422,10 @@ impl Agent {
             dispatcher,
             session: session.map(|w| Arc::new(tokio::sync::Mutex::new(w))),
             tools: tools_map,
+            code_mode: mew_config::CodeModeConfig::default(),
+            codex_code_mode_models: Arc::default(),
+            python_session: crate::PythonSession::default(),
+            python_exit: Arc::new(tokio::sync::Mutex::new(false)),
             messages: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             session_id: session_id.unwrap_or_default(),
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -513,6 +521,54 @@ impl Agent {
         }
         self.model_id = model_id.to_string();
         self.provider_id = provider_id.to_string();
+    }
+
+    pub(crate) fn uses_code_mode(&self) -> bool {
+        self.uses_code_mode_for(&self.provider_id, &self.model_id)
+    }
+
+    pub(crate) fn python_available(&self) -> bool {
+        !self.denied_tool_names.contains("python")
+            && self
+                .active_tool_names
+                .as_ref()
+                .is_none_or(|names| !names.is_empty())
+    }
+
+    pub(crate) fn python_isolated(&self) -> bool {
+        self.code_mode.isolated
+            || self.active_tool_names.is_some()
+            || !self.denied_tool_names.is_empty()
+    }
+
+    pub(crate) fn uses_code_mode_for(&self, provider: &str, model: &str) -> bool {
+        self.code_mode.for_model(provider, model).map_or_else(
+            || {
+                provider == "codex" && self.codex_code_mode_models.contains(model)
+                    || model
+                        .rsplit('/')
+                        .next()
+                        .and_then(|name| name.split_once('-'))
+                        .is_some_and(|(family, _)| family.eq_ignore_ascii_case("deepseek"))
+            },
+            |mode| mode == mew_config::CodeMode::Full,
+        )
+    }
+
+    pub fn set_python_session(&mut self, session: crate::PythonSession) {
+        self.python_session = session;
+        self.python_session
+            .update_policy(self.python_available(), self.python_isolated());
+    }
+
+    pub(crate) fn tool_available(&self, name: &str) -> bool {
+        self.tools.contains_key(name)
+            && (!name.starts_with("browser_") || self.browser_access.is_available())
+            && self
+                .active_tool_names
+                .as_ref()
+                .is_none_or(|names| names.contains(name))
+            && !self.denied_tool_names.contains(name)
     }
 
     pub fn set_permission_engine(
@@ -968,6 +1024,8 @@ impl Agent {
             .as_ref()
             .map(|d| d.iter().cloned().collect::<HashSet<_>>())
             .unwrap_or_default();
+        self.python_session
+            .update_policy(self.python_available(), self.python_isolated());
 
         // Build the template context once: used for rendering the persona
         // body (if templated) and shared with the Skill tool for templated
@@ -1047,6 +1105,8 @@ impl Agent {
         self.persona_prompt = None;
         self.active_tool_names = None;
         self.denied_tool_names.clear();
+        self.python_session
+            .update_policy(self.python_available(), self.python_isolated());
         self.autonomous_hint = None;
         self.fallback_models = None;
         if let Ok(mut g) = self.skill_filter.try_write() {

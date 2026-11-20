@@ -128,6 +128,8 @@ pub struct DaemonServer {
     pub project_pins: Arc<projects::ProjectPinsStore>,
     /// Daemon-wide summary setting, observed by clients and the idle-summary task.
     pub auto_summary_enabled: watch::Sender<bool>,
+    /// Process-wide tools that need an awaited shutdown.
+    pub shutdown_tools: Arc<Vec<Arc<dyn mew_tools::Tool>>>,
 }
 
 impl DaemonServer {
@@ -177,6 +179,7 @@ impl DaemonServer {
             groups_store,
             project_pins,
             auto_summary_enabled: watch::channel(true).0,
+            shutdown_tools: Arc::new(Vec::new()),
         }
     }
 
@@ -215,6 +218,7 @@ impl DaemonServer {
             groups_store: self.groups_store.clone(),
             project_pins: self.project_pins.clone(),
             auto_summary_enabled: self.auto_summary_enabled.clone(),
+            shutdown_tools: self.shutdown_tools.clone(),
         }
     }
 
@@ -248,11 +252,17 @@ impl DaemonServer {
         let mut sig_term =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
                 .context("install SIGTERM handler")?;
+        let mut sig_int = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+            .context("install SIGINT handler")?;
 
         loop {
             tokio::select! {
                 _ = sig_term.recv() => {
                     info!("received SIGTERM, shutting down");
+                    break;
+                }
+                _ = sig_int.recv() => {
+                    info!("received SIGINT, shutting down");
                     break;
                 }
                 accept_result = listener.accept() => {
@@ -316,11 +326,17 @@ impl DaemonServer {
         let mut sig_term =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
                 .context("install SIGTERM handler")?;
+        let mut sig_int = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+            .context("install SIGINT handler")?;
 
         loop {
             tokio::select! {
                 _ = sig_term.recv() => {
                     info!("received SIGTERM, shutting down");
+                    break;
+                }
+                _ = sig_int.recv() => {
+                    info!("received SIGINT, shutting down");
                     break;
                 }
                 accept_result = listener.accept() => {
@@ -1438,6 +1454,7 @@ where
                                 None
                             }
                         };
+                        provider_replay.send_nested(&client_tx);
                         drop(provider_replay);
 
                         // Replay current flagged-files set so the UI has it
@@ -4322,6 +4339,30 @@ async fn translate_event(
         AgentEvent::ToolProgress { call_id, chunk } => {
             vec![ServerMessage::ToolProgress { call_id, chunk }]
         }
+        AgentEvent::NestedToolStart {
+            parent_call_id,
+            call_id,
+            tool_name,
+            input,
+        } => vec![ServerMessage::NestedToolStart {
+            parent_call_id,
+            call_id,
+            tool_name,
+            input,
+        }],
+        AgentEvent::NestedToolEnd {
+            parent_call_id,
+            call_id,
+            success,
+            error,
+            output_bytes,
+        } => vec![ServerMessage::NestedToolEnd {
+            parent_call_id,
+            call_id,
+            success,
+            error,
+            output_bytes,
+        }],
         AgentEvent::Error(msg) => {
             vec![ServerMessage::ErrorEvent { message: msg }]
         }

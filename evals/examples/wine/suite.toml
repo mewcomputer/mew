@@ -1,0 +1,6 @@
+[[tasks]]
+id = "wine-summary"
+prompt = "prompt.txt"
+fixture = "fixture"
+mcp = "mcp.json"
+checker = ["python3", "${manifest_dir}/check.py"]

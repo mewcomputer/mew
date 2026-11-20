@@ -17,7 +17,8 @@ use tungstenite::{client, Message};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
+/// Time allowed for an app-owned daemon to initialize before health checks fail.
+pub const DAEMON_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -45,7 +46,7 @@ impl Default for SupervisorConfig {
             daemon_binary: None,
             local_port: 0,
             remote_enabled: false,
-            startup_timeout: STARTUP_TIMEOUT,
+            startup_timeout: DAEMON_STARTUP_TIMEOUT,
             log_dir: None,
         }
     }
@@ -264,6 +265,18 @@ fn shutdown_child(owned_child: &Mutex<Option<Child>>) {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     if let Some(mut child) = owned_child.take() {
+        #[cfg(unix)]
+        {
+            let _ = unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while std::time::Instant::now() < deadline {
+                match child.try_wait() {
+                    Ok(Some(_)) => return,
+                    Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+                    Err(_) => break,
+                }
+            }
+        }
         let _ = child.kill();
         let _ = child.wait();
     }
@@ -726,6 +739,53 @@ mod tests {
         assert_eq!(endpoint.mode, DaemonMode::LocalExisting);
         assert_eq!(endpoint.websocket_url, websocket_url(address));
         server.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_gives_an_owned_daemon_time_to_clean_up() {
+        let directory = tempfile::tempdir().unwrap();
+        let ready = directory.path().join("ready");
+        let stopped = directory.path().join("stopped");
+        let child = Command::new("sh")
+            .args(["-c", "trap 'printf stopped > \"$1\"; exit 0' TERM; touch \"$2\"; while :; do sleep 0.05; done", "sh"])
+            .arg(&stopped).arg(&ready)
+            .spawn().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !ready.exists() {
+            assert!(std::time::Instant::now() < deadline, "child did not start");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let mut supervisor = DesktopSupervisor::new(SupervisorConfig::default());
+        *supervisor.child.lock().unwrap() = Some(child);
+        supervisor.shutdown().unwrap();
+        assert_eq!(std::fs::read_to_string(stopped).unwrap(), "stopped");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_escalates_when_an_owned_daemon_ignores_sigterm() {
+        let directory = tempfile::tempdir().unwrap();
+        let ready = directory.path().join("ready");
+        let child = Command::new("sh")
+            .args([
+                "-c",
+                "trap '' TERM; touch \"$1\"; while :; do sleep 0.05; done",
+                "sh",
+            ])
+            .arg(&ready)
+            .spawn()
+            .unwrap();
+        let child_pid = child.id();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while !ready.exists() {
+            assert!(std::time::Instant::now() < deadline, "child did not start");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let mut supervisor = DesktopSupervisor::new(SupervisorConfig::default());
+        *supervisor.child.lock().unwrap() = Some(child);
+        supervisor.shutdown().unwrap();
+        assert_ne!(unsafe { libc::kill(child_pid as libc::pid_t, 0) }, 0);
     }
 
     #[cfg(unix)]

@@ -33,15 +33,46 @@ pub(crate) async fn build_daemon_server(
     model_flag: Option<String>,
     raw: bool,
     mode: mew_hooks::PermissionMode,
-) -> Result<mew_daemon::DaemonServer> {
+    shutdown: tokio::sync::watch::Receiver<Option<libc::c_int>>,
+) -> Result<Option<mew_daemon::DaemonServer>> {
     let cfg = mew_config::load().context("load config")?;
-    let cat = if fake_provider {
+    let cwd = if fake_provider {
         None
     } else {
-        crate::setup::providers::load_catalog(&cfg).await
+        Some(std::env::current_dir().context("determine MCP workspace")?)
     };
+    let mut catalog_shutdown = shutdown.clone();
+    let catalog = async {
+        if fake_provider {
+            None
+        } else {
+            tokio::select! {
+                catalog = crate::setup::providers::load_catalog(&cfg) => catalog,
+                _ = catalog_shutdown.wait_for(Option::is_some) => None,
+            }
+        }
+    };
+    let mut mcp_shutdown = shutdown.clone();
+    let mcp_discovery = async {
+        match cwd {
+            Some(cwd) => crate::setup::agent::discover_mcp_tools(&cwd, async move {
+                let _ = mcp_shutdown.wait_for(Option::is_some).await;
+            })
+            .await
+            .context("load MCP servers"),
+            None => Ok(Vec::new()),
+        }
+    };
+    let (cat, mcp_tools) = tokio::join!(catalog, mcp_discovery);
+    let mcp_tools = mcp_tools?;
+    let interrupted = *shutdown.borrow();
+    if interrupted.is_some() {
+        crate::setup::agent::shutdown_mcp_tools(&mcp_tools).await;
+        return Ok(None);
+    }
 
-    build_daemon_server_with_config(
+    let result = build_daemon_server_with_config(
+        mcp_tools.clone(),
         cfg,
         cat,
         fake_provider,
@@ -49,10 +80,33 @@ pub(crate) async fn build_daemon_server(
         model_flag,
         raw,
         mode,
-    )
+    );
+    if result.is_err() {
+        crate::setup::agent::shutdown_mcp_tools(&mcp_tools).await;
+    }
+    result.map(Some)
 }
 
+pub(crate) fn monitor_shutdown() -> Result<(
+    tokio::sync::watch::Receiver<Option<libc::c_int>>,
+    tokio::task::JoinHandle<()>,
+)> {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let (sender, receiver) = tokio::sync::watch::channel(None);
+    let task = tokio::spawn(async move {
+        let signal = tokio::select! {
+            _ = terminate.recv() => libc::SIGTERM,
+            _ = interrupt.recv() => libc::SIGINT,
+        };
+        sender.send_replace(Some(signal));
+    });
+    Ok((receiver, task))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build_daemon_server_with_config(
+    mcp_tools: Vec<Arc<dyn mew_tools::Tool>>,
     cfg: mew_config::Config,
     cat: Option<mew_catalog::Catalog>,
     fake_provider: bool,
@@ -61,6 +115,8 @@ fn build_daemon_server_with_config(
     raw: bool,
     mode: mew_hooks::PermissionMode,
 ) -> Result<mew_daemon::DaemonServer> {
+    let mcp_tools = Arc::new(mcp_tools);
+    let shutdown_tools = mcp_tools.clone();
     let cfg = Arc::new(cfg);
     let cat = Arc::new(cat);
 
@@ -161,7 +217,7 @@ fn build_daemon_server_with_config(
                 provider,
                 Arc::new(mew_hooks::NopDispatcher),
                 Some(params.writer),
-                Vec::new(),
+                mcp_tools.as_ref().clone(),
                 session_id,
             );
             agent.cwd = cwd.clone();
@@ -205,6 +261,7 @@ fn build_daemon_server_with_config(
                 Arc::new(mew_hooks::NopDispatcher),
                 todos_path,
                 &[],
+                mcp_tools.as_slice(),
             )?
         };
         let variant = params
@@ -219,6 +276,7 @@ fn build_daemon_server_with_config(
     // closure is wrapped in an Arc (so the daemon API takes Arc<dyn Fn>),
     // letting both servers share the same one.
     let mut server = mew_daemon::DaemonServer::new(builder);
+    server.shutdown_tools = shutdown_tools;
 
     // Enable model switching for non-fake providers.
     if fake_provider {
@@ -416,12 +474,33 @@ pub(crate) async fn run_daemon(
     mode: mew_hooks::PermissionMode,
     pidfile: Option<String>,
 ) -> Result<()> {
-    let server = build_daemon_server(fake_provider, provider_flag, model_flag, raw, mode).await?;
-
-    let pidfile = pidfile.unwrap_or_else(default_pidfile);
-    write_local_status(Path::new(&pidfile), socket.as_deref(), port.as_deref())?;
-
-    run_local_server(server, socket, port).await
+    let (mut shutdown, signal_task) = monitor_shutdown()?;
+    let Some(server) = build_daemon_server(
+        fake_provider,
+        provider_flag,
+        model_flag,
+        raw,
+        mode,
+        shutdown.clone(),
+    )
+    .await?
+    else {
+        signal_task.abort();
+        return Ok(());
+    };
+    let shutdown_tools = server.shutdown_tools.clone();
+    let result = async {
+        let pidfile = pidfile.unwrap_or_else(default_pidfile);
+        write_local_status(Path::new(&pidfile), socket.as_deref(), port.as_deref())?;
+        tokio::select! {
+            result = run_local_server(server, socket, port) => result,
+            _ = shutdown.wait_for(Option::is_some) => Ok(()),
+        }
+    }
+    .await;
+    crate::setup::agent::shutdown_mcp_tools(&shutdown_tools).await;
+    signal_task.abort();
+    result
 }
 
 async fn run_local_server(
@@ -479,28 +558,58 @@ pub(crate) async fn run_daemon_iroh(
     eprintln!(
         "WARNING: iroh daemon mode exposes this daemon to paired remote devices. They may access sessions, files, commands, and permission requests."
     );
-    let server = build_daemon_server(fake_provider, provider_flag, model_flag, raw, mode).await?;
-
-    let allowlist_path = mew_daemon::iroh_transport::default_allowlist_path();
-    let secret_key_path = mew_daemon::iroh_transport::default_secret_key_path();
-    info!(allowlist = %allowlist_path.display(), "starting iroh listener");
-
-    let secret_key = mew_daemon::iroh_transport::load_or_create_secret_key(&secret_key_path)?;
-    mew_daemon::iroh_transport::run_iroh(
-        server.session_manager,
-        server.groups_store,
-        server.thinking_setter,
-        server.auto_summary_enabled,
-        mew_daemon::iroh_transport::IrohListenerConfig {
-            allowlist_path,
-            secret_key,
-            remote_scope: scoped.then_some(mew_protocol::RemoteScope::Control),
-            remote_token: None,
-            remote_store: None,
-            remote_mode: mew_daemon::remote::RemoteMode::Daemon,
-        },
+    let (mut shutdown, signal_task) = monitor_shutdown()?;
+    let Some(server) = build_daemon_server(
+        fake_provider,
+        provider_flag,
+        model_flag,
+        raw,
+        mode,
+        shutdown.clone(),
     )
-    .await
+    .await?
+    else {
+        signal_task.abort();
+        return Ok(());
+    };
+    let shutdown_tools = server.shutdown_tools.clone();
+    let result = async {
+        let allowlist_path = mew_daemon::iroh_transport::default_allowlist_path();
+        let secret_key_path = mew_daemon::iroh_transport::default_secret_key_path();
+        info!(allowlist = %allowlist_path.display(), "starting iroh listener");
+
+        let secret_key = mew_daemon::iroh_transport::load_or_create_secret_key(&secret_key_path)?;
+        let listener = mew_daemon::iroh_transport::run_iroh(
+            server.session_manager,
+            server.groups_store,
+            server.thinking_setter,
+            server.auto_summary_enabled,
+            mew_daemon::iroh_transport::IrohListenerConfig {
+                allowlist_path,
+                secret_key,
+                remote_scope: scoped.then_some(mew_protocol::RemoteScope::Control),
+                remote_token: None,
+                remote_store: None,
+                remote_mode: mew_daemon::remote::RemoteMode::Daemon,
+                shutdown: Some(shutdown.clone()),
+            },
+        );
+        tokio::pin!(listener);
+        tokio::select! {
+            result = &mut listener => result,
+            _ = shutdown.wait_for(Option::is_some) => {
+                let (result, ()) = tokio::join!(
+                    tokio::time::timeout(std::time::Duration::from_secs(3), &mut listener),
+                    crate::setup::agent::shutdown_mcp_tools(&shutdown_tools),
+                );
+                result.unwrap_or(Ok(()))
+            }
+        }
+    }
+    .await;
+    crate::setup::agent::shutdown_mcp_tools(&shutdown_tools).await;
+    signal_task.abort();
+    result
 }
 
 /// Run the local daemon and an authenticated iroh listener together. This is
@@ -518,7 +627,22 @@ pub(crate) async fn run_daemon_remote(
     eprintln!(
         "WARNING: remote access is enabled. A paired device can reach this daemon over the network; relay connections may be used when direct peer-to-peer access fails."
     );
-    let server = build_daemon_server(fake_provider, provider_flag, model_flag, raw, mode).await?;
+    let (mut shutdown, signal_task) = monitor_shutdown()?;
+    let Some(server) = build_daemon_server(
+        fake_provider,
+        provider_flag,
+        model_flag,
+        raw,
+        mode,
+        shutdown.clone(),
+    )
+    .await?
+    else {
+        signal_task.abort();
+        return Ok(());
+    };
+    let shutdown_tools = server.shutdown_tools.clone();
+    let result = async {
     let remote_server = server.clone_for_listener();
     let allowlist_path = mew_daemon::iroh_transport::default_allowlist_path();
     let secret_key_path = mew_daemon::iroh_transport::default_secret_key_path();
@@ -545,19 +669,34 @@ pub(crate) async fn run_daemon_remote(
             remote_token: None,
             remote_store: Some(remote_store.clone()),
             remote_mode,
+                shutdown: Some(shutdown.clone()),
         },
     );
 
     let remote_store_for_task = remote_store.clone();
-    let remote_task = tokio::spawn(async move {
+        let mut remote_task = tokio::spawn(async move {
         if let Err(error) = remote.await {
             tracing::error!(%error, "iroh remote listener stopped; local daemon remains available");
             let _ = remote_store_for_task.set_hosting(false, remote_mode, None);
         }
     });
-    let result = local.await;
+        let result = tokio::select! {
+            result = local => result,
+            _ = shutdown.wait_for(Option::is_some) => Ok(()),
+        };
     let _ = remote_store.set_hosting(false, remote_mode, None);
+        let interrupted = shutdown.borrow().is_some();
+        if interrupted {
+            let _ = tokio::join!(
+                tokio::time::timeout(std::time::Duration::from_secs(3), &mut remote_task),
+                crate::setup::agent::shutdown_mcp_tools(&shutdown_tools),
+            );
+        }
     remote_task.abort();
+    result
+    }.await;
+    crate::setup::agent::shutdown_mcp_tools(&shutdown_tools).await;
+    signal_task.abort();
     result
 }
 
@@ -925,6 +1064,7 @@ mod model_list_tests {
             .unwrap(),
         );
         let server = build_daemon_server_with_config(
+            Vec::new(),
             cfg,
             Some(catalog),
             false,

@@ -577,6 +577,16 @@ export interface AssistantMeta {
     finish?: string | null;
     error?: MessageError | null;
     manifest?: TurnManifest | null;
+    nested_tool_calls?: NestedToolCall[];
+}
+export interface NestedToolCall {
+    parent_call_id: string;
+    call_id: string;
+    tool_name: string;
+    input: unknown;
+    status: "running" | "completed" | "error";
+    error?: string;
+    output_bytes?: number;
 }
 /** Token usage breakdown. */
 export interface Tokens {
@@ -672,6 +682,19 @@ export type ServerMessage = ({
     type: "tool_end";
     call_id: string;
     success: boolean;
+} | {
+    type: "nested_tool_start";
+    parent_call_id: string;
+    call_id: string;
+    tool_name: string;
+    input: unknown;
+} | {
+    type: "nested_tool_end";
+    parent_call_id: string;
+    call_id: string;
+    success: boolean;
+    error?: string;
+    output_bytes?: number;
 } | {
     type: "part_updated";
     part_id: string;
@@ -954,6 +977,19 @@ export interface MewClientEvents {
     "tool-end": (data: {
         call_id: string;
         success: boolean;
+    }) => void;
+    "nested-tool-start": (data: {
+        parent_call_id: string;
+        call_id: string;
+        tool_name: string;
+        input: unknown;
+    }) => void;
+    "nested-tool-end": (data: {
+        parent_call_id: string;
+        call_id: string;
+        success: boolean;
+        error?: string;
+        output_bytes?: number;
     }) => void;
     "part-updated": (data: {
         part_id: string;

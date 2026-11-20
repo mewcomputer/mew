@@ -182,4 +182,8 @@ pub trait Tool: Send + Sync {
     fn sensitivity(&self) -> Sensitivity;
 
     async fn execute(&self, ctx: ToolCtx, input: Value) -> Result<ToolOutput, ToolError>;
+
+    async fn shutdown(&self) -> Result<(), ToolError> {
+        Ok(())
+    }
 }

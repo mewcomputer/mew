@@ -939,6 +939,24 @@ test("off() unsubscribes a handler", async () => {
   assert.equal(count, 1);
 });
 
+test("dispatches nested tool events without interrupting the connection", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connectP = client.connect();
+  setImmediate(() => latest().open());
+  await connectP;
+  const events: unknown[] = [];
+  client.on("nested-tool-start", (call) => events.push(call));
+  client.on("nested-tool-end", (call) => events.push(call));
+  latest().peerSend({ type: "nested_tool_start", parent_call_id: "py", call_id: "py:1", tool_name: "read", input: { path: "a" } });
+  latest().peerSend({ type: "nested_tool_end", parent_call_id: "py", call_id: "py:1", success: true });
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(events, [
+    { parent_call_id: "py", call_id: "py:1", tool_name: "read", input: { path: "a" } },
+    { parent_call_id: "py", call_id: "py:1", success: true, error: undefined, output_bytes: undefined },
+  ]);
+});
+
 test("cancel sends a cancel message", async () => {
   const { factory, latest } = makeFactory();
   const client = new MewClient("ws://test/", { socketFactory: factory });

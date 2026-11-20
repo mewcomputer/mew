@@ -88,6 +88,9 @@ pub struct Model {
     /// the current agent loop does not act on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_agent_version: Option<String>,
+    /// Whether Codex recommends its code-only tool interface for this model.
+    #[serde(default)]
+    pub codex_code_mode_only: bool,
     /// True when the model can produce text output (`modalities.output`
     /// contains "text"). Image/video/audio generation models (output
     /// `["image"]` / `["video"]`) are filtered out of the model picker by
@@ -824,6 +827,7 @@ fn parse_models_dev_model(val: &serde_json::Value, provider_id: &str) -> Option<
         responses_lite: false,
         prompt_cache_retention_secs: None,
         multi_agent_version: None,
+        codex_code_mode_only: false,
         thinking_budget: None,
     })
 }
@@ -1081,6 +1085,7 @@ fn parse_umans(data: &[u8]) -> Result<Vec<Model>, CatalogError> {
             responses_lite: false,
             prompt_cache_retention_secs: None,
             multi_agent_version: None,
+            codex_code_mode_only: false,
             thinking_budget: None,
         };
         out.push(model);
@@ -1274,6 +1279,7 @@ pub fn parse_codex(data: &[u8]) -> Result<Vec<Model>, CatalogError> {
             responses_lite: m.use_responses_lite,
             prompt_cache_retention_secs: None,
             multi_agent_version: m.multi_agent_version.clone(),
+            codex_code_mode_only: m.tool_mode.as_deref() == Some("code_mode_only"),
             thinking_budget: None,
         });
     }
@@ -1309,6 +1315,8 @@ struct CodexModelInfo {
     use_responses_lite: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     multi_agent_version: Option<String>,
+    #[serde(default)]
+    tool_mode: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1951,6 +1959,19 @@ mod tests {
             .collect();
         assert_eq!(names, vec!["low", "high", "ultra"]);
         assert_eq!(m.thinking_variants[0].params["reasoning_effort"], "low");
+    }
+
+    #[test]
+    fn codex_model_tool_mode_is_preserved() {
+        let json = br#"{"models":[
+            {"slug":"code", "visibility":"list", "supported_in_api":true, "tool_mode":"code_mode_only"},
+            {"slug":"other", "visibility":"list", "supported_in_api":true, "tool_mode":"future_mode"},
+            {"slug":"unknown", "visibility":"list", "supported_in_api":true}
+        ]}"#;
+        let models = parse_codex(json).unwrap();
+        assert!(models[0].codex_code_mode_only);
+        assert!(!models[1].codex_code_mode_only);
+        assert!(!models[2].codex_code_mode_only);
     }
 
     #[test]

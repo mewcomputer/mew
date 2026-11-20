@@ -4472,6 +4472,78 @@ Forced software rendering improved from 11 to 121 scroll frames on the
 same path and switched to the still. Also checked chapter scrolling,
 garden controls, and the install picker at a 390 px viewport.
 
+### 2026-11-19: Python code mode
+
+Added an opt-in Python tool mode with global and per-model settings. Python
+state survives calls and idle session reloads. Nested tools use the existing
+permission and agent dispatch paths. macOS Seatbelt and Linux Bubblewrap
+provide optional isolation; unrestricted Python is treated as dangerous.
+
+Verified the agent, config, subagent, and daemon session tests; macOS and
+Linux isolation including virtual environments and child cleanup; and a live
+Codex run that read a file through the tool bridge and fit a scikit-learn
+regression across Python calls. The sandbox made joblib run serially. The
+documentation site tests and workspace clippy also passed.
+
+### 2026-11-19: Follow Codex tool-mode metadata
+
+Codex models marked `code_mode_only` now default to Python code mode. Explicit
+per-model and global settings take precedence; other models retain direct
+tools unless configured otherwise. Verified catalog, config, agent, subagent,
+daemon reload, and documentation tests. A live Codex run used Python with no
+explicit mode setting and returned the expected result.
+
+### 2026-11-19: MCP tools in Python code mode
+
+Mew now discovers configured stdio and streamable HTTP MCP servers at startup
+and makes their tools available in direct and Python modes through the existing
+permission path. Project settings override global entries. Shared connections
+handle concurrent sessions, cancellation, structured results, and images.
+
+Verified the MCP and Mew tests, documentation site tests, real filesystem and
+grep.app servers, and a live Codex-to-Python-to-grep.app run. Context7 connected
+and listed its tools, but its anonymous quota prevented a live tool call.
+
+### 2026-11-19: Code mode and MCP review fixes
+
+Hardened MCP permissions, deadlines, cancellation and reconnection, and kept
+server discovery within frontend startup budgets. Subagents inherit secret
+redaction and forward Python-mode progress. Python now resolves configured
+executables on the daemon PATH and keeps threaded output within its cell.
+
+Verified agent, MCP, desktop startup, permissions, and documentation tests,
+Linux and macOS Python isolation, live filesystem and grep.app servers, and a
+Codex-to-Python MCP run.
+Idle Python workers still retain state until their session is deleted or the
+daemon exits.
+
+### 2026-11-19: Bound idle Python workers
+
+Python workers now stop after one hour idle or when the daemon's idle-worker
+LRU exceeds its configurable limit, defaulting to three. Running calls and
+approval waits remain protected. The next Python call reports state loss before
+running, while chat history and workspace files remain intact.
+
+Verified real Python process termination, LRU recency and zero capacity,
+active approval waits, reaper cleanup, session reload, config parsing, and the
+agent, daemon session-lifetime, and documentation tests.
+The state-loss notice is retained for the lifetime of the daemon.
+Python-focused tests also passed on Linux with Bubblewrap.
+
+### 2026-11-19: Harden code mode and MCP lifecycle
+
+Restricted personas and subagents now run Python in isolation, and worker
+policy changes stop incompatible cached workers. Python uses the session
+workspace and redacts results and worker diagnostics.
+
+MCP preserves resource results and errors, handles server pings, limits HTTP
+redirects to the same origin, and closes sessions during cancellation and
+shutdown. Desktop-owned daemons get a bounded graceful shutdown. State saves
+now replace files atomically while preserving symlinks.
+
+Verified the focused agent, configuration, MCP and supervisor tests, the
+JavaScript suites on Node 24 and 26, and daemon shutdown against a real MCP SDK
+server. The wider verification is in progress.
 ### 2026-11-19: Homepage copy pass
 
 Updated the hero and chapter copy with examples from the terminal client,
@@ -4524,3 +4596,82 @@ Jianghu's standalone preview remains available separately.
 
 Verified equivalent rendered markup and copy, all 12 site tests, the
 Jianghu build, and the mobile hero and install link.
+
+### 2026-11-19: Verify code mode and MCP on current main
+
+Merged current main into the feature branch and fixed a stale homepage test.
+Session writer leases now unlock explicitly so a briefly inherited descriptor
+cannot delay the next writer.
+
+Verified the full isolated Rust workspace suite, JavaScript suites, site tests,
+subprocess end-to-end tests, and the optional iroh build. Linux tests covered
+Bubblewrap, restricted personas and subagents, MCP, configuration, and session
+leases. A real MCP SDK server received session deletion on SIGINT and SIGTERM.
+
+### 2026-11-19: Test code mode with live models and MCP
+
+Ran isolated Python code mode through the real `mew run` path with Codex and
+Hy, an actual filesystem MCP server, and two Wine Quality analysis tasks. All
+four artifacts matched independent numerical references. The runs exposed a
+large-output token cost and recoverable Hy tool-input errors.
+
+Fixed OpenCode Go's noninteractive session identity and added an opt-in live
+provider regression. Verified the failure against the real API before the fix,
+the live check and session identity after it, both Hy task reruns, and the
+noninteractive MCP-discovery interruption test.
+
+### 2026-11-19: Stream structured noninteractive events
+
+`mew run --format jsonl` emits model responses, tool calls, nested Python tool
+calls, permission decisions, subagent lifecycle and a final usage summary.
+Tool results report text sizes without copying their content into the stream.
+Configured secret words are redacted from structured errors.
+
+Verified JSONL success and failure paths, nested tool success and failure,
+secret redaction, live model runs, 720 CLI/agent/daemon tests, Linux agent tests
+with Bubblewrap, clippy, architecture checks and documentation tests.
+
+### 2026-11-19: Add a reusable evaluation runner
+
+Added a manifest-driven runner for model and tool-mode matrices, repeated runs,
+isolated Mew state, real MCP servers and external artifact checkers. Results
+include JSONL events, transcripts, JSON and CSV summaries, and binary hashes.
+The example uses a small attributed Wine Quality sample and a filesystem MCP
+server.
+
+Verified runner validation, checker failures, credential handling and process
+cleanup. Live Codex and Hy MCP runs passed, as did a separate Codex comparison
+of full code mode and direct tools. A live turn-limit failure retained its usage.
+The deterministic runner tests also run in CI and through `just test-evals`.
+
+### 2026-11-20: Fix persistent shell completion framing
+
+Persistent shell commands now complete when stdout lacks a trailing newline,
+while retaining their output and exit status. Added shell-session and bash-tool
+regressions, including a follow-up command in the same session.
+
+Verified the `mew-tools` test suite, workspace formatting, and crate clippy.
+
+### 2026-11-20: Default DeepSeek models to code mode
+
+DeepSeek model IDs now default to Python code mode across providers. Explicit
+global and provider-qualified model settings still take precedence.
+
+Verified the full `mew-agent` test suite, workspace formatting, and crate clippy.
+
+### 2026-11-20: Retain Python sessions for model defaults
+
+The daemon now shares the Python worker cache when model defaults can enable
+code mode, including after switching to a DeepSeek model.
+
+Verified the daemon suite and Python state across unload and reattachment.
+
+### 2026-11-20: Show nested Python tools in the TUI
+
+Python cells display their source and nested tool activity, including permission
+failures. Nested call details persist outside the model-facing transcript and
+replay while a turn is active. Protocol revision 4 carries the live events.
+
+Verified the affected Rust suites, TUI frames and reconnect/cancellation paths,
+provider request builders, TypeScript client, and a live Hy permission denial
+through the daemon with history reattachment.

@@ -92,7 +92,18 @@ fn web_ci_builds_the_site_that_loads_repository_documentation() {
         .iter()
         .any(|step| step["run"]
             .as_str()
-            .is_some_and(|run| run.contains("pnpm --filter site build"))));
+            .is_some_and(|run| run.contains("pnpm --filter site test"))));
+    let package: serde_json::Value =
+        serde_json::from_str(include_str!("../../../site/package.json")).unwrap();
+    let test = package["scripts"]["test"].as_str().unwrap();
+    assert!(
+        test.starts_with("astro build && "),
+        "site tests must build the site first"
+    );
+    assert!(
+        test.contains("node --test"),
+        "site tests must validate the built site"
+    );
 }
 
 #[test]
@@ -164,4 +175,13 @@ fn linux_builds_install_native_terminal_and_desktop_link_dependencies() {
             }
         }
     }
+}
+
+#[test]
+fn ci_runs_the_eval_runner_tests() {
+    let workflow = workflow("ci.yml");
+    let steps = workflow["jobs"]["web-ci"]["steps"].as_sequence().unwrap();
+    assert!(steps.iter().any(|step| step["run"]
+        .as_str()
+        .is_some_and(|run| run.contains("python3 -B -m unittest discover -s evals/tests"))));
 }

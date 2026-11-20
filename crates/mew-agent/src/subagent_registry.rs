@@ -89,6 +89,15 @@ pub(crate) async fn recover_child_text(
                     _ => None,
                 }
             }
+            mew_message::Part::ToolCall(call) if call.tool_name == "python" => match &call.state {
+                mew_message::ToolState::Completed(completed) => completed
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("python_exit"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                _ => None,
+            },
             _ => None,
         })
         .unwrap_or_else(|| {
@@ -252,6 +261,36 @@ mod tests {
         assert_eq!(
             recover_child_text(&session_dir, child_id).await.as_deref(),
             Some("exit deliverable")
+        );
+
+        let mut python_revision = msg.clone();
+        python_revision
+            .parts
+            .push(mew_message::Part::ToolCall(mew_message::ToolCallPart {
+                base: mew_message::PartBase {
+                    id: mew_message::PartId::new(),
+                    message_id: python_revision.id,
+                    session_id: python_revision.session_id,
+                },
+                tool_name: "python".into(),
+                call_id: "python-exit".into(),
+                state: mew_message::ToolState::Completed(mew_message::ToolStateCompleted {
+                    input: serde_json::json!({"source":"tools.exit_tool(...)"}),
+                    output: "nested deliverable".into(),
+                    metadata: Some(serde_json::json!({"python_exit":"nested deliverable"})),
+                    diff: None,
+                    images: vec![],
+                    time: mew_message::ToolTime {
+                        start: 0,
+                        end: Some(1),
+                    },
+                }),
+                raw_input: String::new(),
+            }));
+        writer.write_message(&python_revision).await.unwrap();
+        assert_eq!(
+            recover_child_text(&session_dir, child_id).await.as_deref(),
+            Some("nested deliverable")
         );
     }
 }
