@@ -319,22 +319,14 @@ export interface PartBase {
     session_id: string;
 }
 export type ToolState = {
-    type: "pending";
+    status: "pending";
     input: unknown;
     time: {
         start: number;
         end: number | null;
     };
 } | {
-    type: "running";
-    input: unknown;
-    output: string;
-    time: {
-        start: number;
-        end: number | null;
-    };
-} | {
-    type: "completed";
+    status: "running";
     input: unknown;
     output: string;
     time: {
@@ -342,7 +334,15 @@ export type ToolState = {
         end: number | null;
     };
 } | {
-    type: "error";
+    status: "completed";
+    input: unknown;
+    output: string;
+    time: {
+        start: number;
+        end: number | null;
+    };
+} | {
+    status: "error";
     input: unknown;
     error: string;
     time: {

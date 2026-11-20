@@ -26,6 +26,7 @@ import type {
   ProjectInfo,
   PersonaInfo,
   AssistantMeta,
+  NestedToolCall,
 } from "@mew/web-client";
 
 // ---------------------------------------------------------------------------
@@ -45,18 +46,20 @@ export type MessagePart =
   | { type: "reasoning"; text: string; streaming?: boolean }
   | {
       type: "tool-call";
+      partId?: string;
       toolName: string;
       callId: string;
       input: unknown;
       state: ToolDisplayState;
       output?: string;
+      nestedCalls?: NestedToolCall[];
       time?: { start: number; end: number | null };
     }
   | { type: "error"; message: string };
 
 export type ToolDisplayState = "pending" | "running" | "completed" | "error";
 
-/** Map the wire ToolState.type to our display state. */
+/** Map the wire ToolState.status to our display state. */
 function matchToolState(type: string): ToolDisplayState {
   switch (type) {
     case "pending":
@@ -84,15 +87,16 @@ function wirePartToMessagePart(part: Part): MessagePart | null {
     case "reasoning":
       return { type: "reasoning", text: part.text };
     case "tool_call": {
-      const state: ToolDisplayState = matchToolState(part.state.type);
+      const state: ToolDisplayState = matchToolState(part.state.status);
       const output =
-        part.state.type === "completed" || part.state.type === "running"
+        part.state.status === "completed" || part.state.status === "running"
           ? part.state.output
-          : part.state.type === "error"
+          : part.state.status === "error"
             ? part.state.error
             : undefined;
       return {
         type: "tool-call",
+        partId: part.id,
         toolName: part.tool_name,
         callId: part.call_id,
         input: part.state.input,
@@ -113,13 +117,40 @@ function wirePartToMessagePart(part: Part): MessagePart | null {
 }
 
 export function wireMessageToChatMessage(message: Message): ChatMessage {
+  const nested = message.assistant?.nested_tool_calls ?? [];
   return {
     id: message.id,
     role: message.role,
-    parts: message.parts.map(wirePartToMessagePart).filter((part): part is MessagePart => part !== null),
+    parts: message.parts.map(wirePartToMessagePart).filter((part): part is MessagePart => part !== null).map((part) => {
+      if (part.type !== "tool-call") return part;
+      const calls = nested.filter((call) => call.parent_call_id === part.callId);
+      return calls.length ? { ...part, nestedCalls: calls } : part;
+    }),
     timestamp: message.time.created,
     assistantMeta: message.assistant ?? undefined,
   };
+}
+
+function updateNestedCalls(
+  messages: ChatMessage[],
+  parentCallId: string,
+  update: (calls: NestedToolCall[]) => NestedToolCall[] | null,
+): ChatMessage[] | null {
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex--) {
+    const message = messages[messageIndex]!;
+    const partIndex = message.parts.findIndex((part) => part.type === "tool-call" && part.callId === parentCallId);
+    if (partIndex < 0) continue;
+    const part = message.parts[partIndex]!;
+    if (part.type !== "tool-call") return null;
+    const calls = update(part.nestedCalls ?? []);
+    if (!calls) return null;
+    const parts = [...message.parts];
+    parts[partIndex] = { ...part, nestedCalls: calls };
+    const result = [...messages];
+    result[messageIndex] = { ...message, parts };
+    return result;
+  }
+  return null;
 }
 
 export interface PendingPermission {
@@ -308,6 +339,8 @@ interface SessionState {
   onToolStart: (callId: string) => void;
   onToolEnd: (callId: string, success: boolean) => void;
   onToolProgress: (callId: string, chunk: string) => void;
+  onNestedToolStart: (call: Pick<NestedToolCall, "parent_call_id" | "call_id" | "tool_name" | "input">) => void;
+  onNestedToolEnd: (call: { parent_call_id: string; call_id: string; success: boolean; error?: string; output_bytes?: number }) => void;
   onPartUpdated: (partId: string, part: Part) => void;
   onPermissionRequest: (req: PendingPermission) => void;
   resolvePermission: (requestId: string) => void;
@@ -570,6 +603,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
                   ...last.parts,
                   {
                     type: "tool-call",
+                    partId: tc.id,
                     toolName: tc.tool_name,
                     callId: tc.call_id,
                     input: tc.state.input,
@@ -584,6 +618,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
                 role: "assistant" as const,
                 parts: [{
                   type: "tool-call",
+                  partId: tc.id,
                   toolName: tc.tool_name,
                   callId: tc.call_id,
                   input: tc.state.input,
@@ -756,45 +791,61 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       return { toolOutputs: outs };
     }),
 
+  onNestedToolStart: (call) => set((state) => {
+    const messages = updateNestedCalls(state.messages, call.parent_call_id, (calls) =>
+      calls.some((child) => child.call_id === call.call_id) ? null : [...calls, { ...call, status: "running" }],
+    );
+    return messages ? { messages } : state;
+  }),
+
+  onNestedToolEnd: (call) => set((state) => {
+    const messages = updateNestedCalls(state.messages, call.parent_call_id, (calls) => {
+      const index = calls.findIndex((child) => child.call_id === call.call_id);
+      if (index < 0) return null;
+      const next = [...calls];
+      next[index] = { ...calls[index]!, status: call.success ? "completed" : "error", error: call.error, output_bytes: call.output_bytes };
+      return next;
+    });
+    return messages ? { messages } : state;
+  }),
+
   onPartUpdated: (partId, part) => {
     // Handle tool state transitions: part_updated arrives with the updated
-    // tool_call part (state.type: running/completed/error) and tool_result parts.
+    // tool_call part (state.status: running/completed/error) and tool_result parts.
     if (part.type === "tool_call") {
       const callId = part.call_id;
-      const newState: ToolDisplayState = matchToolState(part.state.type);
+      const newState: ToolDisplayState = matchToolState(part.state.status);
       const output =
-        part.state.type === "completed" || part.state.type === "running"
+        part.state.status === "completed" || part.state.status === "running"
           ? part.state.output
-          : part.state.type === "error"
+          : part.state.status === "error"
             ? part.state.error
             : undefined;
 
       set((s) => {
         const msgs = [...s.messages];
-        // Find the tool-call part in the last assistant message and update it
+        let previousCallId: string | undefined;
         for (let i = msgs.length - 1; i >= 0; i--) {
           const msg = msgs[i];
-          if (!msg || msg.role !== "assistant") break;
-          const tcPart = msg.parts.find(
-            (p) => p.type === "tool-call" && p.callId === callId,
-          );
-          if (tcPart && tcPart.type === "tool-call") {
-            tcPart.state = newState;
-            // Update input from the part_updated event (the initial part_start
-            // may not have the full input if it arrived before parsing).
-            if (part.state.input !== undefined) {
-              tcPart.input = part.state.input;
-            }
-            if (part.state.time) {
-              tcPart.time = part.state.time;
-            }
-            if (output) tcPart.output = output;
-          }
+          if (!msg || msg.role !== "assistant") continue;
+          const index = msg.parts.findIndex((p) => p.type === "tool-call" &&
+            (p.partId === partId || (callId !== "" && p.callId === callId)));
+          if (index < 0) continue;
+          const existing = msg.parts[index]!;
+          if (existing.type !== "tool-call") continue;
+          previousCallId = existing.callId;
+          const parts = [...msg.parts];
+          parts[index] = { ...existing, partId, callId, toolName: part.tool_name, state: newState,
+            input: part.state.input, time: part.state.time, ...(output !== undefined ? { output } : {}) };
+          msgs[i] = { ...msg, parts };
+          break;
         }
         const ts = new Map(s.toolStates);
+        if (previousCallId !== undefined && previousCallId !== callId) ts.delete(previousCallId);
         ts.set(callId, newState);
         const outs = new Map(s.toolOutputs);
-        if (output) outs.set(callId, output);
+        if (previousCallId !== undefined && previousCallId !== callId) outs.delete(previousCallId);
+        if (output !== undefined) outs.set(callId, output);
         return { messages: msgs, toolStates: ts, toolOutputs: outs };
       });
     } else if (part.type === "tool_result") {
@@ -810,8 +861,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         return { toolStates: ts };
       });
     }
-    // partId is available for future use (e.g. matching streaming parts)
-    void partId;
   },
 
   onPermissionRequest: (req) =>
@@ -1355,7 +1404,8 @@ export function bridgeClientToStore(client: MewClient) {
   client.on("tool-start", (data) => store.getState().onToolStart(data.call_id));
   client.on("tool-end", (data) => store.getState().onToolEnd(data.call_id, data.success));
   client.on("tool-progress", (data) => store.getState().onToolProgress(data.call_id, data.chunk));
-  client.on("nested-tool-start", (data) => store.getState().onToolProgress(data.parent_call_id, `[${data.tool_name}]\n`));
+  client.on("nested-tool-start", (data) => store.getState().onNestedToolStart(data));
+  client.on("nested-tool-end", (data) => store.getState().onNestedToolEnd(data));
 
   client.on("part-updated", (data) => store.getState().onPartUpdated(data.part_id, data.part));
 

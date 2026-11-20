@@ -79,3 +79,17 @@ describe("ToolCallCard", () => {
     expect(screen.getByText(text)).toBeTruthy();
   });
 });
+
+it("shows a Python cell and its nested call status and details", async () => {
+  const user = userEvent.setup();
+  render(<ToolCallCard part={toolPart({
+    toolName: "python", input: { source: "text(tools.read({'path': 'notes.txt'}))" }, state: "completed",
+    nestedCalls: [{ parent_call_id: "call-1", call_id: "nested-1", tool_name: "read", input: { path: "notes.txt" }, status: "error", error: "permission denied" }],
+  })} />);
+  expect(screen.getByText("text(tools.read({'path': 'notes.txt'}))")).toBeTruthy();
+  expect(screen.getByText("read")).toBeTruthy();
+  expect(screen.getByText("notes.txt")).toBeTruthy();
+  expect(screen.getByText("permission denied")).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Show python details" }));
+  expect(screen.getByText(JSON.stringify({ path: "notes.txt" }, null, 2), { normalizer: (text) => text })).toBeTruthy();
+});

@@ -698,3 +698,41 @@ describe("authoritative activity recovery", () => {
     expect(store().subagents.get("task")).toMatchObject({ childSessionId: "current-child", status: "running" });
   });
 });
+
+describe("nested Python tools", () => {
+  let handlers: Map<string, (...args: any[]) => void>;
+  beforeEach(() => {
+    store().reset();
+    handlers = new Map();
+    bridgeClientToStore({ on: (event: string, handler: (...args: any[]) => void) => handlers.set(event, handler), listModels: () => Promise.resolve([]), listPersonas: () => Promise.resolve([]) } as unknown as MewClient);
+    useSessionStore.setState({ sessionId: "chat", messages: [{ id: "msg", role: "assistant", timestamp: 0, parts: [{ type: "tool-call", callId: "py", toolName: "python", input: { source: "pass" }, state: "running" }] }] });
+  });
+  it("updates the streamed cell when the daemon fills in its call identity", () => {
+    useSessionStore.setState({ messages: [] });
+    const part = { type: "tool_call", id: "part-1", message_id: "message-1", session_id: "chat", tool_name: "", call_id: "", state: { status: "pending", input: {}, time: { start: 0, end: null } } };
+    handlers.get("provider")?.({ type: "part_start", part });
+    handlers.get("part-updated")?.({ part_id: "part-1", part: { ...part, tool_name: "python", call_id: "py", state: { status: "running", input: { source: "print(1)" }, output: "", time: { start: 1, end: null } } } });
+    handlers.get("nested-tool-start")?.({ parent_call_id: "py", call_id: "child", tool_name: "read", input: { path: "notes.txt" } });
+    const cell = store().messages[0]!.parts[0]!;
+    expect(cell.type === "tool-call" && { name: cell.toolName, callId: cell.callId, state: cell.state, input: cell.input, nested: cell.nestedCalls?.length }).toEqual({ name: "python", callId: "py", state: "running", input: { source: "print(1)" }, nested: 1 });
+  });
+  it("tracks and deduplicates nested calls without polluting Python output", () => {
+    const start = { parent_call_id: "py", call_id: "child", tool_name: "write", input: { path: "report.md" } };
+    handlers.get("nested-tool-start")?.(start);
+    handlers.get("nested-tool-start")?.(start);
+    handlers.get("nested-tool-end")?.({ parent_call_id: "py", call_id: "child", success: false, error: "permission denied" });
+    handlers.get("nested-tool-start")?.(start);
+    const part = store().messages[0]!.parts[0]!;
+    expect(part.type).toBe("tool-call");
+    if (part.type !== "tool-call") throw new Error("expected tool call");
+    expect(part.nestedCalls).toEqual([{ ...start, status: "error", error: "permission denied" }]);
+    expect(store().toolOutputs.get("py")).toBeUndefined();
+  });
+  it("restores nested calls from history under the right Python cell", () => {
+    const child = { parent_call_id: "py", call_id: "child", tool_name: "read", input: { path: "notes.txt" }, status: "completed", output_bytes: 12 };
+    handlers.get("session-history-page")?.({ session_id: "chat", replace: true, messages: [{ id: "m", session_id: "chat", role: "assistant", time: { created: 0 }, assistant: { nested_tool_calls: [child] }, parts: [{ type: "tool_call", id: "p", message_id: "m", session_id: "chat", tool_name: "python", call_id: "py", state: { status: "completed", input: { source: "pass" }, output: "done", time: { start: 0, end: 1 } } }] }] });
+    const part = store().messages[0]!.parts[0]!;
+    expect(part.type === "tool-call" && part.nestedCalls).toEqual([child]);
+    expect(part.type === "tool-call" && { state: part.state, output: part.output }).toEqual({ state: "completed", output: "done" });
+  });
+});

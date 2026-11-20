@@ -4723,3 +4723,11 @@ Socket selection uses a short UTF-8 path when the configured temporary path
 cannot be passed through the daemon CLI and WebSocket URL. Verified CLI and
 lifecycle tests on macOS and exercised the exact selection helper with a real
 non-UTF-8 directory and Unix socket in Linux. A Linux full-app test is included.
+
+### 2026-11-20: Show Python tool activity in Electron
+
+Show Python source and nested tool calls with their status and errors, including
+when a session is restored. Match streamed tool updates by part ID and decode
+the daemon's tool-state status field. Verified the UI and client suites and
+production build, Electron host tests, and a live Electron session with a nested
+read, restored history, and a denied write.

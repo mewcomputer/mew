@@ -72,6 +72,8 @@ export function ToolCallCard({ part }: { part: Extract<MessagePart, { type: "too
   const hasOutput = toolOutput && toolOutput.length > 0;
   const summary = inputSummary(part.input);
   const sensitivity = inferSensitivity(part.toolName);
+  const source = part.toolName === "python" && part.input && typeof part.input === "object"
+    ? (part.input as Record<string, unknown>).source : undefined;
   const sens = sensitivityMeta(sensitivity);
   const elapsed = useElapsed(part.time?.start, part.time?.end, state === "running");
 
@@ -122,6 +124,26 @@ export function ToolCallCard({ part }: { part: Extract<MessagePart, { type: "too
         )}
       </button>
 
+      {typeof source === "string" && (
+        <pre className="max-h-40 overflow-auto border-t border-border px-3 py-2 text-[11px] leading-relaxed">{source}</pre>
+      )}
+      {part.nestedCalls && part.nestedCalls.length > 0 && (
+        <div className="space-y-2 border-t border-border px-3 py-2 text-xs" aria-label="Nested tools">
+          {part.nestedCalls.map((call) => (
+            <div key={call.call_id}>
+              <div className="flex flex-wrap items-center gap-x-2">
+                <span className="font-medium">{call.tool_name}</span>
+                <span className={cn("text-muted-foreground", call.status === "error" && "text-destructive", call.status === "completed" && "text-text-success")}>{call.status}</span>
+                {inputSummary(call.input) && <span className="min-w-0 break-all text-muted-foreground">{inputSummary(call.input)}</span>}
+                {call.output_bytes != null && <span className="text-muted-foreground">{call.output_bytes} B</span>}
+              </div>
+              {call.error && <div className="mt-1 whitespace-pre-wrap text-destructive">{call.error}</div>}
+              {expanded && <pre className="mt-1 max-h-40 overflow-auto rounded bg-muted p-2 text-[11px]">{JSON.stringify(call.input, null, 2)}</pre>}
+            </div>
+          ))}
+        </div>
+      )}
+
       {hasOutput && !expanded && (
         <div className="min-w-0 border-t border-border">
           <div className="group relative min-w-0">
@@ -143,7 +165,7 @@ export function ToolCallCard({ part }: { part: Extract<MessagePart, { type: "too
 
       {expanded && (
         <div className="min-w-0 border-t border-border px-3 py-2">
-          {part.input != null && (
+          {part.input != null && typeof source !== "string" && (
             <div className="mb-2">
               <div className="flex items-center justify-between">
                 <span className="text-[11px] font-medium text-muted-foreground">
