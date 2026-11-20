@@ -433,6 +433,20 @@ impl Session {
                 replay.nested.push(msg.clone());
                 Some(replay)
             }
+            ServerMessage::PartUpdated {
+                part_id,
+                part: mew_message::Part::ToolCall(_),
+            } => {
+                let mut replay = self.provider_replay.lock().await;
+                if let Some(existing) = replay.tool_updates.iter_mut().find(|update| {
+                    matches!(update, ServerMessage::PartUpdated { part_id: id, .. } if id == part_id)
+                }) {
+                    *existing = msg.clone();
+                } else {
+                    replay.tool_updates.push(msg.clone());
+                }
+                Some(replay)
+            }
             ServerMessage::ErrorEvent { .. } => {
                 let mut replay = self.provider_replay.lock().await;
                 replay.clear();
@@ -503,6 +517,7 @@ impl Session {
 #[derive(Default)]
 pub(crate) struct ProviderReplay {
     provider: Vec<ProviderEventWire>,
+    tool_updates: Vec<ServerMessage>,
     nested: Vec<ServerMessage>,
 }
 
@@ -515,6 +530,7 @@ impl ProviderReplay {
             ProviderEventWire::RetryWait { .. } => {}
             ProviderEventWire::PartStart { .. } if self.provider.is_empty() => {
                 // The previous tool batch is already in session history.
+                self.tool_updates.clear();
                 self.nested.clear();
                 self.provider.push(event.clone());
             }
@@ -542,6 +558,7 @@ impl ProviderReplay {
 
     pub(crate) fn clear(&mut self) {
         self.provider.clear();
+        self.tool_updates.clear();
         self.nested.clear();
     }
 
@@ -567,7 +584,10 @@ impl ProviderReplay {
         }
     }
 
-    pub(crate) fn send_nested(&self, client: &ClientSender) {
+    pub(crate) fn send_tool_activity(&self, client: &ClientSender) {
+        for event in &self.tool_updates {
+            let _ = client.send(event.clone());
+        }
         for event in &self.nested {
             let _ = client.send(event.clone());
         }

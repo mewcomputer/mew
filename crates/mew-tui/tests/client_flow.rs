@@ -182,6 +182,77 @@ fn nested_tool_activity_projects_live_and_from_session_history() {
 }
 
 #[test]
+fn restored_history_displays_completed_tool_output_and_errors() {
+    let mut h = mew_tui::harness::Harness::new(100, 40);
+    h.app.daemon_mode = true;
+    let mut state = ClientState::default();
+    apply(&mut h.app, &mut state, ready("a", "/tmp/a"));
+    let session_id = ulid::Ulid::new();
+    let message_id = ulid::Ulid::new();
+    let time = mew_message::ToolTime {
+        start: 0,
+        end: Some(1),
+    };
+    let tool = |name: &str, state| {
+        Part::ToolCall(mew_message::ToolCallPart {
+            base: PartBase {
+                id: ulid::Ulid::new(),
+                message_id,
+                session_id,
+            },
+            tool_name: name.into(),
+            call_id: name.into(),
+            state,
+            raw_input: String::new(),
+        })
+    };
+    let message = mew_message::Message {
+        id: message_id,
+        session_id,
+        role: mew_message::Role::Assistant,
+        parts: vec![
+            tool(
+                "python",
+                mew_message::ToolState::Completed(mew_message::ToolStateCompleted {
+                    input: serde_json::json!({"source": "print('hello')"}),
+                    output: "saved Python output".into(),
+                    metadata: None,
+                    diff: Some("+saved diff".into()),
+                    images: Vec::new(),
+                    time: time.clone(),
+                }),
+            ),
+            tool(
+                "read",
+                mew_message::ToolState::Error(mew_message::ToolStateError {
+                    input: serde_json::json!({"path":"missing.txt"}),
+                    error: "saved tool error".into(),
+                    time,
+                }),
+            ),
+        ],
+        time: mew_message::Time {
+            created: 0,
+            completed: Some(1),
+        },
+        assistant: Some(Default::default()),
+    };
+    apply(
+        &mut h.app,
+        &mut state,
+        ServerMessage::SessionHistory {
+            messages: vec![message],
+        },
+    );
+    h.render();
+    h.app.toggle_tool_batch_expanded();
+    let frame = h.render();
+    assert!(frame.contains("saved Python output"), "{frame}");
+    assert!(frame.contains("+saved diff"), "{frame}");
+    assert!(frame.contains("saved tool error"), "{frame}");
+}
+
+#[test]
 fn confirmed_project_changes_replace_local_discovery_and_file_catalog() {
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();

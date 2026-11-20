@@ -208,6 +208,10 @@ fn tool_picker_opens_full_canonical_args_results_and_errors() {
     h.app.open_tool(id, part);
     assert!(h.render().contains("actual full failure details"));
     h.app.status.session_id = "changed".into();
+    h.app
+        .apply_daemon_notification(&mew_protocol::ServerMessage::SessionHistory {
+            messages: vec![],
+        });
     let frame = h.render();
     assert!(
         frame.contains("Session changed") && !frame.contains("actual full failure details"),

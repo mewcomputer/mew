@@ -1096,9 +1096,19 @@ fn render_single_tool_call(
         }
     }
 
-    if let Some(ToolDisplayState::Completed { output, diff }) = app.tool_states.get(&tc.base.id) {
+    let completed = match app.tool_states.get(&tc.base.id) {
+        Some(ToolDisplayState::Completed { output, diff }) => {
+            Some((output.as_str(), diff.as_deref()))
+        }
+        None => match &tc.state {
+            ToolState::Completed(state) => Some((state.output.as_str(), state.diff.as_deref())),
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some((output, diff)) = completed {
         if !output.is_empty() {
-            let parsed = output.as_str().into_text().unwrap_or_default();
+            let parsed = output.into_text().unwrap_or_default();
             let is_bash = tc.tool_name == "bash";
             let lines = parsed.lines;
             let line_count = lines.len();
@@ -1191,9 +1201,17 @@ fn render_single_tool_call(
             }
         }
     }
-    if let Some(ToolDisplayState::Error(err)) = app.tool_states.get(&tc.base.id) {
+    let error = match app.tool_states.get(&tc.base.id) {
+        Some(ToolDisplayState::Error(error)) => Some(error.as_str()),
+        None => match &tc.state {
+            ToolState::Error(state) => Some(state.error.as_str()),
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some(err) = error {
         if !err.is_empty() {
-            let parsed = err.as_str().into_text().unwrap_or_default();
+            let parsed = err.into_text().unwrap_or_default();
             for line in parsed.lines {
                 sel_ctx.push_tool_output(tool_width, line, "      ", tool_bg);
             }
