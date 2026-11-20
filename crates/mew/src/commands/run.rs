@@ -95,13 +95,14 @@ pub(crate) async fn build_and_run(
 ) -> Result<()> {
     let (provider_id, model_id) = resolve_model(cfg, cat, provider_flag, model_flag);
 
-    let session_id = ulid::Ulid::new().to_string();
+    let session_id = ulid::Ulid::new();
+    let session_key = session_id.to_string();
     let sessions = mew_session::session_dir();
-    let _lease = mew_session::try_writer_lease(&sessions, &session_id)
+    let _lease = mew_session::try_writer_lease(&sessions, &session_key)
         .await
         .context("acquire session writer")?
         .context("session is open in another process")?;
-    let session_writer = SessionWriter::open_at(&sessions, &session_id)
+    let session_writer = SessionWriter::open_at(&sessions, &session_key)
         .await
         .context("open session")?;
     let todos_path = session_writer.path().parent().map(|p| p.join("todos.json"));
@@ -115,8 +116,8 @@ pub(crate) async fn build_and_run(
     let cwd = std::env::current_dir().unwrap_or_default();
     let discovered = mew_ext_broker::discover_extensions(&cwd);
 
-    let provider =
-        build_provider(cfg, cat, &provider_id, &model_id, raw, None).context("build provider")?;
+    let provider = build_provider(cfg, cat, &provider_id, &model_id, raw, Some(session_id))
+        .context("build provider")?;
     let (mut shutdown, signal_task) = super::daemon::monitor_shutdown()?;
     let mut discovery_shutdown = shutdown.clone();
     let mcp_tools = match crate::setup::agent::discover_mcp_tools(&cwd, async move {
@@ -149,7 +150,7 @@ pub(crate) async fn build_and_run(
             raw,
             mode,
             Some(session_writer),
-            None,
+            Some(session_id),
             None,
             dispatcher.clone(),
             todos_path.clone(),

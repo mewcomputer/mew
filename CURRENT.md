@@ -4607,3 +4607,15 @@ Verified the full isolated Rust workspace suite, JavaScript suites, site tests,
 subprocess end-to-end tests, and the optional iroh build. Linux tests covered
 Bubblewrap, restricted personas and subagents, MCP, configuration, and session
 leases. A real MCP SDK server received session deletion on SIGINT and SIGTERM.
+
+### 2026-11-19: Test code mode with live models and MCP
+
+Ran isolated Python code mode through the real `mew run` path with Codex and
+Hy, an actual filesystem MCP server, and two Wine Quality analysis tasks. All
+four artifacts matched independent numerical references. The runs exposed a
+large-output token cost and recoverable Hy tool-input errors.
+
+Fixed OpenCode Go's noninteractive session identity and added an opt-in live
+provider regression. Verified the failure against the real API before the fix,
+the live check and session identity after it, both Hy task reruns, and the
+noninteractive MCP-discovery interruption test.
