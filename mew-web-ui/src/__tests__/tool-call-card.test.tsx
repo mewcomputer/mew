@@ -86,10 +86,32 @@ it("shows a Python cell and its nested call status and details", async () => {
     toolName: "python", input: { source: "text(tools.read({'path': 'notes.txt'}))" }, state: "completed",
     nestedCalls: [{ parent_call_id: "call-1", call_id: "nested-1", tool_name: "read", input: { path: "notes.txt" }, status: "error", error: "permission denied" }],
   })} />);
-  expect(screen.getByText("text(tools.read({'path': 'notes.txt'}))")).toBeTruthy();
-  expect(screen.getByText("read")).toBeTruthy();
+  expect(screen.getByLabelText("Python code").textContent).toContain("text(tools.read({'path': 'notes.txt'}))");
+  expect(screen.getByLabelText("Nested tools").textContent).toContain("read");
   expect(screen.getByText("notes.txt")).toBeTruthy();
   expect(screen.getByText("permission denied")).toBeTruthy();
-  await user.click(screen.getByRole("button", { name: "Show python details" }));
+  await user.click(screen.getByRole("button", { name: "Show read details" }));
   expect(screen.getByText(JSON.stringify({ path: "notes.txt" }, null, 2), { normalizer: (text) => text })).toBeTruthy();
+});
+
+it("names multiple executed tools and retains Python source for inspection", () => {
+  const source = "value = tools.read({'path': 'a'})\nprint(value)";
+  render(<ToolCallCard part={toolPart({
+    toolName: "python", input: { source }, state: "completed",
+    nestedCalls: [
+      { parent_call_id: "call-1", call_id: "n1", tool_name: "read", input: {}, status: "completed" },
+      { parent_call_id: "call-1", call_id: "n2", tool_name: "write", input: {}, status: "completed" },
+    ],
+  })} />);
+  expect(screen.getByRole("button", { name: "Show read, write details" })).toBeTruthy();
+  expect(screen.getByLabelText("Python code").textContent).toContain(source);
+});
+
+it("keeps the original Python available when display indentation changes", async () => {
+  const user = userEvent.setup();
+  const source = "if ready:\n    print('hello')";
+  render(<ToolCallCard part={toolPart({ toolName: "python", input: { source } })} />);
+  expect(screen.getByLabelText("Python code").textContent).toContain("if ready:\n  print('hello')");
+  await user.click(screen.getByRole("button", { name: "Show python details" }));
+  expect(screen.getByText("Original Python").nextElementSibling?.textContent).toBe(source);
 });

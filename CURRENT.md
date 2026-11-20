@@ -4731,3 +4731,10 @@ when a session is restored. Match streamed tool updates by part ID and decode
 the daemon's tool-state status field. Verified the UI and client suites and
 production build, Electron host tests, and a live Electron session with a nested
 read, restored history, and a denied write.
+
+### 2026-11-20: Make Python tool activity easier to skim
+
+TUI and Electron tool cards lead with the nested tools that actually ran and
+show syntax-colored Python. Python display indentation uses parsed syntax to
+keep multiline strings intact; expanded details retain the original source.
+Verified TUI rendering and golden tests, UI tests, and the production build.

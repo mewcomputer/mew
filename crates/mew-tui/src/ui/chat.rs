@@ -936,6 +936,70 @@ fn trace_label(count: usize) -> String {
     }
 }
 
+/// Reindent syntactically complete cells for display while preserving strings.
+fn python_display_source(source: &str) -> String {
+    let mut parser = tree_sitter::Parser::new();
+    if parser
+        .set_language(&tree_sitter_python::LANGUAGE.into())
+        .is_err()
+    {
+        return source.to_owned();
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return source.to_owned();
+    };
+    if tree.root_node().has_error() {
+        return source.to_owned();
+    }
+    fn collect_strings(node: tree_sitter::Node<'_>, ranges: &mut Vec<std::ops::Range<usize>>) {
+        if node.kind() == "string" {
+            ranges.push(node.byte_range());
+            return;
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            collect_strings(child, ranges);
+        }
+    }
+    let mut strings = Vec::new();
+    collect_strings(tree.root_node(), &mut strings);
+    let mut offset = 0;
+    let mut indents = Vec::new();
+    for line in source.split('\n') {
+        let in_string = strings
+            .iter()
+            .any(|range| range.start < offset && offset < range.end);
+        offset += line.len() + 1;
+        if in_string || line.trim().is_empty() {
+            indents.push(None);
+            continue;
+        }
+        let indent = line
+            .bytes()
+            .take_while(|b| *b == b' ' || *b == b'\t')
+            .count();
+        if line.as_bytes()[..indent].contains(&b'\t') {
+            return source.to_owned();
+        }
+        indents.push(Some(indent));
+    }
+    let Some(unit) = indents.iter().flatten().copied().filter(|n| *n > 0).min() else {
+        return source.to_owned();
+    };
+    if indents.iter().flatten().any(|n| n % unit != 0) {
+        return source.to_owned();
+    }
+    source
+        .split('\n')
+        .zip(indents)
+        .map(|(line, indent)| match indent {
+            Some(n) if n > 0 => format!("{}{}", " ".repeat(n / unit * 2), &line[n..]),
+            _ => line.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn render_single_tool_call(
     sel_ctx: &mut ChatLineCtx<'_>,
     app: &App,
@@ -946,6 +1010,22 @@ fn render_single_tool_call(
 ) {
     let tool_bg = app.theme.resolve("tool.background");
     let (state_label, state_color) = tool_call_label_and_color(app, tc);
+    let calls = nested_calls
+        .iter()
+        .filter(|call| call.parent_call_id == tc.call_id);
+    let mut names = Vec::new();
+    if tc.tool_name == "python" {
+        for call in calls.clone() {
+            if !names.contains(&call.tool_name.as_str()) {
+                names.push(call.tool_name.as_str());
+            }
+        }
+    }
+    let label = if names.is_empty() {
+        tc.tool_name.clone()
+    } else {
+        names.join(", ")
+    };
 
     if let Some(line) = push_tool_edge(tool_width, true, tool_bg) {
         sel_ctx.push_line(line);
@@ -956,7 +1036,7 @@ fn render_single_tool_call(
         vec![
             Span::styled("  ", tool_bg_style),
             Span::styled(
-                format!("{} {}", state_label, tc.tool_name),
+                format!("{} {}", state_label, label),
                 Style::default()
                     .fg(state_color)
                     .bg(tool_bg)
@@ -994,25 +1074,36 @@ fn render_single_tool_call(
             } else {
                 TOOL_LINES_MAX
             };
-            let mut lines = source.lines();
+            use ratatui_mdstream::highlight::Highlighter;
+            let display = if app.bash_expanded {
+                source.to_owned()
+            } else {
+                python_display_source(source)
+            };
+            let mut highlighter = ratatui_mdstream::highlight::SyntectHighlighter::default();
+            highlighter.begin_block(Some("python"));
+            let mut lines = display.lines();
             for line in lines.by_ref().take(limit) {
-                sel_ctx.push_tool_output(tool_width, Line::raw(line.to_owned()), "      ", tool_bg);
+                let spans = highlighter
+                    .highlight_line(Some("python"), line)
+                    .into_iter()
+                    .map(|(text, style)| Span::styled(text, style.bg(tool_bg)))
+                    .collect::<Vec<_>>();
+                sel_ctx.push_tool_output(tool_width, Line::from(spans), "  ", tool_bg);
             }
+            highlighter.end_block();
             let remaining = lines.count();
             if remaining > 0 {
                 sel_ctx.push_tool_output(
                     tool_width,
                     Line::raw(format!("... ({remaining} more lines; ctrl-o to expand)")),
-                    "      ",
+                    "  ",
                     tool_bg,
                 );
             }
         }
     }
 
-    let calls = nested_calls
-        .iter()
-        .filter(|call| call.parent_call_id == tc.call_id);
     if !app.bash_expanded && calls.clone().next().is_some() {
         sel_ctx.push_tool_output(
             tool_width,
@@ -1020,7 +1111,7 @@ fn render_single_tool_call(
                 "nested tools · ctrl-o for details",
                 Style::default().fg(app.theme.resolve("text.muted")),
             ),
-            "      ",
+            "  ",
             tool_bg,
         );
     }
@@ -1055,7 +1146,7 @@ fn render_single_tool_call(
                     Style::default().fg(app.theme.resolve("text.muted")),
                 ),
             ]),
-            "      ",
+            "  ",
             tool_bg,
         );
         if app.bash_expanded {
@@ -1064,7 +1155,7 @@ fn render_single_tool_call(
                     sel_ctx.push_tool_output(
                         tool_width,
                         Line::raw(line.to_owned()),
-                        "        ",
+                        "    ",
                         tool_bg,
                     );
                 }
@@ -1078,7 +1169,7 @@ fn render_single_tool_call(
                         line.to_owned(),
                         Style::default().fg(app.theme.resolve("text.error")),
                     ),
-                    "        ",
+                    "    ",
                     tool_bg,
                 );
             }
@@ -2058,6 +2149,20 @@ mod tests {
     }
 
     #[test]
+    fn python_display_reindents_blocks_without_changing_multiline_strings() {
+        let source = "if ready:\n    text = \"\"\"first\n    keep this indentation\n    \"\"\"\n    if text:\n        print(text)";
+        assert_eq!(python_display_source(source), "if ready:\n  text = \"\"\"first\n    keep this indentation\n    \"\"\"\n  if text:\n    print(text)");
+        for source in ["if x:\n\tprint(x)", "if x:\n    print("] {
+            assert_eq!(python_display_source(source), source);
+        }
+        let source = "if ready:\n    s = f\"\"\"hello\n    {name}\n    more\"\"\"\n    print(s)";
+        assert_eq!(
+            python_display_source(source),
+            "if ready:\n  s = f\"\"\"hello\n    {name}\n    more\"\"\"\n  print(s)"
+        );
+    }
+
+    #[test]
     fn python_cell_renders_source_and_nested_permission_failure() {
         let mut app = App::new();
         let python = tool_call_part("python", serde_json::json!({"source": "text('hello')"}));
@@ -2104,6 +2209,16 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(rendered.contains("text('hello')"), "{rendered}");
+        assert!(
+            built.lines.iter().any(|line| {
+                line.spans
+                    .iter()
+                    .any(|span| span.content.contains("'hello'") && span.style.fg.is_some())
+            }),
+            "Python string should have syntax color"
+        );
+        assert!(rendered.contains("read, write"), "{rendered}");
+        assert!(!rendered.contains("▶ python"), "{rendered}");
         assert!(rendered.contains("4 B"), "{rendered}");
         assert!(rendered.contains("write"), "{rendered}");
         assert!(rendered.contains("blocked.txt"), "{rendered}");

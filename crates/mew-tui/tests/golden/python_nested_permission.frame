@@ -1,10 +1,10 @@
 ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-  ▶ python
-      result = tools.write({'path': 'notes.txt', 'content': 'hello'})
-      text(result['error'])
-      nested tools · ctrl-o for details
-      ↳ ✗ write notes.txt
-        permission denied
+  ▶ write
+  result = tools.write({'path': 'notes.txt', 'content': 'hello'})
+  text(result['error'])
+  nested tools · ctrl-o for details
+  ↳ ✗ write notes.txt
+    permission denied
 ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
 
 

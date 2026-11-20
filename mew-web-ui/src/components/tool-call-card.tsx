@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { ChevronRight, ChevronDown, Clock3, CheckCircle2, XCircle, Loader2, Copy, FileEdit, FilePlus } from "lucide-react";
 import { useSessionStore, type MessagePart } from "../stores/session";
 import { cn } from "../lib/utils";
+import { CodeBlock } from "./code-block";
+import { formatPythonForDisplay } from "../lib/python-display";
 
 type Sensitivity = "readonly" | "mutating" | "dangerous";
 
@@ -74,6 +76,10 @@ export function ToolCallCard({ part }: { part: Extract<MessagePart, { type: "too
   const sensitivity = inferSensitivity(part.toolName);
   const source = part.toolName === "python" && part.input && typeof part.input === "object"
     ? (part.input as Record<string, unknown>).source : undefined;
+  const label = part.toolName === "python" && part.nestedCalls?.length
+    ? [...new Set(part.nestedCalls.map((call) => call.tool_name))].join(", ")
+    : part.toolName;
+  const displaySource = useMemo(() => typeof source === "string" ? formatPythonForDisplay(source) : null, [source]);
   const sens = sensitivityMeta(sensitivity);
   const elapsed = useElapsed(part.time?.start, part.time?.end, state === "running");
 
@@ -101,14 +107,14 @@ export function ToolCallCard({ part }: { part: Extract<MessagePart, { type: "too
       <button
         type="button"
         onClick={() => setExpanded(!expanded)}
-        aria-label={`${expanded ? "Hide" : "Show"} ${part.toolName} details`}
+        aria-label={`${expanded ? "Hide" : "Show"} ${label} details`}
         aria-expanded={expanded}
         className="motion-pressable flex min-w-0 w-full items-start gap-2 rounded-lg px-3 py-2 text-left hover:bg-muted/40"
       >
         <span className="mt-0.5 shrink-0" aria-hidden="true"><StateIcon state={state} /></span>
         <span className="min-w-0 flex-1">
           <span className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-            <span className="min-w-0 break-words font-mono text-xs leading-5 [overflow-wrap:anywhere]">{part.toolName}</span>
+            <span className="min-w-0 break-words font-mono text-xs leading-5 [overflow-wrap:anywhere]">{label}</span>
             <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] leading-4 text-muted-foreground">
               <span className={cn("capitalize", state === "error" && "text-destructive", state === "completed" && "text-text-success", state === "running" && "text-text-accent")}>{state}</span>
               {elapsed && <span className="tabular-nums">{elapsed}</span>}
@@ -124,8 +130,10 @@ export function ToolCallCard({ part }: { part: Extract<MessagePart, { type: "too
         )}
       </button>
 
-      {typeof source === "string" && (
-        <pre className="max-h-40 overflow-auto border-t border-border px-3 py-2 text-[11px] leading-relaxed">{source}</pre>
+      {displaySource !== null && (
+        <div className="max-h-40 overflow-auto border-t border-border px-3 py-2 text-[11px] leading-relaxed" aria-label="Python code">
+          <CodeBlock key={displaySource} code={displaySource} lang="python" showHeader={false} flush />
+        </div>
       )}
       {part.nestedCalls && part.nestedCalls.length > 0 && (
         <div className="space-y-2 border-t border-border px-3 py-2 text-xs" aria-label="Nested tools">
@@ -165,6 +173,7 @@ export function ToolCallCard({ part }: { part: Extract<MessagePart, { type: "too
 
       {expanded && (
         <div className="min-w-0 border-t border-border px-3 py-2">
+          {typeof source === "string" && displaySource !== source && <div><span>Original Python</span><pre className="max-h-40 overflow-auto">{source}</pre></div>}
           {part.input != null && typeof source !== "string" && (
             <div className="mb-2">
               <div className="flex items-center justify-between">
