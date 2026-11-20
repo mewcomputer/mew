@@ -4643,3 +4643,11 @@ Verified runner validation, checker failures, credential handling and process
 cleanup. Live Codex and Hy MCP runs passed, as did a separate Codex comparison
 of full code mode and direct tools. A live turn-limit failure retained its usage.
 The deterministic runner tests also run in CI and through `just test-evals`.
+
+### 2026-11-20: Fix persistent shell completion framing
+
+Persistent shell commands now complete when stdout lacks a trailing newline,
+while retaining their output and exit status. Added shell-session and bash-tool
+regressions, including a follow-up command in the same session.
+
+Verified the `mew-tools` test suite, workspace formatting, and crate clippy.

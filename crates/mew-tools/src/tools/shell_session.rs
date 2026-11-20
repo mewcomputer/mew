@@ -133,12 +133,13 @@ impl ShellSession {
 
         let stdin = self.stdin.as_mut().ok_or(ShellError::NoStdin)?;
 
-        // Write the command, then echo the sentinel with the exit code.
-        // The sentinel is always printed because `echo` runs after the
+        // Write the command, then print the sentinel with the exit code.
+        // The sentinel is always printed because `printf` runs after the
         // command completes (even on failure). If the command calls
         // `exit`, the shell process dies and we detect that in the read
         // loop below (stdout closes without a sentinel).
-        let full_command = format!("{command}\n__mew_exit=$?\necho '{sentinel}'\"$__mew_exit\"\n");
+        let full_command =
+            format!("{command}\n__mew_exit=$?\nprintf '\\n%s%s\\n' '{sentinel}' \"$__mew_exit\"\n");
         stdin
             .write_all(full_command.as_bytes())
             .await
@@ -181,6 +182,10 @@ impl ShellSession {
                 Ok(Ok(Some(l))) => {
                     // Check for sentinel.
                     if l.starts_with(&sentinel) {
+                        // Discard the framing newline after newline-terminated output.
+                        if stdout_lines.last().is_some_and(String::is_empty) {
+                            stdout_lines.pop();
+                        }
                         let code_str = &l[sentinel.len()..];
                         exit_code = code_str.trim().parse::<i32>().ok().or(Some(-1));
                         stdout_done = true;
@@ -324,6 +329,39 @@ mod tests {
         // which would kill the shell process.
         let result = session.execute("false", 10).await.unwrap();
         assert_eq!(result.exit_code, 1);
+    }
+
+    #[tokio::test]
+    async fn test_shell_session_output_without_trailing_newline() {
+        let mut session = ShellSession::new(std::path::PathBuf::from("/tmp"));
+        let result = session
+            .execute("printf 'first\\nlast'; false", 1)
+            .await
+            .unwrap();
+        assert!(!result.timed_out);
+        assert_eq!(result.stdout, "first\nlast");
+        assert_eq!(result.exit_code, 1);
+
+        let next = session.execute("echo recovered", 1).await.unwrap();
+        assert!(!next.timed_out);
+        assert_eq!(next.stdout, "recovered");
+        assert_eq!(next.exit_code, 0);
+    }
+
+    #[tokio::test]
+    async fn test_shell_session_preserves_output_line_breaks() {
+        let mut session = ShellSession::new(std::path::PathBuf::from("/tmp"));
+        for (command, output) in [
+            ("true", ""),
+            ("printf 'line'", "line"),
+            ("printf 'line\\n'", "line"),
+            ("printf 'line\\n\\n'", "line\n"),
+        ] {
+            let result = session.execute(command, 1).await.unwrap();
+            assert!(!result.timed_out, "{command}");
+            assert_eq!(result.stdout, output, "{command}");
+            assert_eq!(result.exit_code, 0, "{command}");
+        }
     }
 
     #[tokio::test]
