@@ -4630,3 +4630,16 @@ Configured secret words are redacted from structured errors.
 Verified JSONL success and failure paths, nested tool success and failure,
 secret redaction, live model runs, 720 CLI/agent/daemon tests, Linux agent tests
 with Bubblewrap, clippy, architecture checks and documentation tests.
+
+### 2026-11-19: Add a reusable evaluation runner
+
+Added a manifest-driven runner for model and tool-mode matrices, repeated runs,
+isolated Mew state, real MCP servers and external artifact checkers. Results
+include JSONL events, transcripts, JSON and CSV summaries, and binary hashes.
+The example uses a small attributed Wine Quality sample and a filesystem MCP
+server.
+
+Verified runner validation, checker failures, credential handling and process
+cleanup. Live Codex and Hy MCP runs passed, as did a separate Codex comparison
+of full code mode and direct tools. A live turn-limit failure retained its usage.
+The deterministic runner tests also run in CI and through `just test-evals`.

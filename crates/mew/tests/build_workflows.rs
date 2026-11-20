@@ -176,3 +176,12 @@ fn linux_builds_install_native_terminal_and_desktop_link_dependencies() {
         }
     }
 }
+
+#[test]
+fn ci_runs_the_eval_runner_tests() {
+    let workflow = workflow("ci.yml");
+    let steps = workflow["jobs"]["web-ci"]["steps"].as_sequence().unwrap();
+    assert!(steps.iter().any(|step| step["run"]
+        .as_str()
+        .is_some_and(|run| run.contains("python3 -B -m unittest discover -s evals/tests"))));
+}

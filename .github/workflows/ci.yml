@@ -92,6 +92,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Test evaluation runner
+        run: python3 -B -m unittest discover -s evals/tests
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
