@@ -417,6 +417,27 @@ async fn clear_keeps_the_transcript_until_the_daemon_confirms() {
 }
 
 #[tokio::test]
+async fn compact_waits_for_the_daemon_result_before_showing_feedback() {
+    let mut app = mew_tui::App::new();
+    let mut target = RecordingTarget::new();
+    let mut should_break = false;
+    let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
+        active_persona: None,
+    }));
+    let mut cx = runtime::Ctx {
+        app: &mut app,
+        target: &mut target,
+        should_break: &mut should_break,
+        cat: None,
+        loaded_personas: &[],
+        plugin_info: &plugin_info,
+    };
+    runtime::handle_action(&mut cx, Action::SlashCommand("/compact".into())).await;
+    assert!(cx.app.messages().is_empty());
+    assert_eq!(target.calls, ["compact"]);
+}
+
+#[tokio::test]
 async fn test_synthetic_message_renders_immediately() {
     let mut app = mew_tui::App::new();
     let mut target = RecordingTarget::new();

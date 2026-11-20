@@ -780,12 +780,88 @@ async fn slash_command_compact_returns_slash_result() {
     match r {
         ServerMessage::SlashResult { text } => {
             assert!(
-                text.contains("compaction"),
-                "expected slash result mentioning compaction, got {text:?}"
+                text.contains("nothing to compact"),
+                "expected empty compaction result, got {text:?}"
             );
         }
         _ => unreachable!(),
     }
+}
+
+#[tokio::test]
+async fn slash_command_compacts_and_persists_without_another_prompt() {
+    let factory = make_text_agent_factory(Arc::new(|| FakeProvider::text_response("response")));
+    let (dir, socket) = spawn_daemon(move |params| {
+        let (mut agent, model, persona) = factory(params)?;
+        agent.keep_turns = 1;
+        Ok((agent, model, persona))
+    })
+    .await;
+    let mut ws = connect(&socket).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: ClientKind::Tui,
+        },
+    )
+    .await;
+    let ready =
+        recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await;
+    let ServerMessage::SessionReady { session_id, .. } = ready else {
+        unreachable!()
+    };
+
+    send(
+        &mut ws,
+        ClientMessage::Prompt {
+            text: "remember this".into(),
+            attachments: vec![],
+        },
+    )
+    .await;
+    recv_one_matching(&mut ws, |m| {
+        matches!(
+            m,
+            ServerMessage::Provider {
+                event: mew_message::ProviderEventWire::MessageEnd { .. }
+            }
+        )
+    })
+    .await;
+    send(
+        &mut ws,
+        ClientMessage::SlashCommand {
+            command: "/compact".into(),
+        },
+    )
+    .await;
+    let result =
+        recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::SlashResult { .. })).await;
+    assert!(
+        matches!(result, ServerMessage::SlashResult { ref text } if text.contains("compacted")),
+        "{result:?}"
+    );
+
+    let transcript = tokio::fs::read_to_string(
+        dir.path()
+            .join("sessions")
+            .join(session_id)
+            .join("session.jsonl"),
+    )
+    .await
+    .unwrap();
+    let messages: Vec<mew_message::Message> = transcript
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(
+        messages.iter().any(|message| message
+            .parts
+            .iter()
+            .any(|part| matches!(part, mew_message::Part::Compaction(_)))),
+        "no persisted compaction marker: {messages:?}"
+    );
 }
 
 #[tokio::test]

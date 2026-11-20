@@ -2513,7 +2513,7 @@ where
                         None
                     };
                     let result = {
-                        let agent = session.agent.lock().await;
+                        let mut agent = session.agent.lock().await;
                         match cmd {
                             "/clear" => match agent.clear_context().await {
                                 Ok(()) => {
@@ -2522,10 +2522,11 @@ where
                                 }
                                 Err(error) => Some(format!("Could not clear context. {error}")),
                             },
-                            "/compact" => {
-                                agent.force_compact().await;
-                                Some("compaction done".to_string())
-                            }
+                            "/compact" => Some(match agent.compact_context().await {
+                                Ok(0) => "nothing to compact".to_string(),
+                                Ok(removed) => format!("compacted {removed} messages"),
+                                Err(error) => format!("compaction failed: {error}"),
+                            }),
                             "/goal" => {
                                 use mew_agent::{GoalState, GoalStatus};
                                 let sub = command.strip_prefix("/goal").unwrap_or("").trim();

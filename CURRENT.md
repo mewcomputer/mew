@@ -4752,3 +4752,10 @@ Cache parsed and highlighted Python cells by source, palette and expansion
 state, favoring recent cells and showing older overflow as plain source.
 Verified TUI rendering, history and golden tests, and benchmarked dirty redraws
 with up to 300 large cells.
+
+### 2026-11-20: Run manual compaction immediately
+
+The daemon compacts and persists context when it handles `/compact`, then
+reports the result to the TUI. Compaction waits for any active turn and reports
+when there is nothing to compact or when it fails. Verified daemon end-to-end,
+agent compaction, and TUI dispatch tests.

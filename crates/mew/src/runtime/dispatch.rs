@@ -484,12 +484,8 @@ async fn handle_slash_command<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: Strin
             Flow::Continue
         }
         SlashResult::Compact => {
-            match cx.target.compact().await {
-                Ok(()) => {
-                    cx.app
-                        .push_synthetic_message("compaction will run on next turn".into());
-                }
-                Err(Unsupported(reason)) => cx.app.set_alert(reason),
+            if let Err(Unsupported(reason)) = cx.target.compact().await {
+                cx.app.set_alert(reason);
             }
             Flow::Continue
         }

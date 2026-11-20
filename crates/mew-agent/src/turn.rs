@@ -1173,7 +1173,7 @@ impl Agent {
 
     /// Compact the context immediately, regardless of token threshold.
     /// Returns the number of messages removed.
-    pub async fn compact_context(&mut self) -> usize {
+    pub async fn compact_context(&mut self) -> Result<usize, String> {
         let mut request = Request {
             messages: self.prepare_messages().await,
             system: self.request_system().await,
@@ -1181,7 +1181,7 @@ impl Agent {
         };
         self.fit_request_context(&mut request, true)
             .await
-            .map_or(0, |(_, removed)| removed)
+            .map(|(_, removed)| removed)
     }
 }
 
