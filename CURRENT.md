@@ -4281,6 +4281,12 @@ ignored. Workspace Clippy, formatting, architecture, and theme checks passed.
 Local macOS checks used the library built from the pinned Ghostty revision
 after the local Zig linker failed.
 
+### 2026-11-19 TUI compaction notice order
+
+Render compaction notices where they occur in the transcript and record the
+actual header row for mouse clicks. Verified the ordering and hit-test
+regression with the full TUI suite.
+
 ### 2026-11-19: Garden homepage, docs palette, and share image
 
 The Astro homepage now uses Jianghu's landing markup, assets, and live
@@ -4538,3 +4544,55 @@ now replace files atomically while preserving symlinks.
 Verified the focused agent, configuration, MCP and supervisor tests, the
 JavaScript suites on Node 24 and 26, and daemon shutdown against a real MCP SDK
 server. The wider verification is in progress.
+### 2026-11-19: Homepage copy pass
+
+Updated the hero and chapter copy with examples from the terminal client,
+including test output, diff review, personas, and approval prompts. Matched
+the metadata and social card to the new headline.
+
+All 12 site tests passed. Checked the hero and install link at 390 and
+1280 pixels and inspected the 1200 × 630 social card.
+
+### 2026-11-19: Restore the homepage's original voice
+
+Restored the headline, section headings, and primary action. The body copy
+adds examples from Mew while keeping the original page structure. Restored
+the matching share card and updated its description.
+
+All 12 site tests passed. Checked the hero and install link at 390 and
+1280 pixels.
+
+### 2026-11-19: Restore the original homepage body copy
+
+Restored the original descriptions and gave sections 4–6 new headings.
+Verified that the paragraphs match the original and all 12 site tests pass.
+
+### 2026-11-19: Add examples to the homepage copy
+
+Added one sentence each about tracing a failing test, asking before a push,
+and using a release skill. Verified the original wording and all 12 site tests.
+
+### 2026-11-19: Expand the subagent and persona examples
+
+Added short examples of finding API callers with a subagent and switching
+from planner to builder after reviewing a plan. Verified the built copy
+and all 12 site tests.
+
+### 2026-11-19: Shorten the homepage subtitle
+
+Kept the sentence about choosing a model, instructions, and tools. Verified
+the built hero and all 12 site tests.
+
+### 2026-11-19: Name the homepage customization options
+
+The hero subtitle now names skills, personas, and experimental plugins.
+Verified the built subtitle and all 12 site tests.
+
+### 2026-11-19: Move the homepage into Astro
+
+The published homepage now owns its copy and markup in `index.astro`.
+Astro renders the install picker and binds the garden assets directly.
+Jianghu's standalone preview remains available separately.
+
+Verified equivalent rendered markup and copy, all 12 site tests, the
+Jianghu build, and the mobile hero and install link.

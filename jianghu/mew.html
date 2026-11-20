@@ -47,7 +47,7 @@
   <section class="hero" id="top" data-focus="garden">
     <div class="intro">
       <h1>Mew is an agent harness designed for your work.</h1>
-      <p class="lede">mew gives you a place to work with agents you can configure. Choose a model, give it instructions, and decide which tools it can use.</p>
+      <p class="lede">Moddable with skills, personas, and experimental plugins.</p>
       <div class="ctas">
         <a class="mew-button primary" href="https://mew.computer/docs/getting-started/installation/" data-install-link>Get started with mew <span aria-hidden="true">→</span></a>
         <a class="mew-button" href="https://github.com/mewcomputer/mew">View on GitHub</a>
@@ -61,7 +61,7 @@
     <div class="panel">
       <p class="num">01</p>
       <h2>Give it a task.</h2>
-      <p>Ask mew to explore a codebase, investigate a problem, or make a change. It can search and read files, edit them, and run commands as the work takes shape.</p>
+      <p>Ask mew to explore a codebase, investigate a problem, or make a change. It can search and read files, edit them, and run commands as the work takes shape. If a test fails, ask mew to trace the error back to the code that triggered it.</p>
       <p>You can follow along, answer questions, and change direction at any point.</p>
     </div>
   </section>
@@ -72,6 +72,7 @@
       <h2>Bring in another agent.</h2>
       <p>Give a subagent a focused task while mew continues working. Ask for an investigation, a review, or a second perspective on a plan. The subagent reports its result back to the conversation.</p>
       <p>You can give subagents their own instructions and choose which models and tools they use.</p>
+      <p>If you’re replacing an API, ask a subagent to look for callers that still depend on it while you work on the replacement.</p>
     </div>
   </section>
 
@@ -81,22 +82,23 @@
       <h2>Make an agent for the job.</h2>
       <p>Personas let you give an agent a role and its own instructions. You might set up one for coding, one for research, or one that’s just there for conversation.</p>
       <p>Each persona can use a different model and tool set. Give a coding persona access to the shell, or leave tools off entirely.</p>
+      <p>For a bigger change, start with the built-in planner. Once you’ve read its plan, switch to the builder and ask it to make the edits.</p>
     </div>
   </section>
 
   <section class="room" data-focus="wall" data-side="right">
     <div class="panel">
       <p class="num">04</p>
-      <h2>Choose when mew asks.</h2>
-      <p>Set permissions for the actions you want to review. You can configure rules for tools, commands, and paths, then choose a permission mode that suits the work.</p>
+      <h2>Decide what needs approval.</h2>
+      <p>Set permissions for the actions you want to review. You can configure rules for tools, commands, and paths, then choose a permission mode that suits the work. Let mew run the tests and ask before pushing a branch.</p>
     </div>
   </section>
 
   <section class="room" data-focus="gate" data-side="left">
     <div class="panel">
       <p class="num">05</p>
-      <h2>Give it context that carries forward.</h2>
-      <p>Add project instructions and reusable skills for the things you do often. Mew can load them into a conversation as needed.</p>
+      <h2>Pick up where you left off.</h2>
+      <p>Add project instructions and reusable skills for the things you do often. Mew can load them into a conversation as needed. A release skill can spell out which checks to run before cutting a tag.</p>
       <p>Your sessions are saved locally, so you can return to a conversation and see what happened.</p>
     </div>
   </section>
@@ -104,7 +106,7 @@
   <section class="room" id="start" data-focus="tower" data-side="left">
     <div class="panel">
       <p class="num">06</p>
-      <h2>Start with a model and a task.</h2>
+      <h2>Try mew in your project.</h2>
       <p>Choose a supported provider, open a session, and tell mew what you want to work on.</p>
       <!-- install-picker -->
       <div class="ctas">
