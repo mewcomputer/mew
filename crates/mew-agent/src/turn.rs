@@ -217,7 +217,11 @@ impl Agent {
             sort_tool_defs(&mut tool_defs);
             let direct_tool_defs = tool_defs.clone();
             if self.uses_code_mode() {
-                tool_defs = vec![self.python_tool_definition()];
+                tool_defs = if self.python_available() {
+                    vec![self.python_tool_definition()]
+                } else {
+                    vec![]
+                };
             }
 
             // Ingest any user guidance queued since the last request so it
@@ -359,7 +363,11 @@ impl Agent {
                     let code_mode = self.uses_code_mode_for(provider_id, model_id);
                     fallback_request.system = self.request_system_for_mode(code_mode).await;
                     fallback_request.tools = if code_mode {
-                        vec![self.python_tool_definition()]
+                        if self.python_available() {
+                            vec![self.python_tool_definition()]
+                        } else {
+                            vec![]
+                        }
                     } else {
                         direct_tool_defs.clone()
                     };
@@ -878,8 +886,11 @@ impl Agent {
             Some(persona) => format!("{}\n\n{}", persona, self.system),
             None => self.system.clone(),
         };
-        if code_mode {
+        if code_mode && self.python_available() {
             system.push_str("\n\n## Python tool mode\n\nThe only direct tool is `python`. Call other available tools inside Python using `tools.name(arguments)`, with the schemas in the Python tool description. For example, use `result = tools.read({\"path\": \"file.txt\"}); text(result[\"output\"])` to read a file. Tool calls return dictionaries with `output` and `error`; check errors before using results. Python variables persist between calls. Use `text(value)` or `print` to show results. When Python is isolated, access the workspace and network through the available tools, not Python's direct file or network APIs.");
+            if self.python_isolated() {
+                system.push_str(" Python runs isolated in this session.");
+            }
             system.push_str(&format!(
                 " After {} minutes of inactivity, or when the idle worker limit requires eviction, Python may stop and its variables and scratch files are lost. If the daemon remains running, the next Python call reports this before running.",
                 crate::python::PYTHON_IDLE_TIMEOUT.as_secs() / 60

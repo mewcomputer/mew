@@ -53,12 +53,14 @@ impl Tool for PythonTool {
 pub(crate) struct PythonOptions {
     pub executable: PathBuf,
     pub isolated: bool,
+    pub cwd: PathBuf,
 }
 
 pub(crate) struct PythonWorker {
     child: Child,
     input: ChildStdin,
     output: BufReader<ChildStdout>,
+    isolated: bool,
     #[cfg(unix)]
     process_group: bool,
     diagnostics: Arc<std::sync::Mutex<Vec<u8>>>,
@@ -144,11 +146,13 @@ pub struct PythonSession {
     state: Arc<SharedPythonState>,
     cache: PythonWorkerCache,
     idle_timeout: Duration,
+    policy_revision: Arc<std::sync::atomic::AtomicU64>,
 }
 
 enum PythonExpiration {
     Idle,
     Capacity,
+    Isolation,
 }
 
 struct PythonSessionState {
@@ -183,6 +187,7 @@ impl PythonSession {
             })),
             cache,
             idle_timeout,
+            policy_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -202,6 +207,42 @@ impl PythonSession {
         PythonSessionGuard {
             state: Some(state),
             session: self,
+        }
+    }
+
+    pub(crate) fn update_policy(&self, available: bool, isolated: bool) {
+        use std::sync::atomic::Ordering;
+
+        let revision = self.policy_revision.fetch_add(1, Ordering::AcqRel) + 1;
+        if let Ok(mut state) = self.state.try_lock() {
+            if self.policy_revision.load(Ordering::Acquire) == revision {
+                self.reset_for_policy(&mut state, available, isolated);
+            }
+            return;
+        }
+        let session = self.clone();
+        let reset = move || {
+            let mut state = session.state.blocking_lock();
+            if session.policy_revision.load(Ordering::Acquire) == revision {
+                session.reset_for_policy(&mut state, available, isolated);
+            }
+        };
+        std::thread::spawn(reset);
+    }
+
+    fn reset_for_policy(&self, state: &mut PythonSessionState, available: bool, isolated: bool) {
+        if state
+            .worker
+            .as_ref()
+            .is_some_and(|worker| !available || worker.isolated != isolated)
+        {
+            let worker = state.worker.take();
+            state.expired = Some(PythonExpiration::Isolation);
+            if let Some(reaper) = state.reaper.take() {
+                reaper.abort();
+            }
+            self.cache.idle.lock().unwrap().remove(&self.state);
+            drop(worker);
         }
     }
 }
@@ -300,7 +341,9 @@ impl PythonWorker {
         let mut command = if options.isolated {
             isolated_command(&options.executable, scratch.path()).await?
         } else {
-            Command::new(&options.executable)
+            let mut command = Command::new(&options.executable);
+            command.current_dir(&options.cwd);
+            command
         };
         #[cfg(unix)]
         if !options.isolated {
@@ -342,6 +385,7 @@ impl PythonWorker {
             child,
             input,
             output: BufReader::new(output),
+            isolated: options.isolated,
             #[cfg(unix)]
             process_group: !options.isolated,
             diagnostics,
@@ -596,6 +640,11 @@ async fn isolated_command(python: &Path, scratch: &Path) -> io::Result<Command> 
 }
 
 impl crate::agent::Agent {
+    fn python_error(&self, message: String, ctx: &ToolCtx) -> ToolError {
+        let (message, count) = mew_tools::secrets::redact_secret_words(&message, &ctx.secrets);
+        ToolError::Execution(mew_tools::secrets::annotate_redaction(message, count))
+    }
+
     fn python_catalog(&self) -> Vec<Value> {
         let mut tools: Vec<_> = self
             .tools
@@ -618,7 +667,7 @@ impl crate::agent::Agent {
 
     pub(crate) fn python_tool_definition(&self) -> mew_provider::ToolDef {
         let tool = PythonTool {
-            isolated: self.code_mode.isolated,
+            isolated: self.python_isolated(),
         };
         let catalog = self.python_catalog();
         mew_provider::ToolDef {
@@ -655,10 +704,20 @@ impl crate::agent::Agent {
             .and_then(Value::as_str)
             .ok_or_else(|| ToolError::InvalidInput("source must be a string".into()))?;
         let catalog = self.python_catalog();
+        let isolated = self.python_isolated();
+        if worker
+            .as_ref()
+            .is_some_and(|process| process.isolated != isolated)
+        {
+            *worker = None;
+            worker.state.as_mut().expect("session guard").expired =
+                Some(PythonExpiration::Isolation);
+        }
         if let Some(reason) = worker.state.as_mut().expect("session guard").expired.take() {
             let reason = match reason {
                 PythonExpiration::Idle => "after being idle",
                 PythonExpiration::Capacity => "because the idle worker capacity was exceeded",
+                PythonExpiration::Isolation => "because Python access or isolation changed",
             };
             return Err(ToolError::Execution(format!(
                 "Python stopped {reason}; its session state, including variables and temporary scratch files, was lost. Run the code again in a fresh session."
@@ -671,7 +730,8 @@ impl crate::agent::Agent {
                     .python
                     .clone()
                     .unwrap_or_else(|| PathBuf::from("python3")),
-                isolated: self.code_mode.isolated,
+                isolated,
+                cwd: self.cwd.clone(),
             };
             let started = tokio::select! {
                 _ = ctx.cancel.cancelled() => return Err(ToolError::Execution("Python was cancelled".into())),
@@ -679,7 +739,7 @@ impl crate::agent::Agent {
             };
             *worker = Some(
                 started
-                    .map_err(|e| ToolError::Execution(format!("could not start Python: {e}")))?,
+                    .map_err(|e| self.python_error(format!("could not start Python: {e}"), ctx))?,
             );
         }
         let process = worker.as_mut().expect("worker started");
@@ -696,9 +756,10 @@ impl crate::agent::Agent {
         };
         if let Err(error) = sent {
             *worker = None;
-            return Err(ToolError::Execution(format!(
-                "Python worker exited and session state was lost: {error}"
-            )));
+            return Err(self.python_error(
+                format!("Python worker exited and session state was lost: {error}"),
+                ctx,
+            ));
         }
         loop {
             let incoming = tokio::select! {
@@ -712,9 +773,10 @@ impl crate::agent::Agent {
                 Ok(Ok(message)) => message,
                 Ok(Err(error)) => {
                     *worker = None;
-                    return Err(ToolError::Execution(format!(
-                        "Python worker exited and session state was lost: {error}"
-                    )));
+                    return Err(self.python_error(
+                        format!("Python worker exited and session state was lost: {error}"),
+                        ctx,
+                    ));
                 }
                 Err(_) => {
                     *worker = None;
@@ -731,12 +793,22 @@ impl crate::agent::Agent {
             }
             match message["type"].as_str() {
                 Some("result") => {
-                    let images =
-                        serde_json::from_value(message["images"].clone()).map_err(|error| {
-                            ToolError::Execution(format!("invalid Python images: {error}"))
-                        })?;
+                    let images = match serde_json::from_value(message["images"].clone()) {
+                        Ok(images) => images,
+                        Err(error) => {
+                            *worker = None;
+                            return Err(self.python_error(
+                                format!("invalid Python images; session state was lost: {error}"),
+                                ctx,
+                            ));
+                        }
+                    };
+                    let (output, count) = mew_tools::secrets::redact_secret_words(
+                        message["output"].as_str().unwrap_or(""),
+                        &ctx.secrets,
+                    );
                     return Ok(mew_hooks::ToolOutput {
-                        output: message["output"].as_str().unwrap_or("").to_owned(),
+                        output: mew_tools::secrets::annotate_redaction(output, count),
                         images,
                         ..Default::default()
                     });
@@ -745,16 +817,19 @@ impl crate::agent::Agent {
                     if message["reset"] == true {
                         *worker = None;
                     }
+                    let error = format!(
+                        "{}{}",
+                        message["error"].as_str().unwrap_or("Python error"),
+                        message["output"]
+                            .as_str()
+                            .filter(|s| !s.is_empty())
+                            .map(|s| format!("\n{s}"))
+                            .unwrap_or_default()
+                    );
+                    let (error, count) =
+                        mew_tools::secrets::redact_secret_words(&error, &ctx.secrets);
                     return Ok(mew_hooks::ToolOutput {
-                        error: format!(
-                            "{}{}",
-                            message["error"].as_str().unwrap_or("Python error"),
-                            message["output"]
-                                .as_str()
-                                .filter(|s| !s.is_empty())
-                                .map(|s| format!("\n{s}"))
-                                .unwrap_or_default()
-                        ),
+                        error: mew_tools::secrets::annotate_redaction(error, count),
                         ..Default::default()
                     });
                 }
@@ -764,9 +839,10 @@ impl crate::agent::Agent {
                         let response = serde_json::json!({"type":"tool_result","cell":cell,"id":message["id"],"result":{"output":"","error":"tool unavailable"}});
                         if let Err(error) = process.send(&response).await {
                             *worker = None;
-                            return Err(ToolError::Execution(format!(
-                                "Python worker exited and session state was lost: {error}"
-                            )));
+                            return Err(self.python_error(
+                                format!("Python worker exited and session state was lost: {error}"),
+                                ctx,
+                            ));
                         }
                         continue;
                     }
@@ -907,6 +983,7 @@ mod path_tests {
             let mut worker = PythonWorker::start(&PythonOptions {
                 executable: "mew-path-test-python".into(),
                 isolated: true,
+                cwd: std::env::current_dir().unwrap(),
             })
             .await
             .unwrap();

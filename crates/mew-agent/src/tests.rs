@@ -18,6 +18,93 @@ use crate::Agent;
 use crate::AgentEvent;
 
 #[tokio::test]
+async fn code_mode_respects_persona_restrictions_on_python() {
+    for config in [
+        mew_personas::PersonaConfig {
+            tools: Some(vec![]),
+            ..Default::default()
+        },
+        mew_personas::PersonaConfig {
+            tools_deny: Some(vec!["python".into()]),
+            ..Default::default()
+        },
+    ] {
+        let provider = Arc::new(CapturingProvider::new(vec![FakeProvider::tool_call(
+            "python",
+            "py",
+            serde_json::json!({"source":"text('executed')"}),
+        )]));
+        let mut agent = Agent::new(
+            provider.clone(),
+            Arc::new(NopDispatcher),
+            None,
+            vec![],
+            None,
+        );
+        agent.code_mode.mode = Some(mew_config::CodeMode::Full);
+        agent.code_mode.isolated = false;
+        agent.max_turns = Some(1);
+        agent.apply_persona(&mew_personas::Persona {
+            name: "restricted".into(),
+            description: String::new(),
+            body: String::new(),
+            path: Default::default(),
+            config,
+        });
+        let mut events = agent.run("run".into());
+        while let Some(event) = events.recv().await {
+            if let AgentEvent::PermissionRequest { tx, .. } = event {
+                let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
+            }
+        }
+        assert!(!provider.captured.lock().unwrap()[0]
+            .tools
+            .iter()
+            .any(|tool| tool.name == "python"));
+        assert!(!provider.captured.lock().unwrap()[0]
+            .system
+            .contains("The only direct tool is `python`"));
+        let messages = agent.messages.lock().await;
+        assert!(!messages.iter().flat_map(|m| &m.parts).any(|part| matches!(part,
+            Part::ToolCall(call) if call.call_id == "py" && call.state.output() == Some("executed\n")
+        )));
+    }
+}
+
+#[tokio::test]
+async fn code_mode_keeps_persona_allowed_tools_accessible_through_python() {
+    let provider = Arc::new(CapturingProvider::new(vec![
+        FakeProvider::tool_call(
+            "python",
+            "py",
+            serde_json::json!({"source":"text(tools.echo({'input':'hello'})['output'])"}),
+        ),
+        FakeProvider::text_response("done"),
+    ]));
+    let mut agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![Arc::new(mew_tools::tools::echo::Echo)],
+        None,
+    );
+    agent.code_mode.mode = Some(mew_config::CodeMode::Full);
+    agent.code_mode.isolated = false;
+    agent.active_tool_names = Some(std::collections::HashSet::from(["echo".into()]));
+    let mut events = agent.run("run".into());
+    while let Some(event) = events.recv().await {
+        if let AgentEvent::PermissionRequest { tx, .. } = event {
+            let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
+        }
+    }
+    assert_eq!(provider.captured.lock().unwrap()[0].tools[0].name, "python");
+    let messages = agent.messages.lock().await;
+    assert!(messages.iter().flat_map(|m| &m.parts).any(|part| matches!(part,
+        Part::ToolCall(call) if call.call_id == "py" && call.state.output().is_some_and(|out| out.contains("hello"))
+    )));
+}
+
+#[tokio::test]
 async fn code_mode_exposes_one_tool_and_keeps_python_state_between_calls() {
     let provider = Arc::new(CapturingProvider::new(vec![
         FakeProvider::tool_call("python", "py1", serde_json::json!({"source":"saved = 41"})),
@@ -4431,6 +4518,32 @@ async fn test_default_max_output_caps_at_32k_logic_directly() {
 
 /// A provider that always returns an error on `stream`.
 struct ErroringProvider;
+
+#[tokio::test]
+async fn fallback_code_mode_respects_persona_python_denial() {
+    let fallback = Arc::new(CapturingProvider::new(vec![FakeProvider::text_response(
+        "done",
+    )]));
+    let mut agent = Agent::new(
+        Arc::new(ErroringProvider),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    agent.code_mode.mode = Some(mew_config::CodeMode::Full);
+    agent.denied_tool_names.insert("python".into());
+    agent.fallback_models = Some(vec!["test/fallback".into()]);
+    let provider = fallback.clone();
+    agent.set_provider_builder(Box::new(move |_| Ok(provider.clone())));
+    let mut events = agent.run("run".into());
+    while events.recv().await.is_some() {}
+    let requests = fallback.captured.lock().unwrap();
+    assert!(requests[0].tools.is_empty());
+    assert!(!requests[0]
+        .system
+        .contains("The only direct tool is `python`"));
+}
 
 #[tokio::test]
 async fn fallback_uses_its_own_code_mode_for_requests_and_execution() {

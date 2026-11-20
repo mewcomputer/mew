@@ -149,7 +149,11 @@ restricts subprocesses or synchronization primitives.
 Setting `isolated = false` lets Python access the host directly, including files,
 network, and subprocesses, without passing those operations through Mew's tool
 permissions. Mew marks each unrestricted Python call as dangerous for the
-permission engine.
+permission engine. Personas and subagents that restrict tools always use
+isolated Python, even when this setting is false. An explicit persona denial
+of `python` or an empty tool allowlist disables Python. Changing the effective
+isolation stops the existing worker after any active cell finishes and reports
+the lost state on the next call.
 
 ### Provider configuration
 

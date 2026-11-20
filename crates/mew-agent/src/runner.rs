@@ -448,6 +448,10 @@ impl SubagentRunner for SimpleRunner {
         );
 
         agent.code_mode = self.code_mode.clone();
+        agent.active_tool_names = def
+            .tools
+            .as_ref()
+            .map(|names| names.iter().cloned().collect());
         agent.codex_code_mode_models = self.codex_code_mode_models.clone();
         agent.secrets = self.secrets.clone();
         agent.set_model_info(&model_id, &provider_id);
@@ -1725,6 +1729,66 @@ mod tests {
     async fn code_mode_subagent_returns_the_nested_exit_result() {
         check_code_mode_subagent(false).await;
         check_code_mode_subagent(true).await;
+    }
+
+    #[tokio::test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    async fn tool_restricted_subagent_isolates_python() {
+        let directory = tempfile::tempdir().unwrap();
+        let secret = directory.path().join("private.txt");
+        std::fs::write(&secret, "private fixture").unwrap();
+        let source = format!("try:\n result=open({:?}).read()\nexcept OSError:\n result='denied'\ntools.exit_tool({{'final_answer':result}})", secret.to_string_lossy());
+        let provider = Arc::new(ScriptedProvider::new(vec![(
+            Duration::ZERO,
+            mew_provider_fake::FakeProvider::tool_call(
+                "python",
+                "py",
+                serde_json::json!({"source":source}),
+            ),
+        )]));
+        let tools = vec![exit_tool()];
+        let mut parent = crate::Agent::new(
+            provider.clone(),
+            Arc::new(mew_hooks::NopDispatcher),
+            None,
+            tools.clone(),
+            None,
+        );
+        parent.code_mode.mode = Some(mew_config::CodeMode::Full);
+        parent.code_mode.isolated = false;
+        let runner = SimpleRunner::new(provider, tools, Arc::new(mew_hooks::NopDispatcher))
+            .with_agent_registry(&mut parent)
+            .with_session_root(directory.path().to_path_buf());
+        let def = SubagentDef {
+            tools: Some(vec!["exit_tool".into()]),
+            ..make_def(Some(10), Some(60))
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let drain = tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                if let SubagentEvent::PermissionRequest { tx, .. } = event {
+                    let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
+                }
+            }
+        });
+        let result = runner
+            .run(SubagentRunOptions {
+                def: &def,
+                prompt: "prompt".into(),
+                parent_call_id: "parent".into(),
+                parent_session_id: SessionId::new(),
+                event_tx: tx,
+                cancel: Default::default(),
+                model: None,
+                parent_depth: 0,
+            })
+            .await
+            .unwrap();
+        drain.await.unwrap();
+        let SubagentResult::Complete { text, .. } = result else {
+            panic!("expected completed child");
+        };
+        assert_eq!(text, "denied");
     }
 
     #[tokio::test]

@@ -206,6 +206,250 @@ async fn execute(
         .await
 }
 
+#[tokio::test]
+async fn unrestricted_python_uses_each_sessions_workspace() {
+    let first_dir = tempfile::tempdir().unwrap();
+    let second_dir = tempfile::tempdir().unwrap();
+    let mut first = idle_agent(Duration::from_secs(60));
+    let mut second = idle_agent(Duration::from_secs(60));
+    first.cwd = first_dir.path().to_path_buf();
+    second.cwd = second_dir.path().to_path_buf();
+
+    for (agent, directory) in [(&first, &first_dir), (&second, &second_dir)] {
+        let output = execute(agent, "import os\ntext(os.getcwd())")
+            .await
+            .unwrap()
+            .output;
+        assert_eq!(
+            std::fs::canonicalize(output.trim()).unwrap(),
+            std::fs::canonicalize(directory.path()).unwrap()
+        );
+    }
+}
+
+#[tokio::test]
+async fn python_redacts_secrets_from_results_and_errors() {
+    let agent = idle_agent(Duration::from_secs(60));
+    let secrets = mew_tools::SecretSet {
+        words: vec!["synthetic-secret".into()],
+        globs: vec![],
+    };
+    let ctx = mew_tools::ToolCtx::new(
+        Arc::new(mew_tools::ToolCtxShared {
+            secrets: Arc::new(secrets),
+            ..Default::default()
+        }),
+        "test".into(),
+        Default::default(),
+        tokio::sync::mpsc::channel(1).0,
+    );
+    let (events, _receiver) = tokio::sync::mpsc::channel(32);
+    for source in [
+        "text('synthetic-secret')",
+        "print('synthetic-secret')\nraise ValueError('synthetic-secret')",
+    ] {
+        let result = agent
+            .execute_python(&ctx, json!({"source":source}), &events)
+            .await
+            .unwrap();
+        let combined = format!("{}{}", result.output, result.error);
+        assert!(
+            !combined.contains("synthetic-secret"),
+            "secret leaked in {combined}"
+        );
+        assert!(combined.contains("[REDACTED]"), "{combined}");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn python_redacts_secrets_from_worker_failure_diagnostics() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let executable = directory.path().join("python-fails");
+    std::fs::write(
+        &executable,
+        "#!/bin/sh\nprintf synthetic-secret >&2\nexit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let secrets = mew_tools::SecretSet {
+        words: vec!["synthetic-secret".into()],
+        globs: vec![],
+    };
+    let ctx = mew_tools::ToolCtx::new(
+        Arc::new(mew_tools::ToolCtxShared {
+            secrets: Arc::new(secrets),
+            ..Default::default()
+        }),
+        "test".into(),
+        Default::default(),
+        tokio::sync::mpsc::channel(1).0,
+    );
+    for startup in [true, false] {
+        let mut agent = idle_agent(Duration::from_secs(60));
+        if startup {
+            agent.code_mode.python = Some(executable.clone());
+        }
+        let source = "import os\nos.write(2, b'synthetic-secret')\nos._exit(1)";
+        let (events, _receiver) = tokio::sync::mpsc::channel(32);
+        let error = agent
+            .execute_python(&ctx, json!({"source":source}), &events)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            !error.contains("synthetic-secret"),
+            "secret leaked in {error}"
+        );
+        assert!(error.contains("[REDACTED]"), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn malformed_python_images_are_redacted_and_reset_the_worker() {
+    let agent = idle_agent(Duration::from_secs(60));
+    let secrets = mew_tools::SecretSet {
+        words: vec!["synthetic-secret".into()],
+        globs: vec![],
+    };
+    let ctx = mew_tools::ToolCtx::new(
+        Arc::new(mew_tools::ToolCtxShared {
+            secrets: Arc::new(secrets),
+            ..Default::default()
+        }),
+        "test".into(),
+        Default::default(),
+        tokio::sync::mpsc::channel(1).0,
+    );
+    let source = "saved=42\nimport __main__, json\n__main__.protocol.write(json.dumps({'type':'result','cell':__main__.active_cell,'images':'synthetic-secret','output':''})+'\\n')\n__main__.protocol.flush()";
+    let (events, _receiver) = tokio::sync::mpsc::channel(32);
+    let error = agent
+        .execute_python(&ctx, json!({"source":source}), &events)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(!error.contains("synthetic-secret"), "{error}");
+    assert!(
+        error.contains("[REDACTED]") && error.contains("state was lost"),
+        "{error}"
+    );
+    assert_eq!(
+        execute(&agent, "text('saved' in globals())")
+            .await
+            .unwrap()
+            .output,
+        "false\n"
+    );
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test]
+async fn restricting_persona_restarts_python_in_isolation() {
+    let secret = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(secret.path(), "private fixture").unwrap();
+    let source = format!(
+        "try:\n text(open({:?}).read())\nexcept OSError:\n text('denied')",
+        secret.path().to_string_lossy()
+    );
+    let mut agent = idle_agent(Duration::from_secs(60));
+    assert_eq!(
+        execute(&agent, &source).await.unwrap().output,
+        "private fixture\n"
+    );
+
+    agent.active_tool_names = Some(std::collections::HashSet::from(["read".into()]));
+    let error = execute(&agent, "text('must not run')")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("isolation") && error.contains("lost"),
+        "{error}"
+    );
+    assert_eq!(execute(&agent, &source).await.unwrap().output, "denied\n");
+
+    agent.active_tool_names = None;
+    let error = execute(&agent, "text('must not run')")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("isolation") && error.contains("lost"),
+        "{error}"
+    );
+    assert_eq!(
+        execute(&agent, &source).await.unwrap().output,
+        "private fixture\n"
+    );
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test]
+async fn persona_denylist_automatically_isolates_python() {
+    let secret = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(secret.path(), "private fixture").unwrap();
+    let mut agent = idle_agent(Duration::from_secs(60));
+    agent.denied_tool_names.insert("bash".into());
+    let source = format!(
+        "try:\n text(open({:?}).read())\nexcept OSError:\n text('denied')",
+        secret.path().to_string_lossy()
+    );
+    assert_eq!(execute(&agent, &source).await.unwrap().output, "denied\n");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn disabling_python_stops_an_existing_unrestricted_worker() {
+    let mut agent = idle_agent(Duration::from_secs(60));
+    let pid = execute(&agent, "import os\ntext(os.getpid())")
+        .await
+        .unwrap()
+        .output
+        .trim()
+        .parse()
+        .unwrap();
+    agent.apply_persona(&mew_personas::Persona {
+        name: "no tools".into(),
+        description: String::new(),
+        body: String::new(),
+        path: Default::default(),
+        config: mew_personas::PersonaConfig {
+            tools: Some(vec![]),
+            ..Default::default()
+        },
+    });
+    wait_for_process_exit(pid).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn reattaching_a_restricted_session_stops_the_old_unrestricted_worker() {
+    let session = PythonSession::with_idle_timeout(Duration::from_secs(60));
+    let first = session_agent(session.clone());
+    let pid = execute(&first, "import os\ntext(os.getpid())")
+        .await
+        .unwrap()
+        .output
+        .trim()
+        .parse()
+        .unwrap();
+    let mut resumed = idle_agent(Duration::from_secs(60));
+    resumed.apply_persona(&mew_personas::Persona {
+        name: "no tools".into(),
+        description: String::new(),
+        body: String::new(),
+        path: Default::default(),
+        config: mew_personas::PersonaConfig {
+            tools: Some(vec![]),
+            ..Default::default()
+        },
+    });
+    resumed.set_python_session(session);
+    wait_for_process_exit(pid).await;
+}
+
 fn outer_approval_agent(session: PythonSession) -> crate::Agent {
     let provider = Arc::new(mew_provider_fake::FakeProvider::new(
         mew_provider_fake::FakeProvider::tool_call(
@@ -632,6 +876,7 @@ async fn worker(isolated: bool) -> PythonWorker {
     PythonWorker::start(&PythonOptions {
         executable: PathBuf::from("python3"),
         isolated,
+        cwd: std::env::current_dir().unwrap(),
     })
     .await
     .unwrap()
@@ -642,6 +887,7 @@ async fn python_start_reports_when_the_interpreter_exits_immediately() {
     let result = PythonWorker::start(&PythonOptions {
         executable: PathBuf::from("/usr/bin/false"),
         isolated: false,
+        cwd: std::env::current_dir().unwrap(),
     })
     .await;
     assert!(result.is_err());
@@ -991,6 +1237,7 @@ async fn isolated_python_uses_the_selected_virtual_environment() {
     let mut worker = PythonWorker::start(&PythonOptions {
         executable: dir.path().join("bin/python3"),
         isolated: true,
+        cwd: dir.path().to_path_buf(),
     })
     .await
     .unwrap();

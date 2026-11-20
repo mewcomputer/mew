@@ -196,10 +196,17 @@ impl Agent {
             let call_id = tc.call_id.clone();
             let part_id = tc.base.id;
 
-            if !nested && self.uses_code_mode() && tc.tool_name != "python" {
+            if !nested
+                && self.uses_code_mode()
+                && (tc.tool_name != "python" || !self.python_available())
+            {
                 let state = ToolState::Error(ToolStateError {
                     input: tc.input().clone(),
-                    error: "direct tool calls are unavailable in code mode".into(),
+                    error: if tc.tool_name == "python" {
+                        "python is unavailable for this persona".into()
+                    } else {
+                        "direct tool calls are unavailable in code mode".into()
+                    },
                     time: ToolTime {
                         start: Utc::now().timestamp_millis(),
                         end: Some(Utc::now().timestamp_millis()),
@@ -336,7 +343,7 @@ impl Agent {
 
             // Resolve permission paths from the same cwd used by the tool.
             let python_tool = crate::python::PythonTool {
-                isolated: self.code_mode.isolated,
+                isolated: self.python_isolated(),
             };
             let is_python = !nested && tc.tool_name == "python" && self.uses_code_mode();
             // A pending approval is part of the Python call: keep its worker

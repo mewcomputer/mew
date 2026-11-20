@@ -527,6 +527,20 @@ impl Agent {
         self.uses_code_mode_for(&self.provider_id, &self.model_id)
     }
 
+    pub(crate) fn python_available(&self) -> bool {
+        !self.denied_tool_names.contains("python")
+            && self
+                .active_tool_names
+                .as_ref()
+                .is_none_or(|names| !names.is_empty())
+    }
+
+    pub(crate) fn python_isolated(&self) -> bool {
+        self.code_mode.isolated
+            || self.active_tool_names.is_some()
+            || !self.denied_tool_names.is_empty()
+    }
+
     pub(crate) fn uses_code_mode_for(&self, provider: &str, model: &str) -> bool {
         self.code_mode.for_model(provider, model).map_or_else(
             || provider == "codex" && self.codex_code_mode_models.contains(model),
@@ -536,6 +550,8 @@ impl Agent {
 
     pub fn set_python_session(&mut self, session: crate::PythonSession) {
         self.python_session = session;
+        self.python_session
+            .update_policy(self.python_available(), self.python_isolated());
     }
 
     pub(crate) fn tool_available(&self, name: &str) -> bool {
@@ -1001,6 +1017,8 @@ impl Agent {
             .as_ref()
             .map(|d| d.iter().cloned().collect::<HashSet<_>>())
             .unwrap_or_default();
+        self.python_session
+            .update_policy(self.python_available(), self.python_isolated());
 
         // Build the template context once: used for rendering the persona
         // body (if templated) and shared with the Skill tool for templated
@@ -1080,6 +1098,8 @@ impl Agent {
         self.persona_prompt = None;
         self.active_tool_names = None;
         self.denied_tool_names.clear();
+        self.python_session
+            .update_policy(self.python_available(), self.python_isolated());
         self.autonomous_hint = None;
         self.fallback_models = None;
         if let Ok(mut g) = self.skill_filter.try_write() {
