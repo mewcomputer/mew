@@ -4596,3 +4596,14 @@ Jianghu's standalone preview remains available separately.
 
 Verified equivalent rendered markup and copy, all 12 site tests, the
 Jianghu build, and the mobile hero and install link.
+
+### 2026-11-19: Verify code mode and MCP on current main
+
+Merged current main into the feature branch and fixed a stale homepage test.
+Session writer leases now unlock explicitly so a briefly inherited descriptor
+cannot delay the next writer.
+
+Verified the full isolated Rust workspace suite, JavaScript suites, site tests,
+subprocess end-to-end tests, and the optional iroh build. Linux tests covered
+Bubblewrap, restricted personas and subagents, MCP, configuration, and session
+leases. A real MCP SDK server received session deletion on SIGINT and SIGTERM.
