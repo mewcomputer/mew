@@ -2,6 +2,7 @@ use mew_agent::{AgentEvent, AskUserQuestion};
 use mew_message::{Message, Part, PartId, Role, ToolState};
 use mew_provider::ProviderEvent;
 use ratatui::layout::Rect;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -215,6 +216,7 @@ pub struct App {
     pub md_state: mdstream::DocumentState,
     pub md_stream: Option<mdstream::MdStream>,
     pub md_render_cache: ratatui_mdstream::cache::RenderCache,
+    pub(crate) python_render_cache: RefCell<HashMap<PartId, PythonRenderCacheEntry>>,
     pub rendered_md_cache:
         HashMap<mew_message::PartId, (u16, String, Rc<ratatui_mdstream::RenderedLines>)>,
     pub last_md_width: u16,
@@ -314,6 +316,14 @@ pub struct App {
     /// is now `test_render_cache_batches_deltas`.
     #[cfg(test)]
     pub render_count: u32,
+}
+
+pub(crate) struct PythonRenderCacheEntry {
+    pub source: String,
+    pub palette: Vec<ratatui::style::Color>,
+    pub expanded: bool,
+    pub lines: Rc<Vec<ratatui::text::Line<'static>>>,
+    pub remaining: usize,
 }
 
 /// Cached result of building the chat `Text` for one transcript state.
@@ -989,6 +999,7 @@ impl App {
             md_state: mdstream::DocumentState::new(),
             md_stream: None,
             md_render_cache: ratatui_mdstream::cache::RenderCache::new(),
+            python_render_cache: RefCell::new(HashMap::new()),
             rendered_md_cache: HashMap::new(),
             last_md_width: 0,
             max_scroll: 0,
@@ -1187,6 +1198,7 @@ impl App {
                 // history. This is the /resume path — the daemon sends
                 // the full message list on attach.
                 self.messages.clear();
+                self.python_render_cache.get_mut().clear();
                 self.md_stream = None;
                 self.md_state = mdstream::DocumentState::new();
                 self.md_render_cache.invalidate();
@@ -1224,6 +1236,7 @@ impl App {
                 });
                 if *replace {
                     self.messages.clear();
+                    self.python_render_cache.get_mut().clear();
                     self.awaiting_transcript = false;
                 }
                 if *replace {
@@ -2015,6 +2028,7 @@ impl App {
     /// Clear the chat display and all associated render state.
     pub fn clear_messages(&mut self) {
         self.messages.clear();
+        self.python_render_cache.get_mut().clear();
         self.tool_states.clear();
         self.rendered_md_cache.clear();
         self.md_render_cache.invalidate();
@@ -2036,6 +2050,9 @@ impl App {
             .flat_map(|m| m.parts.iter().map(|p| p.id()))
             .collect();
         self.rendered_md_cache
+            .retain(|id, _| surviving.contains(id));
+        self.python_render_cache
+            .get_mut()
             .retain(|id, _| surviving.contains(id));
         self.pending_md_rerender = None;
         self.mark_chat_dirty();

@@ -403,6 +403,30 @@ pub(crate) fn build_chat_lines(
     let tool_bg_style = Style::default().bg(tool_bg);
     let msg_count = app.messages.len();
     let tool_width = chat_width;
+    let recent_python: std::collections::HashSet<_> = app
+        .messages
+        .iter()
+        .rev()
+        .flat_map(|message| message.parts.iter().rev())
+        .filter_map(|part| match part {
+            Part::ToolCall(call)
+                if call.tool_name == "python"
+                    && call
+                        .state
+                        .input()
+                        .get("source")
+                        .and_then(|source| source.as_str())
+                        .is_some_and(|source| source.len() <= MAX_PYTHON_DISPLAY_BYTES) =>
+            {
+                Some(call.base.id)
+            }
+            _ => None,
+        })
+        .take(MAX_CACHED_PYTHON_CELLS)
+        .collect();
+    app.python_render_cache
+        .get_mut()
+        .retain(|id, _| recent_python.contains(id));
     app.reasoning_header_rows.clear();
     app.tool_batch_header_rows.clear();
     app.compaction_header_rows.clear();
@@ -596,6 +620,7 @@ pub(crate) fn build_chat_lines(
                             app,
                             tc,
                             nested,
+                            recent_python.contains(&tc.base.id),
                             tool_width,
                             tool_bg_style,
                         );
@@ -966,6 +991,7 @@ fn tool_display_names<'a>(
 }
 
 const MAX_PYTHON_DISPLAY_BYTES: usize = 16 * 1024;
+const MAX_CACHED_PYTHON_CELLS: usize = 256;
 
 /// Reindent syntactically complete cells for display while preserving strings.
 fn python_display_source(source: &str) -> String {
@@ -1038,11 +1064,114 @@ fn python_display_source(source: &str) -> String {
         .join("\n")
 }
 
+fn python_render_lines(
+    app: &App,
+    part_id: mew_message::PartId,
+    source: &str,
+    tool_bg: Color,
+    cacheable: bool,
+) -> (Rc<Vec<Line<'static>>>, usize) {
+    use ratatui_mdstream::highlight::{Highlighter, SYNTAX_SCOPES};
+    if !cacheable {
+        let mut lines = source.lines();
+        let limit = if app.bash_expanded {
+            usize::MAX
+        } else {
+            TOOL_LINES_MAX
+        };
+        let rendered = Rc::new(
+            lines
+                .by_ref()
+                .take(limit)
+                .map(|line| Line::raw(line.to_owned()))
+                .collect(),
+        );
+        return (rendered, lines.count());
+    }
+    let palette: Vec<_> = std::iter::once(app.theme.resolve("foreground"))
+        .chain(
+            SYNTAX_SCOPES
+                .iter()
+                .map(|(_, token)| app.theme.resolve(token)),
+        )
+        .chain(std::iter::once(tool_bg))
+        .collect();
+    if let Some(entry) = app.python_render_cache.borrow().get(&part_id) {
+        if entry.source == source && entry.palette == palette && entry.expanded == app.bash_expanded
+        {
+            return (Rc::clone(&entry.lines), entry.remaining);
+        }
+    }
+    let limit = if app.bash_expanded {
+        usize::MAX
+    } else {
+        TOOL_LINES_MAX
+    };
+    let formatted;
+    let display = if app.bash_expanded || source.len() > MAX_PYTHON_DISPLAY_BYTES {
+        source
+    } else {
+        formatted = python_display_source(source);
+        &formatted
+    };
+    let mut highlighter = (source.len() <= MAX_PYTHON_DISPLAY_BYTES).then(|| {
+        let mut highlighter =
+            ratatui_mdstream::highlight::SyntectHighlighter::from_theme_tokens(|token| {
+                match app.theme.resolve(token) {
+                    Color::Rgb(r, g, b) => ((r as u32) << 16) | ((g as u32) << 8) | b as u32,
+                    _ => 0,
+                }
+            });
+        highlighter.begin_block(Some("py"));
+        highlighter
+    });
+    let mut source_lines = display.lines();
+    let lines = Rc::new(
+        source_lines
+            .by_ref()
+            .take(limit)
+            .map(|line| {
+                let spans = if let Some(highlighter) = &mut highlighter {
+                    highlighter
+                        .highlight_line(Some("py"), line)
+                        .into_iter()
+                        .map(|(text, style)| Span::styled(text, style.bg(tool_bg)))
+                        .collect::<Vec<_>>()
+                } else {
+                    vec![Span::raw(line.to_owned())]
+                };
+                Line::from(spans)
+            })
+            .collect(),
+    );
+    if let Some(highlighter) = &mut highlighter {
+        highlighter.end_block();
+    }
+    let remaining = source_lines.count();
+    if source.len() <= MAX_PYTHON_DISPLAY_BYTES {
+        let mut cache = app.python_render_cache.borrow_mut();
+        if cache.len() < MAX_CACHED_PYTHON_CELLS || cache.contains_key(&part_id) {
+            cache.insert(
+                part_id,
+                crate::app::PythonRenderCacheEntry {
+                    source: source.to_owned(),
+                    palette,
+                    expanded: app.bash_expanded,
+                    lines: Rc::clone(&lines),
+                    remaining,
+                },
+            );
+        }
+    }
+    (lines, remaining)
+}
+
 fn render_single_tool_call(
     sel_ctx: &mut ChatLineCtx<'_>,
     app: &App,
     tc: &mew_message::ToolCallPart,
     nested_calls: &[mew_message::NestedToolCall],
+    cacheable: bool,
     tool_width: u16,
     tool_bg_style: Style,
 ) {
@@ -1095,49 +1224,11 @@ fn render_single_tool_call(
             .get("source")
             .and_then(|value| value.as_str())
         {
-            let limit = if app.bash_expanded {
-                usize::MAX
-            } else {
-                TOOL_LINES_MAX
-            };
-            use ratatui_mdstream::highlight::Highlighter;
-            let formatted;
-            let display = if app.bash_expanded || source.len() > MAX_PYTHON_DISPLAY_BYTES {
-                source
-            } else {
-                formatted = python_display_source(source);
-                &formatted
-            };
-            let mut highlighter = (source.len() <= MAX_PYTHON_DISPLAY_BYTES).then(|| {
-                let mut highlighter =
-                    ratatui_mdstream::highlight::SyntectHighlighter::from_theme_tokens(|token| {
-                        match app.theme.resolve(token) {
-                            Color::Rgb(r, g, b) => {
-                                ((r as u32) << 16) | ((g as u32) << 8) | b as u32
-                            }
-                            _ => 0,
-                        }
-                    });
-                highlighter.begin_block(Some("py"));
-                highlighter
-            });
-            let mut lines = display.lines();
-            for line in lines.by_ref().take(limit) {
-                let spans = if let Some(highlighter) = &mut highlighter {
-                    highlighter
-                        .highlight_line(Some("py"), line)
-                        .into_iter()
-                        .map(|(text, style)| Span::styled(text, style.bg(tool_bg)))
-                        .collect::<Vec<_>>()
-                } else {
-                    vec![Span::raw(line.to_owned())]
-                };
-                sel_ctx.push_tool_output(tool_width, Line::from(spans), "  ", tool_bg);
+            let (lines, remaining) =
+                python_render_lines(app, tc.base.id, source, tool_bg, cacheable);
+            for line in lines.iter() {
+                sel_ctx.push_tool_output(tool_width, line.clone(), "  ", tool_bg);
             }
-            if let Some(highlighter) = &mut highlighter {
-                highlighter.end_block();
-            }
-            let remaining = lines.count();
             if remaining > 0 {
                 sel_ctx.push_tool_output(
                     tool_width,
@@ -2337,6 +2428,75 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(expanded.contains("expanded-only"), "{expanded}");
+    }
+
+    #[test]
+    fn python_render_cache_prioritizes_recent_cells() {
+        let mut app = App::new();
+        let mut ids = Vec::new();
+        for _ in 0..257 {
+            let call = tool_call_part(
+                "python",
+                serde_json::json!({"source": "if ready:\n    print('x')"}),
+            );
+            ids.push(call.base.id);
+            app.push_message(mew_message::Message {
+                id: ulid::Ulid::new(),
+                session_id: ulid::Ulid::new(),
+                role: mew_message::Role::Assistant,
+                parts: vec![Part::ToolCall(call)],
+                time: mew_message::Time {
+                    created: 0,
+                    completed: None,
+                },
+                assistant: None,
+            });
+        }
+        let _ = build_chat_lines(&mut app, 78, 80);
+        let cache = app.python_render_cache.borrow();
+        assert!(!cache.contains_key(&ids[0]));
+        assert!(cache.contains_key(&ids[256]));
+        assert_eq!(cache.len(), 256);
+    }
+
+    #[test]
+    fn python_render_follows_source_and_theme_changes() {
+        let mut app = App::new();
+        app.theme = crate::theme::Theme::load("codex-light");
+        let python = tool_call_part("python", serde_json::json!({"source": "text('first')"}));
+        app.push_message(mew_message::Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: mew_message::Role::Assistant,
+            parts: vec![Part::ToolCall(python)],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        });
+        let _ = build_chat_lines(&mut app, 78, 80);
+        app.theme = crate::theme::Theme::load("codex-dark");
+        let expected = app.theme.resolve("syntax.string");
+        let themed = build_chat_lines(&mut app, 78, 80);
+        assert!(themed.lines.iter().any(|line| line
+            .spans
+            .iter()
+            .any(|span| span.content.contains("first") && span.style.fg == Some(expected))));
+        if let Part::ToolCall(call) = &mut app.messages[0].parts[0] {
+            if let ToolState::Pending(state) = &mut call.state {
+                state.input = serde_json::json!({"source": "text('second')"});
+            }
+        }
+        let built = build_chat_lines(&mut app, 78, 80);
+        assert!(built.lines.iter().any(|line| line
+            .spans
+            .iter()
+            .any(|span| span.content.contains("second") && span.style.fg == Some(expected))));
+        assert!(!built
+            .lines
+            .iter()
+            .any(|line| line.spans.iter().any(|span| span.content.contains("first"))));
     }
 
     #[test]

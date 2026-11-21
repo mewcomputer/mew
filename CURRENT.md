@@ -4745,3 +4745,10 @@ Show nested names in tool batches, use the active syntax palette, preserve
 colors while wrapping, and avoid displaying a guessed Python sensitivity.
 Bound parsing and highlighting for large cells. Verified the full TUI suite,
 the web UI suite and build, and shared client tests.
+
+### 2026-11-20: Bound Python redraw work
+
+Cache parsed and highlighted Python cells by source, palette and expansion
+state, favoring recent cells and showing older overflow as plain source.
+Verified TUI rendering, history and golden tests, and benchmarked dirty redraws
+with up to 300 large cells.
