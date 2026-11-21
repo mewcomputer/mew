@@ -1,7 +1,10 @@
 import { parser } from "@lezer/python";
 
+export const MAX_PYTHON_DISPLAY_LENGTH = 16 * 1024;
+
 /** Format indentation for display only, retaining the original source separately. */
 export function formatPythonForDisplay(source: string): string {
+  if (source.length > MAX_PYTHON_DISPLAY_LENGTH) return source;
   const strings: Array<[number, number]> = [];
   let invalid = false;
   parser.parse(source).iterate({ enter(node) {
@@ -12,8 +15,11 @@ export function formatPythonForDisplay(source: string): string {
 
   const lines = source.split("\n");
   let offset = 0;
+  let stringIndex = 0;
   const indents = lines.map((line) => {
-    const inString = strings.some(([start, end]) => start < offset && offset < end);
+    while (stringIndex < strings.length && strings[stringIndex]![1] <= offset) stringIndex++;
+    const range = strings[stringIndex];
+    const inString = range !== undefined && range[0] < offset && offset < range[1];
     offset += line.length + 1;
     if (inString || !line.trim()) return null;
     const indent = line.match(/^[ \t]*/)?.[0] ?? "";

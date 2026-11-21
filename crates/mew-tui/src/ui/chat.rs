@@ -535,13 +535,17 @@ pub(crate) fn build_chat_lines(
                     // again (click or Ctrl-G).
                     if is_expanded && !is_active && run_len > 1 {
                         let mut seen = std::collections::HashSet::new();
+                        let nested = msg
+                            .assistant
+                            .as_ref()
+                            .map_or(&[][..], |meta| meta.nested_tool_calls.as_slice());
                         let unique_names: Vec<&str> = msg.parts[run_start..run_end]
                             .iter()
-                            .filter_map(|p| {
+                            .flat_map(|p| {
                                 if let Part::ToolCall(tc) = p {
-                                    Some(tc.tool_name.as_str())
+                                    tool_display_names(tc, nested)
                                 } else {
-                                    None
+                                    Vec::new()
                                 }
                             })
                             .filter(|n| seen.insert(*n))
@@ -598,11 +602,15 @@ pub(crate) fn build_chat_lines(
                     }
                 } else {
                     // Collapsed batch summary row.
+                    let nested = msg
+                        .assistant
+                        .as_ref()
+                        .map_or(&[][..], |meta| meta.nested_tool_calls.as_slice());
                     let tool_names: Vec<&str> = msg.parts[run_start..run_end]
                         .iter()
-                        .map(|p| {
+                        .flat_map(|p| {
                             if let Part::ToolCall(tc) = p {
-                                tc.tool_name.as_str()
+                                tool_display_names(tc, nested)
                             } else {
                                 unreachable!()
                             }
@@ -936,8 +944,34 @@ fn trace_label(count: usize) -> String {
     }
 }
 
+fn tool_display_names<'a>(
+    tc: &'a mew_message::ToolCallPart,
+    nested: &'a [mew_message::NestedToolCall],
+) -> Vec<&'a str> {
+    let mut names = Vec::new();
+    if tc.tool_name == "python" {
+        for call in nested
+            .iter()
+            .filter(|call| call.parent_call_id == tc.call_id)
+        {
+            if !names.contains(&call.tool_name.as_str()) {
+                names.push(call.tool_name.as_str());
+            }
+        }
+    }
+    if names.is_empty() {
+        names.push(&tc.tool_name);
+    }
+    names
+}
+
+const MAX_PYTHON_DISPLAY_BYTES: usize = 16 * 1024;
+
 /// Reindent syntactically complete cells for display while preserving strings.
 fn python_display_source(source: &str) -> String {
+    if source.len() > MAX_PYTHON_DISPLAY_BYTES {
+        return source.to_owned();
+    }
     let mut parser = tree_sitter::Parser::new();
     if parser
         .set_language(&tree_sitter_python::LANGUAGE.into())
@@ -964,11 +998,15 @@ fn python_display_source(source: &str) -> String {
     let mut strings = Vec::new();
     collect_strings(tree.root_node(), &mut strings);
     let mut offset = 0;
+    let mut string_index = 0;
     let mut indents = Vec::new();
     for line in source.split('\n') {
+        while string_index < strings.len() && strings[string_index].end <= offset {
+            string_index += 1;
+        }
         let in_string = strings
-            .iter()
-            .any(|range| range.start < offset && offset < range.end);
+            .get(string_index)
+            .is_some_and(|range| range.start < offset && offset < range.end);
         offset += line.len() + 1;
         if in_string || line.trim().is_empty() {
             indents.push(None);
@@ -1013,19 +1051,7 @@ fn render_single_tool_call(
     let calls = nested_calls
         .iter()
         .filter(|call| call.parent_call_id == tc.call_id);
-    let mut names = Vec::new();
-    if tc.tool_name == "python" {
-        for call in calls.clone() {
-            if !names.contains(&call.tool_name.as_str()) {
-                names.push(call.tool_name.as_str());
-            }
-        }
-    }
-    let label = if names.is_empty() {
-        tc.tool_name.clone()
-    } else {
-        names.join(", ")
-    };
+    let label = tool_display_names(tc, nested_calls).join(", ");
 
     if let Some(line) = push_tool_edge(tool_width, true, tool_bg) {
         sel_ctx.push_line(line);
@@ -1075,23 +1101,42 @@ fn render_single_tool_call(
                 TOOL_LINES_MAX
             };
             use ratatui_mdstream::highlight::Highlighter;
-            let display = if app.bash_expanded {
-                source.to_owned()
+            let formatted;
+            let display = if app.bash_expanded || source.len() > MAX_PYTHON_DISPLAY_BYTES {
+                source
             } else {
-                python_display_source(source)
+                formatted = python_display_source(source);
+                &formatted
             };
-            let mut highlighter = ratatui_mdstream::highlight::SyntectHighlighter::default();
-            highlighter.begin_block(Some("python"));
+            let mut highlighter = (source.len() <= MAX_PYTHON_DISPLAY_BYTES).then(|| {
+                let mut highlighter =
+                    ratatui_mdstream::highlight::SyntectHighlighter::from_theme_tokens(|token| {
+                        match app.theme.resolve(token) {
+                            Color::Rgb(r, g, b) => {
+                                ((r as u32) << 16) | ((g as u32) << 8) | b as u32
+                            }
+                            _ => 0,
+                        }
+                    });
+                highlighter.begin_block(Some("py"));
+                highlighter
+            });
             let mut lines = display.lines();
             for line in lines.by_ref().take(limit) {
-                let spans = highlighter
-                    .highlight_line(Some("python"), line)
-                    .into_iter()
-                    .map(|(text, style)| Span::styled(text, style.bg(tool_bg)))
-                    .collect::<Vec<_>>();
+                let spans = if let Some(highlighter) = &mut highlighter {
+                    highlighter
+                        .highlight_line(Some("py"), line)
+                        .into_iter()
+                        .map(|(text, style)| Span::styled(text, style.bg(tool_bg)))
+                        .collect::<Vec<_>>()
+                } else {
+                    vec![Span::raw(line.to_owned())]
+                };
                 sel_ctx.push_tool_output(tool_width, Line::from(spans), "  ", tool_bg);
             }
-            highlighter.end_block();
+            if let Some(highlighter) = &mut highlighter {
+                highlighter.end_block();
+            }
             let remaining = lines.count();
             if remaining > 0 {
                 sel_ctx.push_tool_output(
@@ -1473,15 +1518,7 @@ fn wrap_tool_line_with_metadata(
         };
     }
 
-    // Collect the full text and remember the first span's style (tool
-    // output is usually monochrome; for multi-color ANSI output we lose
-    // the per-word color but keep the fill, which is the visible bug).
     let full: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-    let base_style = line
-        .spans
-        .first()
-        .map(|s| s.style.bg(tool_bg))
-        .unwrap_or_else(|| Style::default().bg(tool_bg));
 
     let chunks = wrap_text_to_width(&full, content_w);
     if chunks.is_empty() {
@@ -1495,14 +1532,42 @@ fn wrap_tool_line_with_metadata(
     }
 
     let mut rendered = RenderedLines::default();
+    let mut source_offset = 0;
     for (index, chunk) in chunks.into_iter().enumerate() {
         rendered.metadata.push(LineMetadata {
             content: indent.len()..indent.len() + chunk.len(),
             continues_previous: index > 0,
         });
-        rendered
-            .lines
-            .push(build_tool_row(width, indent, &chunk, base_style, tool_bg));
+        let end = source_offset + chunk.len();
+        let mut offset = 0;
+        let mut spans = vec![Span::styled(
+            indent.to_owned(),
+            Style::default().bg(tool_bg),
+        )];
+        for span in &line.spans {
+            let span_end = offset + span.content.len();
+            let start = source_offset.max(offset);
+            let stop = end.min(span_end);
+            if start < stop {
+                spans.push(Span::styled(
+                    span.content[start - offset..stop - offset].to_owned(),
+                    span.style.bg(tool_bg),
+                ));
+            }
+            offset = span_end;
+            if offset >= end {
+                break;
+            }
+        }
+        let used = indent_w as usize + display_width(&chunk);
+        if used < width as usize {
+            spans.push(Span::styled(
+                " ".repeat(width as usize - used),
+                Style::default().bg(tool_bg),
+            ));
+        }
+        rendered.lines.push(Line::from(spans));
+        source_offset = end;
     }
     rendered
 }
@@ -1677,6 +1742,28 @@ fn tool_args_summary(name: &str, input: &serde_json::Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_output_preserves_span_colors_across_wrapping() {
+        let lines = wrap_tool_line(
+            8,
+            Line::from(vec![
+                Span::styled("alpha ", Style::default().fg(Color::Red)),
+                Span::styled("beta", Style::default().fg(Color::Blue)),
+            ]),
+            "  ",
+            Color::Black,
+        );
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0]
+            .spans
+            .iter()
+            .any(|span| span.content.contains("alpha") && span.style.fg == Some(Color::Red)));
+        assert!(lines[1]
+            .spans
+            .iter()
+            .any(|span| span.content.contains("beta") && span.style.fg == Some(Color::Blue)));
+    }
 
     #[test]
     fn test_wrap_tool_line_short_returns_one_row() {
@@ -2160,6 +2247,8 @@ mod tests {
             python_display_source(source),
             "if ready:\n  s = f\"\"\"hello\n    {name}\n    more\"\"\"\n  print(s)"
         );
+        let large = format!("if ready:\n{}", "    print('hello')\n".repeat(2000));
+        assert_eq!(python_display_source(&large), large);
     }
 
     #[test]
@@ -2213,7 +2302,7 @@ mod tests {
             built.lines.iter().any(|line| {
                 line.spans
                     .iter()
-                    .any(|span| span.content.contains("'hello'") && span.style.fg.is_some())
+                    .any(|span| span.content.contains("hello") && span.style.fg.is_some())
             }),
             "Python string should have syntax color"
         );
@@ -2248,6 +2337,101 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(expanded.contains("expanded-only"), "{expanded}");
+    }
+
+    #[test]
+    fn python_highlighting_uses_active_theme() {
+        let mut app = App::new();
+        app.theme = crate::theme::Theme::load("codex-light");
+        let expected = app.theme.resolve("syntax.string");
+        let python = tool_call_part("python", serde_json::json!({"source": "text('hello')"}));
+        app.push_message(mew_message::Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: mew_message::Role::Assistant,
+            parts: vec![Part::ToolCall(python)],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        });
+        let built = build_chat_lines(&mut app, 78, 80);
+        assert!(
+            built.lines.iter().any(|line| line
+                .spans
+                .iter()
+                .any(|span| span.content.contains("hello") && span.style.fg == Some(expected))),
+            "expected {expected:?}: {:?}",
+            built.lines
+        );
+    }
+
+    #[test]
+    fn python_batch_summary_names_executed_tools() {
+        let mut app = App::new();
+        let first = tool_call_part("python", serde_json::json!({"source": "tools.read({})"}));
+        let first_id = first.base.id;
+        let mut second = tool_call_part("python", serde_json::json!({"source": "tools.write({})"}));
+        second.call_id = "call-2".into();
+        app.push_message(mew_message::Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: mew_message::Role::Assistant,
+            parts: vec![Part::ToolCall(first), Part::ToolCall(second)],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: Some(mew_message::AssistantMeta {
+                nested_tool_calls: vec![
+                    mew_message::NestedToolCall {
+                        parent_call_id: "call-1".into(),
+                        call_id: "n1".into(),
+                        tool_name: "read".into(),
+                        input: serde_json::json!({}),
+                        status: mew_message::NestedToolStatus::Completed,
+                        error: None,
+                        output_bytes: None,
+                    },
+                    mew_message::NestedToolCall {
+                        parent_call_id: "call-2".into(),
+                        call_id: "n2".into(),
+                        tool_name: "write".into(),
+                        input: serde_json::json!({}),
+                        status: mew_message::NestedToolStatus::Completed,
+                        error: None,
+                        output_bytes: None,
+                    },
+                ],
+                ..Default::default()
+            }),
+        });
+        let rendered = build_chat_lines(&mut app, 78, 80)
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("2 tool calls: read, write"), "{rendered}");
+        app.tool_batch_expanded.insert(first_id);
+        let expanded = build_chat_lines(&mut app, 78, 80)
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(expanded.contains("2 tool calls: read, write"), "{expanded}");
     }
 
     #[test]

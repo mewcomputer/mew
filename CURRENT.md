@@ -4738,3 +4738,10 @@ TUI and Electron tool cards lead with the nested tools that actually ran and
 show syntax-colored Python. Python display indentation uses parsed syntax to
 keep multiline strings intact; expanded details retain the original source.
 Verified TUI rendering and golden tests, UI tests, and the production build.
+
+### 2026-11-20: Harden Python activity rendering
+
+Show nested names in tool batches, use the active syntax palette, preserve
+colors while wrapping, and avoid displaying a guessed Python sensitivity.
+Bound parsing and highlighting for large cells. Verified the full TUI suite,
+the web UI suite and build, and shared client tests.

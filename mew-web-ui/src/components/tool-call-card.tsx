@@ -3,7 +3,7 @@ import { ChevronRight, ChevronDown, Clock3, CheckCircle2, XCircle, Loader2, Copy
 import { useSessionStore, type MessagePart } from "../stores/session";
 import { cn } from "../lib/utils";
 import { CodeBlock } from "./code-block";
-import { formatPythonForDisplay } from "../lib/python-display";
+import { formatPythonForDisplay, MAX_PYTHON_DISPLAY_LENGTH } from "../lib/python-display";
 
 type Sensitivity = "readonly" | "mutating" | "dangerous";
 
@@ -118,7 +118,7 @@ export function ToolCallCard({ part }: { part: Extract<MessagePart, { type: "too
             <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] leading-4 text-muted-foreground">
               <span className={cn("capitalize", state === "error" && "text-destructive", state === "completed" && "text-text-success", state === "running" && "text-text-accent")}>{state}</span>
               {elapsed && <span className="tabular-nums">{elapsed}</span>}
-              <span className={sens.className}>{sens.label}</span>
+              {part.toolName !== "python" && <span className={sens.className}>{sens.label}</span>}
             </span>
           </span>
           {summary && <span className="block truncate text-[11px] leading-4 text-muted-foreground" title={summary}>{summary}</span>}
@@ -132,7 +132,9 @@ export function ToolCallCard({ part }: { part: Extract<MessagePart, { type: "too
 
       {displaySource !== null && (
         <div className="max-h-40 overflow-auto border-t border-border px-3 py-2 text-[11px] leading-relaxed" aria-label="Python code">
-          <CodeBlock key={displaySource} code={displaySource} lang="python" showHeader={false} flush />
+          {displaySource.length > MAX_PYTHON_DISPLAY_LENGTH
+            ? <pre>{displaySource}</pre>
+            : <CodeBlock key={displaySource} code={displaySource} lang="python" showHeader={false} flush />}
         </div>
       )}
       {part.nestedCalls && part.nestedCalls.length > 0 && (

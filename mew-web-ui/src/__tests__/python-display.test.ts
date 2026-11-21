@@ -17,4 +17,9 @@ describe("Python display indentation", () => {
     const source = 'if ready:\n    s = f"""hello\n    {name}\n    more"""\n    print(s)';
     expect(formatPythonForDisplay(source)).toBe('if ready:\n  s = f"""hello\n    {name}\n    more"""\n  print(s)');
   });
+
+  it("leaves very large cells unchanged", () => {
+    const source = `if ready:\n${"    print('hello')\n".repeat(2000)}`;
+    expect(formatPythonForDisplay(source)).toBe(source);
+  });
 });

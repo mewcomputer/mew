@@ -104,6 +104,7 @@ it("names multiple executed tools and retains Python source for inspection", () 
     ],
   })} />);
   expect(screen.getByRole("button", { name: "Show read, write details" })).toBeTruthy();
+  expect(screen.queryByText("Mutating")).toBeNull();
   expect(screen.getByLabelText("Python code").textContent).toContain(source);
 });
 
