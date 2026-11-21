@@ -4767,3 +4767,8 @@ compacted history, and report recoverable file and sidecar errors without
 discarding the prior context. Reset the context meter after compaction and
 keep usage through temporary metadata failures. Verified agent, tool, daemon
 WebSocket and session-lifetime tests, TUI client flow, and web UI/client tests.
+
+### 2026-11-20: Update context meter snapshots
+
+Refresh window-navigation snapshots for the unknown context meter after
+compaction. Verified the full TUI test suite.
