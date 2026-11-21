@@ -640,6 +640,7 @@ impl Agent {
                 }
             });
 
+            let flagged_files_path = self.flagged_files_path().await;
             let ctx = ToolCtx::new(
                 std::sync::Arc::new(mew_tools::ToolCtxShared {
                     session_id: self.session_id,
@@ -650,6 +651,8 @@ impl Agent {
                     snapshot_store: self.snapshot_store.clone(),
                     browser_access: self.browser_access.clone(),
                     supports_vision: self.supports_vision,
+                    flagged_files_path,
+                    flagged_files: self.flagged_files.clone(),
                 }),
                 tc.call_id.clone(),
                 self.cancel_token.child_token(),
@@ -749,10 +752,23 @@ impl Agent {
                 input: input.clone(),
             };
 
-            let output = self
+            let mut output = self
                 .dispatcher
                 .on_tool_execute_after(&hook_call, tool_output)
                 .await;
+
+            if output.error.is_empty() && tc.tool_name == "write_plan" && self.plan_path.is_none() {
+                if let Some(delta) = &output.file_delta {
+                    let file = mew_tools::tools::flag_important::FlaggedFile {
+                        path: std::path::PathBuf::from(&delta.path),
+                        mode: mew_tools::tools::flag_important::FlagMode::Referenced,
+                    };
+                    if let Err(error) = self.flag_file_if_absent(file).await {
+                        output.error =
+                            format!("Plan was written, but its flag could not be saved: {error}");
+                    }
+                }
+            }
 
             tracing::info!(tool = %tc.tool_name, call_id = %call_id, success = %output.error.is_empty(), "tool finished");
             let (success, final_state) = if !output.error.is_empty() {
@@ -815,20 +831,6 @@ impl Agent {
                         removed: delta.removed,
                     })
                     .await;
-            }
-            // Keep generated plan paths discoverable after compaction without
-            // inlining every plan written during a session.
-            if success && tc.tool_name == "write_plan" && self.plan_path.is_none() {
-                if let Some(delta) = &output.file_delta {
-                    let path = std::path::PathBuf::from(&delta.path);
-                    let mut flagged = self.flagged_files.lock().await;
-                    if !flagged.iter().any(|file| file.path == path) {
-                        flagged.push(mew_tools::tools::flag_important::FlaggedFile {
-                            path,
-                            mode: mew_tools::tools::flag_important::FlagMode::Referenced,
-                        });
-                    }
-                }
             }
             // Publish changes made by flag_important or generated plan writes.
             if tc.tool_name == "flag_important"

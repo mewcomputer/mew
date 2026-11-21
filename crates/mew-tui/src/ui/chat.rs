@@ -2039,6 +2039,7 @@ mod tests {
                 tail_start_id: None,
                 summary: None,
                 removed_count: Some(7),
+                preserved_context: Vec::new(),
             })],
             time: mew_message::Time {
                 created: 0,
@@ -2137,6 +2138,7 @@ mod tests {
                 tail_start_id: None,
                 summary: Some(summary.to_string()),
                 removed_count: Some(3),
+                preserved_context: Vec::new(),
             })],
             time: mew_message::Time {
                 created: 0,

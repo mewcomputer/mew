@@ -874,7 +874,7 @@ export type ServerMessage = ({
     type: "session_usage_changed";
     session_id: string;
     usage: SessionUsageWire;
-    context_tokens?: number;
+    context_tokens?: number | null;
 } | {
     type: "session_alert";
     session_id: string;
@@ -1155,7 +1155,7 @@ export interface MewClientEvents {
     "session-usage-changed": (data: {
         session_id: string;
         usage: SessionUsageWire;
-        context_tokens?: number;
+        context_tokens?: number | null;
     }) => void;
     "session-alert": (data: {
         session_id: string;

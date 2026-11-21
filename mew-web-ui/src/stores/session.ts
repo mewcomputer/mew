@@ -255,6 +255,7 @@ interface SessionState {
   // Current context occupancy for the active session (snapshot, not
   // cumulative): the latest request's prompt size and the model's window.
   contextTokens: number;
+  contextTokensKnown: boolean;
   contextWindow: number;
 
   // Model management
@@ -371,7 +372,7 @@ interface SessionState {
   onFilePreview: (path: string, content: string, truncated: boolean, language?: string) => void;
   onGitStatus: (entries: GitEntry[]) => void;
   onFsChanged: (paths: string[]) => void;
-  onSessionUsageChanged: (sessionId: string, usage: SessionUsageWire, contextTokens?: number) => void;
+  onSessionUsageChanged: (sessionId: string, usage: SessionUsageWire, contextTokens?: number | null) => void;
   onSessionAlert: (sessionId: string, title: string, kind: AlertKind, detail?: string) => void;
   clearAlertsForSession: (sessionId: string) => void;
   dismissAlert: (sessionId: string, timestamp: number) => void;
@@ -437,6 +438,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   totalOutputTokens: 0,
   totalCost: 0,
   contextTokens: 0,
+  contextTokensKnown: true,
   contextWindow: 0,
   availableModels: [],
   currentModel: null,
@@ -717,6 +719,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
               totalOutputTokens,
               totalCost,
               contextTokens,
+              contextTokensKnown: ev.usage.input > 0 || s.contextTokensKnown,
               contextWindow,
             };
           }
@@ -727,6 +730,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             totalOutputTokens,
             totalCost,
             contextTokens,
+            contextTokensKnown: ev.usage.input > 0 || s.contextTokensKnown,
             contextWindow,
             messages: s.messages.map((m, i) =>
               i === idx
@@ -1004,9 +1008,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // context reading.
       return {
         sessionUsage,
+        ...(state.sessionId === sessionId && contextTokens !== undefined ? {
+          contextTokensKnown: contextTokens !== null,
+          ...(contextTokens !== null ? { contextTokens } : {}),
+        } : {}),
         availableSessions: state.availableSessions.map((s) =>
           s.session_id === sessionId
-            ? { ...s, usage, context_tokens: contextTokens ?? s.context_tokens }
+            ? { ...s, usage, context_tokens: contextTokens === null ? undefined : contextTokens ?? s.context_tokens }
             : s,
         ),
       };
@@ -1066,7 +1074,16 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       ),
     })),
 
-  setAvailableSessions: (sessions) => set({ availableSessions: sessions }),
+  setAvailableSessions: (sessions) => set((state) => {
+    const active = sessions.find((session) => session.session_id === state.confirmedSessionId);
+    return {
+      availableSessions: sessions,
+      ...(active && active.state !== "running" ? {
+        contextTokensKnown: active.context_tokens !== undefined,
+        contextTokens: active.context_tokens ?? 0,
+      } : {}),
+    };
+  }),
 
   setSessionsLoading: (loading) => set({ sessionsLoading: loading }),
 
@@ -1280,6 +1297,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       totalOutputTokens: 0,
       totalCost: 0,
       contextTokens: 0,
+      contextTokensKnown: true,
       contextWindow: 0,
       // Clear per-session state that shouldn't leak across sessions.
       sessionCwd: null,
@@ -1371,10 +1389,13 @@ export function bridgeClientToStore(client: MewClient) {
   });
 
   client.on("session-ready", (data) => {
+    const active = store.getState().availableSessions.find((session) => session.session_id === data.session_id);
     useSessionStore.setState({
       sessionId: data.session_id,
       confirmedSessionId: data.session_id,
       sessionCwd: data.cwd ?? null,
+      contextTokensKnown: active?.context_tokens !== undefined,
+      contextTokens: active?.context_tokens ?? 0,
       pendingPermissions: [],
       pendingAskUser: [],
       pendingGoals: [],

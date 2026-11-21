@@ -80,6 +80,8 @@ pub struct Session {
         Mutex<HashMap<String, (mew_protocol::PromptStatus, Option<String>)>>,
     /// Broadcast targets: (client_id, sender, kind) per attached client.
     pub clients: Mutex<Vec<(u64, ClientSender, mew_protocol::ClientKind)>>,
+    pub(crate) last_usage: Mutex<Option<mew_protocol::SessionUsageWire>>,
+    pub(crate) last_context_tokens: Mutex<Option<u64>>,
     /// Pending permission / workspace-permission / subagent-permission requests.
     pub pending_permissions: Mutex<HashMap<String, PendingRequest<PermissionDecision>>>,
     /// Pending ask-user requests.
@@ -300,6 +302,8 @@ impl Session {
             job_observers: Mutex::new(HashMap::new()),
             prompt_receipts: Mutex::new(HashMap::new()),
             clients: Mutex::new(Vec::new()),
+            last_usage: Mutex::new(None),
+            last_context_tokens: Mutex::new(None),
             pending_permissions: Mutex::new(HashMap::new()),
             pending_ask_user: Mutex::new(HashMap::new()),
             pending_goal_proposals: Mutex::new(HashMap::new()),
@@ -422,6 +426,36 @@ impl Session {
 
     /// Broadcast a message to all attached clients. Removes any sender that fails.
     pub async fn broadcast(&self, mut msg: ServerMessage) {
+        if let ServerMessage::Provider {
+            event: mew_message::ProviderEventWire::MessageEnd { usage, cost, .. },
+        } = &msg
+        {
+            let mut cached = self.last_usage.lock().await;
+            let totals = cached.get_or_insert_with(Default::default);
+            totals.input_tokens = totals.input_tokens.saturating_add(usage.input as u64);
+            totals.output_tokens = totals.output_tokens.saturating_add(usage.output as u64);
+            totals.cache_read_tokens = totals
+                .cache_read_tokens
+                .saturating_add(usage.cache_read as u64);
+            totals.cache_write_tokens = totals
+                .cache_write_tokens
+                .saturating_add(usage.cache_write as u64);
+            totals.cost += cost;
+            if usage.input > 0 {
+                *self.last_context_tokens.lock().await = Some(usage.input as u64);
+            }
+        }
+        if let ServerMessage::SessionUsageChanged {
+            session_id,
+            usage,
+            context_tokens,
+        } = &msg
+        {
+            if session_id == &self.id {
+                *self.last_usage.lock().await = Some(usage.clone());
+                *self.last_context_tokens.lock().await = *context_tokens;
+            }
+        }
         let _provider_publication = match &msg {
             ServerMessage::Provider { event } => {
                 let mut replay = self.provider_replay.lock().await;
@@ -846,6 +880,8 @@ impl SessionManager {
             return Err(AttachError::NotFound);
         }
 
+        let initial_usage = meta.usage.as_ref().map(Into::into);
+        let initial_context_tokens = meta.context_tokens;
         let cwd = meta.cwd.clone().map(PathBuf::from);
         let policy = mew_session::SessionPolicy::read(&self.session_dir, session_id)
             .await
@@ -866,6 +902,11 @@ impl SessionManager {
         .map_err(AttachError::BuildAgent)?;
         self.restore_python_session(session_id, &mut agent).await;
         load_todos(&agent).await.map_err(AttachError::BuildAgent)?;
+        agent
+            .restore_flagged_files()
+            .await
+            .context("restore flagged files")
+            .map_err(AttachError::BuildAgent)?;
 
         // The writer has already migrated and repaired the log. Reuse the
         // same scan for model context, transcript pages, and receipt recovery.
@@ -887,6 +928,8 @@ impl SessionManager {
             provider.clone(),
             self.session_dir.clone(),
         );
+        *session.last_usage.get_mut() = initial_usage;
+        *session.last_context_tokens.get_mut() = initial_context_tokens;
         session.writer_lease = Some(lease);
         *session.history_index.get_mut() = Arc::new(history_index);
         session.prompt_receipts.get_mut().extend(

@@ -2500,6 +2500,7 @@ where
                     continue;
                 };
                 let client_tx = client_tx.clone();
+                let origin_client_id = client_id;
                 let session_manager_clone = session_manager.clone();
                 tokio::spawn(async move {
                     let _guard = session.turn_lock.lock().await;
@@ -2512,6 +2513,7 @@ where
                     } else {
                         None
                     };
+                    let mut compacted = false;
                     let result = {
                         let mut agent = session.agent.lock().await;
                         match cmd {
@@ -2524,7 +2526,10 @@ where
                             },
                             "/compact" => Some(match agent.compact_context().await {
                                 Ok(0) => "nothing to compact".to_string(),
-                                Ok(removed) => format!("compacted {removed} messages"),
+                                Ok(removed) => {
+                                    compacted = true;
+                                    format!("compacted {removed} messages")
+                                }
                                 Err(error) => format!("compaction failed: {error}"),
                             }),
                             "/goal" => {
@@ -2636,8 +2641,43 @@ where
                             }
                         }
                     };
+                    if compacted {
+                        let cached_usage = session.last_usage.lock().await.clone();
+                        let usage = match session_manager_clone
+                            .update_metadata(&session.id, move |meta| {
+                                reconcile_usage(meta, cached_usage.as_ref(), None);
+                                meta.context_tokens = None;
+                            })
+                            .await
+                        {
+                            Ok(meta) => meta.usage.as_ref().map(Into::into),
+                            Err(error) => {
+                                tracing::warn!(session_id = %session.id, %error, "could not reset context usage after compaction");
+                                session.last_usage.lock().await.clone()
+                            }
+                        };
+                        if let Some(usage) = usage {
+                            session_manager_clone
+                                .broadcast_all(ServerMessage::SessionUsageChanged {
+                                    session_id: session.id.clone(),
+                                    usage,
+                                    context_tokens: None,
+                                })
+                                .await;
+                        }
+                    }
                     if let Some(text) = result {
-                        let _ = client_tx.send(ServerMessage::SlashResult { text });
+                        if cmd == "/compact" {
+                            let clients = session.clients.lock().await;
+                            if clients
+                                .iter()
+                                .any(|(id, _, _)| Some(*id) == origin_client_id)
+                            {
+                                let _ = client_tx.send(ServerMessage::SlashResult { text });
+                            }
+                        } else {
+                            let _ = client_tx.send(ServerMessage::SlashResult { text });
+                        }
                     }
                 });
             }
@@ -3254,9 +3294,16 @@ where
                 if let Some(session) = active.get(&session_id).cloned() {
                     drop(active);
                     let agent = session.agent.lock().await;
-                    let mut guard = agent.flagged_files.lock().await;
-                    guard.retain(|f| f.path.display().to_string() != path);
-                    let files: Vec<mew_protocol::FlaggedFileWire> = guard
+                    let files = match agent.unflag_file(&path).await {
+                        Ok(files) => files,
+                        Err(error) => {
+                            reply(ServerMessage::Error {
+                                message: format!("could not save flagged files: {error}"),
+                            });
+                            continue;
+                        }
+                    };
+                    let files: Vec<mew_protocol::FlaggedFileWire> = files
                         .iter()
                         .map(|f| mew_protocol::FlaggedFileWire {
                             path: f.path.display().to_string(),
@@ -3266,7 +3313,6 @@ where
                             ),
                         })
                         .collect();
-                    drop(guard);
                     drop(agent);
                     session
                         .broadcast(ServerMessage::FlaggedFilesChanged {
@@ -3626,6 +3672,23 @@ fn attachment_parts(attachments: Vec<mew_protocol::Attachment>) -> Vec<mew_messa
         .collect()
 }
 
+fn reconcile_usage(
+    meta: &mut mew_session::Meta,
+    cached: Option<&mew_protocol::SessionUsageWire>,
+    context_tokens: Option<u64>,
+) {
+    if let Some(cached) = cached {
+        let usage = meta.usage.get_or_insert_with(Default::default);
+        usage.input_tokens = usage.input_tokens.max(cached.input_tokens);
+        usage.output_tokens = usage.output_tokens.max(cached.output_tokens);
+        usage.cache_read_tokens = usage.cache_read_tokens.max(cached.cache_read_tokens);
+        usage.cache_write_tokens = usage.cache_write_tokens.max(cached.cache_write_tokens);
+        usage.cost = usage.cost.max(cached.cost);
+        usage.turns = usage.turns.max(cached.turns);
+    }
+    meta.context_tokens = context_tokens;
+}
+
 /// Run and persist a turn, then publish its idle state and outcome.
 async fn run_turn(
     session: &Arc<Session>,
@@ -3649,8 +3712,11 @@ async fn run_turn(
     *session.current_turn_cancel.lock().await = None;
     *session.is_running.lock().await = false;
 
+    let cached_usage = session.last_usage.lock().await.clone();
+    let cached_context = *session.last_context_tokens.lock().await;
     let (usage_wire, context_tokens) = match session_mgr
         .update_metadata(&session.id, move |meta| {
+            reconcile_usage(meta, cached_usage.as_ref(), cached_context);
             meta.last_turn_failed = had_error;
             if let Some(usage) = meta.usage.as_mut() {
                 usage.add_turn();
@@ -3661,6 +3727,9 @@ async fn run_turn(
         Ok(meta) => (meta.usage.as_ref().map(Into::into), meta.context_tokens),
         Err(error) => {
             tracing::warn!(session_id = %session.id, %error, "could not save turn metadata");
+            if let Some(usage) = session.last_usage.lock().await.as_mut() {
+                usage.turns = usage.turns.saturating_add(1);
+            }
             (None, None)
         }
     };

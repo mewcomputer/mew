@@ -1022,7 +1022,7 @@ test("session-usage-changed carries the current context reading", async () => {
   setImmediate(() => latest().open());
   await connectP;
 
-  const got: Array<{ session_id: string; context_tokens?: number }> = [];
+  const got: Array<{ session_id: string; context_tokens?: number | null }> = [];
   client.on("session-usage-changed", (data) => got.push(data));
 
   latest().peerSend({
@@ -1059,6 +1059,11 @@ test("session-usage-changed carries the current context reading", async () => {
   await new Promise((r) => setImmediate(r));
   assert.equal(got.length, 2);
   assert.equal(got[1]!.context_tokens, undefined);
+  latest().peerSend({ type: "session_usage_changed", session_id: "sess_1", usage: {
+    input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_write_tokens: 0, cost: 0, turns: 1,
+  }, context_tokens: null });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(got[2]!.context_tokens, null);
 });
 
 test("todo edits wait for matching session and request acknowledgements", async () => {

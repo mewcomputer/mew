@@ -624,6 +624,7 @@ async fn history_pages_preserve_messages_before_compaction_and_live_updates() {
         tail_start_id: Some(tail_start_id),
         summary: None,
         removed_count: Some(expected.len() as u32 - 1),
+        preserved_context: Vec::new(),
     })];
     expected.push(marker);
     let persisted = expected.clone();

@@ -383,6 +383,9 @@ describe("session activity + usage", () => {
 
   it("onSessionUsageChanged updates usage on session", () => {
     useSessionStore.setState({
+      sessionId: "s1",
+      contextTokens: 900,
+      contextTokensKnown: true,
       availableSessions: [
         {
           session_id: "s1",
@@ -411,6 +414,21 @@ describe("session activity + usage", () => {
     expect(s.usage!.cost).toBe(0.05);
     expect(s.usage!.turns).toBe(3);
     expect(s.context_tokens).toBe(900);
+    store().onSessionUsageChanged("s1", s.usage!);
+    expect(useSessionStore.getState().availableSessions[0]!.context_tokens).toBe(900);
+    store().onSessionUsageChanged("s1", s.usage!, null);
+    expect(useSessionStore.getState().availableSessions[0]!.context_tokens).toBeUndefined();
+    expect(useSessionStore.getState().contextTokensKnown).toBe(false);
+  });
+
+  it("restores the active context reading from the session list", () => {
+    useSessionStore.setState({ sessionId: "s1", confirmedSessionId: "s1", contextTokens: 0, contextTokensKnown: true });
+    const info = { session_id: "s1", state: "active" as const, created_at: 0, client_count: 0 };
+    store().setAvailableSessions([info]);
+    expect(useSessionStore.getState().contextTokensKnown).toBe(false);
+    store().setAvailableSessions([{ ...info, context_tokens: 4200 }]);
+    expect(useSessionStore.getState().contextTokensKnown).toBe(true);
+    expect(useSessionStore.getState().contextTokens).toBe(4200);
   });
 });
 

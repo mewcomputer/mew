@@ -1192,6 +1192,70 @@ impl Agent {
         self.token_count_cache.lock().unwrap().clear();
     }
 
+    pub(crate) async fn flagged_files_path(&self) -> Option<std::path::PathBuf> {
+        let session = self.session.as_ref()?;
+        let writer = session.lock().await;
+        Some(writer.path().parent()?.join("flagged-files.json"))
+    }
+
+    pub async fn restore_flagged_files(&self) -> std::io::Result<()> {
+        let Some(path) = self.flagged_files_path().await else {
+            return Ok(());
+        };
+        let files = mew_tools::tools::flag_important::load_flagged_files(&path)
+            .await
+            .map_err(|error| std::io::Error::new(error.kind(), format!(
+                "cannot read flagged files at {}: {error}; repair the file or move it aside to discard the saved flags",
+                path.display()
+            )))?;
+        if let Some(files) = files {
+            *self.flagged_files.lock().await = files;
+        }
+        Ok(())
+    }
+
+    pub async fn unflag_file(&self, path: &str) -> std::io::Result<Vec<FlaggedFile>> {
+        let state_path = self.flagged_files_path().await;
+        let mut files = self.flagged_files.lock().await;
+        let mut next = files.clone();
+        let removed_path = files
+            .iter()
+            .find(|file| file.path.display().to_string() == path)
+            .map(|file| file.path.clone())
+            .unwrap_or_else(|| std::path::PathBuf::from(path));
+        next.retain(|file| file.path.display().to_string() != path);
+        if let Some(state_path) = state_path {
+            mew_tools::tools::flag_important::save_explicit_unflag(
+                &state_path,
+                &next,
+                &removed_path,
+            )
+            .await?;
+        }
+        *files = next;
+        Ok(files.clone())
+    }
+
+    pub(crate) async fn flag_file_if_absent(&self, file: FlaggedFile) -> std::io::Result<()> {
+        let state_path = self.flagged_files_path().await;
+        let mut files = self.flagged_files.lock().await;
+        if files.iter().any(|existing| existing.path == file.path) {
+            return Ok(());
+        }
+        if let Some(path) = &state_path {
+            if mew_tools::tools::flag_important::is_explicitly_unflagged(path, &file.path).await? {
+                return Ok(());
+            }
+        }
+        let mut next = files.clone();
+        next.push(file);
+        if let Some(state_path) = state_path {
+            mew_tools::tools::flag_important::save_flagged_files(&state_path, &next).await?;
+        }
+        *files = next;
+        Ok(())
+    }
+
     /// Read this agent's persisted session metadata, if any.
     pub async fn session_meta(&self) -> Option<mew_session::Meta> {
         let session = self.session.as_ref()?;
@@ -1328,26 +1392,7 @@ impl Agent {
         input: TurnInput,
         cancel_token: Option<CancellationToken>,
     ) -> mpsc::Receiver<AgentEvent> {
-        // Auto-flag the plan file as important if it exists. This guarantees
-        // the plan survives context compaction without the model having to
-        // remember to call flag_important every turn.
-        if let Some(path) = self.resolved_plan_path() {
-            if path.exists() {
-                let path = path.clone();
-                let flagged = self.flagged_files.clone();
-                tokio::spawn(async move {
-                    let mut guard = flagged.lock().await;
-                    let already = guard.iter().any(|f| f.path == path);
-                    if !already {
-                        guard.push(FlaggedFile {
-                            path: path.clone(),
-                            mode: mew_tools::tools::flag_important::FlagMode::Included,
-                        });
-                        tracing::debug!(plan = %path.display(), "auto-flagged plan file as important");
-                    }
-                });
-            }
-        }
+        let auto_plan = self.resolved_plan_path().filter(|path| path.exists());
 
         // Write a state snapshot to <session_dir>/mew.state.json for
         // external introspection. Spawned as a background task so it
@@ -1370,6 +1415,22 @@ impl Agent {
         agent.cancel_token = cancel_token.unwrap_or_default();
 
         tokio::spawn(async move {
+            if let Some(path) = auto_plan {
+                if let Err(error) = agent
+                    .flag_file_if_absent(FlaggedFile {
+                        path,
+                        mode: mew_tools::tools::flag_important::FlagMode::Included,
+                    })
+                    .await
+                {
+                    let _ = tx
+                        .send(AgentEvent::Error(format!(
+                            "Could not save the automatic plan flag: {error}"
+                        )))
+                        .await;
+                    return;
+                }
+            }
             if let Err(e) = agent.run_loop(input, tx).await {
                 tracing::error!("agent loop ended with error: {}", e);
             }

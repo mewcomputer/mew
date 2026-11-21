@@ -15,6 +15,7 @@ export function StatusFooter() {
   useOutsideClick(ref, open, () => setOpen(false));
   const connectionState = useSessionStore((s) => s.connectionState);
   const contextTokens = useSessionStore((s) => s.contextTokens);
+  const contextTokensKnown = useSessionStore((s) => s.contextTokensKnown);
   const contextWindow = useSessionStore((s) => s.contextWindow);
   const cost = useSessionStore((s) => s.totalCost);
   const subagents = useSessionStore((s) => s.subagents);
@@ -80,8 +81,8 @@ export function StatusFooter() {
             <span className="capitalize">{connectionState}</span>
           </div>
           <div className="hidden items-center gap-2 sm:flex">
-            {(contextTokens > 0 || contextWindow > 0) && (
-              <Metric label="ctx" value={contextLabel(contextTokens, contextWindow)} />
+            {(!contextTokensKnown || contextTokens > 0 || contextWindow > 0) && (
+              <Metric label="ctx" value={contextTokensKnown ? contextLabel(contextTokens, contextWindow) : "?"} />
             )}
             <Metric label="cost" value={`$${cost.toFixed(4)}`} />
           </div>

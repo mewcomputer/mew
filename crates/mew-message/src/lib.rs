@@ -261,6 +261,9 @@ pub struct CompactionPart {
     /// header line — also gracefully `None` for older sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub removed_count: Option<u32>,
+    /// Synthetic context reintroduced during compaction and restored on resume.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preserved_context: Vec<Message>,
 }
 
 // ---------------------------------------------------------------------------
@@ -712,6 +715,7 @@ mod tests {
             tail_start_id: Some(Ulid::new()),
             summary: None,
             removed_count: None,
+            preserved_context: Vec::new(),
         });
         roundtrip("compaction", &p);
     }

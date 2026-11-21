@@ -204,6 +204,103 @@ async fn code_mode_resets_a_worker_with_an_unfinished_tool_thread() {
 }
 
 #[tokio::test]
+async fn automatic_plan_flag_is_ready_before_immediate_compaction() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = directory.path().join("plan.md");
+    std::fs::write(&plan, "plan survives the first request").unwrap();
+    let id = ulid::Ulid::new().to_string();
+    let writer = mew_session::Writer::open_at(directory.path(), &id)
+        .await
+        .unwrap();
+    let provider = Arc::new(CapturingProvider::new(vec![FakeProvider::text_response(
+        "done",
+    )]));
+    let mut agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        Some(writer),
+        vec![],
+        None,
+    );
+    agent.plan_path = Some(plan);
+    agent.keep_turns = 1;
+    agent
+        .append_message(context_message(Role::User, "old".into()))
+        .await;
+    agent.force_compact().await;
+    let mut events = agent.run("continue".into());
+    while events.recv().await.is_some() {}
+    let requests = provider.captured.lock().unwrap();
+    assert!(requests[0].messages.iter().any(|message| message.parts.iter().any(|part| matches!(part, Part::Text(text) if text.text.contains("plan survives the first request")))));
+}
+
+#[tokio::test]
+async fn python_nested_flag_is_durable() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("plan.md"), "plan").unwrap();
+    let id = ulid::Ulid::new().to_string();
+    let writer = mew_session::Writer::open_at(directory.path(), &id)
+        .await
+        .unwrap();
+    let flags = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let parent_flags = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let shared_tool = Arc::new(mew_tools::tools::flag_important::FlagImportant::new());
+    let mut parent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![shared_tool.clone()],
+        None,
+    );
+    parent.flagged_files = parent_flags.clone();
+    let provider = Arc::new(CapturingProvider::new(vec![
+        FakeProvider::tool_call(
+            "python",
+            "py",
+            serde_json::json!({"source": "text(tools.flag_important({'path':'plan.md'}))"}),
+        ),
+        FakeProvider::text_response("done"),
+    ]));
+    let mut agent = Agent::new(
+        provider,
+        Arc::new(NopDispatcher),
+        Some(writer),
+        vec![shared_tool],
+        None,
+    );
+    agent.flagged_files = flags;
+    agent.cwd = directory.path().to_path_buf();
+    agent.code_mode.mode = Some(mew_config::CodeMode::Full);
+    let mut events = agent.run("flag the plan".into());
+    let mut reported = false;
+    while let Some(event) = events.recv().await {
+        match event {
+            AgentEvent::PermissionRequest { tx, .. } => {
+                tx.send(mew_hooks::PermissionDecision::AllowOnce).unwrap();
+            }
+            AgentEvent::FlaggedFilesChanged { files } => {
+                reported |= files.iter().any(|file| file.path.ends_with("plan.md"));
+            }
+            _ => {}
+        }
+    }
+    assert!(reported, "nested flag changes must be visible to clients");
+    let stored = mew_tools::tools::flag_important::load_flagged_files(
+        &directory.path().join(&id).join("flagged-files.json"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].path, directory.path().join("plan.md"));
+    assert!(
+        parent_flags.lock().await.is_empty(),
+        "a shared child tool must not mutate parent flags"
+    );
+    assert_eq!(agent.flagged_files.lock().await.len(), 1);
+}
+
+#[tokio::test]
 async fn code_mode_dispatches_nested_tools_with_their_permission() {
     let provider = Arc::new(CapturingProvider::new(vec![
         FakeProvider::tool_call(
@@ -1317,6 +1414,522 @@ async fn clear_succeeds_when_the_transcript_commits_but_metadata_cannot_update()
         history.last().map(|message| message.parts.as_slice()),
         Some([Part::Text(marker)]) if marker.synthetic && marker.text == crate::turn::CONTEXT_CLEARED_TEXT
     ));
+}
+
+#[tokio::test]
+async fn manual_compaction_commits_when_metadata_update_fails() {
+    let directory = tempfile::tempdir().unwrap();
+    let id = ulid::Ulid::new().to_string();
+    let writer = mew_session::Writer::open_at(directory.path(), &id)
+        .await
+        .unwrap();
+    let metadata = writer.path().with_file_name("meta.json");
+    let mut agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        Some(writer),
+        vec![],
+        None,
+    );
+    agent.keep_turns = 1;
+    agent
+        .append_message(context_message(Role::User, "old".into()))
+        .await;
+    agent
+        .append_message(context_message(Role::Assistant, "new".into()))
+        .await;
+    tokio::fs::remove_file(metadata).await.unwrap();
+    assert_eq!(agent.compact_context().await.unwrap(), 1);
+    let live = agent.messages.lock().await.clone();
+    let history = mew_session::Reader::load_from(directory.path(), &id)
+        .await
+        .unwrap();
+    let resumed = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    resumed.load_messages(history).await;
+    assert_eq!(*resumed.messages.lock().await, live);
+}
+
+#[tokio::test]
+async fn failed_manual_compaction_keeps_live_and_reloaded_context() {
+    let directory = tempfile::tempdir().unwrap();
+    let id = ulid::Ulid::new().to_string();
+    let writer = mew_session::Writer::open_at(directory.path(), &id)
+        .await
+        .unwrap();
+    let transcript = writer.path().clone();
+    let saved = transcript.with_extension("saved");
+    let mut agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        Some(writer),
+        vec![],
+        None,
+    );
+    agent.keep_turns = 1;
+    agent
+        .append_message(context_message(Role::User, "old".into()))
+        .await;
+    agent
+        .append_message(context_message(Role::Assistant, "new".into()))
+        .await;
+    let live = agent.messages.lock().await.clone();
+    tokio::fs::rename(&transcript, &saved).await.unwrap();
+    tokio::fs::create_dir(&transcript).await.unwrap();
+    assert!(agent.compact_context().await.is_err());
+    assert_eq!(*agent.messages.lock().await, live);
+    tokio::fs::remove_dir(&transcript).await.unwrap();
+    tokio::fs::rename(&saved, &transcript).await.unwrap();
+    let history = mew_session::Reader::load_from(directory.path(), &id)
+        .await
+        .unwrap();
+    let resumed = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    resumed.load_messages(history).await;
+    assert_eq!(*resumed.messages.lock().await, live);
+}
+
+#[tokio::test]
+async fn compaction_rejects_oversized_flagged_content_without_committing() {
+    let directory = tempfile::tempdir().unwrap();
+    let id = ulid::Ulid::new().to_string();
+    let path = directory.path().join("large.txt");
+    std::fs::write(&path, "x".repeat(1024 * 1024 + 1)).unwrap();
+    let writer = mew_session::Writer::open_at(directory.path(), &id)
+        .await
+        .unwrap();
+    let mut agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        Some(writer),
+        vec![],
+        None,
+    );
+    agent.keep_turns = 1;
+    agent
+        .append_message(context_message(Role::User, "old".into()))
+        .await;
+    agent
+        .append_message(context_message(Role::Assistant, "new".into()))
+        .await;
+    agent.flagged_files.lock().await.push(FlaggedFile {
+        path,
+        mode: FlagMode::Included,
+    });
+    let before = agent.messages.lock().await.clone();
+    let error = agent.compact_context().await.unwrap_err();
+    assert!(
+        error.contains("flagged") && error.contains("too large"),
+        "{error}"
+    );
+    assert_eq!(*agent.messages.lock().await, before);
+    let history = mew_session::Reader::load_from(directory.path(), &id)
+        .await
+        .unwrap();
+    assert_eq!(history, before);
+}
+
+#[tokio::test]
+async fn compaction_rejects_a_concurrent_flag_change() {
+    use mew_hooks::ChatParams;
+    struct CompactionGate {
+        inner: NopDispatcher,
+        entered: tokio::sync::Notify,
+        proceed: tokio::sync::Notify,
+    }
+    #[async_trait::async_trait]
+    impl mew_hooks::Dispatcher for CompactionGate {
+        async fn on_chat_params(&self, params: ChatParams) -> ChatParams {
+            self.inner.on_chat_params(params).await
+        }
+        async fn on_chat_headers(&self, headers: http::HeaderMap) -> http::HeaderMap {
+            headers
+        }
+        async fn init(&self, _: &mew_hooks::PluginHost) {}
+        async fn shutdown(&self) {}
+        async fn on_register_tools(&self) -> Vec<mew_hooks::ToolRegistration> {
+            self.inner.on_register_tools().await
+        }
+        async fn on_register_slash_commands(&self) -> Vec<mew_hooks::SlashCommandDef> {
+            self.inner.on_register_slash_commands().await
+        }
+        async fn execute_slash_command(&self, c: &str, a: &str) -> Option<String> {
+            self.inner.execute_slash_command(c, a).await
+        }
+        async fn on_provider_event(&self, ev: &mew_provider::ProviderEvent) {
+            self.inner.on_provider_event(ev).await
+        }
+        async fn on_tool_error(&self, c: &mew_hooks::ToolCall, e: &str) {
+            self.inner.on_tool_error(c, e).await
+        }
+        async fn on_subagent_start(&self, n: &str, p: &str, d: Option<&str>) {
+            self.inner.on_subagent_start(n, p, d).await
+        }
+        async fn on_subagent_end(&self, n: &str, p: &str, o: &str) {
+            self.inner.on_subagent_end(n, p, o).await
+        }
+        async fn on_turn_end(&self, m: &[mew_message::Message]) {
+            self.inner.on_turn_end(m).await
+        }
+        async fn on_pre_model_turn(&self, m: &[mew_message::Message], s: &str) {
+            self.inner.on_pre_model_turn(m, s).await
+        }
+        async fn on_stop(&self) {
+            self.inner.on_stop().await
+        }
+        async fn on_pre_compaction(&self, _: &[mew_message::Message]) {
+            self.entered.notify_one();
+            self.proceed.notified().await;
+        }
+        async fn on_post_compaction(&self, m: &[mew_message::Message]) {
+            self.inner.on_post_compaction(m).await
+        }
+        async fn on_chat_message(&self, msg: mew_message::Message) -> mew_message::Message {
+            self.inner.on_chat_message(msg).await
+        }
+        async fn on_system_prompt(&self, p: String) -> String {
+            self.inner.on_system_prompt(p).await
+        }
+        async fn on_tool_execute_before(
+            &self,
+            c: &mew_hooks::ToolCall,
+            v: serde_json::Value,
+        ) -> mew_hooks::HookOutcome<serde_json::Value> {
+            self.inner.on_tool_execute_before(c, v).await
+        }
+        async fn on_tool_execute_after(
+            &self,
+            c: &mew_hooks::ToolCall,
+            o: mew_hooks::ToolOutput,
+        ) -> mew_hooks::ToolOutput {
+            self.inner.on_tool_execute_after(c, o).await
+        }
+        async fn on_permission_ask(
+            &self,
+            c: &mew_hooks::ToolCall,
+            d: mew_hooks::PermissionDecision,
+        ) -> mew_hooks::HookOutcome<mew_hooks::PermissionDecision> {
+            self.inner.on_permission_ask(c, d).await
+        }
+        async fn on_shell_env(
+            &self,
+            e: std::collections::HashMap<String, String>,
+        ) -> std::collections::HashMap<String, String> {
+            self.inner.on_shell_env(e).await
+        }
+        async fn on_user_input(&self, p: String) -> String {
+            self.inner.on_user_input(p).await
+        }
+        async fn on_persona_change(&self, o: Option<&str>, n: &str) {
+            self.inner.on_persona_change(o, n).await
+        }
+        async fn on_session_save(&self) {
+            self.inner.on_session_save().await
+        }
+        async fn on_model_finish(&self, f: &str, i: u32, o: u32, c: f64) {
+            self.inner.on_model_finish(f, i, o, c).await
+        }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("plan.md");
+    std::fs::write(&file, "important").unwrap();
+    let id = ulid::Ulid::new().to_string();
+    let writer = mew_session::Writer::open_at(directory.path(), &id)
+        .await
+        .unwrap();
+    let gate = Arc::new(CompactionGate {
+        inner: NopDispatcher,
+        entered: tokio::sync::Notify::new(),
+        proceed: tokio::sync::Notify::new(),
+    });
+    let mut agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        gate.clone(),
+        Some(writer),
+        vec![],
+        None,
+    );
+    agent.keep_turns = 1;
+    agent
+        .append_message(context_message(Role::User, "old".into()))
+        .await;
+    agent
+        .append_message(context_message(Role::Assistant, "new".into()))
+        .await;
+    agent.flagged_files.lock().await.push(FlaggedFile {
+        path: file.clone(),
+        mode: FlagMode::Included,
+    });
+    let before = agent.messages.lock().await.clone();
+    let mut compacting = agent.clone();
+    let task = tokio::spawn(async move { compacting.compact_context().await });
+    tokio::time::timeout(std::time::Duration::from_secs(3), gate.entered.notified())
+        .await
+        .unwrap();
+    let change = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        agent.unflag_file(&file.display().to_string()),
+    )
+    .await;
+    gate.proceed.notify_one();
+    assert!(change.unwrap().unwrap().is_empty());
+    let error = task.await.unwrap().unwrap_err();
+    assert!(error.contains("Flagged files changed"), "{error}");
+    assert_eq!(*agent.messages.lock().await, before);
+    let history = mew_session::Reader::load_from(directory.path(), &id)
+        .await
+        .unwrap();
+    assert_eq!(history, before);
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn compaction_rejects_fifo_without_blocking_unflag() {
+    let directory = tempfile::tempdir().unwrap();
+    let fifo = directory.path().join("slow-plan");
+    nix::unistd::mkfifo(
+        &fifo,
+        nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+    )
+    .unwrap();
+    let id = ulid::Ulid::new().to_string();
+    let writer = mew_session::Writer::open_at(directory.path(), &id)
+        .await
+        .unwrap();
+    let mut agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        Some(writer),
+        vec![],
+        None,
+    );
+    agent.keep_turns = 1;
+    agent
+        .append_message(context_message(Role::User, "old".into()))
+        .await;
+    agent
+        .append_message(context_message(Role::Assistant, "new".into()))
+        .await;
+    agent.flagged_files.lock().await.push(FlaggedFile {
+        path: fifo.clone(),
+        mode: FlagMode::Included,
+    });
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), agent.compact_context())
+        .await
+        .expect("FIFO blocked compaction");
+    assert!(result.unwrap_err().contains("not a regular file"));
+    assert!(agent
+        .unflag_file(&fifo.display().to_string())
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn missing_flagged_file_does_not_discard_previous_context() {
+    let directory = tempfile::tempdir().unwrap();
+    let id = ulid::Ulid::new().to_string();
+    let file = directory.path().join("plan.md");
+    std::fs::write(&file, "important plan").unwrap();
+    let writer = mew_session::Writer::open_at(directory.path(), &id)
+        .await
+        .unwrap();
+    let mut agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        Some(writer),
+        vec![],
+        None,
+    );
+    agent.keep_turns = 1;
+    agent
+        .append_message(context_message(Role::User, "old".into()))
+        .await;
+    agent
+        .append_message(context_message(Role::Assistant, "new".into()))
+        .await;
+    agent.flagged_files.lock().await.push(FlaggedFile {
+        path: file.clone(),
+        mode: FlagMode::Included,
+    });
+    assert!(agent.compact_context().await.unwrap() > 0);
+    let before = agent.messages.lock().await.clone();
+    std::fs::remove_file(file).unwrap();
+    let error = agent.compact_context().await.unwrap_err();
+    assert!(error.contains("Could not read flagged file"));
+    assert!(error.contains("/unflag"), "{error}");
+    assert!(error.contains("Pinned context"), "{error}");
+    assert_eq!(*agent.messages.lock().await, before);
+    let history = mew_session::Reader::load_from(directory.path(), &id)
+        .await
+        .unwrap();
+    let resumed = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    resumed.load_messages(history).await;
+    assert_eq!(*resumed.messages.lock().await, before);
+}
+
+#[tokio::test]
+async fn failed_unflag_preserves_the_saved_flag() {
+    let directory = tempfile::tempdir().unwrap();
+    let id = ulid::Ulid::new().to_string();
+    let writer = mew_session::Writer::open_at(directory.path(), &id)
+        .await
+        .unwrap();
+    let agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        Some(writer),
+        vec![],
+        None,
+    );
+    let file = directory.path().join("plan.md");
+    agent.flagged_files.lock().await.push(FlaggedFile {
+        path: file.clone(),
+        mode: FlagMode::Included,
+    });
+    let state = directory.path().join(&id).join("flagged-files.json");
+    mew_tools::tools::flag_important::save_flagged_files(&state, &agent.flagged_files.lock().await)
+        .await
+        .unwrap();
+    let backup = state.with_extension("backup");
+    tokio::fs::rename(&state, &backup).await.unwrap();
+    tokio::fs::create_dir(&state).await.unwrap();
+    assert!(agent
+        .unflag_file(&file.display().to_string())
+        .await
+        .is_err());
+    assert_eq!(agent.flagged_files.lock().await.len(), 1);
+    tokio::fs::remove_dir(&state).await.unwrap();
+    tokio::fs::rename(&backup, &state).await.unwrap();
+    let restored = mew_tools::tools::flag_important::load_flagged_files(&state)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].path, file);
+}
+
+#[tokio::test]
+async fn manual_compaction_preserves_flagged_files_after_reload() {
+    let directory = tempfile::tempdir().unwrap();
+    let id = ulid::Ulid::new().to_string();
+    let plan = directory.path().join("plan.md");
+    let reference = directory.path().join("reference.md");
+    std::fs::write(&plan, "preserved plan").unwrap();
+    let writer = mew_session::Writer::open_at(directory.path(), &id)
+        .await
+        .unwrap();
+    let mut agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        Some(writer),
+        vec![],
+        None,
+    );
+    agent.keep_turns = 1;
+    agent
+        .append_message(context_message(Role::User, "old".into()))
+        .await;
+    agent
+        .append_message(context_message(Role::Assistant, "new".into()))
+        .await;
+    agent.flagged_files.lock().await.extend([
+        FlaggedFile {
+            path: plan.clone(),
+            mode: FlagMode::Included,
+        },
+        FlaggedFile {
+            path: reference.clone(),
+            mode: FlagMode::Referenced,
+        },
+    ]);
+    assert_eq!(agent.compact_context().await.unwrap(), 1);
+    let live = agent.messages.lock().await.clone();
+    let history = mew_session::Reader::load_from(directory.path(), &id)
+        .await
+        .unwrap();
+    let writer = mew_session::Writer::open_at(directory.path(), &id)
+        .await
+        .unwrap();
+    let mut resumed = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        Some(writer),
+        vec![],
+        None,
+    );
+    resumed.keep_turns = 1;
+    resumed.restore_flagged_files().await.unwrap();
+    resumed.load_messages(history).await;
+    assert_eq!(*resumed.messages.lock().await, live);
+    assert_eq!(resumed.flagged_files.lock().await.len(), 2);
+    assert!(resumed.compact_context().await.unwrap() > 0);
+    let live = resumed.messages.lock().await.clone();
+    let history = mew_session::Reader::load_from(directory.path(), &id)
+        .await
+        .unwrap();
+    let writer = mew_session::Writer::open_at(directory.path(), &id)
+        .await
+        .unwrap();
+    let mut again = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        Some(writer),
+        vec![],
+        None,
+    );
+    again.keep_turns = 1;
+    again.restore_flagged_files().await.unwrap();
+    again.load_messages(history).await;
+    assert_eq!(*again.messages.lock().await, live);
+    again
+        .unflag_file(&plan.display().to_string())
+        .await
+        .unwrap();
+    let writer = mew_session::Writer::open_at(directory.path(), &id)
+        .await
+        .unwrap();
+    let final_agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        Some(writer),
+        vec![],
+        None,
+    );
+    final_agent.restore_flagged_files().await.unwrap();
+    let flags = final_agent.flagged_files.lock().await;
+    assert_eq!(flags.len(), 1);
+    assert_eq!(flags[0].path, reference);
+    drop(flags);
+    final_agent
+        .flag_file_if_absent(FlaggedFile {
+            path: plan,
+            mode: FlagMode::Included,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        final_agent.flagged_files.lock().await.len(),
+        1,
+        "an explicitly unflagged plan should not be re-added automatically"
+    );
 }
 
 #[tokio::test]

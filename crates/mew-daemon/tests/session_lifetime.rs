@@ -18,6 +18,80 @@ use tokio_tungstenite::WebSocketStream;
 
 type Ws = WebSocketStream<DuplexStream>;
 
+#[tokio::test]
+async fn corrupt_flags_report_recovery_and_preserve_the_transcript() {
+    let directory = tempfile::tempdir().unwrap();
+    let sessions = directory.path().join("sessions");
+    let builder: mew_daemon::AgentBuilder = Arc::new(|params| {
+        let agent = Agent::new(
+            Arc::new(FakeProvider::new(FakeProvider::text_response(
+                "saved response",
+            ))),
+            Arc::new(NopDispatcher),
+            Some(params.writer),
+            vec![],
+            None,
+        );
+        Ok((agent, None, None))
+    });
+    let server = DaemonServer::with_session_dir(builder, sessions.clone());
+    let session = server.session_manager.create(None).await.unwrap();
+    let id = session.id.clone();
+    let agent = session.agent.lock().await.clone();
+    let mut events = agent.run("saved question".into());
+    while events.recv().await.is_some() {}
+    drop(agent);
+    drop(session);
+    server.session_manager.remove(&id).await;
+    let sidecar = sessions.join(&id).join("flagged-files.json");
+    tokio::fs::write(&sidecar, "{bad json").await.unwrap();
+    let history_path = sessions.join(&id).join("session.jsonl");
+    let before = tokio::fs::read(&history_path).await.unwrap();
+    let (mut socket, _task) = connect(&server).await;
+    send(
+        &mut socket,
+        ClientMessage::AttachSession {
+            session_id: id.clone(),
+            client_kind: ClientKind::Tui,
+        },
+    )
+    .await;
+    let error = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let frame = socket.next().await.unwrap().unwrap();
+            if let ServerMessage::Error { message } =
+                mew_protocol::decode_json(frame.to_text().unwrap()).unwrap()
+            {
+                break message;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(error.contains(&sidecar.display().to_string()), "{error}");
+    assert!(
+        error.contains("repair") && error.contains("discard"),
+        "{error}"
+    );
+    assert_eq!(tokio::fs::read(&sidecar).await.unwrap(), b"{bad json");
+    assert_eq!(tokio::fs::read(&history_path).await.unwrap(), before);
+    tokio::fs::rename(&sidecar, sidecar.with_extension("broken"))
+        .await
+        .unwrap();
+    send(
+        &mut socket,
+        ClientMessage::AttachSession {
+            session_id: id.clone(),
+            client_kind: ClientKind::Tui,
+        },
+    )
+    .await;
+    receive(&mut socket, |message| matches!(message, ServerMessage::SessionReady { session_id, .. } if session_id == &id)).await;
+    let restored = server.session_manager.attach(&id).await.unwrap();
+    assert!(!restored.agent.lock().await.messages.lock().await.is_empty());
+    assert_eq!(tokio::fs::read(&history_path).await.unwrap(), before);
+}
+
 async fn python_result(agent: &Agent) -> String {
     let mut events = agent.run("test".into());
     let mut result = String::new();
@@ -38,6 +112,85 @@ async fn python_result(agent: &Agent) -> String {
         }
     }
     result
+}
+
+#[tokio::test]
+async fn python_flags_and_unflags_survive_session_unload() {
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let plan = workspace.join("plan.md");
+    std::fs::write(&plan, "plan").unwrap();
+    let workspace_for_builder = workspace.clone();
+    let builder: mew_daemon::AgentBuilder = Arc::new(move |params| {
+        let flags = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let script = FakeProvider::tool_call(
+            "python",
+            "py",
+            serde_json::json!({"source": "text(tools.flag_important({'path':'plan.md'}))"}),
+        );
+        let mut agent = Agent::new(
+            Arc::new(FakeProvider::new(script)),
+            Arc::new(NopDispatcher),
+            Some(params.writer),
+            vec![Arc::new(
+                mew_tools::tools::flag_important::FlagImportant::new(),
+            )],
+            None,
+        );
+        agent.flagged_files = flags;
+        agent.cwd = workspace_for_builder.clone();
+        agent.code_mode.mode = Some(mew_config::CodeMode::Full);
+        agent.max_turns = Some(1);
+        Ok((agent, None, None))
+    });
+    let server = DaemonServer::with_session_dir(builder, directory.path().join("sessions"));
+    let session = server.session_manager.create(None).await.unwrap();
+    let id = session.id.clone();
+    let agent = session.agent.lock().await.clone();
+    let mut events = agent.run("flag the plan".into());
+    while let Some(event) = events.recv().await {
+        if let mew_agent::AgentEvent::PermissionRequest { tx, .. } = event {
+            tx.send(mew_hooks::PermissionDecision::AllowOnce).unwrap();
+        }
+    }
+    assert_eq!(agent.flagged_files.lock().await.len(), 1);
+    drop(agent);
+    drop(session);
+    server.session_manager.remove(&id).await;
+    let session = server.session_manager.attach(&id).await.unwrap();
+    let agent = session.agent.lock().await.clone();
+    assert_eq!(agent.flagged_files.lock().await[0].path, plan);
+    let (mut socket, task) = connect(&server).await;
+    send(
+        &mut socket,
+        ClientMessage::AttachSession {
+            session_id: id.clone(),
+            client_kind: ClientKind::Desktop,
+        },
+    )
+    .await;
+    receive(&mut socket, |message| {
+        matches!(message, ServerMessage::SessionReady { .. })
+    })
+    .await;
+    send(
+        &mut socket,
+        ClientMessage::UnflagFile {
+            session_id: id.clone(),
+            path: plan.display().to_string(),
+        },
+    )
+    .await;
+    receive(&mut socket, |message| matches!(message, ServerMessage::FlaggedFilesChanged { session_id, files } if session_id == &id && files.is_empty())).await;
+    socket.close(None).await.unwrap();
+    task.await.unwrap();
+    drop(agent);
+    drop(session);
+    server.session_manager.remove(&id).await;
+    let session = server.session_manager.attach(&id).await.unwrap();
+    let agent = session.agent.lock().await;
+    assert!(agent.flagged_files.lock().await.is_empty());
 }
 
 #[tokio::test]

@@ -613,7 +613,7 @@ pub(crate) fn build_session_agent(
     let flagged_files: Arc<tokio::sync::Mutex<Vec<FlaggedFile>>> =
         Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let mut tools = tools;
-    tools.push(Arc::new(FlagImportant::new(flagged_files.clone())));
+    tools.push(Arc::new(FlagImportant::new()));
 
     let permission_engine = build_permission_engine(cfg, mode, &cwd);
 

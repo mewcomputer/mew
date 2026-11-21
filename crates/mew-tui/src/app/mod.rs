@@ -679,6 +679,7 @@ pub struct Status {
     /// Tokens in the current context: the latest request's prompt size.
     /// Snapshotted (not accumulated) so it tracks growth and compaction.
     pub context_tokens: u32,
+    pub context_tokens_known: bool,
     pub cost: f64,
     pub session_id: String,
     pub context_window: u32,
@@ -690,6 +691,7 @@ impl Default for Status {
             model: String::new(),
             provider: String::new(),
             context_tokens: 0,
+            context_tokens_known: true,
             cost: 0.0,
             session_id: String::new(),
             context_window: 0,
@@ -1120,6 +1122,7 @@ impl App {
                     // isn't stuck at 0 until the next turn completes.
                     if let Some(ct) = active.context_tokens {
                         self.status.context_tokens = u32::try_from(ct).unwrap_or(u32::MAX);
+                        self.status.context_tokens_known = true;
                     }
                 }
                 self.daemon_sessions = sessions.clone();
@@ -2464,6 +2467,7 @@ impl App {
                 // output, harness) — keep the last real reading.
                 if usage.input > 0 {
                     self.status.context_tokens = usage.input;
+                    self.status.context_tokens_known = true;
                 }
                 self.status.cost += cost;
                 if let Some(msg) = self.messages.last_mut() {

@@ -790,7 +790,13 @@ async fn slash_command_compact_returns_slash_result() {
 
 #[tokio::test]
 async fn slash_command_compacts_and_persists_without_another_prompt() {
-    let factory = make_text_agent_factory(Arc::new(|| FakeProvider::text_response("response")));
+    let factory = make_text_agent_factory(Arc::new(|| {
+        let mut events = FakeProvider::text_response("response");
+        if let Some(mew_provider::ProviderEvent::MessageEnd { usage, .. }) = events.last_mut() {
+            usage.input = 4200;
+        }
+        events
+    }));
     let (dir, socket) = spawn_daemon(move |params| {
         let (mut agent, model, persona) = factory(params)?;
         agent.keep_turns = 1;
@@ -836,17 +842,18 @@ async fn slash_command_compacts_and_persists_without_another_prompt() {
         },
     )
     .await;
-    let result =
-        recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::SlashResult { .. })).await;
+    let events = recv_until(&mut ws, |m| matches!(m, ServerMessage::SlashResult { .. })).await;
+    assert!(events.iter().any(|m| matches!(m, ServerMessage::SessionUsageChanged { session_id: id, context_tokens: None, .. } if id == &session_id)), "{events:?}");
+    let result = events.last().unwrap();
     assert!(
-        matches!(result, ServerMessage::SlashResult { ref text } if text.contains("compacted")),
+        matches!(result, ServerMessage::SlashResult { text } if text.contains("compacted")),
         "{result:?}"
     );
 
     let transcript = tokio::fs::read_to_string(
         dir.path()
             .join("sessions")
-            .join(session_id)
+            .join(&session_id)
             .join("session.jsonl"),
     )
     .await
@@ -862,6 +869,336 @@ async fn slash_command_compacts_and_persists_without_another_prompt() {
             .any(|part| matches!(part, mew_message::Part::Compaction(_)))),
         "no persisted compaction marker: {messages:?}"
     );
+    send(
+        &mut ws,
+        ClientMessage::SlashCommand {
+            command: "/compact".into(),
+        },
+    )
+    .await;
+    let result =
+        recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::SlashResult { .. })).await;
+    assert!(
+        matches!(result, ServerMessage::SlashResult { text } if text.contains("nothing to compact"))
+    );
+    let after = tokio::fs::read_to_string(
+        dir.path()
+            .join("sessions")
+            .join(&session_id)
+            .join("session.jsonl"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(after, transcript);
+}
+
+#[tokio::test]
+async fn compaction_clears_context_meter_when_metadata_is_unavailable() {
+    let factory = make_text_agent_factory(Arc::new(|| {
+        let mut events = FakeProvider::text_response("response");
+        if let Some(mew_provider::ProviderEvent::MessageEnd { usage, .. }) = events.last_mut() {
+            usage.input = 4200;
+        }
+        events
+    }));
+    let (dir, socket) = spawn_daemon(move |params| {
+        let (mut agent, model, persona) = factory(params)?;
+        agent.keep_turns = 1;
+        Ok((agent, model, persona))
+    })
+    .await;
+    let mut ws = connect(&socket).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: ClientKind::Tui,
+        },
+    )
+    .await;
+    let ServerMessage::SessionReady { session_id, .. } =
+        recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await
+    else {
+        unreachable!()
+    };
+    send(
+        &mut ws,
+        ClientMessage::Prompt {
+            text: "hello".into(),
+            attachments: vec![],
+        },
+    )
+    .await;
+    recv_one_matching(&mut ws, |m| {
+        matches!(
+            m,
+            ServerMessage::SessionUsageChanged {
+                context_tokens: Some(4200),
+                ..
+            }
+        )
+    })
+    .await;
+    tokio::fs::remove_file(
+        dir.path()
+            .join("sessions")
+            .join(&session_id)
+            .join("meta.json"),
+    )
+    .await
+    .unwrap();
+    send(
+        &mut ws,
+        ClientMessage::SlashCommand {
+            command: "/compact".into(),
+        },
+    )
+    .await;
+    let events = recv_until(&mut ws, |m| matches!(m, ServerMessage::SlashResult { .. })).await;
+    assert!(events.iter().any(|m| matches!(m, ServerMessage::SessionUsageChanged { session_id: id, usage, context_tokens: None } if id == &session_id && usage.input_tokens == 4200)), "{events:?}");
+}
+
+#[tokio::test]
+async fn compaction_clears_context_meter_when_metadata_failed_during_turn() {
+    let factory = make_text_agent_factory(Arc::new(|| {
+        let mut events = FakeProvider::text_response(&"response ".repeat(20));
+        if let Some(mew_provider::ProviderEvent::MessageEnd { usage, .. }) = events.last_mut() {
+            usage.input = 4200;
+        }
+        events
+    }));
+    let (dir, socket) = spawn_daemon(move |params| {
+        let (mut agent, model, persona) = factory(params)?;
+        agent.keep_turns = 1;
+        Ok((agent, model, persona))
+    })
+    .await;
+    let mut ws = connect(&socket).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: ClientKind::Tui,
+        },
+    )
+    .await;
+    let ServerMessage::SessionReady { session_id, .. } =
+        recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await
+    else {
+        unreachable!()
+    };
+    send(
+        &mut ws,
+        ClientMessage::Prompt {
+            text: "hello".into(),
+            attachments: vec![],
+        },
+    )
+    .await;
+    recv_one_matching(&mut ws, |m| {
+        matches!(
+            m,
+            ServerMessage::Provider {
+                event: mew_message::ProviderEventWire::PartStart { .. }
+            }
+        )
+    })
+    .await;
+    tokio::fs::remove_file(
+        dir.path()
+            .join("sessions")
+            .join(&session_id)
+            .join("meta.json"),
+    )
+    .await
+    .unwrap();
+    recv_one_matching(&mut ws, |m| {
+        matches!(
+            m,
+            ServerMessage::Provider {
+                event: mew_message::ProviderEventWire::MessageEnd { .. }
+            }
+        )
+    })
+    .await;
+    send(
+        &mut ws,
+        ClientMessage::SlashCommand {
+            command: "/compact".into(),
+        },
+    )
+    .await;
+    let events = recv_until(&mut ws, |m| matches!(m, ServerMessage::SlashResult { .. })).await;
+    assert!(events.iter().any(|m| matches!(m, ServerMessage::SessionUsageChanged { usage, context_tokens: None, .. } if usage.input_tokens == 4200)), "{events:?}");
+}
+
+#[tokio::test]
+async fn queued_compaction_result_follows_its_session_after_switch() {
+    let factory = make_text_agent_factory(Arc::new(|| {
+        FakeProvider::text_response(&"response ".repeat(50))
+    }));
+    let (_dir, socket) = spawn_daemon(move |params| {
+        let (mut agent, model, persona) = factory(params)?;
+        agent.keep_turns = 1;
+        Ok((agent, model, persona))
+    })
+    .await;
+    let mut first = connect(&socket).await;
+    send(
+        &mut first,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: ClientKind::Tui,
+        },
+    )
+    .await;
+    let ServerMessage::SessionReady { session_id, .. } = recv_one_matching(&mut first, |m| {
+        matches!(m, ServerMessage::SessionReady { .. })
+    })
+    .await
+    else {
+        unreachable!()
+    };
+    let mut observer = connect(&socket).await;
+    send(
+        &mut observer,
+        ClientMessage::AttachSession {
+            session_id: session_id.clone(),
+            client_kind: ClientKind::Web,
+        },
+    )
+    .await;
+    recv_one_matching(&mut observer, |m| {
+        matches!(m, ServerMessage::SessionReady { .. })
+    })
+    .await;
+    send(
+        &mut first,
+        ClientMessage::Prompt {
+            text: "hello".into(),
+            attachments: vec![],
+        },
+    )
+    .await;
+    recv_one_matching(&mut first, |m| {
+        matches!(
+            m,
+            ServerMessage::Provider {
+                event: mew_message::ProviderEventWire::PartStart { .. }
+            }
+        )
+    })
+    .await;
+    send(
+        &mut first,
+        ClientMessage::SlashCommand {
+            command: "/compact".into(),
+        },
+    )
+    .await;
+    send(
+        &mut first,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: ClientKind::Tui,
+        },
+    )
+    .await;
+    recv_one_matching(
+        &mut first,
+        |m| matches!(m, ServerMessage::SessionReady { session_id: id, .. } if id != &session_id),
+    )
+    .await;
+    let events = recv_until(&mut observer, |m| matches!(m, ServerMessage::SessionUsageChanged { session_id: id, context_tokens: None, .. } if id == &session_id)).await;
+    assert!(
+        !events
+            .iter()
+            .any(|m| matches!(m, ServerMessage::SlashResult { .. })),
+        "{events:?}"
+    );
+    send(&mut first, ClientMessage::Ping).await;
+    let events = recv_until(&mut first, |m| matches!(m, ServerMessage::Pong { .. })).await;
+    assert!(
+        !events
+            .iter()
+            .any(|m| matches!(m, ServerMessage::SlashResult { .. })),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn compaction_does_not_answer_another_clients_slash_command() {
+    let factory = make_text_agent_factory(Arc::new(|| {
+        FakeProvider::text_response(&"response ".repeat(50))
+    }));
+    let (_dir, socket) = spawn_daemon(factory).await;
+    let mut first = connect(&socket).await;
+    send(
+        &mut first,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: ClientKind::Tui,
+        },
+    )
+    .await;
+    let ServerMessage::SessionReady { session_id, .. } = recv_one_matching(&mut first, |m| {
+        matches!(m, ServerMessage::SessionReady { .. })
+    })
+    .await
+    else {
+        unreachable!()
+    };
+    let mut second = connect(&socket).await;
+    send(
+        &mut second,
+        ClientMessage::AttachSession {
+            session_id,
+            client_kind: ClientKind::Web,
+        },
+    )
+    .await;
+    recv_one_matching(&mut second, |m| {
+        matches!(m, ServerMessage::SessionReady { .. })
+    })
+    .await;
+    send(
+        &mut first,
+        ClientMessage::Prompt {
+            text: "hello".into(),
+            attachments: vec![],
+        },
+    )
+    .await;
+    recv_one_matching(&mut first, |m| {
+        matches!(
+            m,
+            ServerMessage::Provider {
+                event: mew_message::ProviderEventWire::PartStart { .. }
+            }
+        )
+    })
+    .await;
+    send(
+        &mut first,
+        ClientMessage::SlashCommand {
+            command: "/compact".into(),
+        },
+    )
+    .await;
+    send(&mut first, ClientMessage::Ping).await;
+    recv_one_matching(&mut first, |m| matches!(m, ServerMessage::Pong { .. })).await;
+    send(
+        &mut second,
+        ClientMessage::SlashCommand {
+            command: "/clear".into(),
+        },
+    )
+    .await;
+    let result = recv_one_matching(&mut second, |m| {
+        matches!(m, ServerMessage::SlashResult { .. })
+    })
+    .await;
+    assert!(matches!(result, ServerMessage::SlashResult { text } if text.contains("cleared")));
 }
 
 #[tokio::test]

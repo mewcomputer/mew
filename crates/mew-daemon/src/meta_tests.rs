@@ -1,6 +1,39 @@
 use super::*;
 use crate::request_tests::{connect, flush, send};
 
+#[test]
+fn recovered_metadata_keeps_usage_recorded_during_an_outage() {
+    let mut meta = mew_session::Meta::new("test");
+    meta.usage = Some(mew_session::SessionUsage {
+        input_tokens: 12,
+        output_tokens: 3,
+        turns: 1,
+        ..Default::default()
+    });
+    meta.context_tokens = Some(12);
+    let cached = mew_protocol::SessionUsageWire {
+        input_tokens: 42,
+        output_tokens: 8,
+        turns: 1,
+        ..Default::default()
+    };
+    reconcile_usage(&mut meta, Some(&cached), Some(30));
+    let usage = meta.usage.unwrap();
+    assert_eq!(
+        (usage.input_tokens, usage.output_tokens, usage.turns),
+        (42, 8, 1)
+    );
+    assert_eq!(meta.context_tokens, Some(30));
+}
+
+#[test]
+fn recovered_metadata_does_not_restore_a_cleared_context_meter() {
+    let mut meta = mew_session::Meta::new("test");
+    meta.context_tokens = Some(42);
+    reconcile_usage(&mut meta, None, None);
+    assert_eq!(meta.context_tokens, None);
+}
+
 #[tokio::test]
 async fn metadata_edits_and_cumulative_usage_survive_follow_up_turns() {
     let directory = tempfile::tempdir().unwrap();

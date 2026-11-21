@@ -338,6 +338,7 @@ impl App {
                 {
                     if let Some(session) = state.session(session_id) {
                         self.status.cost = session.usage.cost;
+                        self.status.context_tokens_known = session.context_tokens.is_some();
                         if let Some(tokens) = session.context_tokens {
                             self.status.context_tokens = u32::try_from(tokens).unwrap_or(u32::MAX);
                         }
@@ -550,6 +551,7 @@ impl App {
             files: session.flagged_files.clone(),
         });
         self.status.cost = session.usage.cost;
+        self.status.context_tokens_known = session.context_tokens.is_some();
         self.status.context_tokens = session
             .context_tokens
             .map(|tokens| u32::try_from(tokens).unwrap_or(u32::MAX))

@@ -4759,3 +4759,11 @@ The daemon compacts and persists context when it handles `/compact`, then
 reports the result to the TUI. Compaction waits for any active turn and reports
 when there is nothing to compact or when it fails. Verified daemon end-to-end,
 agent compaction, and TUI dispatch tests.
+
+### 2026-11-20: Preserve flagged context through compaction
+
+Persist flags and unflags per session, retain included context when rebuilding
+compacted history, and report recoverable file and sidecar errors without
+discarding the prior context. Reset the context meter after compaction and
+keep usage through temporary metadata failures. Verified agent, tool, daemon
+WebSocket and session-lifetime tests, TUI client flow, and web UI/client tests.

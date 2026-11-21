@@ -24,6 +24,35 @@ fn ready(id: &str, cwd: &str) -> ServerMessage {
 }
 
 #[test]
+fn context_usage_reset_clears_the_active_meter() {
+    let mut app = App::new();
+    let mut state = ClientState::default();
+    apply(&mut app, &mut state, ready("a", "/tmp/a"));
+    let usage = mew_protocol::SessionUsageWire::default();
+    apply(
+        &mut app,
+        &mut state,
+        ServerMessage::SessionUsageChanged {
+            session_id: "a".into(),
+            usage: usage.clone(),
+            context_tokens: Some(4200),
+        },
+    );
+    assert_eq!(app.status.context_tokens, 4200);
+    assert!(app.status.context_tokens_known);
+    apply(
+        &mut app,
+        &mut state,
+        ServerMessage::SessionUsageChanged {
+            session_id: "a".into(),
+            usage,
+            context_tokens: None,
+        },
+    );
+    assert!(!app.status.context_tokens_known);
+}
+
+#[test]
 fn passive_turn_streams_and_finishes_without_a_local_prompt_receiver() {
     let mut app = App::new();
     app.daemon_mode = true;

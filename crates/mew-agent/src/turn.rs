@@ -10,10 +10,60 @@ use mew_message::{
 };
 use mew_provider::{ProviderEvent, Request, ToolDef};
 use mew_subagents::ChildGuidanceError;
-use mew_tools::tools::flag_important::FlagMode;
+use mew_tools::tools::flag_important::{FlagMode, FlaggedFile};
 
 use crate::agent::{AcceptedPrompt, Agent, PromptAdmissionError, TurnInput};
 use crate::{AgentEvent, GoalStatus};
+
+const MAX_PRESERVED_FLAG_BYTES: usize = 1024 * 1024;
+
+async fn read_flagged_file(
+    path: &std::path::Path,
+    limit: usize,
+    deadline: tokio::time::Instant,
+) -> Result<String, String> {
+    use tokio::io::AsyncReadExt;
+    let owned = path.to_path_buf();
+    let read = async move {
+        let file = tokio::task::spawn_blocking(move || {
+            let mut options = std::fs::OpenOptions::new();
+            options.read(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.custom_flags(nix::libc::O_NONBLOCK);
+            }
+            let file = options.open(owned)?;
+            if !file.metadata()?.is_file() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "not a regular file",
+                ));
+            }
+            Ok(file)
+        })
+        .await
+        .map_err(std::io::Error::other)??;
+        let mut bytes = Vec::new();
+        tokio::fs::File::from_std(file)
+            .take((limit + 1) as u64)
+            .read_to_end(&mut bytes)
+            .await?;
+        Ok::<_, std::io::Error>(bytes)
+    };
+    let bytes = tokio::time::timeout_at(deadline, read)
+        .await
+        .map_err(|_| format!("Timed out reading flagged file {}", path.display()))?
+        .map_err(|error| format!("Could not read flagged file {}: {error}", path.display()))?;
+    if bytes.len() > limit {
+        return Err(format!(
+            "flagged files are too large to preserve during compaction; reference {} instead",
+            path.display()
+        ));
+    }
+    String::from_utf8(bytes)
+        .map_err(|error| format!("Flagged file {} is not UTF-8: {error}", path.display()))
+}
 
 impl Agent {
     pub(crate) fn build_prompt_message(
@@ -968,9 +1018,12 @@ impl Agent {
         }
 
         let summary = self.compaction_summary(&before[..start], latest_user);
+        let state_path = self.flagged_files_path().await;
+        let shared_flags = self.flagged_files.clone();
+        let flags = shared_flags.lock().await.clone();
         let compacted = self
-            .compacted_messages(&before[start..], force, dropped, summary)
-            .await;
+            .compacted_messages(&before[start..], force, dropped, summary, &flags)
+            .await?;
         let previous = std::mem::replace(&mut request.messages, compacted);
         let mut candidate = self.request_manifest(request);
         let compacted_estimate = estimated_request_tokens(request, &candidate);
@@ -996,7 +1049,13 @@ impl Agent {
         }
 
         self.dispatcher.on_pre_compaction(&previous).await;
-        self.commit_compaction(&request.messages).await?;
+        let current_flags = shared_flags.lock().await;
+        if *current_flags != flags {
+            return Err("Flagged files changed during compaction; please retry.".into());
+        }
+        self.commit_compaction(&request.messages, &current_flags, state_path.as_deref())
+            .await?;
+        drop(current_flags);
         self.dispatcher.on_post_compaction(&request.messages).await;
         tracing::info!(dropped, estimated, "compacted older context");
         Ok((candidate, dropped))
@@ -1017,7 +1076,8 @@ impl Agent {
         force: bool,
         removed: usize,
         summary: String,
-    ) -> Vec<Message> {
+        flagged: &[FlaggedFile],
+    ) -> Result<Vec<Message>, String> {
         let tail_start_id = tail
             .iter()
             .find(|message| !is_compaction_message(message))
@@ -1038,6 +1098,7 @@ impl Agent {
                 tail_start_id,
                 summary: Some(summary),
                 removed_count: Some(removed as u32),
+                preserved_context: Vec::new(),
             })],
             time: Time {
                 created: Utc::now().timestamp_millis(),
@@ -1053,31 +1114,37 @@ impl Agent {
         );
 
         // Re-inject flagged files so they survive compaction.
-        let flagged = self.flagged_files.lock().await.clone();
         if !flagged.is_empty() {
             let now = Utc::now().timestamp_millis();
+            let mut preserved_bytes = 0usize;
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
             for f in flagged.iter().rev() {
                 let note_text = match f.mode {
-                    FlagMode::Included => match tokio::fs::read_to_string(&f.path).await {
-                        Ok(content) => format!(
+                    FlagMode::Included => {
+                        let remaining = MAX_PRESERVED_FLAG_BYTES.saturating_sub(preserved_bytes);
+                        let content = read_flagged_file(&f.path, remaining, deadline)
+                            .await
+                            .map_err(|error| {
+                                format!(
+                                "{error}; restore the file or remove it from Pinned context (in the TUI, use /unflag {}) before retrying",
+                                    f.path.display()
+                                )
+                            })?;
+                        format!(
                             "Flagged file (preserved across compaction) — {}:\n\n{}",
                             f.path.display(),
-                            content,
-                        ),
-                        Err(e) => {
-                            tracing::warn!(
-                                path = %f.path.display(),
-                                error = %e,
-                                "could not read flagged file for compaction re-injection",
-                            );
-                            continue;
-                        }
-                    },
+                            content
+                        )
+                    }
                     FlagMode::Referenced => format!(
                         "Flagged file (referenced — re-read with the read tool when needed): {}",
                         f.path.display(),
                     ),
                 };
+                preserved_bytes = preserved_bytes.saturating_add(note_text.len());
+                if preserved_bytes > MAX_PRESERVED_FLAG_BYTES {
+                    return Err("flagged files are too large to preserve during compaction; use referenced mode".into());
+                }
                 let id = Ulid::new();
                 messages.insert(
                     0,
@@ -1103,7 +1170,15 @@ impl Agent {
                 );
             }
         }
-        messages
+        let marker_index = messages
+            .iter()
+            .position(is_compaction_message)
+            .expect("compaction marker exists");
+        let preserved = messages[..marker_index].to_vec();
+        if let Part::Compaction(marker) = &mut messages[marker_index].parts[0] {
+            marker.preserved_context = preserved;
+        }
+        Ok(messages)
     }
 
     fn compaction_summary(&self, dropped: &[Message], latest_user: Option<usize>) -> String {
@@ -1153,7 +1228,17 @@ impl Agent {
         format!("{CARRIED_USER_MESSAGES}{}", excerpts.join("\n\n---\n\n"))
     }
 
-    async fn commit_compaction(&self, messages: &[Message]) -> Result<(), String> {
+    async fn commit_compaction(
+        &self,
+        messages: &[Message],
+        flags: &[FlaggedFile],
+        state_path: Option<&std::path::Path>,
+    ) -> Result<(), String> {
+        if let Some(path) = state_path {
+            mew_tools::tools::flag_important::save_flagged_files(path, flags)
+                .await
+                .map_err(|error| format!("Could not save flagged files: {error}"))?;
+        }
         if let Some(session) = &self.session {
             let marker = messages
                 .iter()
@@ -1162,7 +1247,7 @@ impl Agent {
             session
                 .lock()
                 .await
-                .write_message(marker)
+                .write_context_marker(marker)
                 .await
                 .map_err(|error| format!("Could not save context compaction: {error}"))?;
         }
@@ -1179,6 +1264,10 @@ impl Agent {
             system: self.request_system().await,
             ..Request::default()
         };
+        let start = compaction_start(&request.messages, self.keep_turns);
+        if request.messages[..start].iter().all(is_compaction_message) {
+            return Ok(0);
+        }
         self.fit_request_context(&mut request, true)
             .await
             .map(|(_, removed)| removed)
@@ -1465,7 +1554,15 @@ pub(crate) fn context_from_history(mut history: Vec<Message>) -> Vec<Message> {
     };
 
     let marker = history[marker_index].clone();
-    let mut context = vec![marker];
+    let mut context = marker
+        .parts
+        .iter()
+        .find_map(|part| match part {
+            Part::Compaction(compaction) => Some(compaction.preserved_context.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    context.push(marker);
 
     if let Some(tail_start_id) = tail_start_id {
         if let Some(tail_index) = history
@@ -1639,6 +1736,7 @@ mod tests {
                 tail_start_id: Some(kept.id),
                 summary: None,
                 removed_count: Some(1),
+                preserved_context: Vec::new(),
             })],
         );
         let marker_id = marker.id;

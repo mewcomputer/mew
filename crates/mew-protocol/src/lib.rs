@@ -1132,7 +1132,7 @@ pub enum ServerMessage {
         session_id: String,
         usage: SessionUsageWire,
         /// Current context occupancy after the turn, if known.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
         context_tokens: Option<u64>,
     },
 
@@ -3425,6 +3425,13 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+        let reset = ServerMessage::SessionUsageChanged {
+            session_id: "sess_v".into(),
+            usage: SessionUsageWire::default(),
+            context_tokens: None,
+        };
+        let value: serde_json::Value = serde_json::from_str(&encode_json(&reset).unwrap()).unwrap();
+        assert_eq!(value.get("context_tokens"), Some(&serde_json::Value::Null));
     }
 
     #[test]

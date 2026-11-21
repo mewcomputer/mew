@@ -2,23 +2,115 @@ use crate::{Sensitivity, Tool, ToolCtx, ToolError, ToolOutput};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::path::PathBuf;
+#[cfg(test)]
 use std::sync::Arc;
 
 /// A file the user or model has marked as important for the session, so it
 /// survives context compaction.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FlaggedFile {
     pub path: PathBuf,
     pub mode: FlagMode,
 }
 
 /// How a flagged file is carried across compaction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FlagMode {
     /// Inline the file's content into the post-compaction context.
     Included,
     /// Record a pointer to the file without inlining content.
     Referenced,
+}
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct FlaggedFilesState {
+    files: Vec<FlaggedFile>,
+    #[serde(default)]
+    unflagged: Vec<PathBuf>,
+}
+
+async fn load_flagged_state(path: &std::path::Path) -> std::io::Result<Option<FlaggedFilesState>> {
+    match tokio::fs::read(path).await {
+        Ok(data) => serde_json::from_slice(&data)
+            .map(Some)
+            .map_err(std::io::Error::other),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+pub async fn load_flagged_files(
+    path: &std::path::Path,
+) -> std::io::Result<Option<Vec<FlaggedFile>>> {
+    Ok(load_flagged_state(path).await?.map(|state| state.files))
+}
+
+pub async fn is_explicitly_unflagged(
+    path: &std::path::Path,
+    file: &std::path::Path,
+) -> std::io::Result<bool> {
+    Ok(load_flagged_state(path)
+        .await?
+        .is_some_and(|state| state.unflagged.iter().any(|item| item == file)))
+}
+
+pub async fn save_flagged_files(
+    path: &std::path::Path,
+    flags: &[FlaggedFile],
+) -> std::io::Result<()> {
+    let mut state = load_flagged_state(path).await?.unwrap_or_default();
+    state.files = flags.to_vec();
+    save_flagged_state(path, &state).await
+}
+
+pub async fn save_explicit_flag(
+    path: &std::path::Path,
+    flags: &[FlaggedFile],
+    file: &std::path::Path,
+) -> std::io::Result<()> {
+    let mut state = load_flagged_state(path).await?.unwrap_or_default();
+    state.files = flags.to_vec();
+    state.unflagged.retain(|item| item != file);
+    save_flagged_state(path, &state).await
+}
+
+pub async fn save_explicit_unflag(
+    path: &std::path::Path,
+    flags: &[FlaggedFile],
+    file: &std::path::Path,
+) -> std::io::Result<()> {
+    let mut state = load_flagged_state(path).await?.unwrap_or_default();
+    state.files = flags.to_vec();
+    if !state.unflagged.iter().any(|item| item == file) {
+        state.unflagged.push(file.to_path_buf());
+    }
+    save_flagged_state(path, &state).await
+}
+
+async fn save_flagged_state(
+    path: &std::path::Path,
+    state: &FlaggedFilesState,
+) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let data = serde_json::to_vec(state).map_err(std::io::Error::other)?;
+    let temporary = path.with_file_name(format!(".flagged-{}.tmp", ulid::Ulid::new()));
+    let result = async {
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .await?;
+        file.write_all(&data).await?;
+        file.sync_all().await?;
+        drop(file);
+        tokio::fs::rename(&temporary, path).await
+    }
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&temporary).await;
+    }
+    result
 }
 
 /// Human-readable label for a FlagMode, used in wire protocol and UI.
@@ -31,12 +123,11 @@ pub fn flag_mode_label(mode: FlagMode) -> &'static str {
 }
 
 pub struct FlagImportant {
-    flagged: Arc<tokio::sync::Mutex<Vec<FlaggedFile>>>,
     schema: Value,
 }
 
 impl FlagImportant {
-    pub fn new(flagged: Arc<tokio::sync::Mutex<Vec<FlaggedFile>>>) -> Self {
+    pub fn new() -> Self {
         let schema = serde_json::json!({
             "type": "object",
             "properties": {
@@ -53,7 +144,13 @@ impl FlagImportant {
             },
             "required": ["path"]
         });
-        Self { flagged, schema }
+        Self { schema }
+    }
+}
+
+impl Default for FlagImportant {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -108,15 +205,24 @@ impl Tool for FlagImportant {
             )));
         }
 
-        let mut guard = self.flagged.lock().await;
-        if let Some(existing) = guard.iter_mut().find(|f| f.path == path) {
+        let mut guard = ctx.flagged_files.lock().await;
+        let mut next = guard.clone();
+        if let Some(existing) = next.iter_mut().find(|f| f.path == path) {
             existing.mode = mode;
         } else {
-            guard.push(FlaggedFile {
+            next.push(FlaggedFile {
                 path: path.clone(),
                 mode,
             });
         }
+        if let Some(state_path) = &ctx.flagged_files_path {
+            save_explicit_flag(state_path, &next, &path)
+                .await
+                .map_err(|error| {
+                    ToolError::Execution(format!("could not save flagged files: {error}"))
+                })?;
+        }
+        *guard = next;
         let count = guard.len();
         drop(guard);
 
@@ -139,8 +245,20 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn dummy_ctx_with_cwd(cwd: PathBuf) -> ToolCtx {
-        ToolCtx::test_new(cwd)
+    fn dummy_ctx_with_cwd(
+        cwd: PathBuf,
+        flagged: Arc<tokio::sync::Mutex<Vec<FlaggedFile>>>,
+    ) -> ToolCtx {
+        ToolCtx::new(
+            Arc::new(crate::ToolCtxShared {
+                cwd,
+                flagged_files: flagged,
+                ..Default::default()
+            }),
+            "test".into(),
+            tokio_util::sync::CancellationToken::new(),
+            tokio::sync::mpsc::channel(1).0,
+        )
     }
 
     fn write_temp_file(dir: &std::path::Path, name: &str, content: &str) -> PathBuf {
@@ -150,17 +268,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn flags_are_durable_and_failed_writes_do_not_change_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = write_temp_file(tmp.path(), "plan.md", "plan");
+        let path = tmp.path().join("flags.json");
+        let flagged = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let tool = FlagImportant::new();
+        let ctx = || {
+            ToolCtx::new(
+                Arc::new(crate::ToolCtxShared {
+                    cwd: tmp.path().to_path_buf(),
+                    flagged_files_path: Some(path.clone()),
+                    flagged_files: flagged.clone(),
+                    ..Default::default()
+                }),
+                "test".into(),
+                tokio_util::sync::CancellationToken::new(),
+                tokio::sync::mpsc::channel(1).0,
+            )
+        };
+        tool.execute(ctx(), serde_json::json!({"path": file, "mode": "included"}))
+            .await
+            .unwrap();
+        let restored = load_flagged_files(&path).await.unwrap().unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].mode, FlagMode::Included);
+        tool.execute(
+            ctx(),
+            serde_json::json!({"path": file, "mode": "referenced"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            load_flagged_files(&path).await.unwrap().unwrap()[0].mode,
+            FlagMode::Referenced
+        );
+        save_explicit_unflag(&path, &[], &file).await.unwrap();
+        flagged.lock().await.clear();
+        assert!(is_explicitly_unflagged(&path, &file).await.unwrap());
+        tool.execute(ctx(), serde_json::json!({"path": file, "mode": "included"}))
+            .await
+            .unwrap();
+        assert!(!is_explicitly_unflagged(&path, &file).await.unwrap());
+
+        let bad = ToolCtx::new(
+            Arc::new(crate::ToolCtxShared {
+                cwd: tmp.path().to_path_buf(),
+                flagged_files_path: Some(tmp.path().join("missing").join("flags.json")),
+                flagged_files: flagged.clone(),
+                ..Default::default()
+            }),
+            "test".into(),
+            tokio_util::sync::CancellationToken::new(),
+            tokio::sync::mpsc::channel(1).0,
+        );
+        assert!(tool
+            .execute(bad, serde_json::json!({"path": file, "mode": "referenced"}))
+            .await
+            .is_err());
+        assert_eq!(flagged.lock().await[0].mode, FlagMode::Included);
+        assert_eq!(
+            load_flagged_files(&path).await.unwrap().unwrap()[0].mode,
+            FlagMode::Included
+        );
+    }
+
+    #[tokio::test]
     async fn test_flag_included_mode() {
         let tmp = tempfile::tempdir().unwrap();
         let file = write_temp_file(tmp.path(), "plan.md", "# Plan\nDo things.");
         let flagged = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let tool = FlagImportant::new(flagged.clone());
+        let tool = FlagImportant::new();
         let input = serde_json::json!({
             "path": file.to_string_lossy(),
             "mode": "included"
         });
         let result = tool
-            .execute(dummy_ctx_with_cwd(tmp.path().to_path_buf()), input)
+            .execute(
+                dummy_ctx_with_cwd(tmp.path().to_path_buf(), flagged.clone()),
+                input,
+            )
             .await
             .unwrap();
         assert!(result.output.contains("included"));
@@ -175,14 +362,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let file = write_temp_file(tmp.path(), "spec.md", "spec body");
         let flagged = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let tool = FlagImportant::new(flagged.clone());
+        let tool = FlagImportant::new();
         let input = serde_json::json!({
             "path": file.to_string_lossy(),
             "mode": "referenced"
         });
-        tool.execute(dummy_ctx_with_cwd(tmp.path().to_path_buf()), input)
-            .await
-            .unwrap();
+        tool.execute(
+            dummy_ctx_with_cwd(tmp.path().to_path_buf(), flagged.clone()),
+            input,
+        )
+        .await
+        .unwrap();
         assert_eq!(flagged.lock().await[0].mode, FlagMode::Referenced);
     }
 
@@ -191,11 +381,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let file = write_temp_file(tmp.path(), "a.txt", "a");
         let flagged = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let tool = FlagImportant::new(flagged.clone());
+        let tool = FlagImportant::new();
         let input = serde_json::json!({ "path": file.to_string_lossy() });
-        tool.execute(dummy_ctx_with_cwd(tmp.path().to_path_buf()), input)
-            .await
-            .unwrap();
+        tool.execute(
+            dummy_ctx_with_cwd(tmp.path().to_path_buf(), flagged.clone()),
+            input,
+        )
+        .await
+        .unwrap();
         assert_eq!(flagged.lock().await[0].mode, FlagMode::Included);
     }
 
@@ -203,10 +396,13 @@ mod tests {
     async fn test_flag_missing_path_errors() {
         let tmp = tempfile::tempdir().unwrap();
         let flagged = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let tool = FlagImportant::new(flagged);
+        let tool = FlagImportant::new();
         let input = serde_json::json!({});
         let result = tool
-            .execute(dummy_ctx_with_cwd(tmp.path().to_path_buf()), input)
+            .execute(
+                dummy_ctx_with_cwd(tmp.path().to_path_buf(), flagged.clone()),
+                input,
+            )
             .await;
         assert!(result.is_err());
     }
@@ -215,10 +411,13 @@ mod tests {
     async fn test_flag_nonexistent_file_errors() {
         let tmp = tempfile::tempdir().unwrap();
         let flagged = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let tool = FlagImportant::new(flagged.clone());
+        let tool = FlagImportant::new();
         let input = serde_json::json!({ "path": "nope.md" });
         let result = tool
-            .execute(dummy_ctx_with_cwd(tmp.path().to_path_buf()), input)
+            .execute(
+                dummy_ctx_with_cwd(tmp.path().to_path_buf(), flagged.clone()),
+                input,
+            )
             .await;
         assert!(result.is_err());
         assert!(
@@ -232,10 +431,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let file = write_temp_file(tmp.path(), "a.txt", "a");
         let flagged = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let tool = FlagImportant::new(flagged.clone());
+        let tool = FlagImportant::new();
         let input = serde_json::json!({ "path": file.to_string_lossy(), "mode": "banana" });
         let result = tool
-            .execute(dummy_ctx_with_cwd(tmp.path().to_path_buf()), input)
+            .execute(
+                dummy_ctx_with_cwd(tmp.path().to_path_buf(), flagged.clone()),
+                input,
+            )
             .await;
         assert!(result.is_err());
     }
@@ -245,16 +447,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let file = write_temp_file(tmp.path(), "shared.md", "body");
         let flagged = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let tool = FlagImportant::new(flagged.clone());
+        let tool = FlagImportant::new();
 
         tool.execute(
-            dummy_ctx_with_cwd(tmp.path().to_path_buf()),
+            dummy_ctx_with_cwd(tmp.path().to_path_buf(), flagged.clone()),
             serde_json::json!({ "path": file.to_string_lossy(), "mode": "included" }),
         )
         .await
         .unwrap();
         tool.execute(
-            dummy_ctx_with_cwd(tmp.path().to_path_buf()),
+            dummy_ctx_with_cwd(tmp.path().to_path_buf(), flagged.clone()),
             serde_json::json!({ "path": file.to_string_lossy(), "mode": "referenced" }),
         )
         .await
@@ -267,8 +469,7 @@ mod tests {
 
     #[test]
     fn test_tool_metadata() {
-        let flagged = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let tool = FlagImportant::new(flagged);
+        let tool = FlagImportant::new();
         assert_eq!(tool.name(), "flag_important");
         assert_eq!(tool.sensitivity(), Sensitivity::ReadOnly);
         let required = tool
