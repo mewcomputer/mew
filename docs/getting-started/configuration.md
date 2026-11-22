@@ -1,34 +1,33 @@
 ---
 title: Configuration
-description: Configure mew providers, credentials, permissions, and workspace.
+description: Configure Mew providers, credentials, permissions, and workspace.
 ---
 
-Configure Mew with `config.toml` and environment variables. Mew saves
-runtime preferences in `state.toml`. Run `mew config show` to inspect
-the effective configuration, or `mew config edit` to edit the file.
+Configure Mew with `config.toml` and environment variables. Mew stores runtime
+preferences in `state.toml`. Run `mew config show` to print the effective
+configuration, or `mew config edit` to open the file in your editor.
 
 ## File locations
 
 | File | Path | Purpose |
 |------|------|---------|
-| `config.toml` | `~/.config/mew/config.toml` | Main config: providers, permissions, secrets, workspace |
-| `state.toml` | Same directory | Runtime state: last model, sidebar state, disabled plugins |
-| `credentials.json` | Same directory | Credential fallback (keyring and env vars preferred) |
-| `.env` | Working directory | Loaded at startup via dotenvy (for `RUST_LOG`, `MEW_CRED_*`) |
+| `config.toml` | `~/.config/mew/config.toml` | Providers, permissions, secrets, and workspace settings |
+| `state.toml` | Same directory | Runtime state (last model, theme, collapsed sections, disabled plugins) |
+| `credentials.json` | Same directory | Plaintext credential fallback when keyring and env vars are unset |
+| `.env` | Working directory or parent | Loaded at startup via `dotenvy` (for `RUST_LOG`, `MEW_CRED_*`) |
 
-Override the config directory by setting `MEW_CONFIG_DIR` or
-`XDG_CONFIG_HOME`.
+Override the config directory with `MEW_CONFIG_DIR` or `XDG_CONFIG_HOME`.
 
 ## Config sources (later wins)
 
-1. Built-in defaults (see [Providers](/docs/using-mew/providers/) for provider IDs)
-2. `config.toml` (overrides built-in providers, adds custom providers)
-3. Environment variables with the `MEW_` prefix. A double underscore
-   denotes a nested key, as in `MEW_TUI__THEME`. Set lists such as
-   `workspace.roots` in `config.toml`.
+1. Built-in defaults (see [Providers](/docs/using-mew/providers/) for provider IDs).
+2. `config.toml` (overrides built-in providers and adds custom settings).
+3. `MEW_`-prefixed environment variables. Use `__` for nested keys, such as
+   `MEW_TUI__THEME`. Define list fields such as `workspace.roots` in
+   `config.toml`.
 
-The CLI loads a `.env` file at process startup. A daemon started earlier
-keeps its own environment when you open or resume a conversation.
+The CLI loads `.env` at process startup. A running daemon keeps its startup
+environment when you open or resume a conversation.
 
 ## Configuration reference
 
@@ -48,124 +47,111 @@ sidebar_finished_ttl_secs = 180
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `default_model` | string | (empty) | Model ID used when no `--model` flag or state entry exists |
-| `default_persona` | string | `"builder"` | Persona loaded at startup. `"none"` or `"default"` starts without one |
-| `plan_path` | string | `"plans/"` | Each `write_plan` call creates a new file such as `plans/vale-nori.md`. Use the returned path with `edit_plan`. Set a different relative or absolute path to use a fixed file |
+| `default_model` | string | `""` | Fallback model ID when no `--model` flag or `state.toml` entry applies |
+| `default_persona` | string | `"builder"` | Startup persona. Set `"none"` or `"default"` to start without one |
+| `plan_path` | string | `"plans/"` | Directory or fixed file path for `write_plan`. A directory gets generated names such as `plans/vale-nori.md` for use with `edit_plan` |
 | `providers` | table | (built-in) | Provider definitions keyed by provider ID |
 | `models` | array | `[]` | Custom model entries that override or extend the catalog |
 | `code_mode` | table | (model default) | Run tools through a persistent Python session. See [Python code mode](#python-code-mode) |
 | `permissions` | table | (empty) | Permission rules and classifier config. See [Permissions](/docs/using-mew/permissions/) |
-| `secrets` | table | (empty) | Secret files and words for redaction |
-| `workspace` | table | (empty) | Workspace roots for file access and shell permission checks |
-| `plugins` | table | (empty) | Configuration by plugin name. See [Plugins](/docs/using-mew/plugins/) |
+| `secrets` | table | (empty) | Secret file globs and literal words to redact |
+| `workspace` | table | (empty) | Allowed workspace roots for file tools and shell escape checks |
+| `plugins` | table | (empty) | Per-plugin configuration keyed by plugin name. See [Plugins](/docs/using-mew/plugins/) |
 | `tui` | table | (built-in) | Terminal theme and sidebar settings. See [Theming](/docs/using-mew/theming/) |
-| `orchestration` | table | (built-in) | Subagent limits and reminders. See [Subagents](/docs/using-mew/subagents/) |
+| `orchestration` | table | (built-in) | Subagent concurrency limits and reminders. See [Subagents](/docs/using-mew/subagents/) |
 
-Set `tui.sidebar_finished_ttl_secs` to change how long failed activity
-stays visible in the terminal sidebar. It defaults to 180 seconds.
-A value of 0 hides failed activity immediately.
+Set `tui.sidebar_finished_ttl_secs` to change how long failed activity stays
+visible in the terminal sidebar. It defaults to 180 seconds; `0` hides failed
+activity immediately.
 
 :::note
-Personas and skills accept `polytoken:` as an alias for `mew:` in their
-frontmatter. This is for compatibility with personas authored for
-Polytoken. See [Personas](/docs/using-mew/personas/) for details.
+Personas and skills accept `polytoken:` as an alias for `mew:` in frontmatter.
+See [Personas](/docs/using-mew/personas/) for details.
 :::
 
 ### Python code mode
 
-Code mode gives the model a single `python` tool. Python runs in a persistent
-session and calls Mew's available tools through `tools`. By default, Mew enables
-it for DeepSeek models across providers and for Codex models whose catalog entry
-specifies `code_mode_only`. DeepSeek model names start with `deepseek-`, including
-namespaced names such as `deepseek/deepseek-r1`. Other models use the existing
-tool interface. The Codex catalog is loaded for OAuth users or from a project
-catalog override.
+Code mode replaces individual tool calls with a persistent `python` tool that
+invokes Mew tools through a Python module.
 
-Choose a global mode and optional provider-qualified overrides in `config.toml`:
+#### Enabling and model defaults
+
+By default, Mew enables code mode for DeepSeek models (case-insensitive `deepseek`
+match across providers) and for Codex models whose catalog entry sets
+`code_mode_only`. The Codex catalog loads for OAuth users or from a project
+catalog override. Other models receive direct tools unless overridden.
 
 ```toml
 [code_mode]
-mode = "off"       # optional: "off" or "full"
-isolated = true    # default
-max_idle_workers = 3  # default: retained top-level Python workers per daemon
+mode = "off"          # optional: "off" or "full"
+isolated = true       # default
+max_idle_workers = 3  # retained top-level Python workers per daemon
 # python = "/path/to/venv/bin/python"
 
 [code_mode.models]
-"codex/gpt-6-luna" = "full"
+"codex/gpt-5.6-luna" = "full"
 "opencode-go/hy4-flash-free" = "full"
 ```
 
-The per-model setting takes priority, followed by the global setting and the
-model default. Omit `mode` to use the model default. Set `mode = "full"` to enable
-it for every model, or `mode = "off"` to disable it globally, then use model
-overrides for exceptions. `python` defaults to `python3` on the daemon's `PATH`. Use a
-virtual environment's Python executable to make its installed packages
-available. The interpreter and its installed packages must be trusted.
+Precedence runs from `code_mode.models["provider/model"]`, to `code_mode.mode`,
+to the model default. Omit `mode` to keep per-model defaults. Set `python` to a
+virtual environment executable to expose its installed packages; Mew runs `python3`
+from `PATH` by default. Only point `python` at a trusted interpreter and
+environment.
 
-Python variables persist across calls in the same session, including when an
-idle session is unloaded and reattached, while its worker remains cached. By
-default, Mew retains up to three idle top-level Python workers per daemon.
-When the limit is exceeded, it stops the least recently used idle worker.
-`max_idle_workers` changes that limit; `0` stops each worker as soon as its
-call finishes. Restart the daemon after changing the setting. Running Python
-calls, including calls waiting for approval, are not evicted. Active subagents
-have separate Python sessions and are not counted against this idle limit.
+#### Worker lifecycle and limits
 
-Mew also stops a worker after one hour without a Python call, measured from the
-end of its last call. When a worker stops because of inactivity or cache
-capacity, the next Python call reports that session state was lost before
-running any code, as long as the daemon has not restarted in the meantime.
-Variables and temporary scratch files are lost; chat history and workspace
-files remain. Save results you want to keep to the workspace through Mew tools;
-live Python objects are not restored automatically. State also does not survive
-daemon restarts,
-session deletion, cancellation, a worker crash, or a ten-minute period without
-a worker response. Approval waits do not count toward the ten-minute timeout.
+- **State persistence**: variables persist across cells in the same session,
+  including after an idle session unloads and reattaches while its worker stays
+  cached.
+- **Idle worker cache**: each daemon retains up to `max_idle_workers` (default
+  `3`) idle top-level workers and evicts the least recently used worker when
+  full. Running or approval-waiting calls are never evicted, and subagents keep
+  separate workers outside this cap. Setting `0` stops each worker when its call
+  ends. Restart the daemon after changing `max_idle_workers`.
+- **Timeouts and resets**: workers stop after 1 hour of inactivity or a
+  10-minute stall without a response (approval waits excluded). Daemon restarts,
+  session deletion, cancellation, and worker crashes also drop Python state.
+- **Loss notification**: after an idle eviction or timeout on a live daemon, the
+  next `python` call reports the lost state before running code. Save durable
+  data to workspace files with Mew tools.
 
-The model can call tools with `tools.read({"path": "file.txt"})`, inspect
-their definitions in `ALL_TOOLS`, and use `text(value)` to return output.
-`emit_image(result["images"][0])` returns a tool's image to a vision-capable
-model. Calls from Python threads are serialized through the tool dispatcher.
-Nested tool calls use the same permission checks as direct calls.
-Configured MCP tools are also available; see [MCP Servers](/docs/using-mew/mcp-servers/).
+#### In-cell API and TUI display
 
-The TUI shows each Python cell and the tools it calls, including permission
-prompts and errors. Press Ctrl-O to expand the cell and nested arguments. Nested
-call details remain in session history. Nested results are not saved separately;
-the cell can emit results worth retaining. Successful calls show the result's
-byte count.
+- **Helpers**: call tools with `tools.read({"path": "file.txt"})`, inspect
+  definitions in `ALL_TOOLS`, return output with `text(value)`, and forward tool
+  images to vision-capable models with `emit_image(result["images"][0])`.
+  Configured MCP tools are also exposed under `tools`.
+- **Threads**: Python threads call tools synchronously through the dispatcher
+  and obey normal permission checks. Join spawned threads and await thread-pool
+  tasks before a cell returns; work outliving a cell has later tool calls
+  rejected, fails the cell, resets the worker, and discards late output.
+- **TUI inspection**: press `Ctrl+O` to toggle Python cell expansion and view
+  nested tool arguments. History retains nested call records and byte counts;
+  emit values with `text(...)` to keep results in model context.
 
-Threads can call tools only during the cell that started them. In-flight calls
-finish before the cell returns; later calls from work that has not started are
-rejected. Join threads that call tools and await thread-pool tasks before
-returning from a cell. If one remains running, the cell fails and the Python
-session resets. Thread pools can be reused across cells. Output from background
-work that outlives its cell does not appear in later cells.
+#### Sandboxing
 
-With `isolated = true`, Mew runs Python in a macOS Seatbelt sandbox or a Linux
-Bubblewrap sandbox. Linux requires `bwrap` and working unprivileged user
-namespaces. The worker can read the selected Python environment and system
-libraries and use a private scratch directory. Other workspace files and the
-network are inaccessible directly.
-Access through Mew tools remains governed by their permissions. This uses the
-host kernel and does not impose CPU or memory quotas. If isolation cannot start,
-the call fails instead of running without it.
+With `isolated = true` (default), Mew starts Python inside macOS Seatbelt or
+Linux Bubblewrap (`bwrap`, requiring unprivileged user namespaces). The sandbox
+exposes the Python environment, system libraries, and a private scratch
+directory while blocking direct workspace and network access. Tools called from
+Python still enforce their normal permissions. Sandboxing relies on the host
+kernel without CPU or memory quotas, and calls fail closed if the sandbox
+cannot start. Some scientific packages fall back to serial execution when
+restricted from spawning subprocesses.
 
-Some scientific packages fall back to serial execution when the sandbox
-restricts subprocesses or synchronization primitives.
-
-Setting `isolated = false` lets Python access the host directly, including files,
-network, and subprocesses, without passing those operations through Mew's tool
-permissions. Mew marks each unrestricted Python call as dangerous for the
-permission engine. Personas and subagents that restrict tools always use
-isolated Python, even when this setting is false. An explicit persona denial
-of `python` or an empty tool allowlist disables Python. Changing the effective
-isolation stops the existing worker after any active cell finishes and reports
-the lost state on the next call.
+Setting `isolated = false` grants Python direct host access to files, network,
+and subprocesses outside Mew's permission engine, so Mew classifies every
+unrestricted `python` call as `Dangerous`. Personas and subagents with tool
+restrictions always enforce `isolated = true`, and disabling or omitting `python`
+turns code mode off for that persona. Changing effective isolation stops the
+existing worker after active cells finish and reports lost state on the next
+call.
 
 ### Provider configuration
 
-Each provider is a key under `[providers]`:
+Configure each provider under `[providers.<id>]`:
 
 ```toml
 [providers.deepseek]
@@ -176,18 +162,17 @@ credential_ref = "deepseek"
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `shape` | yes | Adapter protocol (`"openai"`, `"anthropic"`, or `"responses"`) |
-| `base_url` | direct API providers | API endpoint URL |
-| `credential_ref` | direct providers using API keys | Credential name. See [Credentials](#credentials) |
-| `kind` | no | `"direct"` (default) or `"router"` |
-| `nano` | no | Least expensive router model |
-| `micro` | router | General-purpose router model |
-| `deci` | router | Most capable router model |
-| `disable_hashline` | no | If `true`, do not register the `edit_hashline` tool for this provider (default: `false`) |
+| `shape` | Yes | Wire protocol: `"openai"`, `"anthropic"`, or `"responses"` |
+| `base_url` | Direct providers | API endpoint URL |
+| `credential_ref` | API-key providers | Credential lookup key. See [Credentials](#credentials) |
+| `kind` | No | `"direct"` (default) or `"router"` |
+| `nano` | No | Smallest router tier model (`provider/model`) |
+| `micro` | Router providers | General-purpose router tier model (`provider/model`) |
+| `deci` | Router providers | Highest-capability router tier model (`provider/model`) |
+| `disable_hashline` | No | Set `true` to omit `edit_hashline` for this provider (default: `false`) |
 
-Router providers group model tiers for subagents and the permission
-classifier. Choose a direct provider for chat. A tier uses
-`provider/model` syntax:
+Router providers map `nano`, `micro`, and `deci` tiers for subagents and the
+permission classifier. Pick a direct provider for interactive chat.
 
 ```toml
 [providers.router]
@@ -197,13 +182,13 @@ micro = "deepseek/deepseek-v4-flash"
 deci = "deepseek/deepseek-v4-pro"
 ```
 
-Existing router configurations can use `small` and `big` as fallbacks
-for `micro` and `deci`. See [Providers](/docs/using-mew/providers/) for routing
-behavior and built-in providers.
+Existing configs using `small` and `big` still work as fallbacks for `micro` and
+`deci`. See [Providers](/docs/using-mew/providers/) for built-in providers and
+routing rules.
 
 ### Custom models
 
-Override or extend the models.dev catalog with `[[models]]` entries:
+Add `[[models]]` blocks to extend or override the models.dev catalog:
 
 ```toml
 [[models]]
@@ -222,20 +207,19 @@ params = { reasoning_effort = "high" }
 | Field | Type | Description |
 |-------|------|-------------|
 | `id` | string | Model identifier |
-| `provider` | string | Provider ID that serves this model |
-| `shape` | string | Adapter shape (optional, inferred from provider if omitted) |
+| `provider` | string | Provider ID serving the model |
+| `shape` | string | Adapter shape (defaults to the provider's shape) |
 | `context_window` | integer | Context window in tokens |
-| `prompt_cache_retention_secs` | integer | Known prompt-cache retention in seconds; omit when unknown |
-| `thinking_variants` | array | Named thinking variants with provider-specific params |
-| `thinking_budget` | table | Token budget range for models that accept a thinking budget |
-| `responses_lite` | boolean | Use the Responses Lite transport for compatible models |
-| `merge` | boolean | Keep catalog values for omitted fields when overriding an existing model (default: `false`) |
+| `prompt_cache_retention_secs` | integer | Documented prompt-cache retention in seconds |
+| `thinking_variants` | array | Named thinking variants with provider parameters |
+| `thinking_budget` | table | Token budget range for budget-based thinking models |
+| `responses_lite` | boolean | Enable the Responses Lite transport for compatible models |
+| `merge` | boolean | Keep existing catalog fields when overriding a model (default: `false`) |
 
 ### Secrets
 
-Add file patterns under `secrets.files` to guard reads and hide matching
-paths from search tools. Add literal values under `secrets.words` to redact
-them from supported tool output.
+Configure `secrets.files` globs to guard matching paths from reads and search
+tools, and `secrets.words` values to redact literal secrets from tool output:
 
 ```toml
 [[secrets.files]]
@@ -245,8 +229,8 @@ paths = [".env", "secrets.toml", "*.key"]
 values = ["example-secret-value"]
 ```
 
-See [Permissions](/docs/using-mew/permissions/) for how the secret-file
-guard interacts with permission rules and modes.
+See [Permissions](/docs/using-mew/permissions/) for how secret guards interact
+with permission modes.
 
 ### Workspace
 
@@ -255,62 +239,76 @@ guard interacts with permission rules and modes.
 roots = ["~/code/myproject", "~/code/shared"]
 ```
 
-Directories the agent is allowed to touch. Defaults to the current
-directory when empty. Feeds two enforcement layers:
+`workspace.roots` restricts which directories the agent may access without
+prompting. Empty `roots` default path checks to the current directory and turn
+off the shell escape tier. Non-empty `roots` enable two checks:
 
-1. **Agent layer**: path-based tools (read, write, edit, glob, grep)
-   reject paths outside the roots before running.
-2. **Escape tier**: bash commands with path arguments outside the roots
-   escalate from auto-allow to a prompt.
+1. **Path-based tools** (`read`, `write`, `edit_str_replace`, `edit_hashline`,
+   `glob`, `grep`): when targeting a path outside `roots`, Mew prompts once for
+   the containing directory and caches granted directories for the session.
+   Denying the prompt rejects the tool call.
+2. **Shell tools** (`bash`, `shell_background`, `shell_monitor`): commands
+   referencing paths outside `roots` escalate from auto-allow to a permission
+   prompt.
 
-Empty roots disable the escape tier. See
-[Permissions](/docs/using-mew/permissions/) for the full sandboxing details.
+See [Permissions](/docs/using-mew/permissions/) for full rule evaluation order.
 
 ## Credentials
 
-Credential resolution for `credential_ref` follows this order:
+Mew resolves `credential_ref` in this order:
 
-1. **Env var**: `MEW_CRED_<REF_UPPERCASED>` (hyphens become underscores).
-   For `credential_ref = "deepseek"`, set `MEW_CRED_DEEPSEEK`.
-2. **System keyring**: `mew` service, account = ref name
-3. **credentials.json**: `{"deepseek": "sk-..."}` in the config directory
+1. **Environment variable**: `MEW_CRED_<NORMALIZED_REF>`, uppercased with
+   non-alphanumeric characters converted to `_`. For `credential_ref = "z-ai"`,
+   set `MEW_CRED_Z_AI`.
+2. **System keyring**: service `mew`, account matching `credential_ref`.
+3. **`credentials.json`**: JSON map in the config directory, such as
+   `{"deepseek": "sk-..."}`.
 
-Env vars are the fastest path for development. Keyring is best for
-persistent setups. `credentials.json` works when neither is available.
+Use environment variables for temporary sessions or scripts, the system keyring
+for persistent setups, and `credentials.json` when no keyring is available.
 
 ## Environment variables
 
 | Variable | Description |
 |----------|-------------|
-| `MEW_CRED_<NAME>` | Set a credential value (hyphens in name become underscores) |
+| `MEW_CRED_<NAME>` | Credential value (non-alphanumeric characters become `_`) |
 | `MEW_DEFAULT_MODEL` | Override `default_model` |
 | `MEW_SESSION_DIR` | Override session storage directory |
-| `MEW_DATA_DIR` | Override persistent data directory (XDG default: `~/.local/share/mew`) |
-| `MEW_CACHE_DIR` | Override cache directory (XDG default: `~/.cache/mew`) |
+| `MEW_DATA_DIR` | Override data directory (default: `~/.local/share/mew`) |
+| `MEW_CACHE_DIR` | Override cache directory (default: `~/.cache/mew`) |
 | `MEW_CONFIG_DIR` | Override config directory |
-| `MEW_PERMISSIVE` | Start in permissive mode |
-| `MEW_AUTO` | Start in auto mode |
-| `MEW_AUTO_PLUS` | Start in auto+ mode |
-| `MEW_DANGEROUS` | Start in dangerous mode (skip all prompts) |
-| `RUST_LOG` | Log level (loaded from `.env` before tracing init) |
+| `MEW_PERMISSIVE` | Start `chat`, `run`, or `daemon` in permissive mode |
+| `MEW_AUTO` | Start `chat`, `run`, or `daemon` in auto mode |
+| `MEW_AUTO_PLUS` | Start `chat`, `run`, or `daemon` in auto+ mode |
+| `MEW_DANGEROUS` | Start `chat`, `run`, or `daemon` in dangerous mode |
+| `RUST_LOG` | Tracing log filter (loaded from `.env` before logger init) |
+
+Running bare `mew` starts in `standard` mode and ignores the four permission
+environment variables; pass them with `mew chat`, `mew run`, or `mew daemon`.
 
 ## State persistence
 
-`state.toml` stores runtime state between sessions:
+`state.toml` persists CLI, TUI, and desktop UI preferences across restarts:
 
 | Field | Description |
 |-------|-------------|
-| `last_model` | Last-used model ID |
-| `last_provider` | Last-used provider ID |
-| `sidebar_collapsed` | Sidebar section collapse state |
-| `disabled_plugins` | Plugins the user has disabled |
+| `last_model` | Last selected model ID |
+| `last_provider` | Last selected provider ID |
+| `last_thinking_variant` | Last selected thinking variant |
+| `recent_models` | Up to six recently used `provider/model` entries |
+| `theme` | Active theme name set via `/theme` |
+| `sidebar_collapsed` | Collapsed state of terminal sidebar sections |
+| `disabled_plugins` | Disabled plugin names |
+| `revoked_extensions` | Revoked extension names |
 
-CLI `--provider` and `--model` flags override state, which overrides
-the built-in default. The last-used model and provider are saved back to
-`state.toml` whenever you switch.
+Native desktop layout preferences (`desktop_*` and `terminal_font`) also live
+in `state.toml`. Model selection follows `--model`, then `state.toml`
+(`last_model`), then `config.toml` (`default_model`), and finally the built-in
+default (`deepseek-v4-flash`). Switching models or providers in a session writes
+the choice back to `state.toml`.
 
 ## MCP servers
 
 Configure stdio and streamable HTTP servers in `mcp.json`. See
 [MCP Servers](/docs/using-mew/mcp-servers/) for discovery, permissions, and
-the server trust boundary.
+timeouts.

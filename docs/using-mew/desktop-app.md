@@ -1,23 +1,22 @@
 ---
 title: Desktop App
-description: Build and use mew's macOS desktop clients.
+description: Build and use Mew's macOS desktop clients.
 ---
 
-Mew has a native macOS app and an experimental Electron app. Both use the
-same Rust daemon to run the agent and store conversations. The CLI nightlies
-from [Installation](/docs/getting-started/installation/) contain the terminal
-client. Build the desktop apps from source.
+Mew includes a native macOS app and an experimental Electron app. Both connect to
+the same Rust daemon to run turns and store conversations. CLI nightlies from
+[Installation](/docs/getting-started/installation/) include only the terminal
+client; build the desktop apps from source.
 
 ## Run the native app
 
-Start with a checkout of the [mew repository](https://github.com/mewcomputer/mew).
-You'll need the Xcode command-line tools, current stable Rust, Node.js 24 or
-later, pnpm, Just, Zig 0.15.2, CMake, Ninja, and the CEF SDK matching
-`Cargo.lock`. Packaging also requires the standalone macOS
-`agent-browser` binary, version 0.34.0 or later, on your `PATH`.
+Clone the [Mew repository](https://github.com/mewcomputer/mew). Install the
+Xcode command-line tools, current stable Rust, Node.js 24 or later, pnpm, Just,
+Zig 0.15.2, CMake, Ninja, the CEF SDK matching `Cargo.lock`, and the standalone
+macOS `agent-browser` binary (version 0.34.0 or later) on your `PATH`.
 
-Set `CEF_PATH` to your SDK directory. On Apple silicon, the repository's CI
-helper can download and verify the matching SDK for you:
+Set `CEF_PATH` to your SDK directory. On Apple silicon, the CI helper downloads
+and verifies the matching SDK:
 
 ```sh
 export CEF_PATH="$HOME/.cache/mew-cef"
@@ -31,38 +30,39 @@ just install-js
 just desktop-dev
 ```
 
-To build a release-profile app, run `just desktop-build` and open
-`target/release/bundle/macos/mew.app`. To create a DMG and ZIP for that Mac's
-architecture, run `just desktop-package`. Look for the files under
-`target/release/dist/`. These local builds are not notarized.
+Run `just desktop-build` to build a release bundle at
+`target/release/bundle/macos/mew.app`, or `just desktop-package` to write a DMG
+and ZIP under `target/release/dist/`. Local builds are ad hoc signed and not
+notarized.
 
 ## Start a conversation
 
-Choose **File → New Chat** or press `⌘N`. Use the sessions sidebar to return
-to a conversation. Open a workbench tab with `⌘T`, toggle the terminal with
-`⌘J`, or search sessions with `⌘K`.
+Choose **File → New Chat** or press `⌘N`. Switch conversations from the
+sessions sidebar. Press `⌘T` to open a workbench tab, `⌘J` to toggle the
+terminal, or `⌘K` to search sessions.
 
-By default the app connects to a healthy local daemon on port `25566` or
-starts its bundled daemon. If you already configured a provider for the CLI
-under the same account, the local daemon uses that configuration. Otherwise,
-see [Configuration](/docs/getting-started/configuration/) to set up a provider.
-If your credential lives in a shell environment variable, launch from that
-shell so a newly started daemon inherits it.
+By default, the app attaches to a healthy local daemon on port `25566` or spawns
+its bundled daemon. Existing CLI provider configurations apply automatically.
+Otherwise, see [Configuration](/docs/getting-started/configuration/) to set up a
+provider. When using credentials in shell environment variables, launch the app
+from that shell so a newly started daemon inherits them.
 
 ## Use browser tabs
 
-In a local conversation, open a workbench tab with `⌘T`, enter a URL, and
-press Enter. Once the browser page connects, you can ask the agent to inspect
-that page. The agent's target follows the browser tab you select for that
-conversation. Browser tools in the native app require a local daemon.
+In a local conversation, press `⌘T` to open a workbench tab, enter a URL, and
+press Enter. Once the page loads, ask the agent to inspect or interact with it.
+Browser tool calls target whichever browser tab is active for that conversation
+and require a local daemon.
 
 ## Try Electron
 
-From the same checkout, use `just install-js` followed by
-`just desktop-electron-dev`. The Electron app uses the shared Web UI and
-bundles its own host. To build it without launching it, run
-`just desktop-electron-build`. The bundle is written to
-`target/release/bundle/macos/mew-electron.app`.
+From the repository checkout, run `just install-js` followed by
+`just desktop-electron-dev`. The Electron shell uses the shared React Web UI and
+bundles `mew` (running `mew desktop-host`) along with `agent-browser` (version
+0.34.0 or later on `PATH` is required during packaging).
 
-For an example of an Electron workflow, see
-[Guide a running subagent in Electron](/docs/using-mew/subagents/#guide-a-running-subagent-in-electron).
+Run `just desktop-electron-build` to build without launching. The packager
+writes the bundle to `target/release/bundle/macos/mew-electron.app`.
+
+See [Guide a running subagent](/docs/using-mew/subagents/#guide-a-running-subagent)
+for steering child agents from the Web UI or Electron.

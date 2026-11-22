@@ -1,87 +1,66 @@
 ---
 title: Plugins
-description: Manage installed mew plugins and learn about the experimental hook runtime.
+description: Manage installed Mew plugins and inspect the experimental hook runtime.
 ---
 
-Plugins are external programs that extend mew's capabilities. They can
-register tools, add slash commands, modify requests, observe events, and
-push UI updates. Plugins are the original extension format — the newer
-[extension package](/docs/using-mew/extensions/) format adds manifests,
-sandboxing, and consent. The built-in chat daemon and the `mew run` command use a no-op hook
-dispatcher. Managing an executable with `mew ext` does not activate it in
-those commands. The hook behavior below describes the experimental
-runtime.
+Plugins are standalone executable programs that communicate with Mew over
+stdin/stdout JSON-RPC. They predate [extension packages](/docs/using-mew/extensions/),
+which add `mew-ext.toml` manifests, macOS Seatbelt sandboxing, and capability
+consent.
 
-## Where plugins live
+The chat daemon and `mew run` currently wire a no-op hook dispatcher, so
+managing executables with `mew ext` does not load plugins during chat sessions
+or one-shot runs. The capabilities and consent sections below describe the
+experimental hook runtime.
 
-Plugins are discovered as executable files in these directories:
+## Discovery
+
+The experimental loader scans executable files alphabetically in:
 
 1. `~/.config/mew/plugins/` (global)
-2. `.mew/plugins/` in your project directory (project-local)
+2. `.mew/plugins/` (project-local)
 
-The hook runtime discovers executable files in alphabetical order.
+Compiled dynamic library files (`.wasm`, `.dylib`, `.so`, `.dll`) are ignored.
 
 ## Managing plugins
 
-To make a bare plugin discoverable by `mew ext list`, place the
-executable in the global plugins directory.
+Place an executable in `~/.config/mew/plugins/` (or `.mew/plugins/`) to include
+it in `mew ext list`:
 
-```bash
+```sh
 mkdir -p ~/.config/mew/plugins
 cp my-plugin ~/.config/mew/plugins/
 chmod +x ~/.config/mew/plugins/my-plugin
 ```
 
-To disable a plugin without removing it:
+Disable or re-enable a plugin without deleting it:
 
-```bash
+```sh
 mew ext disable <name>
-```
-
-To re-enable:
-
-```bash
 mew ext enable <name>
 ```
 
-Disabled plugins are tracked in `state.toml` under `disabled_plugins`.
+Mew records disabled plugin names in `state.toml` under `disabled_plugins`.
 
-## What plugins can do
+## Experimental hook capabilities
 
-- Register dynamic tools that appear in the model's tool list
-- Register slash commands that show up in autocomplete and `/help`
-- Modify chat parameters (temperature, max_tokens, tool_choice) per turn
-- Inject HTTP headers into provider requests
-- Modify the system prompt before each turn
-- Block or modify tool inputs before execution
-- Modify tool outputs after execution
-- Auto-approve or deny permissions based on custom rules
-- Inject environment variables into bash commands
-- Observe all provider events for telemetry and metrics
-- Store per-plugin key-value data persisted to disk
-- Push toast notifications to the TUI
-- Render custom text content beside the input area
+When the hook runtime is wired, plugins can:
+
+- Register dynamic `Mutating` tools and custom slash commands.
+- Modify chat parameters (`temperature`, `max_tokens`, `top_p`, `tool_choice`),
+  HTTP headers, and system prompts before turns.
+- Block or rewrite tool inputs, outputs, permission decisions, and shell
+  environment variables.
+- Observe provider events for telemetry.
+- Persist per-plugin key-value storage to disk.
+- Push TUI toast notifications or custom text beside the input box.
 
 ## Consent
 
-On first load, bare plugins prompt for full access (all hooks and host
-functions). Approve to grant full access, or decline to restrict the
-plugin to observe-only mode. In non-interactive mode, new plugins are
-auto-restricted to observe-only.
+On first load, a bare plugin prompts once for full access (all hooks and host
+functions); declining restricts it to observe-only mode. In non-interactive runs,
+new plugins default to observe-only. Mew persists consent choices across runs.
 
-Your choice is persisted and remembered on subsequent loads.
-
-## Plugins vs extension packages
-
-| Feature | Bare plugins | Extension packages |
-|---------|-------------|-------------------|
-| Manifest | None | `mew-ext.toml` required |
-| Sandbox | No | Yes (macOS) |
-| Consent | Full-access prompt | Capability-based prompts |
-| Install | Manual file copy | `mew ext install` |
-| Discovery | `plugins/` dir | `extensions/` dir |
-
-See [Extensions](/docs/using-mew/extensions/) for the package format.
-
-For the JSON-RPC protocol, hook point reference, and host function API,
-see [Extension System Internals](/docs/development/dev-extensions/).
+See [Extensions](/docs/using-mew/extensions/) for a comparison between bare
+plugins and extension packages, and [Extension System Internals](/docs/development/dev-extensions/)
+for the JSON-RPC protocol and hook reference.

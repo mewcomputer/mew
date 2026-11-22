@@ -3,41 +3,36 @@ title: Personas
 description: Switchable system prompts with model pinning and tool allowlists.
 ---
 
-Personas are switchable system prompts. Each persona can pin a specific
-model, restrict which tools are available, and optionally use a template
-for dynamic prompt generation. They let you switch the agent's behavior
-without rewriting your context file.
+Personas are switchable system prompts that can pin a model, restrict tools,
+and render templates dynamically.
 
 ## Built-in personas
 
-mew ships with two built-in personas designed for a two-phase workflow:
+Mew bundles two built-in personas for a two-phase workflow:
 
 | Persona | Tools | Purpose |
 |---------|-------|---------|
-| `builder` | All tools | The default. When asked to implement a plan, reads it and works through it step by step. |
-| `planner` | Code search, plan tools, questions, and todos | Investigates the codebase, writes a plan, and presents it for review. |
+| `builder` | All tools | Default persona. Reads an approved plan when asked and applies edits step by step. |
+| `planner` | `read`, `glob`, `grep`, `write_plan`, `edit_plan`, `ask_user_question`, `flag_important`, `subagent`, and `todo_*` | Investigates the codebase and writes a plan for review. |
 
-The intended flow:
+Typical workflow:
 
-1. `/persona planner` to start in planning mode
-2. The planner investigates and writes a named file in `plans/` by default. Set `plan_path` in your config to use a fixed file
-3. `/persona builder` to switch to execution
-4. Ask the builder to execute the reviewed plan
+1. Run `/persona planner` to enter planning mode.
+2. Ask the planner to investigate and write a plan (written to `plans/` by
+   default, or a fixed file configured via `plan_path`).
+3. Run `/persona builder` to switch back to editing.
+4. Ask the builder to implement the reviewed plan.
 
-User-defined personas with the same name override the built-ins. Both are
-always available even without any persona files on disk.
-
-`default_persona` in config controls which one loads at startup
-(defaults to `"builder"`). Set it to `"planner"` to start in planning
-mode, or `"none"`/`"default"` to start without a persona.
+User-defined personas with the same name override the built-ins. Set
+`default_persona` in `config.toml` to `"builder"` (default), `"planner"`, or
+`"none"` / `"default"` to start without a persona.
 
 ## Discovery
 
-Personas are searched in project-scoped and global-scoped directories.
-Project paths are walked from cwd up to the git root. Earlier paths win
-on duplicate names.
+Mew searches project directories (walked from the working directory up to the
+Git root) before global directories. Earlier matches win on duplicate names.
 
-**Project paths** (walked cwd to git root):
+**Project paths** (cwd up to Git root):
 
 1. `.mew/personas/<name>/PERSONA.md`
 2. `.opencode/personas/<name>/PERSONA.md`
@@ -53,7 +48,8 @@ on duplicate names.
 
 ## Format
 
-A persona is a YAML frontmatter block followed by markdown body text:
+A persona is a Markdown file with optional YAML frontmatter followed by
+instructions:
 
 ```markdown
 ---
@@ -72,26 +68,34 @@ You are a research assistant. Focus on gathering information and
 synthesizing findings. Be thorough but concise.
 ```
 
-The body becomes the system prompt. The system prompt is rebuilt from
-scratch every turn, so the body text is always injected fresh.
+Mew prepends the persona body before the base system prompt (followed by context
+files and `<available_skills>`) and rebuilds the system prompt from scratch on
+every turn.
 
 ## Frontmatter fields
 
+Frontmatter is optional; without it, Mew uses the directory name and an empty
+description. When frontmatter is present, `name` must match the directory name
+(1 to 64 lowercase letters, digits, or internal hyphens matching
+`^[a-z0-9]+(-[a-z0-9]+)*$`).
+
 | Field | Required | Description |
 |-------|----------|-------------|
-| `name` | yes | Persona identifier (used in `/persona <name>`) |
-| `description` | no | Short description shown in the persona list |
-| `mew.model` | no | Pin a `provider/model` pair (overrides session default) |
-| `mew.tools` | no | Tool allowlist: `[]` (no tools), `[read, bash]` (whitelist), or absent (all tools) |
-| `mew.tools_deny` | no | Tools to exclude from the allowlist |
-| `mew.skills` | no | Skill allowlist: `null` (all skills), `[skill1, skill2]` (whitelist), or `[]` (hide all) |
-| `mew.template` | no | When `true`, render body as a minijinja template |
+| `name` | When frontmatter is present | Persona identifier (must match directory name) |
+| `description` | No | Short description shown in `/persona` |
+| `mew.model` | No | Pin `provider/model` (or a bare model ID on the active provider) |
+| `mew.fallback_models` | No | Ordered fallback model IDs if the pinned model is unavailable |
+| `mew.tools` | No | Tool allowlist: `[]` (no tools), list of tool names/tags, or omitted (all tools) |
+| `mew.tools_deny` | No | Tools excluded after applying `mew.tools` |
+| `mew.skills` | No | Skill allowlist: `null` (all skills), list of names, or `[]` (hide all) |
+| `mew.template` | No | Render the body with minijinja when `true` |
+| `mew.autonomous_hint` | No | Guidance passed to the `auto` / `auto_plus` permission classifier |
+| `mew.color` | No | Status-bar accent hex color (for example `"#3b6b3b"`) |
 
 ### `polytoken:` alias
 
-For compatibility with personas authored for Polytoken, `polytoken:` is
-accepted as an alias for `mew:`. When both are present, `mew:` takes
-priority:
+Mew accepts `polytoken:` as an alias for `mew:` in frontmatter; when both appear,
+`mew:` takes precedence:
 
 ```yaml
 ---
@@ -103,19 +107,17 @@ polytoken:
 ---
 ```
 
-This works identically to using `mew:`. Use whichever you prefer.
-
 ## Tool allowlisting
 
-`mew.tools` controls which tools the model can call. The allowlist
-applies on top of the full tool registry:
+`mew.tools` accepts individual tool names and expansion tags:
 
-- Absent: all registered tools available
-- `[read, bash, grep, glob]`: only these four tools available
-- `[]`: no tools available (text-only conversation)
+- `tag!ALL`: every registered tool.
+- `tag!ALL_MCP`: every connected MCP tool (`mcp__*`).
+- `mcp__<server>`: every tool from a specific MCP server.
 
-`mew.tools_deny` removes specific tools from the available set, applied
-after the allowlist. This is useful when you want "all tools except X":
+Omitting `mew.tools` enables all registered tools, while `[]` disables all
+tools for a text-only persona. `mew.tools_deny` runs after allowlist expansion
+to subtract specific tools:
 
 ```yaml
 mew:
@@ -126,51 +128,56 @@ mew:
 
 ## Model pinning
 
-`mew.model` pins a `provider/model` pair that overrides the session
-default. This lets a persona use a different model without changing the
-session-wide setting:
+`mew.model` pins a `provider/model` pair (or a bare model ID on the active
+provider) for that persona:
 
 ```yaml
 mew:
   model: z-ai/glm-4.5-air
 ```
 
-When you switch to this persona, the model changes. When you switch back
-or to another persona, the model changes again.
+Switching to a persona with `mew.model` switches to that model; switching to a
+persona without `mew.model` or clearing the persona with `/persona default` keeps
+the current model.
 
 ## Templates
 
-When `mew.template: true`, the body is rendered through minijinja before
-being used as the system prompt. These variables are available:
+When `mew.template: true`, Mew renders the persona body through minijinja before
+building the system prompt.
+
+### Template variables
 
 | Variable | Type | Description |
 |----------|------|-------------|
 | `supports_vision` | bool | Whether the active model supports image input |
-| `persona_name` | str | The active persona's name |
-| `model_id` | str | The active model ID (e.g. `deepseek-v4-flash`) |
-| `provider_id` | str | The active provider ID (e.g. `deepseek`) |
-| `model_variant` | str | The active thinking variant (e.g. `high`, empty if none) |
-| `session_id` | str | The session ID |
-| `cwd` | str | The current working directory |
-| `current_date` | str | Today's date in ISO 8601 (e.g. `2026-06-29`) |
-| `tools` | list of str | Tool names available this turn (after allowlist + denylist) |
-| `denied_tools` | list of str | Tools removed by the denylist |
-| `skills` | list of str | Available skill names (derived from `available_skills`) |
-| `available_skills` | list of objects | Skills with `name` and `description` fields |
-| `project_vars` | map | Project-local variables from `.mew/project_vars.yaml` |
-| `available_subagents` | list of objects | Subagents with `name` and `description` fields |
+| `persona_name` | str | Active persona name |
+| `subagent_name` | str | Active subagent name (in subagent templates) |
+| `skill_name` | str | Active skill name (in skill templates) |
+| `model_id` | str | Active model ID (for example `deepseek-v4-flash`) |
+| `provider_id` | str | Active provider ID (for example `deepseek`) |
+| `model_variant` | str | Active thinking variant (for example `high`, or empty) |
+| `session_id` | str | Session ID |
+| `cwd` | str | Working directory |
+| `current_date` | str | Current date in ISO 8601 (for example `2026-06-29`) |
+| `tools` | list of str | Effective tool names after allowlist and denylist |
+| `denied_tools` | list of str | Tool names excluded by `mew.tools_deny` |
+| `skills` | list of str | Available skill names |
+| `available_skills` | list of objects | Skills with `name` and `description` |
+| `available_subagents` | list of objects | Subagents with `name` and `description` |
+| `mcp_servers` | list of str | Connected MCP server names |
+| `project_vars` | map | Project variables from `project_vars.yaml` (in `.mew/`, `.opencode/`, `.claude/`, or `.agents/`) |
 
-Template functions:
+### Template functions
 
 | Function | Description |
 |----------|-------------|
-| `has_tool(name)` | Returns true if `name` is in the effective tool list |
-| `has_skill(name)` | Returns true if `name` is an available skill |
-| `has_mcp(name)` | Returns true if `name` is a connected MCP server |
-| `is_model_variant(variant)` | Returns true if the active provider matches a known family: `anthropic` (umans), `openai` (opencode-zen, opencode-go, deepseek, z-ai), `deepseek`, `z-ai`, `umans`, `opencode` |
-| `transclude("mew://path")` | Inline a built-in VFS resource (see below) |
+| `has_tool(name)` | True if `name` is in the effective tool list |
+| `has_skill(name)` | True if `name` is an available skill |
+| `has_mcp(name)` | True if `name` is in `mcp_servers` |
+| `is_model_variant(variant)` | True for matching provider or family: `anthropic` (`umans`), `openai` (`opencode-zen`, `opencode-go`, `deepseek`, `z-ai`, `alibaba-token-plan`, `alibaba-token-plan-cn`), `deepseek`, `z-ai`, `umans`, `opencode`, or exact `provider_id` match |
+| `transclude("mew://path")` | Inline a built-in VFS prompt resource |
 
-Example:
+Example template:
 
 ```markdown
 ---
@@ -181,11 +188,9 @@ mew:
 ---
 
 {% if supports_vision %}
-You can see images. When the user shares a screenshot, analyze it
-before responding.
+You can see images. Analyze screenshots before responding.
 {% else %}
-You cannot see images. If the user references an image, ask them to
-describe it.
+You cannot see images. Ask the user to describe any referenced image.
 {% endif %}
 
 Model: {{ model_id }} on {{ provider_id }}.
@@ -196,13 +201,11 @@ Available tools: {{ tools | join(", ") }}.
 {% endfor %}
 ```
 
-If rendering fails (syntax error, missing variable), mew falls back to
-the raw body and logs a warning.
+On template errors, Mew logs a warning and falls back to the raw persona body.
 
 ### Transclusion
 
-Templates can include built-in prompt fragments using the `transclude`
-function:
+Include built-in compiled prompt fragments with `transclude`:
 
 ```markdown
 {{ transclude("mew://system_prompts/base") }}
@@ -210,29 +213,11 @@ function:
 You are {{ persona_name }}. Additional instructions here.
 ```
 
-This pulls in shared prompt content that mew bundles at compile time.
-
 ## Switching personas
 
-In the TUI:
-
-```
-/persona researcher
-```
-
-This opens a confirm modal showing the model and toolset diff between
-the current and new persona. The switch only happens after you confirm.
-
-```
-/persona default
-```
-
-Clears the active persona and returns to the session default model and
-full toolset. This bypasses the confirm modal.
-
-```
-/persona
-```
-
-Opens the persona picker. It shows descriptions and identifies built-in
-and user-defined personas.
+- `/persona <name>`: opens a confirmation modal previewing the model and toolset
+  changes before switching.
+- `/persona default` or `/persona none`: clears the active persona and restores
+  the full toolset immediately while keeping the active model.
+- `/persona`: opens the persona picker showing each persona's name, active
+  marker, and description.

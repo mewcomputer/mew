@@ -3,10 +3,9 @@ title: MCP Servers
 description: Configure Model Context Protocol tools in Mew.
 ---
 
-Mew can discover tools from Model Context Protocol servers and make them
-available in both direct tool mode and Python code mode. Add servers to
-`mcp.json` beside the `config.toml` shown by `mew config path`, or in your
-project:
+Mew discovers tools from Model Context Protocol servers and registers them for
+both direct tool mode and Python code mode. Configure servers in `mcp.json`
+beside the `config.toml` printed by `mew config path`, or in your project:
 
 ```json
 {
@@ -22,54 +21,54 @@ project:
 }
 ```
 
-A `url` selects streamable HTTP; a `command` selects stdio. You can also set
-`type` to `http` or `stdio`. HTTP servers accept a `headers` object, and stdio
-servers accept an `env` object in addition to `args`. Values are literal
-strings: Mew does not expand environment-variable references in `mcp.json`.
-Stdio servers inherit the daemon's environment and use its startup directory.
+A `url` entry selects streamable HTTP; a `command` entry selects stdio. Set
+`type` to `"http"` or `"stdio"` explicitly when needed. HTTP servers accept a
+`headers` object, and stdio servers accept an `env` object alongside `args`.
+Config values are literal strings (Mew does not expand environment variables in
+`mcp.json`). Stdio servers inherit the daemon's environment and working
+directory.
 
-Mew reads the global file and the closest project `mcp.json` between the
-startup directory and the Git root. Outside a Git repository, it checks the
-startup directory. Project entries replace global entries with the same name;
-set `"disabled": true` on an entry to disable it. The daemon discovers servers
-once at startup and shares them across sessions. Restart the daemon after
-changing the configuration or server tools. `mew run` discovers them at the
-start of each run. A server that fails to start, fails discovery, or takes
-longer than 15 seconds is skipped with a warning. Server stderr is suppressed.
-When Mew starts a daemon, the desktop and TUI wait up to 30 seconds for it to
-become ready, including server discovery.
+## Discovery and startup
 
-Mew trusts project configuration and starts configured stdio commands during
-discovery, before a tool permission is requested. Configure only servers you
-trust. MCP servers execute outside the Python sandbox and can use the files,
-network, and credentials available to their own process. Python isolation does
-not restrict what an MCP server can do.
+- **Search order**: Mew loads the global `mcp.json` and the nearest project
+  `mcp.json` between the startup directory and the Git root (or the startup
+  directory outside Git). Project entries override global entries with the same
+  name; set `"disabled": true` to disable an inherited server.
+- **Startup timing**: the daemon discovers servers once at startup and shares
+  them across sessions, so restart the daemon after editing `mcp.json`.
+  `mew run` discovers servers at the start of each run.
+- **Timeouts**: servers that fail to launch or fail discovery within 15 seconds
+  are skipped with a warning, and server stderr is suppressed. TUI and desktop
+  launchers wait up to 30 seconds for daemon startup, including MCP discovery.
+- **Trust boundary**: Mew starts configured stdio servers during discovery
+  before any tool permission prompt runs. Configure only trusted servers. MCP
+  servers execute outside the Python sandbox with full access to their process's
+  files, network, and environment.
 
 ## Using tools and permissions
 
-Tools are named `mcp__<server>__<tool>`, for example
-`mcp__files__read_file`. Names are normalized for model providers;
-duplicate names and names longer than 64 characters are skipped. In Python
-mode, inspect `ALL_TOOLS` to find their exact names. MCP tools can return text,
-structured data, and images.
+Mew names each discovered tool `mcp__<server>__<tool>` (for example,
+`mcp__files__read_file`), normalized for model providers. Duplicate names and
+names exceeding 64 characters are skipped. In Python code mode, inspect
+`ALL_TOOLS` to check available names.
 
-Mew treats MCP tools as dangerous and applies the existing
-[permission modes and rules](/docs/using-mew/permissions/) to each call,
-including calls from Python. In permissive mode, MCP calls still prompt.
-`mew run` follows its existing noninteractive
-behavior and automatically allows permission prompts. Cancellation is sent to
-the server on a best-effort basis; a server may continue work after cancellation.
-MCP calls time out after ten minutes. A cancelled stdio call causes Mew to
-restart that server before a later call. Failed calls are not automatically
-replayed, since they may have already changed external state.
+- **Capabilities**: MCP tools return text, structured data, and (when the active
+  model supports vision) images. Embedded resources and resource links in tool
+  output are included inline. Mew exposes MCP tools only, omitting separate
+  resource and prompt endpoints.
+- **Permissions**: Mew classifies all MCP tools as `Dangerous` and enforces
+  [permission modes and rules](/docs/using-mew/permissions/) on direct and
+  Python-nested calls. Even in `permissive` mode, MCP calls prompt unless an
+  allow rule matches; `mew run` grants permission prompts automatically unless
+  blocked by a `deny` rule.
+- **Timeouts and retries**: MCP calls time out after 10 minutes. Cancelling an
+  in-flight call sends a best-effort cancellation notice; cancelled stdio calls
+  restart the server before the next call. Failed calls are never replayed
+  automatically.
+- **HTTP and redaction**: supply HTTP credentials through `headers`; Mew follows
+  redirects only within the same origin and closes stateful HTTP sessions on
+  clean shutdown. Values listed under `[[secrets.words]]` are redacted from text
+  and structured MCP results.
 
-Configured secret words are redacted from text and structured tool results.
-Configure any sensitive values for redaction separately. MCP support exposes
-tools but does not expose separate resource or prompt APIs. Embedded resources
-and resource links returned by tools are included in their output. HTTP
-authentication can be supplied through configured headers. Redirects are
-followed only within the same origin.
-Mew closes stateful HTTP sessions during normal shutdown; forced termination or
-an unresponsive server can leave a session for the server to expire.
-
-For protocol details, see the [MCP specification](https://modelcontextprotocol.io/).
+See the [MCP specification](https://modelcontextprotocol.io/) for protocol
+details.

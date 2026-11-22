@@ -3,49 +3,37 @@ title: Context Files
 description: AGENTS.md and CLAUDE.md files that give the agent project context.
 ---
 
-Mew loads project context from the conversation's working directory up
-to the Git worktree root. It adds these files to the system prompt when
-it builds the session.
-
-## What context files are for
-
-Context files tell the agent about your project before it starts working.
-Without one, the agent has to discover everything by reading files. With
-one, it starts with your conventions, build commands, architecture, and
-known gotchas already in context.
-
-A good context file saves time on every turn. The agent doesn't have to
-figure out that your project uses `cargo test` instead of `make test`, or
-that your test files live in `tests/` not `src/tests/`.
+Context files add project conventions, commands, and repository layout to the
+system prompt when Mew starts a session.
 
 ## Discovery
 
-Mew loads context from the Git worktree root down to the conversation's
-working directory, in order from broad to specific. Outside a worktree,
-it uses your home directory as the root when the working directory is
-inside it. In other locations it checks the working directory itself.
+Mew searches from the Git worktree root down to the conversation's working
+directory, loading files from general to specific. Outside a Git worktree, Mew
+starts from your home directory if the working directory sits inside it, or reads
+the working directory alone otherwise.
 
-At each level, Mew reads `AGENTS.md` or falls back to `CLAUDE.md`. It
-also loads `.mew/AGENTS.md` and `.mew/wiki.md` when present.
+At each directory level, Mew reads `AGENTS.md` (falling back to `CLAUDE.md` if
+absent), then loads `.mew/AGENTS.md` and `.mew/wiki.md` when present.
 
-Before project files, Mew loads a global `AGENTS.md` from the directory
-reported by `mew config path`. If that file is absent it tries
-`~/.claude/CLAUDE.md`. Use `mew debug context` to inspect the sources it
-found.
+Before project files, Mew loads a global `AGENTS.md` from the config directory
+(the parent directory of the file printed by `mew config path`). When absent,
+it falls back to `~/.claude/CLAUDE.md`. Run `mew debug context` to inspect the
+resolved files.
 
-## What to put in a context file
+## Recommended contents
 
 ### Essential
 
-- **Build and test commands**: how to build, test, lint, and format
-- **Architecture overview**: which directory does what, key abstractions
-- **Conventions**: naming, file layout, error handling patterns
+- **Build and test commands**: build, test, lint, and format commands.
+- **Architecture overview**: directory layout and key types.
+- **Conventions**: naming rules, module structure, and error patterns.
 
 ### Helpful
 
-- **Common pitfalls**: things that look right but aren't
-- **File locations**: where config lives, where tests go, where output lands
-- **Dependencies**: what the project depends on and why
+- **Gotchas**: non-obvious pitfalls and invariants.
+- **File paths**: config, tests, and generated output locations.
+- **Dependencies**: key libraries and why the project uses them.
 
 ### Example
 
@@ -64,25 +52,25 @@ found.
 
 ## Conventions
 - Use thiserror for error types
-- All public functions need doc comments
-- Tests go in #[cfg(test)] mod tests at the bottom of the file
+- Document public functions
+- Put unit tests in `#[cfg(test)] mod tests`
 
 ## Gotchas
-- The db layer caches connections, don't create new pools
-- Auth tokens expire after 1 hour, refresh before API calls
+- The db layer caches connections; reuse the existing pool
+- Auth tokens expire after 1 hour
 ```
 
-## CLAUDE.md vs AGENTS.md
+## CLAUDE.md and AGENTS.md
 
-Both files use the same Markdown format. Where both exist in the same
-directory, Mew uses `AGENTS.md`.
+Both files use the same Markdown format. When both exist in the same directory,
+Mew loads `AGENTS.md`.
 
 ## `@file` includes
 
-You can split context across multiple files using `@path/to/file` lines.
-When mew loads an AGENTS.md or CLAUDE.md file, any line starting with `@`
-followed by a path is replaced with the contents of that file (as literal
-text, no template rendering).
+Split long instructions across files using `@path/to/file` lines. When Mew
+reads a context file (`AGENTS.md`, `CLAUDE.md`, `.mew/AGENTS.md`, `.mew/wiki.md`,
+or the global fallback file), each line starting with `@` followed by a relative
+path expands to that file's contents as literal text.
 
 ```markdown
 # Project: my-app
@@ -97,16 +85,17 @@ text, no template rendering).
 @docs/coding-style.md
 ```
 
-Write paths relative to the file that contains the `@` reference.
+Write include paths relative to the file containing the `@` line. Mew rejects
+paths containing `..` parent traversal, leaves missing or invalid `@` lines in
+place, and logs a warning.
 
-Missing files leave the `@` line as-is and log a warning. This works in
-both AGENTS.md and CLAUDE.md, and in `.mew/AGENTS.md` additively loaded
-files.
+## Templates and project variables
 
-## Project variables
+Context files also support minijinja templating when YAML frontmatter sets
+`mew: true` or `polytoken: true`.
 
-Project-local variables can be stored in `.mew/project_vars.yaml` and
-referenced in persona, skill, and subagent templates as `project_vars`:
+Store project-local template variables in `project_vars.yaml`, a flat YAML map
+of string keys to string values:
 
 ```yaml
 # .mew/project_vars.yaml
@@ -127,26 +116,22 @@ When responding to incidents, escalate to {{ project_vars.escalation }}.
 Team channel: {{ project_vars.channel }}.
 ```
 
-The file is a flat YAML map of string keys to string values. It's
-searched in `.mew/`, `.opencode/`, `.claude/`, and `.agents/` directories
-from cwd up to the git root. First match wins.
+Mew searches `.mew/`, `.opencode/`, `.claude/`, and `.agents/` for
+`project_vars.yaml` from the Git root (or `$HOME`) down to the working
+directory. The first match wins.
 
-## How context is used
+## Reloading and token budget
 
-Context files form part of the session's system prompt and use context
-window tokens. Start a new session after editing a context file to use
-the revised instructions.
-
-If your context file is large, consider moving detailed procedures into
-[skills](/docs/using-mew/skills/) that the agent loads on demand instead of
-embedding everything in the system prompt.
+Context files enter the session's system prompt at startup and consume context
+tokens on every turn. Start a new session to apply edits to context files. For
+long task-specific guides, move them into [skills](/docs/using-mew/skills/) so
+the agent loads them only when needed.
 
 ## Inspecting loaded context
 
-Run `mew debug context` from the project directory to inspect the sources
-used by the CLI's debug prompt assembly. File-system context files appear under
-their paths; built-in VFS resources pulled in by templates (`transclude`) appear
-under `mew://`:
+Run `mew debug context` from your project directory to inspect the active
+prompt sources. Disk files appear under their filesystem paths; built-in VFS
+resources pulled in via `transclude` appear under `mew://`:
 
 ```text
 $ mew debug context
@@ -162,14 +147,13 @@ $ mew debug context
     └── code/my-app/AGENTS.md
 ```
 
-The VFS list is resolved, not scanned: only the branches actually taken are
-shown (for example a single provider-specific `base_*` variant), and nested
-transclusions are followed. Add `--full` to print the fully assembled system
-prompt assembled by the debug command, including the base scaffold, context
-files, and skills listing. The command writes diagnostics to stderr, so you
-can redirect the prompt:
+The `mew://` tree lists only the resolved template branches and nested
+transclusions (such as a single provider-specific `base_*` prompt). Pass
+`--full` to print the complete system prompt, including the base scaffold,
+context files, and skill catalog. Diagnostics go to stderr, so stdout can be
+redirected cleanly:
 
-```bash
+```sh
 mew debug context --full > context.txt
 mew debug context --full | less
 ```

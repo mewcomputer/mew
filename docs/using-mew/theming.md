@@ -1,10 +1,44 @@
 ---
 title: Theming
-description: Make mew look just the way you want.
+description: Switch built-in themes, install custom themes, and edit theme tokens.
 ---
 
-mew shares a single token vocabulary between the Rust TUI and the React web UI.
-The source of truth is `crates/mew-tui/resources/theme_manifest.json`.
+Mew shares a single theme token vocabulary across the Rust TUI, the native macOS
+desktop app, and the React Web UI, generated from
+`crates/mew-tui/resources/theme_manifest.json`.
+
+## Switching and installing themes
+
+In the TUI, run `/theme <name>` to apply a theme, or `/theme` to open the theme
+picker. From the CLI, list themes, check the active theme, install a JSON theme,
+or print a theme's CSS variables:
+
+```sh
+mew theme list
+mew theme current
+mew theme install /path/to/my-theme.json
+mew theme export-css my-theme
+```
+
+## Custom themes
+
+Mew loads custom JSON themes from `.mew/themes/<name>.json` (checked first) and
+`~/.config/mew/themes/<name>.json`:
+
+```json
+{
+  "name": "my-theme",
+  "mode": "dark",
+  "tokens": {
+    "background": "#18181b",
+    "foreground": "#f4f4f5",
+    "accent": "#38bdf8"
+  }
+}
+```
+
+Mew validates every token key in `tokens` against the manifest vocabulary and
+rejects unknown keys. Custom JSON themes do not support `base` inheritance.
 
 ## Manifest format
 
@@ -25,14 +59,16 @@ The source of truth is `crates/mew-tui/resources/theme_manifest.json`.
 }
 ```
 
-- `tokens` — base values for every supported token.
-- `themes` — sparse overrides on top of the base table. A theme can also set
-  `"base": "<id>"` to inherit from another theme before applying its own tokens.
-- Values starting with `@` are aliases to another token, e.g. `"text.body":
-  "@foreground"`. Alias chains are resolved at load/codegen time and cycles are
-  rejected.
-- Keys starting with `_` are CSS-only metadata and are not emitted as color
-  variables.
+- `tokens`: default values for all supported tokens.
+- `themes`: sparse per-theme overrides on top of `tokens`. Manifest themes may
+  declare `"base": "<id>"` for runtime loading via `Theme::from_manifest`, though
+  `theme_codegen` ignores `base`.
+- `@alias`: values prefixed with `@` reference another token (for example,
+  `"text.body": "@foreground"`). Runtime loading rejects alias cycles; CSS
+  codegen warns and skips the theme, and Rust codegen stops resolving on a
+  cycle.
+- `_metadata`: keys prefixed with `_` supply CSS-only metadata and do not emit
+  color variables.
 
 ## Token vocabulary
 
@@ -48,85 +84,68 @@ Core shadcn-style tokens:
 - `destructive`, `destructive_foreground`
 - `border`, `input`, `ring`
 - `sidebar` and `sidebar_*` variants
-- `chart_1` … `chart_4`
+- `chart_1` through `chart_4`
 
-Extended TUI/web tokens:
+Extended TUI, desktop, and web tokens:
 
-- Surface: `panel.background`, `panel.overlay`, `panel.overlay_hover`,
+- **Surface**: `panel.background`, `panel.overlay`, `panel.overlay_hover`,
   `chat.surface.background`, `chat.user.background`, `tool.background`,
-  `tool.border`, `status_bar.background`, `sidebar.background`,
-  `divider`, `surface.success`, `surface.error`, `surface.inverse`
-- Selection: `selection.foreground`, `selection.background`
-- Text: `text.body`, `text.muted`, `text.placeholder`, `text.disabled`,
-  `text.accent`, `text.success`, `text.warning`, `text.error`, `text.inverse`,
-  `surface.inverse`
-- Color scales: `{red,orange,yellow,green,blue,purple,cyan}.{fg,med,bg}`
-- Terminal ANSI: `terminal.{black,red,green,yellow,blue,magenta,cyan,white,
+  `tool.border`, `status_bar.background`, `sidebar.background`, `divider`,
+  `surface.success`, `surface.error`, `surface.inverse`
+- **Selection**: `selection.foreground`, `selection.background`
+- **Text**: `text.body`, `text.muted`, `text.placeholder`, `text.disabled`,
+  `text.accent`, `text.success`, `text.warning`, `text.error`, `text.inverse`
+- **Color scales**: `{red,orange,yellow,green,blue,purple,cyan}.{fg,med,bg}`
+- **Terminal ANSI**: `terminal.{black,red,green,yellow,blue,magenta,cyan,white,
   bright_*,dim_*}`
-- Pills: `pill.{auto,permissive,dangerous,model,thinking,cwd,git,attention,
+- **Pills**: `pill.{auto,permissive,dangerous,model,thinking,cwd,git,attention,
   persona,custom}.{fg,bg}`
-- Markdown: `markdown.{paragraph,heading.foreground,heading.h1..h6,emphasis,
+- **Markdown**: `markdown.{paragraph,heading.foreground,heading.h1..h6,emphasis,
   strong,strikethrough,inline_code.{fg,bg},link_text,link_url,list_bullet,
   block_quote,thematic_break,table_header,table_cell,table_border,
   code_fence.{fg,bg,border},pending_indicator}`
-- Syntax: `syntax.{comment,string,keyword,function,number,type,variable,
+- **Syntax**: `syntax.{comment,string,keyword,function,number,type,variable,
   operator,constant}`
-- Dynamic persona accent: `persona.accent.{fg,bg}`
+- **Dynamic persona accent**: `persona.accent.{fg,bg}`
 
-## Codegen
+## Codegen and adding a built-in theme
 
-The `theme_codegen` binary is the single generator for all derived files:
+`theme_codegen` generates all derived assets from `theme_manifest.json`:
 
-```bash
-just theme-codegen          # regenerate
-just theme-codegen-check    # verify generated files are up-to-date
+```sh
+just theme-codegen          # regenerate assets
+just theme-codegen-check    # check generated files (also run by just ci)
 ```
 
 Outputs:
 
-- `mew-web-ui/src/generated-themes.css` — one `[data-theme="..."]` block per
-  selectable theme.
-- `crates/mew-tui/src/theme_generated.rs` — compile-time base table and
-  per-theme overrides.
-- `crates/ratatui-mdstream/resources/theme.tmTheme` — syntect TextMate theme.
+- `mew-web-ui/src/generated-themes.css`: `[data-theme="..."]` CSS blocks for
+  built-in web themes (skips `dark`, `light`, and `terminal.*` / `pill.*` /
+  `syntax.*` tokens).
+- `crates/mew-tui/src/theme_generated.rs`: compile-time base token table and
+  built-in theme overrides.
+- `crates/ratatui-mdstream/resources/theme.tmTheme`: syntect TextMate theme built
+  from the `dark` theme.
 
-Generated files are checked in; `just theme-codegen-check` is part of `just ci`.
+To add a built-in theme:
 
-## Adding a new theme
-
-1. Add an entry to `theme_manifest.json` under `themes` with `"mode": "dark"`
-   or `"mode": "light"` and only the tokens that differ from the base.
-2. For web UI themes, add metadata to `mew-web-ui/src/themes.json`.
+1. Add an entry under `themes` in `theme_manifest.json` with `"mode": "dark"` or
+   `"mode": "light"` and the overridden tokens.
+2. Add Web UI metadata in `mew-web-ui/src/themes.json` if the theme should
+   appear in the browser switcher.
 3. Run `just theme-codegen`.
-4. Verify with `pnpm build` and `cargo test -p mew-tui`.
+4. Verify with `just build-ui` (or `pnpm --filter mew-web-ui build`) and
+   `cargo test -p mew-tui`.
 
 ## Persona accent colors
 
-Persona accent colors are computed dynamically from the persona name (or an
-explicit `color` field in `PERSONA.md`) and injected into a cloned theme table
-via `Theme::with_persona_accent`. UI code that renders persona-accented surfaces
-should call this once per render and resolve `persona.accent.fg` /
-`persona.accent.bg` from the clone.
-
-## Custom themes
-
-Install a custom theme JSON file and list the available themes.
-
-```bash
-mew theme install /path/to/my-theme.json
-mew theme list
-```
-
-Use `/theme <name>` in the TUI to select a theme, or `/theme` without a
-name to open the picker. Run `mew theme current` to print the configured
-TUI theme.
-
-Custom themes are validated against the manifest: every token key must exist in
-the base vocabulary. Unknown tokens are rejected. Use `mew theme export-css
-<name>` to inspect the resolved CSS block for any installed or built-in theme.
+Mew derives persona accent colors dynamically from the persona name or an
+explicit `mew.color` (or `polytoken.color`) value in `PERSONA.md`. Rendering code
+calls `Theme::with_persona_accent` once per render and reads `persona.accent.fg`
+and `persona.accent.bg` from the returned theme clone.
 
 ## ANSI colors
 
-`terminal.*` tokens are reserved for future ANSI escape rendering of tool
-output. They are not currently used by the streaming markdown path, which is
-styled by the generated syntect theme instead.
+Mew reserves `terminal.*` tokens for future ANSI escape rendering of tool
+output; streaming Markdown syntax highlighting uses the generated
+`theme.tmTheme` file.

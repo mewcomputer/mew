@@ -1,10 +1,9 @@
 ---
 title: Adding a Tool
-description: How to implement a new tool for the mew agent.
+description: How to implement and register a new tool for the Mew agent.
 ---
 
-Tools are how the agent interacts with the filesystem, runs commands, and
-calls external services. Every tool implements the `Tool` trait.
+Every agent tool implements the `Tool` trait in `crates/mew-tools/src/lib.rs`.
 
 ## The Tool trait
 
@@ -13,58 +12,52 @@ calls external services. Every tool implements the `Tool` trait.
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
-    fn schema(&self) -> &serde_json::Value;
+    fn schema(&self) -> &Value;
     fn sensitivity(&self) -> Sensitivity;
-    async fn execute(&self, ctx: ToolCtx, input: serde_json::Value)
-        -> Result<ToolOutput, ToolError>;
+    async fn execute(&self, ctx: ToolCtx, input: Value) -> Result<ToolOutput, ToolError>;
+    async fn shutdown(&self) -> Result<(), ToolError> { Ok(()) }
 }
 ```
 
-- `name()` — identifier the model uses to call the tool. Must be unique.
-- `description()` — shown to the model in the tool list. This is how the
-  model decides when to call your tool, so be specific.
-- `schema()` — JSON Schema for the tool's input parameters. Must return
-  a `serde_json::Value` describing the expected `input` object.
-- `sensitivity()` — controls the default permission gate (see below).
-- `execute()` — runs the tool and returns output. Receives the parsed
-  input and a `ToolCtx` with workspace roots, secrets, and shared state.
+- `name()`: unique identifier used by the model and permission rules.
+- `description()`: prompt-visible summary telling the model when to call the tool.
+- `schema()`: JSON Schema describing the expected `input` object.
+- `sensitivity()`: default permission tier (`ReadOnly`, `Mutating`, or `Dangerous`).
+- `execute()`: runs the tool with `ToolCtx` and parsed JSON arguments.
+- `shutdown()`: optional cleanup hook called when a session shuts down.
 
 ## Sensitivity levels
 
-| Level | Behavior | Examples |
-|-------|----------|----------|
-| `ReadOnly` | Normally allowed in Standard mode | Read, Glob, Grep |
-| `Mutating` | Normally prompts in Standard mode | Write, Edit, Bash |
-| `Dangerous` | Prompts in Standard mode | High-risk operations |
+| Level | Standard-mode default | Built-in examples |
+|-------|-----------------------|-------------------|
+| `ReadOnly` | Auto-allow | `read`, `glob`, `grep` |
+| `Mutating` | Prompt | `write`, `edit_str_replace`, `edit_hashline` |
+| `Dangerous` | Prompt (also in `permissive`) | `bash`, `shell_background`, `shell_monitor`, MCP tools |
 
-The permission engine in `mew-config` evaluates the active mode, rules, and
-workspace or secret protections. See [Permissions](/docs/using-mew/permissions/)
-for how these settings interact.
+`mew-config` combines sensitivity with the permission mode, declarative rules,
+workspace checks, and secret-file guards. See
+[Permissions](/docs/using-mew/permissions/).
 
-## ToolCtx
+## ToolCtx and ToolOutput
 
-`ToolCtx` carries the call ID, cancellation token, and progress channel
-for each call. It dereferences to `ToolCtxShared`, which holds the session ID,
-working directory, secrets, hashline snapshot store, and other session-scoped
-state. Access these through fields such as `ctx.cwd` and `ctx.snapshot_store`.
+`ToolCtx` holds the call's `call_id`, `cancel` (`CancellationToken`), and
+`progress_tx` channel, and dereferences to `ToolCtxShared`. `ToolCtxShared`
+stores session-wide state: `session_id`, `cwd`, `secrets`, `snapshot_store`,
+`browser_access`, `shell_session`, `dispatcher`, and `supports_vision`.
 
-## ToolOutput
+Return `mew_hooks::ToolOutput` with `output`, `error`, an optional `diff`, and
+optional structured metadata, file stats, or images. Return `ToolError` for
+invalid arguments, cancellation, or execution failures.
 
-Return `mew_hooks::ToolOutput`, which carries `output`, `error`, and an optional
-`diff`. It can also carry structured metadata, per-file change counts, and
-images. Return a `ToolError` for invalid input, cancellation, or an execution
-failure that prevents producing a result.
+## Reference example: Read
 
-## A real tool: Read
-
-The `Read` tool in `crates/mew-tools/src/tools/read.rs` shows path resolution,
-line-based pagination, and how to feed the hashline snapshot store. Its
-schema uses `OnceLock` to compute the JSON schema once, and its sensitivity
-is `ReadOnly`.
+`Read` (`crates/mew-tools/src/tools/read.rs`) shows path resolution, line
+pagination, image gating via `supports_vision`, and feeding the hashline
+`SnapshotStore`. Its schema uses `OnceLock` and declares `Sensitivity::ReadOnly`.
 
 ## Registering a tool
 
-Add your tool to `build_tools()` in `crates/mew/src/setup/agent.rs`.
+Register built-in tools in `build_tools()` (`crates/mew/src/setup/agent.rs`):
 
 ```rust
 let mut tools: Vec<Arc<dyn Tool>> = vec![
@@ -73,39 +66,37 @@ let mut tools: Vec<Arc<dyn Tool>> = vec![
     // ... built-in tools ...
 ];
 
-// Conditional registration:
 if !skills.is_empty() {
     tools.push(Arc::new(Skill::new(skills, skill_filter, template_ctx)));
 }
-// MCP tools are added after connection:
-tools.extend(mcp_tools);
+if hashline_enabled {
+    tools.push(Arc::new(EditHashline));
+} else {
+    tools.push(Arc::new(EditStrReplace));
+}
 ```
 
-The agent's tool map is `HashMap<String, Arc<dyn Tool>>`, keyed by `name()`.
-Persona tool allowlists filter this map at turn time via `active_tool_names`.
+MCP tools (`connect_mcp_servers()`), browser tools, and `python` code-mode tools
+are appended by the agent builders (`build_session_agent` / `build_agent`)
+around `build_tools()`. The agent indexes tools in a
+`HashMap<String, Arc<dyn Tool>>` keyed by `name()`, which persona allowlists
+filter per turn.
 
 ## MCP tools
 
-MCP server tools are automatically wrapped as `McpTool` implementations
-after `connect_mcp_servers()` runs. No manual code needed. Key details:
-
-- MCP tool names are qualified: `mcp__<server>__<tool>` to avoid collisions
-  with built-in tools.
-- MCP tools declare `Sensitivity::Mutating` and use the active permission policy.
-- The `McpTool::execute()` method sends a JSON-RPC request to the MCP server
-  subprocess and waits for the response.
-- HTTP-based MCP servers use `connect_http()` instead of `connect_stdio()`.
+`McpTool` automatically wraps discovered MCP server tools (`mcp__<server>__<tool>`)
+over stdio or streamable HTTP (`connect_stdio()` / `connect_http()`), declares
+`Sensitivity::Dangerous`, forwards JSON-RPC tool calls, and applies secret
+redaction.
 
 ## Secret redaction
 
-`SecretSet` holds configured secret words and file globs. Use helpers in
-`mew_tools::secrets` when handling file content or command output. Check
-`read`, `grep`, and `bash` for examples of the protections appropriate to
-each type of output.
+Use helpers in `mew_tools::secrets` against `ctx.secrets` (`SecretSet`) when
+reading files or capturing command output. See `read.rs`, `grep.rs`, and
+`bash.rs` for reference implementations.
 
 ## Subagent tools
 
-`mew-agent` owns the subagent task registry and runner. The runner emits
-progress and completion events, which the daemon forwards to clients.
-See [Tasks and orchestration](/docs/development/dev-orchestration/) for
-the task registry and its lifecycle.
+`mew-agent` owns the subagent task registry and runner, forwarding child
+progress and completion events to attached clients. See
+[Tasks and orchestration](/docs/development/dev-orchestration/).

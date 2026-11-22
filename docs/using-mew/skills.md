@@ -3,70 +3,68 @@ title: Skills
 description: Reusable procedure documents that guide the agent.
 ---
 
-Skills are Markdown files with instructions the agent can load on demand.
-When a task matches a skill's description, the agent calls the `skill`
-tool to pull the full instructions into its context. Skills let you
-codify workflows, conventions, and procedures without bloating the system
-prompt on every turn.
+Skills are Markdown files loaded on demand when a task matches a skill's
+description. Using skills keeps multi-step workflows and checklists out of the
+system prompt until the agent needs them.
 
 ## When to use a skill
 
-Skills are for multi-step procedures the agent should follow consistently.
-A few examples:
+Use a skill for repeatable procedures with ordered steps:
 
-- A codebase investigation checklist (find patterns, verify locations,
-  confirm assumptions before planning)
-- A release procedure (run tests, bump version, update changelog, tag)
-- A deployment runbook (build, push, verify health check)
-- A testing convention (where tests go, naming, what to assert)
+- Codebase investigation checklists (search patterns, verify call sites, confirm
+  assumptions before planning)
+- Release checklists (run tests, bump versions, update changelog, tag)
+- Deployment runbooks (build, push, verify health checks)
+- Project testing conventions (test locations, naming, required assertions)
 
-If something is a single fact or rule, put it in your
-[context file](/docs/getting-started/context-files/). If it's a procedure with steps,
-make it a skill.
+Put single facts or always-on rules in a
+[context file](/docs/getting-started/context-files/); put multi-step procedures
+in a skill.
 
 ## How skills work
 
-1. At startup, the `mew-skills` loader scans discovery paths and loads
-   all `SKILL.md` files.
-2. The `skill` tool registers only when at least one skill is discovered.
-3. The model sees each skill's name and description in the tool list. It
-   does not see the skill body until it calls the tool.
-4. When the model calls `skill` with a name, the full body is loaded
-   into context as a tool result.
-5. Persona `mew.skills` allowlists can restrict which skills are
-   available.
+1. At startup, `mew-skills` scans discovery paths and loads every `SKILL.md`
+   file along with the built-in `mew-docs` skill.
+2. Mew lists each skill's name and description in the system prompt under
+   `<available_skills>`.
+3. When the model calls the `skill` tool with a skill name, Mew returns the
+   skill body as a tool result.
+4. Persona `mew.skills` allowlists can filter which skills are visible.
 
-The skill list shows the name and description, so describe what the
-skill does and when to use it. In the TUI, enter `@skill:<name>` to include
-a skill body in your own prompt.
+Write descriptions that state clearly what the skill does and when to load it.
+In the TUI, type `@skill:<name>` to inline a skill body directly into your
+prompt (this inserts the raw body without template rendering; the `skill` tool
+still returns the rendered version).
 
 ## Discovery
 
-Skills are discovered from standard directories, walked from cwd up to
-the git root:
+Mew searches directories from the working directory up to the Git root, then
+checks extension-provided skill directories, then global directories. When two
+skills share a name, the earlier match wins (project skills override global
+skills and the built-in `mew-docs` skill).
 
-**Project paths** (walked cwd to git root, earlier wins):
+**Project paths** (cwd up to Git root):
 
 1. `.mew/skills/<name>/SKILL.md`
 2. `.opencode/skills/<name>/SKILL.md`
 3. `.claude/skills/<name>/SKILL.md`
 4. `.agents/skills/<name>/SKILL.md`
 
+**Extension paths:**
+
+5. Extension `[provides]` skill directories (in `mew run`)
+
 **Global paths:**
 
-5. `~/.config/mew/skills/<name>/SKILL.md`
-6. `~/.config/opencode/skills/<name>/SKILL.md`
-7. `~/.claude/skills/<name>/SKILL.md`
-8. `~/.agents/skills/<name>/SKILL.md`
-
-When two skills have the same name, the one from the earlier path wins.
-Project skills take precedence over global skills. A skill named
-`mew-docs` is also built in and can be overridden by a discovered skill
-of the same name.
+6. `~/.config/mew/skills/<name>/SKILL.md`
+7. `~/.config/opencode/skills/<name>/SKILL.md`
+8. `~/.claude/skills/<name>/SKILL.md`
+9. `~/.agents/skills/<name>/SKILL.md`
 
 ## Format
 
-A skill is a Markdown file with YAML frontmatter:
+Create `<name>/SKILL.md` with Markdown instructions and optional YAML
+frontmatter:
 
 ```markdown
 ---
@@ -76,79 +74,75 @@ description: Follow the release procedure before tagging a new version.
 
 # Release Checklist
 
-1. Run `cargo test --all` and confirm all tests pass
-2. Run `cargo clippy --all -- -D warnings`
-3. Bump the version in Cargo.toml
-4. Update CHANGELOG.md with the changes since the last tag
-5. Commit the version bump and changelog
-6. Tag the release: `git tag v<version>`
-7. Push tags: `git push --tags`
+1. Run `cargo test --all` and confirm all tests pass.
+2. Run `cargo clippy --all -- -D warnings`.
+3. Bump the version in `Cargo.toml`.
+4. Update `CHANGELOG.md` with changes since the last tag.
+5. Commit the version bump and changelog.
+6. Tag and push the release: `git tag v<version> && git push --tags`.
 
-If any step fails, stop and report the error. Don't skip steps.
+Stop and report any failure. Complete every step in order.
 ```
 
 ### Frontmatter fields
 
+Without frontmatter, Mew derives `name` from the parent directory and sets an
+empty description. When frontmatter is present, `name` must be 1 to 64
+characters matching `^[a-z0-9]+(-[a-z0-9]+)*$` and must match the parent
+directory name `<name>/SKILL.md` (otherwise the loader skips the skill).
+
 | Field | Required | Description |
 |-------|----------|-------------|
-| `name` | yes | Skill identifier. Lowercase letters, digits, and hyphens. Must match `^[a-z0-9]+(-[a-z0-9]+)*$` |
-| `description` | yes | One-line description the model uses to decide when to load this skill |
-| `template` | no | When `true`, render the body through minijinja before returning (see below) |
-| `license` | no | License info (not currently used) |
-| `compatibility` | no | Compatibility info (not currently used) |
+| `name` | When frontmatter is present | Skill identifier matching the parent directory name |
+| `description` | No | One-line summary telling the model when to load the skill |
+| `template` | No | Render the body through minijinja before returning when `true` |
+| `license` | No | License metadata (informational) |
+| `compatibility` | No | Compatibility metadata (informational) |
+| `metadata` | No | Custom metadata map (informational) |
 
 ### Templated skills
 
-When `template: true` is set in the frontmatter, the skill body is
-rendered through minijinja before being returned to the model. This lets
-skill instructions adapt to the active model, available tools, and
-project state.
+When `template: true` is set, Mew renders the skill body through minijinja
+before returning it from the `skill` tool, adapting instructions to the active
+model, tools, and project variables:
 
 ```markdown
 ---
 name: adaptive-test-runner
-description: Run tests using the appropriate test command for the project.
+description: Run tests using the project's test command.
 template: true
 ---
 
 {% if has_tool("bash") %}
-Run tests with: cargo test --all
+Run tests with: `cargo test --all`
 {% else %}
-You don't have bash access. Ask the user to run `cargo test --all`.
+You lack bash access. Ask the user to run `cargo test --all`.
 {% endif %}
 
 Model: {{ model_id }}
 Date: {{ current_date }}
 ```
 
-Templated skills use the same variables and functions as persona
-templates. When no persona is active or the active persona doesn't use
-templating, templated skills fall back to their raw body. See
-[Personas](/docs/using-mew/personas/#templates) for the full variable reference.
+Templated skills share variables and helper functions with persona templates.
+When no persona is active or the active persona omits `template: true`,
+templated skills fall back to their raw body. See
+[Personas](/docs/using-mew/personas/#templates) for all template variables.
 
 ### Writing effective skills
 
-The description is the most important field. The model uses it to decide
-whether to load the skill, so be specific:
-
-- **Good**: "Follow the release procedure before tagging a new version."
-- **Bad**: "Release stuff."
-
-The body should be imperative and concrete. Tell the agent what to do,
-in what order, and what to do if something goes wrong. Avoid vague
-instructions like "be careful" or "consider the options."
-
-Skills are loaded into context as tool results, so they consume tokens.
-Keep them as short as possible while remaining actionable. A skill that
-is a page of precise steps is better than five pages of prose.
+- **Make the description concrete**: write `"Follow the release procedure before
+  tagging a new version."` instead of `"Release stuff."`
+- **Give ordered, imperative steps**: state what to run, in what order, and how
+  to handle failures. Avoid vague advice such as `"be careful"`.
+- **Keep skills concise**: every loaded skill enters the conversation as a tool
+  result and consumes context tokens.
 
 ## Persona integration
 
-Personas can restrict which skills are available via `mew.skills` in
-the frontmatter:
+Personas restrict visible skills through `mew.skills` in frontmatter:
 
-- `null` or absent: all discovered skills available (default)
-- `[skill1, skill2]`: only listed skills available
-- `[]`: no skills available
+- `null` or omitted: all discovered skills available (default).
+- `[skill1, skill2]`: only listed skills available.
+- `[]`: no skills available.
 
-See [Personas](/docs/using-mew/personas/) for the full frontmatter reference.
+See [Personas](/docs/using-mew/personas/) for the full persona reference.

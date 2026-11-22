@@ -1,23 +1,23 @@
 ---
 title: Tools
-description: Built-in tools the agent uses to read, write, and run things.
+description: Built-in tools the agent uses to inspect files, edit code, and run commands.
 ---
 
-Tools are how the agent interacts with your system. Each tool has a name,
-a sensitivity level, and a set of parameters. The model decides which
-tool to call based on the tool's description and the current task.
+Each built-in tool exposes a name, a JSON Schema parameter list, and a
+sensitivity level. The model invokes tools during a turn to inspect and edit
+your project.
 
 ## How tool calls work
 
-1. The model emits a tool call with a name and input arguments
-2. mew checks permissions (see [Permissions](/docs/using-mew/permissions/))
-3. If approved, the tool runs and produces output
-4. The output goes back to the model as context for the next turn
+1. The model emits a tool call with a name and arguments.
+2. Mew checks permissions (see [Permissions](/docs/using-mew/permissions/)).
+3. If approved, the tool executes and returns its output.
+4. Mew appends the tool result to the conversation for the model's next turn.
 
-In the TUI, tool calls appear as cards inline in the conversation. Each
-card shows the tool name, its input, and the output. Bash output can be
-expanded or collapsed with `Ctrl+O`. Diffs (from Write and Edit) get
-syntax-colored `+`/`-` highlighting.
+In the TUI, tool calls render as cards showing the tool name, arguments, and
+output. Press `Ctrl+O` to toggle expansion for bash output, Python cells, and
+nested tool details. Diffs from `write`, `edit_str_replace`, and
+`edit_hashline` render with theme-colored `+` and `-` lines.
 
 ## Built-in tools
 
@@ -25,111 +25,105 @@ syntax-colored `+`/`-` highlighting.
 
 | Tool | Sensitivity | Description |
 |------|-------------|-------------|
-| `read` | ReadOnly | Read file contents. Returns a `[path#hash]` header and numbered lines for hashline edits. Supports offset and limit for pagination. Returns supported image formats to vision-capable models. Other binary files are unsupported. |
-| `write` | Mutating | Write content to a file. Creates the file if it doesn't exist, overwrites if it does. |
-| `edit_str_replace` | Mutating | Replace a unique string in a file. Fails if the old string appears more than once. Includes first/last line snippets in error messages to help recovery. |
-| `glob` | ReadOnly | Find files matching a glob pattern. Sorted by modification time. Honors `.gitignore` by default. |
-| `grep` | ReadOnly | Search file contents for a regex pattern. Prefers ripgrep if available. Supports include filters and context lines. |
+| `read` | `ReadOnly` | Read a file with `[path#hash]` headers and numbered lines for hashline edits. Supports `offset` and `limit`, and returns images to vision-capable models. |
+| `write` | `Mutating` | Create or overwrite a file. |
+| `edit_str_replace` | `Mutating` | Replace a unique substring in a file (fails if ambiguous and returns surrounding lines for recovery). |
+| `glob` | `ReadOnly` | Match file paths by glob pattern, sorted by modification time (honors `.gitignore`). |
+| `grep` | `ReadOnly` | Search file contents by regular expression (uses ripgrep when available) with include filters and context lines. |
 
-See [Hashline Edits](/docs/using-mew/hashline/) for the patch format and examples.
+See [Hashline Edits](/docs/using-mew/hashline/) for line-anchored patching.
 
 ### Shell
 
 | Tool | Sensitivity | Description |
 |------|-------------|-------------|
-| `bash` | Dangerous | Execute a shell command. Output is captured and returned. Secret redaction applies to output. |
-| `shell_background` | Dangerous | Launch a shell command in the background and return a job ID immediately. |
-| `shell_monitor` | Dangerous | Run a command and wait for it to exit successfully, retrying until a timeout. For readiness probes. |
-| `job_status` | ReadOnly | Check the status of a background job (shell or subagent). |
-| `job_block` | ReadOnly | Wait for a background job to reach a terminal state. |
-| `job_cancel` | Mutating | Cancel a running background job and wait for it to stop. On Unix, kills its process group, including children in that group. |
+| `bash` | `Dangerous` | Execute a shell command and return captured output with secret redaction. |
+| `shell_background` | `Dangerous` | Start a background shell command and return its job ID immediately. |
+| `shell_monitor` | `Dangerous` | Poll a readiness command until it exits zero or times out. |
+| `job_status` | `ReadOnly` | Check the status of a background shell job or subagent task. |
+| `job_block` | `ReadOnly` | Wait for a background job to finish. |
+| `job_cancel` | `Mutating` | Stop a running background job and wait for termination (signals its process group on Unix). |
 
-A child that starts a separate process group or session can outlive the job.
+A child process that spawns its own process group or session can outlive
+`job_cancel`.
 
 ### Session and agent
 
 | Tool | Sensitivity | Description |
 |------|-------------|-------------|
-| `echo` | ReadOnly | Echoes back the provided input. Used for testing and diagnostics. |
-| `exit_tool` | ReadOnly | Stop the current subagent run and return a final answer to the parent. Top-level use ends the session. |
-| `flag_important` | ReadOnly | Mark a file as important so it survives context compaction. Flagged files are kept in context even when older messages are summarized. |
-| `progress_update` | ReadOnly | Report a status update to the parent agent. Used by subagents mid-run to show what they're doing in the sidebar. |
-| `ask_user_question` | ReadOnly | Ask the user 1–4 questions when their answer would change how to proceed. Renders an interactive question card. |
+| `echo` | `ReadOnly` | Echo input text for testing and diagnostics. |
+| `exit_tool` | `ReadOnly` | Return a final answer from a subagent to its parent, or stop the current top-level turn. |
+| `flag_important` | `ReadOnly` | Mark a file so context compaction retains it when summarizing earlier turns. |
+| `progress_update` | `ReadOnly` | Emit a subagent progress line shown in attached client UIs. |
+| `ask_user_question` | `ReadOnly` | Present 1 to 4 interactive questions to the user when input is needed. |
 
 ### Plans and goals
 
 | Tool | Sensitivity | Description |
 |------|-------------|-------------|
-| `write_plan` | ReadOnly | Write a plan in `plans/` or to the file set by `plan_path`. |
-| `edit_plan` | ReadOnly | Replace text in a plan through the same path restrictions as `write_plan`. |
-| `propose_goal` | ReadOnly | Ask the user to approve a goal. |
-| `complete_goal` | ReadOnly | Mark the active goal complete with a summary. |
-| `block_goal` | ReadOnly | Mark the active goal as blocked and report the reason. |
+| `write_plan` | `ReadOnly` | Write a plan file under `plans/` or the configured `plan_path`. |
+| `edit_plan` | `ReadOnly` | Replace text inside a plan file within `plan_path` bounds. |
+| `propose_goal` | `ReadOnly` | Propose a multi-turn goal for user confirmation. |
+| `complete_goal` | `ReadOnly` | Mark the active goal complete with a summary. |
+| `block_goal` | `ReadOnly` | Mark the active goal blocked with a reason. |
 
-The plan tools can write to their configured location even though they use
-`ReadOnly` permission sensitivity. See [Personas](/docs/using-mew/personas/)
-for the planning workflow and [Slash Commands](/docs/using-mew/slash-commands/#goals)
+Plan tools enforce path restrictions to `plan_path` even though their
+sensitivity is `ReadOnly`. See [Personas](/docs/using-mew/personas/) for the
+planner/builder workflow and [Slash Commands](/docs/using-mew/slash-commands/#goals)
 for goal controls.
 
 ### Subagents
 
 | Tool | Sensitivity | Description |
 |------|-------------|-------------|
-| `subagent_start` | ReadOnly | Spawn a child agent with its own context, tool allowlist, and system prompt. Returns the result or a job ID when started in the background. |
-| `subagent_wait` | ReadOnly | Wait for a background subagent to complete and get its result. |
+| `subagent_start` | `ReadOnly` | Spawn a child agent synchronously or in the background (`async: true`). |
+| `subagent_wait` | `ReadOnly` | Collect the result from a background subagent task. |
 
-See [Subagents](/docs/using-mew/subagents/) for how subagents work and how to
-define custom ones.
+See [Subagents](/docs/using-mew/subagents/) for subagent definitions and limits.
 
 ### Todos
 
 | Tool | Sensitivity | Description |
 |------|-------------|-------------|
-| `todo_create` | ReadOnly | Create one or more todos. Each todo tracks a step of the work. |
-| `todo_update` | ReadOnly | Update a todo's content and/or status (`pending`, `in_progress`, `done`, `blocked`). |
-| `todo_complete` | ReadOnly | Mark a todo done. Refused if dependencies aren't done. |
-| `todo_delete` | ReadOnly | Delete a todo. Refused if another todo depends on it. |
-| `todo_list` | ReadOnly | List all todos with their IDs, statuses, and dependencies. |
+| `todo_create` | `ReadOnly` | Create one or more tracked todo items. |
+| `todo_update` | `ReadOnly` | Update a todo's content or status (`pending`, `in_progress`, `done`, `blocked`). |
+| `todo_complete` | `ReadOnly` | Mark a todo done once its dependencies are done. |
+| `todo_delete` | `ReadOnly` | Delete a todo if no other todo depends on it. |
+| `todo_list` | `ReadOnly` | List all todos with IDs, statuses, and dependencies. |
 
-The todo list renders in a panel below the chat. Press `Ctrl+Space` and
-select **Todo** or use `/todo` to open the todo viewer.
+Todos appear in the terminal sidebar. Run `/todo` (or select `/todo` from the
+`Ctrl+Space` palette) to browse and edit them in a modal overlay.
 
 ### Web
 
 | Tool | Sensitivity | Description |
 |------|-------------|-------------|
-| `web_fetch` | ReadOnly | Fetch a URL and return its content as markdown. HTML pages are converted to readable markdown. Content is limited to 128,000 characters. |
-
-`web_fetch` is useful for reading documentation pages, API references,
-and articles without leaving the conversation. It follows up to 5
-redirects and sets a 30-second timeout.
+| `web_fetch` | `ReadOnly` | Fetch a URL (up to 5 redirects, 30-second timeout), converting HTML to Markdown capped at 128,000 characters. |
 
 ### Conditional tools
 
-These tools only register when their prerequisites are met:
+These tools register or activate based on configuration, model mode, and client
+capabilities:
 
-| Tool | Condition | Description |
-|------|-----------|-------------|
-| `skill` | At least one skill discovered | Load a skill's full instructions into context. See [Skills](/docs/using-mew/skills/). |
-| `edit_hashline` | Enabled for the active provider | Edit files using [hashline patches](/docs/using-mew/hashline/). Set `disable_hashline = true` in the provider config to hide it. |
+| Tool | Sensitivity | Condition | Description |
+|------|-------------|-----------|-------------|
+| `python` | `ReadOnly` (`isolated = true`) or `Dangerous` (`isolated = false`) | Python code mode active | Run Python in a persistent worker that calls Mew and MCP tools via `tools.*`. Replaces direct tools when active. See [Python code mode](/docs/getting-started/configuration/#python-code-mode). |
+| `skill` | `ReadOnly` | At least one skill loaded (always active via built-in `mew-docs`) | Load a skill's instructions into context. See [Skills](/docs/using-mew/skills/). |
+| `edit_hashline` | `Mutating` | Enabled for active provider | Edit files with [hashline patches](/docs/using-mew/hashline/). Disable via `disable_hashline = true`. |
+| `browser_snapshot`, `browser_screenshot` | `ReadOnly` | Active native browser tab | Inspect DOM snapshots or capture screenshots of the selected browser tab. |
+| `browser_open`, `browser_click`, `browser_fill`, `browser_press`, `browser_close` | `Mutating` | Active native browser tab | Open URLs, interact with elements, send key presses, and close browser tabs. |
 
-The native desktop app also exposes browser tools once you connect an
-in-app browser tab to the conversation. `browser_snapshot` and
-`browser_screenshot` are ReadOnly. Opening a URL, clicking, filling inputs,
-pressing keys, and closing the tab are Mutating. See the
-[Desktop guide](/docs/using-mew/desktop-app/#use-browser-tabs) for opening an
-in-app tab.
+See [Desktop App](/docs/using-mew/desktop-app/#use-browser-tabs) for connecting
+an in-app browser tab.
 
 ## Secret redaction
 
-`read`, `grep`, and the shell output helpers redact configured secret
-values. `glob` and `grep` omit matches that come from configured secret
-paths.
-
-See [Permissions](/docs/using-mew/permissions/) for how to configure secret
-redaction.
+`read`, `grep`, shell output helpers, MCP tools, and Python code mode redact
+configured `[[secrets.words]]` values. `glob` and `grep` omit paths matching
+`[[secrets.files]]`. See [Permissions](/docs/using-mew/permissions/) for
+configuration details.
 
 ## Adding a custom tool
 
-See [Adding a Tool](/docs/development/dev-tools/) for the developer guide on
-implementing and registering new tools.
+See [Adding a Tool](/docs/development/dev-tools/) to implement and register a
+new built-in tool.

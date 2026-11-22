@@ -14,73 +14,91 @@ Press `?` with an empty composer to open the shortcuts overlay.
 | `Ctrl+Alt+O` | Show conversations open in this terminal window |
 | `Ctrl+Alt+Left` / `Ctrl+Alt+Right` | Switch between open conversations |
 | `Ctrl+Alt+Enter` | Start a conversation in the current project |
-| `Ctrl+Alt+W` | Close the current view, or the selected conversation view in a picker |
-| `?` | Toggle keyboard shortcuts overlay |
-| `Ctrl+L` | Scroll to bottom (re-attach auto-scroll) |
-| `Ctrl+C` | Cancel stream / clear input / quit (press twice) |
-| `Esc` | Cancel stream (press twice) / close modal / clear selection |
-| `Ctrl+D` | Delete character forward / quit when input is empty and idle |
+| `Ctrl+Alt+W` | Close the current view, or the selected view in a picker |
+| `?` | Toggle keyboard shortcuts overlay (when input is empty) |
+| `Ctrl+L` | Scroll to bottom and re-enable auto-scroll |
+| `Ctrl+C` | Cancel stream (press twice to quit while streaming), clear non-empty input, or quit when idle and empty |
+| `Esc` | Cancel stream (press twice), close modal, or clear selection |
+| `Ctrl+D` | Delete character forward, or quit when idle and empty |
 | `Ctrl+Home` | Scroll to top |
 | `Ctrl+End` | Scroll to bottom |
+
+Closing a conversation view retains its draft and queued follow-ups for the
+current TUI process while daemon work keeps running. Closing the last view exits
+the TUI.
 
 ## Input editing
 
 | Shortcut | Action |
 |----------|--------|
 | `Enter` | Submit the composer, confirm a dialog, or insert a newline in a todo draft |
-| `Shift+Enter` / `Alt+Enter` / `Ctrl+J` | Insert newline in the composer, goal, question answer or todo draft |
-| `Ctrl+A` / `Ctrl+E` | Cursor to start / end of line |
-| `Ctrl+F` / `Ctrl+B` | Cursor right / left |
-| `Ctrl+H` / `Backspace` | Delete the previous character |
-| `Ctrl+W` | Kill the previous whitespace-delimited word |
-| `Ctrl+K` | Kill to this line's end, or kill its newline when already at the end |
-| `Ctrl+U` | Kill to this line's beginning |
-| `Ctrl+Y` | Yank the most recently killed text |
-| `Alt+Y` | Replace the last yank with an older kill |
-| `Ctrl+T` | Transpose characters at the cursor |
+| `Shift+Enter` / `Alt+Enter` / `Ctrl+J` | Insert a newline in the composer, goal, question answer, or todo draft |
+| `Ctrl+A` / `Ctrl+E` | Move cursor to start / end of line |
+| `Ctrl+F` / `Ctrl+B` | Move cursor right / left |
+| `Ctrl+H` / `Backspace` | Delete previous character |
+| `Ctrl+W` | Kill previous whitespace-delimited word |
+| `Ctrl+K` | Kill to line end, or kill trailing newline at line end |
+| `Ctrl+U` / `Cmd+Backspace` | Kill to line start |
+| `Ctrl+Y` | Yank most recently killed text |
+| `Alt+Y` | Replace last yank with older kill |
+| `Ctrl+T` | Transpose characters at cursor |
 | `Ctrl+Z` / `Ctrl+_` | Undo |
 | `Ctrl+Shift+Z` | Redo |
 | `Ctrl+P` / `Ctrl+N` | Recall previous / next composer history, or navigate picker results |
+| `Ctrl+R` | Open reverse history search |
 | `Ctrl+S` | Search forward while history search is open |
 | `Alt+B` / `Alt+F`, `Alt+Left` / `Alt+Right` | Move backward / forward by word |
-| `Alt+Backspace` / `Alt+D` | Kill the previous / next word, using alphanumeric word boundaries |
-| `Alt+<` / `Alt+>` | Move to the beginning / end of the entire field |
-| `Up` / `Down` | Navigate between input lines / history |
+| `Alt+Backspace` / `Alt+D` | Kill previous / next word at alphanumeric boundaries |
+| `Alt+<` / `Alt+>` | Move to start / end of field |
+| `Up` / `Down` | Move between visual lines, browse history, or scroll chat 1 line when input is empty |
 | `PageUp` / `PageDown` | Scroll chat up / down by 10 lines |
-| `Ctrl+R` | Reverse search through input history |
+| `Ctrl+V` / `Ctrl+Shift+V` / `Cmd+V` | Paste an image from the system clipboard |
 
-Editing keys work in the composer, reference input, picker filters, question
-answers, goals, todo drafts, history search and settings. Each field has its
-own undo history; killed text is shared between fields. Consecutive kills
-combine into one entry. Moving, typing, pasting or changing fields ends that
-sequence and stops `Alt+Y` from replacing unrelated text. Characters with
-combining marks and joined emoji move, delete and transpose together.
+Editing keys work in the composer, reference filter, picker filters, question
+answers, goals, todo drafts, history search, and settings. Each field keeps its
+own undo stack while sharing the kill ring. Consecutive kills combine into one
+yank entry; moving, typing, pasting, or switching fields breaks the kill
+sequence. Combining marks and joined emoji move, delete, and transpose as single
+units.
 
-In conversation pickers, `Ctrl+Alt+A` archives/restores the selected conversation
-and `Ctrl+Alt+P` pins it. Closing a view keeps its draft and queued follow-ups
-for this TUI process and leaves daemon work running. Closing the last view exits
-the TUI. `Tab` opens global history from the open-view or notification picker;
-in history, it switches between current and archived conversations.
-In the thinking picker, `Ctrl+Alt+P` cycles variants.
-Plain `Ctrl+A` and `Ctrl+P/N` retain their editing/navigation meanings.
+## Pickers
 
-## Chat
+| Shortcut | Scope | Action |
+|----------|-------|--------|
+| `Ctrl+Alt+A` | Conversation pickers | Archive or restore the selected conversation |
+| `Ctrl+Alt+P` | Conversation pickers | Toggle pin on the selected conversation |
+| `Tab` | Open-view / attention pickers | Switch to global session history |
+| `Tab` | Session history picker | Toggle between active and archived conversations |
+| `Right` | Model picker (empty filter) | Open thinking variants for the selected model |
+| `Ctrl+Alt+P` | Thinking-variant picker | Cycle through variants for the active model |
+| `PageUp` / `PageDown` | Centered pickers | Scroll the details pane |
+
+Inside pickers, plain `Ctrl+A` and `Ctrl+P` / `Ctrl+N` retain their standard
+cursor and navigation behavior.
+
+## Chat and queue
 
 | Shortcut | Action |
 |----------|--------|
 | `Ctrl+Shift+C` | Copy selected text to clipboard |
-| `Ctrl+Alt+T` | Toggle reasoning/thinking block expansion |
-| `Ctrl+O` | Toggle bash output expansion |
+| `Ctrl+Alt+T` | Toggle reasoning block expansion |
+| `Ctrl+O` | Toggle bash, Python cell, and nested tool output expansion |
+| `Ctrl+G` | Toggle tool-call batch and compaction block expansion |
 | `Ctrl+1` | Toggle the sidebar Environment section |
-| `x` | Cancel most recently started subagent (when input empty) |
-| `@` | Open the reference picker for @-mentions (files, models, skills, subagents) |
+| `Shift+Tab` / `Ctrl+Shift+Tab` | Cycle personas forward / backward when input is empty |
+| `Ctrl+Up` | Inject the oldest queued message as guidance into the running turn |
+| `Up` `Up` | While streaming with queued messages and empty input, cancel the turn and send the oldest queued message |
+| `@` | Open the reference picker for files, models, skills, and subagents |
 
 ## Mouse
 
 | Action | Effect |
 |--------|--------|
-| Scroll wheel | Scroll the chat, picker list or details under the pointer |
+| Scroll wheel | Scroll the chat, picker list, or details pane under the pointer |
 | Click scrollbar track | Page the corresponding view |
 | Drag scrollbar thumb | Scroll the corresponding view |
-| Click sidebar task, subagent or job | Open its details |
-| Click + drag | Select text (when mouse capture is on) |
+| Click + drag | Select text and copy it to the clipboard on release |
+| Click reasoning, tool batch, or compaction header | Expand or collapse the block |
+| Click sidebar header or conversation/attention/task/subagent/job row | Collapse section, switch conversation, or open details |
+| Click status bar bell | Open the attention list |
+| Click input box | Focus and position the cursor |

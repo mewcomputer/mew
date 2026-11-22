@@ -3,88 +3,103 @@ title: Slash Commands
 description: Built-in slash commands available in the TUI.
 ---
 
-Type any of these in the input box (they autocomplete as you type).
+Type slash commands in the composer; autocomplete filters matching commands as
+you type. Loaded plugins can also register custom slash commands when the hook
+runtime is enabled.
 
 ## Session management
 
 | Command | Description |
 |---------|-------------|
-| `/clear` | Clear the current context (persists to disk) |
-| `/compact` | Force context compaction on the next turn |
-| `/sessions` | Open conversations ordered by latest activity (`/session` also works) |
-| `/resume <id>` | Resume a previous session by ID. Omit the ID to open the picker. |
-| `/project` | Pick a project directory and open a new conversation there |
+| `/clear` | Clear conversation context while keeping earlier lines in `session.jsonl` |
+| `/compact` | Compact earlier messages immediately (waits for an active turn) |
+| `/sessions`, `/session` | Open the session history picker ordered by latest activity |
+| `/resume <id>` | Resume `<id>`, or open the session picker when no ID is given |
+| `/project` | Pick a project directory and start a new conversation there |
 | `/rename <title>` | Rename the active conversation |
-| `/autotitle on` / `/autotitle off` | Turn automatic titles on or off for the active conversation |
-| `/autosummary on` / `/autosummary off` | Turn automatic summaries on or off for the active conversation |
-| `/yield` | Let another connected client take control |
+| `/autotitle on`, `/autotitle off` | Toggle automatic session titles for the active conversation |
+| `/autosummary on`, `/autosummary off` | Toggle automatic session summaries for the active conversation |
+| `/yield` | Yield control so another attached client can take over |
 
-The daemon-backed TUI does not support `/rewind`. See
-[Sessions](/docs/getting-started/sessions/) for persistence and resume.
+Daemon-backed TUI sessions do not support `/rewind`. See
+[Sessions](/docs/getting-started/sessions/) for storage and resume details.
 
-## Model & reasoning
+## Model and reasoning
 
 | Command | Description |
 |---------|-------------|
-| `/model <name>` | Switch to a different model |
-| `/model` | Open the model picker (`/models` also works) |
-| `/thinking <variant>` | Set thinking variant (`high`, `max`, `thinking`, `off`) |
-| `/thinking` | Open the available thinking variants |
+| `/model <name>` | Switch directly to a model |
+| `/model`, `/models` | Open the model picker |
+| `/thinking <variant>` | Set a thinking variant (`low`, `medium`, `high`, `xhigh`, `max`, `thinking`, `off`, `none`, or `budget:<n>`) |
+| `/thinking` | Open the thinking-variant picker |
 
 ## Personas
 
 | Command | Description |
 |---------|-------------|
-| `/persona <name>` | Switch to a named persona (opens confirm modal) |
+| `/persona <name>` | Preview and confirm switching to `<name>` |
 | `/persona` | Open the persona picker |
-| `/persona default` | Clear the active persona |
+| `/persona default`, `/persona none` | Clear the active persona immediately |
 
 ## Permissions
 
 | Command | Description |
 |---------|-------------|
-| `/permissions` | Open the permission mode picker (`/permission` also works) |
-| `/permissions <mode>` | Switch directly: `standard`, `permissive`, `auto`, `auto_plus`, `dangerous` |
+| `/permissions`, `/permission` | Open the permission mode picker |
+| `/permissions <mode>` | Switch directly (`standard`, `permissive`, `auto`, `auto_plus`, or `dangerous`) |
 
-See [Permissions](/docs/using-mew/permissions/) for mode details, rules, and sandboxing.
+See [Permissions](/docs/using-mew/permissions/) for mode behavior, rules, and
+workspace checks.
 
 ## Goals
 
 | Command | Description |
 |---------|-------------|
-| `/goal <objective>` | Open the goal editor and confirm an objective for the agent to work toward |
-| `/goal` | Show the active goal and its status |
-| `/goal pause` / `/goal resume` | Pause or resume automatic continuation toward the goal |
+| `/goal <objective>` | Open the goal editor and confirm a new objective |
+| `/goal` | Inspect the active goal and its status |
+| `/goal pause`, `/goal resume` | Pause or resume automatic continuation toward the goal |
 | `/goal complete` | Mark the active goal complete |
-| `/goal clear` | Remove the active goal |
+| `/goal clear` | Clear the active goal |
 
 ## Other
 
 | Command | Description |
 |---------|-------------|
-| `/help` | Show available commands |
-| `/cost` | Show cost breakdown (tokens, $) |
-| `/todo` | Browse and edit the session todo list |
-| `/agents` | Open a subagent's recorded conversation and tool trace |
+| `/help` | Open the keyboard shortcuts and help overlay |
+| `/cost` | Show session token and cost breakdown |
+| `/todo` | Browse and edit session todos |
+| `/agents` | Open a subagent's recorded transcript and tool trace |
 | `/jobs` | Open a background shell job and read its captured output |
-| `/tools` | Browse tool calls with full arguments, results and errors |
-| `/review` `/diff` | Review changes in this conversation's workspace; press `r` to refresh |
-| `/theme <name>` | Switch themes. Omit the name to open the theme picker. |
-| `/unflag <path>` | Stop keeping a file marked as important for compaction |
-| `/mouse` `/m` | Toggle mouse capture for text selection |
-| `/quit` `/q` | Exit mew |
+| `/tools` | Browse tool calls with arguments, results, and errors |
+| `/review`, `/diff` | Inspect workspace changes for this conversation (`r` refreshes) |
+| `/theme <name>` | Switch theme, or open the theme picker when omitted |
+| `/unflag <path>` | Remove a file's compaction flag |
+| `/mouse`, `/m` | Toggle mouse capture for text selection |
+| `/quit`, `/q` | Exit Mew |
 
-The bell and `Ctrl+Alt+N` open this terminal window's conversations with pending
-questions, permissions, failures or unread results. `Ctrl+Alt+O` lists all views
-open here, and `Tab` opens global history from either list. Each conversation
-keeps its draft, attachments and queued
-follow-ups when you switch. Submitted input stays visible until the daemon
-acknowledges it; an uncertain submission is never replayed automatically.
+## Conversation switcher and drafts
 
-Conversation icons show state: `○` idle or complete, `●` unread update, `?`
-question, `!` approval, `×` a failed turn in an open conversation, and `▶` working.
-Each title has a second row with its
-project path on the left and pending action counts and time on the right.
-Paths inside your home directory use `~/`; search accepts either form. Selected
-details show failures and any clipped context, with `PgUp`/`PgDn` to scroll.
-Use `/cost` for cost details.
+Press `Ctrl+Alt+N` (or click the bell) to list conversations open in this
+terminal window that have pending questions, approvals, failures, or unread
+results. Press `Ctrl+Alt+O` to list all views open in this terminal window, and
+press `Tab` in either picker to open global session history.
+
+Each conversation preserves its own draft, attachments, and queued follow-ups
+when you switch views. Sent input remains pending in the UI until the daemon
+acknowledges it, and uncertain submissions are left unretried after reconnect.
+
+## Picker status icons
+
+| Icon | Meaning |
+|------|---------|
+| `○` | Idle or complete |
+| `●` | Unread update |
+| `?` | Pending question |
+| `!` | Pending permission approval |
+| `×` | Failed latest turn in an open conversation |
+| `▶` | Turn in progress |
+
+Each conversation row shows its title on the first line and its project path
+(with `~/` substitution, searchable both ways), pending counts, and timestamp on
+the second. The details pane shows failure notes and clipped context (`PgUp` and
+`PgDn` scroll it). Run `/cost` for full cost details.

@@ -3,38 +3,41 @@ title: Session handover
 description: Continue a daemon session in another Mew client.
 ---
 
-Multiple clients can attach to the same session on one daemon. The daemon
-owns the history and turn, so opening another client leaves the conversation
-in place.
+Multiple clients can attach to the same daemon session simultaneously because
+the daemon owns conversation history, policy, and turn execution.
 
 ## Open an existing session
 
-Start the [browser bridge](/docs/using-mew/web-ui/) and connect both
-clients to its daemon. In the browser, open
-`http://localhost:9847/session/<session-id>` to attach directly. To go from
-the browser to the terminal, copy the session ID from that URL.
+- **From any TUI already attached to the same daemon**: run
+  `/resume <session-id>`.
+- **From a local desktop app or another TUI**: attach the TUI to the daemon's
+  WebSocket endpoint (`ws://unix:$socket` for the web bridge socket, or
+  `ws://127.0.0.1:25566` for the native desktop daemon):
 
-Set `session_id` to the conversation ID before running the command.
+  ```sh
+  socket="${XDG_RUNTIME_DIR:-/tmp}/mew.sock"
+  mew chat --connect "ws://unix:$socket" --attach "$session_id"
+  ```
 
-```sh
-socket="${XDG_RUNTIME_DIR:-/tmp}/mew.sock"
-mew chat --connect "ws://unix:$socket" --attach "$session_id"
-```
+- **From the browser**: start `mew-web` (see [Web UI](/docs/using-mew/web-ui/))
+  and open `http://localhost:9847/session/<session-id>`.
+- **From iOS or a remote profile**: connect to the daemon started with
+  `mew daemon --remote` and select the session from the combined chat list.
 
-If the bridge uses a custom socket, use that path instead. If the same
-daemon also has a local TCP listener, its WebSocket URL works too. In a TUI
-already connected to that daemon, run `/resume <session-id>`.
+Run `/yield` in the TUI to emit an advisory `YieldControl` signal so other
+attached clients can take over cleanly.
 
-## What happens on attach and detach
+## Attach and detach lifecycle
 
-- `AttachSession` loads an existing session from disk if needed. The daemon
-  sends `SessionReady`, recent history, and pending requests to the new client.
-- `ClientAttached` and `ClientDetached` report presence. `YieldControl`
-  broadcasts `ControlYielded` as an advisory event. The daemon serializes
-  turns even when several authorized clients can send prompts.
-- An active turn or shell job keeps the session running after the last client
-  leaves. The daemon checks detached sessions every 30 seconds and unloads
-  unused runtimes. Saved history remains available for later attachment.
+- `AttachSession` loads an idle session from disk if needed; the daemon sends
+  `SessionReady`, `SessionHistoryPage`, and any pending permission or question
+  requests to the new client.
+- `ClientAttached`, `ClientDetached`, and `ControlYielded` (`YieldControl`)
+  broadcast client presence to attached peers while `turn_lock` serializes
+  turns across all clients.
+- Detached sessions with active turns or background shell jobs continue
+  running; the daemon checks detached sessions every 30 seconds and unloads
+  idle runtimes while leaving transcripts on disk.
 
 See [Daemon Protocol](/docs/development/dev-protocol/) for wire messages and
 [Architecture](/docs/development/dev-architecture/) for session ownership.

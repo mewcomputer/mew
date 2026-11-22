@@ -1,40 +1,39 @@
 ---
 title: Web UI Development
-description: How to develop and extend the mew web UI.
+description: How to develop and extend the Mew web UI.
 ---
 
-The web UI is a React app that talks to the daemon over WebSocket via
-the `mew-web-client` TypeScript library.
+`mew-web-ui` is a React application communicating with `mew-daemon` over
+WebSocket through `@mew/web-client`. The same compiled React bundle also powers
+the opt-in Electron shell (`apps/mew-electron`) via `mew desktop-host`
+(`DesktopRelay` in `crates/mew-web-bridge/src/desktop.rs`).
 
 ## Getting started
 
 ```sh
-just build-web        # installs dependencies and builds both binaries
-just dev-web          # starts the bridge and Vite with HMR
-just dev-web --open   # also launches the browser
+just build-web        # install JS deps, build UI, and compile mew-web
+just dev-web          # start mew-web bridge (:9847) and Vite HMR (:5173)
+just dev-web --open   # also open http://127.0.0.1:5173/ in your browser
 ```
 
-This auto-spawns `mew daemon` in the background and starts the Vite dev
-server. Hot module replacement works for all React components.
+`just dev-web` auto-spawns `mew daemon` when the local Unix socket is idle and
+enables hot module replacement across React components.
 
 ## Architecture
 
-```
-Browser → mew-web (bridge) → mew daemon (Unix socket)
+```text
+Browser -> mew-web (bridge) -> mew daemon (Unix socket)
 ```
 
-The browser stack consists of a Rust bridge and two pnpm workspace packages.
-
-- **`mew-web-bridge`** (Rust): TCP+WS listener that relays browser WebSocket
-  connections to the daemon's Unix socket. Serves the built React app from
-  `mew-web-ui/dist/` as static assets via `include_dir`. SPA fallback for
-  client-side routing. Auto-spawns `mew daemon` if not running.
-- **`mew-web-client`** (TypeScript): Typed client for the wire protocol.
-  Builds to ESM with `.d.ts` types. The `MewClient` class manages the
-  WebSocket connection, dispatches events to typed listeners, and provides
-  promise-based methods for request/response patterns.
-- **`mew-web-ui`** (TypeScript/React): React app with TanStack Router.
-  Vite build to `dist/`. Uses Zustand for state management.
+- **`mew-web-bridge`** (Rust): TCP and WebSocket server relaying browser
+  WebSockets to the daemon's Unix socket, auto-spawning `mew daemon` when idle,
+  and serving Vite-hashed static assets embedded from `mew-web-ui/dist/` via
+  `include_dir` (with SPA fallback routing).
+- **`@mew/web-client`** (`mew-web-client/`, TypeScript): ESM package with `.d.ts`
+  declarations exporting `MewClient` for typed events and request/response
+  methods.
+- **`mew-web-ui`** (`mew-web-ui/`, TypeScript/React): TanStack Router and
+  Zustand frontend.
 
 ## The TypeScript client
 
@@ -48,92 +47,76 @@ await client.connect();
 await client.ping();
 const sessionId = await client.newSession();
 
-// Promise-based methods (wait for the matching server response):
 const models = await client.listModels();
 const model = models[0];
 if (model) await client.switchModel(model.provider, model.model);
 
-// Event-based (streaming):
-client.on("provider", (ev) => { /* handle PartStart/PartDelta/etc */ });
+client.on("provider", (ev) => { /* handle PartStart/PartDelta/etc. */ });
 client.on("tool-start", ({ call_id }) => { /* ... */ });
 client.on("model-switched", (data) => { /* ... */ });
 
 await client.submitPrompt(sessionId, "Summarize this project.");
 ```
 
-The application calls `ping()` after connection to discover daemon capabilities.
-Create or attach a session before submitting a prompt. Scoped submissions
-resolve once the daemon acknowledges acceptance. Watch provider events for
-streamed output.
+Call `ping()` after connecting to inspect daemon version and capabilities, then
+create or attach to a session before submitting prompts. `submitPrompt` resolves
+once the daemon returns an accepted `PromptReceipt`. Handle
+`client.on("permission-request", (request, respond) => { ... })` by calling
+`respond` with the user's decision.
 
-Subscribe to `client.on("permission-request", (request, respond) => { … })`
-to handle permission requests and call `respond` with the user's decision.
+## Zustand store and client bridge
 
-## The Zustand store
-
-`src/stores/session.ts` defines `SessionState` and its actions. The store
-tracks connection and session state, assembles streaming messages and
-history pages, and holds model settings, todos, and pending requests.
-
-## The bridge function
-
-`getClient()` in `src/lib/client.ts` creates a shared `MewClient` and calls
-`bridgeClientToStore(client)`. The bridge maps client events to actions on
-`useSessionStore`. Permission responders and queued ask-user actions retain
-request IDs so replies reach the right pending action.
+- `src/stores/session.ts` defines `SessionState`, tracking connection status,
+  paginated transcripts, streaming parts, model settings, todos, and pending
+  prompts.
+- `src/lib/client.ts` (`getClient()`) creates the singleton `MewClient` and
+  wires `bridgeClientToStore(client)` to Zustand actions; components and store
+  modules also import `src/lib/client-ref.ts` to avoid circular dependencies.
 
 ## Routing and reconnect
 
-`src/routes/__root.tsx` mounts the workspace and calls `useMewConnection`.
-The connection hook retries with exponential backoff capped at 30 seconds and
-checks the daemon with `ping()`. The session route's `useSessionAttach` hook
-reattaches after reconnect and surfaces attachment errors.
-
-The confirmed session ID is saved to `localStorage`. The home route tries the
-saved session, and `/session/<id>` opens a specific conversation directly.
-History is paginated. Attaching loads the newest page, and older messages load
-when requested.
+`src/routes/__root.tsx` mounts the layout and runs `useMewConnection`, which
+reconnects with exponential backoff (up to 30 seconds) and checks daemon health
+with `ping()`. `src/routes/session.$sessionId.tsx` runs `useSessionAttach` to
+reattach and restore paginated history (`Load earlier messages` fetches older
+pages); the root route remembers the latest session ID in `localStorage`.
 
 ## Key components
 
 | Component or route | Purpose |
-|-----------|---------|
-| `routes/__root.tsx` | Workspace layout, connection hook, global navigation |
-| `routes/session.$sessionId.tsx` | Session attachment and conversation layout |
+|--------------------|---------|
+| `routes/__root.tsx` | Workspace layout, connection hook, global shortcuts |
+| `routes/session.$sessionId.tsx` | Session attachment and conversation view |
 | `components/virtual-chat-surface.tsx` | Virtualized message list and streaming text |
-| `components/input-area.tsx` | Prompt input and slash command suggestions |
-| `components/model-pill.tsx` | Model picker with thinking variant selection |
-| `components/session-rail.tsx` | Session list |
+| `components/input-area.tsx` | Prompt composer and slash autocomplete |
+| `components/model-pill.tsx` | Model and thinking-variant picker |
+| `components/session-rail.tsx` | Session list and creation |
 | `components/right-rail.tsx` | Tabbed workspace tools |
-| `components/permission-toast.tsx` | Tool permission requests |
-| `components/ask-user-card.tsx` | Interactive questions |
+| `components/permission-toast.tsx` | Tool approval prompt |
+| `components/ask-user-card.tsx` | Interactive question prompt |
 
-## Building
+## Building and origins
 
 ```sh
-just build-web  # builds Rust + TS, embeds dist into mew-web-bridge
+just build-web  # build TypeScript packages and embed dist/ into mew-web
 ```
 
-The built `mew-web` binary serves the React app from embedded assets at
-runtime. Vite hashes asset filenames, so files are served dynamically by
-path lookup rather than hardcoded `include_bytes!`.
-
-`mew-web` listens on loopback. It accepts WebSocket requests for its bound
-address and port, including the `localhost` alias, and checks browser origins
-against the same address and any explicit loopback origins. `just dev-web`
-allows the Vite server on port 5173. If you run the bridge and Vite separately,
-pass `--allow-origin http://localhost:5173` to the bridge and open Vite at that
-address. Repeat `--allow-origin` for each additional local development origin.
+`mew-web` binds to loopback and accepts WebSocket connections whose `Origin`
+matches its bound address (including `localhost`) or an explicit `--allow-origin`
+flag. `just dev-web` passes `--allow-origin` for Vite on port `5173`; pass
+`--allow-origin http://localhost:5173` when running Vite and the bridge
+separately.
 
 ## Adding a new wire event end-to-end
 
-1. **Protocol**: Add `ClientMessage` or `ServerMessage` variant + roundtrip
-   test in `mew-protocol/src/lib.rs`
-2. **Daemon**: Handle in `handle_connection` (`mew-daemon/src/lib.rs`).
-   Update `translate_server_message` in `mew-daemon/src/client.rs` if needed.
-3. **TS client**: Add the event type to the `MewClientEvents` interface,
-   add the dispatch case in `handleMessage`, and add any request method.
-4. **Store**: Add state field + action to `SessionState`, initialize in the
-   store, wire in `bridgeClientToStore`.
-5. **Component**: Render the new state in a React component and exercise the
-   flow with the relevant client or UI tests.
+1. **Protocol**: add the `ClientMessage` or `ServerMessage` variant and
+   roundtrip test in `crates/mew-protocol/src/lib.rs`.
+2. **Daemon**: handle it in `handle_connection` (`crates/mew-daemon/src/lib.rs`),
+   and update `mew-client-core` (and `translate_server_message` in
+   `crates/mew-daemon/src/client.rs` if applicable).
+3. **TypeScript client**: add the type to `MewClientEvents`, dispatch it in
+   `handleMessage`, and add any request method in `mew-web-client/src/index.ts`.
+4. **Store**: add the state field and action to `SessionState` and wire it in
+   `bridgeClientToStore` (`mew-web-ui/src/stores/session.ts`).
+5. **Component and tests**: render the state in `mew-web-ui` and add client/UI
+   tests.

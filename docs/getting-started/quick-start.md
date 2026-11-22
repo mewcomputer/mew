@@ -6,8 +6,7 @@ description: Configure a provider and send your first prompt in the terminal.
 ## 1. Configure a provider
 
 After [installing Mew](/docs/getting-started/installation/), set credentials
-for one of the built-in providers. For example, set the API key from an
-OpenCode Zen account in your shell:
+for a built-in provider. For OpenCode Zen, export your API key in your shell:
 
 ```sh
 export MEW_CRED_OPENCODE_ZEN="your-api-key"
@@ -15,7 +14,7 @@ export MEW_CRED_OPENCODE_ZEN="your-api-key"
 
 See [Providers](/docs/using-mew/providers/) for other API key options or
 [sign in to Codex](/docs/using-mew/providers/#sign-in-to-codex) with ChatGPT.
-Use `mew config edit` to add a custom provider.
+Run `mew config edit` to add a custom provider.
 
 ## 2. Start a chat
 
@@ -23,14 +22,14 @@ Use `mew config edit` to add a custom provider.
 mew chat --provider opencode-zen
 ```
 
-Use `mew` to start with your last-used provider on later launches.
+Run `mew` on later launches to reuse your last provider.
 
-This opens the TUI. The layout has three areas:
+An empty session opens on a centered landing screen with the composer and a
+bottom status bar. Once you send a prompt, the terminal switches to the chat
+layout:
 
-```
-┌──────────────────────────────────────────────┐
-│  status bar: model · provider · context      │
-├──────────────────────────────────┬───────────┤
+```text
+┌──────────────────────────────────┬───────────┐
 │                                  │  sidebar  │
 │  chat                            │           │
 │                                  │  session  │
@@ -38,96 +37,98 @@ This opens the TUI. The layout has three areas:
 │  assistant responses             │  changes  │
 │  tool call cards                 │           │
 │                                  │           │
-├──────────────────────────────────┴───────────┤
-│  input bar (type your prompt here)           │
-└──────────────────────────────────────────────┘
+├──────────────────────────────────┤  (when    │
+│  input bar (type your prompt)    │  >= 112   │
+├──────────────────────────────────┤  columns) │
+│  status bar: model · cwd · cost  │           │
+└──────────────────────────────────┴───────────┘
 ```
 
-- **Status bar** (top): shows the current model, provider, and context
-  window usage.
-- **Sidebar** (right): the current session at the top, then live activity
-  (todos, subagents, background jobs, file changes) as it happens. Press
-  `Ctrl+1` to expand the Environment section and see loaded context files.
-- **Chat** (center): messages stream in as the model responds. Tool calls
-  appear as cards with their input and output.
-- **Input bar** (bottom): type your prompt and press `Enter`.
-
-Type a prompt and press Enter. The response streams in as it's generated.
+- **Chat** (main pane): displays your prompts, streamed model replies, and
+  tool-call cards with inputs and output.
+- **Input bar** (below chat): accepts prompts, slash commands, and `@`
+  references. Press `Enter` to send.
+- **Status bar** (bottom): shows the permission mode (when non-standard),
+  provider and model, active goal, thinking variant, persona, working
+  directory, git branch, context usage, cost, and attention bell.
+- **Sidebar** (right, shown at 112 columns or wider): displays the active
+  session, goal, todos, subagents, background jobs, and file changes. Press
+  `Ctrl+1` to toggle the Environment section and inspect loaded context files.
 
 ## 3. One-shot mode
 
-For quick prompts without the TUI:
+Run a single turn and print the result to stdout:
 
 ```sh
 mew run --provider opencode-zen "explain what this project does"
 ```
 
-This runs a single turn, prints the response, and exits. Useful for
-scripting and quick questions.
+For a machine-readable JSONL event stream on stdout, pass `--format jsonl`:
 
-For a machine-readable stream, use `mew run --format jsonl "prompt"`.
-Each stdout line is a JSON event. `run_started` identifies the session and
-model; `text_delta` contains response text; `model_response` reports a model
-response and its usage; `tool_start`/`tool_end` and
-`nested_tool_start`/`nested_tool_end` track tool calls. The final
-`run_finished` event reports status, elapsed milliseconds, call counts, usage
-and cost. Events after `run_started` carry elapsed milliseconds. Early command
-or configuration errors can occur before the stream starts; check the exit
-status and stderr as well. Diagnostic output stays on stderr.
+```sh
+mew run --format jsonl "explain what this project does"
+```
 
-Tool-end events report text output size in bytes when available. The summary
-records the largest top-level and nested text outputs separately. A nested output
-stays inside Python unless the cell prints it, so its size is not necessarily
-the amount sent to the model.
+Key JSONL events:
 
-The stream also reports retries, permission decisions, cancelled questions and
-goals, and subagent starts and finishes. Noninteractive runs automatically
-allow permission prompts.
+- `run_started`: identifies the session and model.
+- `text_delta`: streams assistant response text.
+- `model_response`: reports each model response and its token usage.
+- `tool_start` / `tool_end` and `nested_tool_start` / `nested_tool_end`: track
+  top-level and Python-nested tool calls, including `elapsed_ms` and text output
+  `output_bytes`.
+- `run_finished`: reports final status, `elapsed_ms`, call counts, top-level
+  usage and cost, and the largest top-level and nested output sizes.
 
-Usage and call totals cover the top-level agent, including tools called from
-Python. They do not include child subagent usage. Usage and cost come from the
-provider and may be incomplete. Tool inputs and outputs are not included in
-the event stream; the response text and error messages can contain task data.
+Noninteractive runs emit retries, permission decisions, cancelled questions and
+goals, and subagent lifecycle events. Every event after `run_started` carries
+`elapsed_ms`. Diagnostic output goes to stderr, so check both the exit status
+and stderr when a command fails before streaming starts.
+
+Noninteractive runs allow permission prompts automatically, though explicit
+`deny` rules in `config.toml` still block matching tool calls. Usage and call
+totals include tools invoked from Python, exclude child subagents, and rely on
+provider-reported figures that may be incomplete. Nested tool outputs stay
+inside Python unless printed, so `output_bytes` can exceed what enters the
+model's context. Tool arguments and outputs stay out of the JSONL stream, though
+assistant text and error messages can include task data.
 
 ## 4. Switch models
 
-Inside the TUI, press `Ctrl+Space` to open the command palette, then select
-"Switch Model" and choose a model. You can also use `/model provider/model`
-with a model from one of your configured providers. The picker lists
-available models from those providers and the built-in catalog. See [Providers](/docs/using-mew/providers/) for the full
-list.
+Press `Ctrl+Space` in the TUI and select **Switch Model**, or run
+`/model provider/model`. The picker lists models from your configured providers
+and the built-in catalog. See [Providers](/docs/using-mew/providers/) for the
+full list.
 
 ## 5. Set thinking variant
 
-For models that support configurable reasoning:
+For models with configurable reasoning, run:
 
-```
+```text
 /thinking high
 ```
 
-Or use `Ctrl+Space` and select "Thinking Variant". In that picker,
-`Ctrl+Alt+P` cycles through available options. See
-[Providers](/docs/using-mew/providers/#thinking-variants) for which models support
-which variants.
+You can also press `Ctrl+Space` and select **Thinking Variant**. Inside that
+picker, `Ctrl+Alt+P` cycles through the model's supported variants. See
+[Providers](/docs/using-mew/providers/#thinking-variants) for supported models
+and options.
 
 ## 6. Cancel a stream
 
-Press `Esc` twice to cancel the current response. The first `Esc` shows
-a hint in the status bar ("esc again to stop agent"). The second cancels
-immediately.
+Press `Esc` twice to cancel an active turn. The first `Esc` displays `"esc again
+to stop agent"` in the status bar; the second cancels the stream immediately.
 
 ## 7. Review costs
 
-```
+```text
 /cost
 ```
 
-Shows accumulated token counts and estimated cost for the session.
+Prints accumulated token counts and estimated cost for the current session.
 
 ## Where to go next
 
-- [Slash Commands](/docs/using-mew/slash-commands/): full command reference
-- [Keyboard Shortcuts](/docs/getting-started/keyboard-shortcuts/): terminal keybindings
-- [Tips & Tricks](/docs/using-mew/tips-and-tricks/): power-user features and
-  workflows
-- [Permissions](/docs/using-mew/permissions/): how tool approval works
+- [Slash Commands](/docs/using-mew/slash-commands/): full command reference.
+- [Keyboard Shortcuts](/docs/getting-started/keyboard-shortcuts/): terminal keybindings.
+- [Tips & Tricks](/docs/using-mew/tips-and-tricks/): power-user workflows.
+- [Permissions](/docs/using-mew/permissions/): how tool approval works.

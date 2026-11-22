@@ -1,11 +1,10 @@
 ---
 title: Mew Docs
-description: Install mew, choose a client, and learn how to guide your agent.
+description: Install Mew, choose a client, and learn how to guide your agent.
 ---
 
-Mew is an AI coding assistant that runs through a daemon. The daemon owns your
-sessions and connects to the model provider you configure. The terminal,
-desktop, browser, and iOS clients give you different ways to work with it.
+Mew is an AI coding assistant backed by a local daemon. The daemon owns your
+sessions and connects to the model provider you configure.
 
 ## Get started
 
@@ -23,10 +22,10 @@ desktop, browser, and iOS clients give you different ways to work with it.
 | Browser | [Start and connect to the Web UI](/docs/using-mew/web-ui/). |
 | iOS | [Pair with your daemon from the iOS app](/docs/using-mew/ios-app/). |
 
-## Make it yours
+## Customize
 
 Use [context files](/docs/getting-started/context-files/) for project
 instructions and [skills](/docs/using-mew/skills/) for repeatable workflows.
-Set [permissions](/docs/using-mew/permissions/) to control what tools can do
-without asking. The [architecture guide](/docs/development/dev-architecture/)
-shows how the pieces fit together if you want to work on mew itself.
+Configure [permissions](/docs/using-mew/permissions/) to control which actions
+run automatically. Read the [architecture guide](/docs/development/dev-architecture/)
+to work on Mew itself.

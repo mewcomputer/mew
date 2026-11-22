@@ -1,101 +1,88 @@
 ---
 title: Comparing Features
-description: How mew's overlapping features differ, and when to reach for each.
+description: How Mew's overlapping features differ and when to use each.
 ---
 
-Several mew features look similar from the outside. This page lays out the
-real differences so you can pick the right one. Each section links to the
-detailed page for the feature.
+## Personas, skills, and subagents
 
-## Personas vs skills vs subagents
-
-All three are markdown files, all three live under `.mew/` (and friends),
-and all three change how the agent behaves. The confusion is earned. They
-differ on three axes: who they affect, when they apply, and what they
-inject.
+Personas, skills, and subagents all use Markdown files under `.mew/` and nearby
+directories, and all three shape agent behavior. They differ in scope, timing,
+and how they enter context:
 
 |                     | Persona                       | Skill                              | Subagent                       |
 |---------------------|-------------------------------|------------------------------------|--------------------------------|
-| Affects             | The main agent                | Any agent that loads it            | A fresh child agent            |
-| When it applies     | Whole session, until switched | One turn, when the model loads it  | A bounded task, then it exits  |
-| What gets injected  | System prompt (every turn)    | A tool result (that turn only)     | Its own separate conversation  |
-| Own context window  | No, shares yours               | No, shares yours                    | Yes, isolated                  |
-| Can pin a model     | Yes (`mew.model`)             | No                                 | Yes (`model` / tier keyword)   |
+| Affects             | Main agent                    | Any agent that loads it            | Child agent                    |
+| When it applies     | Whole session, until switched | On the turn it is loaded           | Bounded task until exit        |
+| Context mechanism   | Prepended to system prompt    | Tool result or `@skill:` inline    | Isolated child session         |
+| Own context window  | Shared with main session      | Shared with caller session         | Isolated                       |
+| Can pin a model     | Yes (`mew.model`)             | No                                 | Yes (`model` or tier keyword)  |
 | Can restrict tools  | Yes (`mew.tools`)             | No                                 | Yes (`tools`)                  |
-| Good for            | A mode of working             | A repeatable procedure             | Heavy or noisy work            |
+| Best used for       | Mode of working               | Repeatable procedure               | Noisy or parallel subtasks     |
 
-**Pick by intent:**
+Choose by intent:
 
-- You want to flip how the agent works for the rest of the session
-  (e.g. planner vs builder). Use a [persona](/docs/using-mew/personas/).
-- You want the agent to follow a checklist only when the task calls for
-  it, without paying for it on every turn. Use a
-  [skill](/docs/using-mew/skills/).
-- You want to hand off a chunk of work, keep its logs and file reads out
-  of your main context, and get a summary back. Use a
-  [subagent](/docs/using-mew/subagents/).
+- **Switch how the main agent works across turns** (for example, planner vs.
+  builder): use a [persona](/docs/using-mew/personas/).
+- **Load a checklist only when needed** so it stays out of unrelated turns: use
+  a [skill](/docs/using-mew/skills/).
+- **Delegate a focused subtask** so file reads and command output stay out of
+  your main context: use a [subagent](/docs/using-mew/subagents/).
 
-A subagent can load skills and run under its own persona, so these compose
-rather than compete.
+Subagents carry their own Markdown system prompt (independent of personas) and
+can load skills whenever `skill` is in their tool list.
 
-## Where do my instructions go?
+## Where instructions live
 
-Three places take free-text instructions: the
-[context file](/docs/getting-started/context-files/), a persona body, and a
-skill body. They serve different lifetimes.
+Context files, persona bodies, and skill bodies accept free-text instructions
+with different lifetimes:
 
-| Put it in a...                                  | When                                                       |
-|-------------------------------------------------|------------------------------------------------------------|
-| Context file (`AGENTS.md` / `CLAUDE.md`)        | Always-on facts: build commands, architecture, conventions |
-| [Persona](/docs/using-mew/personas/) body       | A switchable mode of working that changes the system prompt |
-| [Skill](/docs/using-mew/skills/) body           | A multi-step procedure the agent follows only when relevant |
+| File | Lifetime and use |
+|------|------------------|
+| [Context file](/docs/getting-started/context-files/) (`AGENTS.md` / `CLAUDE.md`) | Always in the system prompt: build commands, layout, conventions |
+| [Persona](/docs/using-mew/personas/) body | Prepended to the system prompt while that persona is active |
+| [Skill](/docs/using-mew/skills/) body | Name and description stay in the system prompt; body loads on demand |
 
-Rule of thumb: if it should be true on every turn, it goes in the context
-file. If it depends on the mode you are in, it goes in a persona. If it is
-a procedure you only sometimes need, it goes in a skill.
+Put permanent project facts in a context file, mode-specific instructions in a
+persona, and task-specific procedures in a skill.
 
-Context files and persona bodies both end up in the system prompt. Skills
-do not: they enter context as a tool result on the turn the model loads
-them, which is what keeps your system prompt small.
+## Plugins and MCP servers
 
-## Plugins vs MCP servers
-
-Both can add tools. Plugins run as local subprocesses. MCP servers can
-run locally or connect over HTTP.
+Both plugins and MCP servers add tools. Plugins run as local subprocesses using
+Mew's JSON-RPC protocol; MCP servers run locally or over HTTP. Daemon chat and
+`mew run` currently use a no-op hook dispatcher, so bare plugins are
+experimental while MCP servers are active today.
 
 |                       | Plugin                                  | MCP server                              |
 |-----------------------|-----------------------------------------|-----------------------------------------|
-| Protocol              | mew's own JSON-RPC                      | The standard MCP protocol               |
+| Protocol              | Mew JSON-RPC                            | Model Context Protocol                  |
 | Adds tools            | Yes                                     | Yes                                     |
 | Lifecycle hooks       | Yes, including prompt and request hooks | No                                      |
 | Registers slash cmds  | Yes                                     | No                                      |
 | Mutates requests      | Yes                                     | No                                      |
-| Persistent storage    | Yes, per-plugin key-value               | No (state lives inside the server)      |
-| Tool sensitivity      | Set per tool                            | `Mutating`                       |
-| Transport             | stdin/stdout subprocess                 | stdio subprocess or HTTP                |
-| Good for              | Deep integration, telemetry, policy     | Adding off-the-shelf tools              |
+| Persistent storage    | Yes, per-plugin key-value               | No (managed by server)                  |
+| Tool sensitivity      | `Mutating`                              | `Dangerous`                             |
+| Transport             | stdin/stdout subprocess                 | stdio subprocess or streamable HTTP     |
+| Best used for         | Lifecycle hooks, policy, telemetry      | Connecting external tool servers        |
 
-**Pick by intent:**
+Choose by intent:
 
-- You just want more tools, especially ones someone else already wrote.
-  Use an [MCP server](/docs/using-mew/mcp-servers/).
-- You need to observe or mutate the agent lifecycle, ship a custom
-  permission policy, or keep state across turns. Use a
-  [plugin](/docs/using-mew/plugins/).
+- **Connect existing external tools** such as databases or APIs: use an
+  [MCP server](/docs/using-mew/mcp-servers/).
+- **Experiment with lifecycle hooks, custom slash commands, or plugin storage**:
+  see [Plugins](/docs/using-mew/plugins/).
 
-## Tools vs slash commands
+## Tools and slash commands
 
-Both extend what mew can do, but they are triggered by different actors.
+Tools and slash commands both extend Mew, triggered by different actors:
 
 |                  | Tool                                  | Slash command                    |
 |------------------|---------------------------------------|----------------------------------|
-| Triggered by     | The model, during a turn              | You, typing in the input box     |
-| Model-facing     | Yes, with a JSON-schema and params    | No                               |
-| Permission-gated | Yes (sensitivity + rules)             | No                               |
+| Triggered by     | The model, during a turn              | You, in the composer             |
+| Model-facing     | Yes, with JSON Schema parameters      | No                               |
+| Permission-gated | Yes (sensitivity and rules)           | No                               |
 | Examples         | `read`, `bash`, `subagent_start`      | `/model`, `/persona`, `/clear`   |
 
-If the model should do it autonomously while working, it is a
-[tool](/docs/using-mew/tools/). If it is a shortcut for you to steer mew,
-it is a [slash command](/docs/using-mew/slash-commands/). Plugins can
-register slash commands too, which is how user-facing shortcuts get added
-without changing mew itself.
+Use a [tool](/docs/using-mew/tools/) for actions the model runs during a turn,
+and a [slash command](/docs/using-mew/slash-commands/) for shortcuts you run
+directly. Plugins can also register custom slash commands when the hook runtime
+is active.

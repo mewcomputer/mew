@@ -1,330 +1,270 @@
 ---
 title: Architecture
-description: Internal architecture and crate structure for mew contributors.
+description: Internal architecture and crate structure for Mew contributors.
 ---
 
-mew is a multi-frontend agent server. The runtime path is
-**Frontend → Transport → Daemon → Session → Agent → Provider**. The
-terminal, browser, desktop, and iOS clients use the same daemon and
-wire protocol.
-
-This doc walks through how input reaches a provider stream, how the daemon
-owns sessions, how tool calls are collected and executed, and how the agent
-relates to the rest of the system. For the ratatui event loop, display store,
-and streaming markdown implementation, see
+Mew is a multi-frontend agent server following the runtime path
+`Frontend -> Transport -> Daemon -> Session -> Agent -> Provider`. Terminal,
+browser, desktop, and iOS clients share one daemon and wire protocol. For the
+ratatui event loop, display store, and streaming Markdown implementation, see
 [TUI Architecture](/docs/development/dev-tui/).
 
 ## The pipeline
 
-```
-Browser/Frontend → WebSocket → mew-daemon (Unix socket or TCP)
-                                      │
-                         SessionManager::create / attach
-                                      │
-                         Session { agent, clients, turn_lock }
-                                      │
-                         agent.run_with_parts(...) → AgentEvent
-                                      │
-                         translate_event → ServerMessage
-                                      │
-                         session.broadcast → all attached clients
-```
-
-The web UI reaches the daemon through `mew-web-bridge`, a small TCP+WS
-bridge that also serves the built React app:
-
-```
-Browser ──ws/http──▶ mew-web-bridge (127.0.0.1:9847)
-                         │
-                         └── unix ws ──▶ mew-daemon
+```text
+Frontend -> WebSocket -> mew-daemon (Unix socket or TCP)
+                             |
+                SessionManager::create / attach
+                             |
+                Session { agent, clients, turn_lock }
+                             |
+                agent.run_with_parts(...) -> AgentEvent
+                             |
+                translate_event -> ServerMessage
+                             |
+                session.broadcast -> all attached clients
 ```
 
-For mobile/remote access, the daemon can also listen over iroh (P2P
-QUIC with hole punching and relays). Build the CLI with the `iroh` feature
-to enable `mew daemon --remote`. The `mew pair` command generates a QR code that the iOS app scans to
-connect. See [iOS App](/docs/using-mew/ios-app/) and [Mobile Core
-Development](/docs/development/dev-mobile/) for details.
+The browser UI reaches the daemon through `mew-web-bridge`, a TCP and WebSocket
+bridge serving the compiled React app:
 
-## Crate map
+```text
+Browser --ws/http--> mew-web-bridge (127.0.0.1:9847)
+                         |
+                         +-- unix ws --> mew-daemon
+```
 
-| Crate | Purpose | Key Types |
-|-------|---------|-----------|
-| `mew` | Binary entry point, CLI parsing | `Cli`, `Commands`, `build_provider` |
-| `mew-tui` | Event loop, ratatui UI, App state | `Event`, `EventLoop`, `App`, `Action` |
-| `mew-agent` | Conversation state, tool execution loop | `Agent`, `AgentEvent`, `turn_loop` |
-| `mew-provider` | Provider trait + event stream | `Provider`, `ProviderEvent`, `EventStream` |
-| `mew-tools` | Tool trait + built-ins | `Tool`, `ToolCtx`, `ToolOutput`, `Sensitivity` |
-| `mew-hashline` | Line-anchored edits with hash staleness detection | `Patcher`, `SnapshotStore`, `Patch` |
-| `mew-protocol` | Wire message types | `ClientMessage`, `ServerMessage` |
-| `mew-daemon` | WebSocket server, session ownership | `DaemonServer`, `Session`, `SessionManager` |
-| `mew-mobile-core` | Rust core for iOS (UniFFI) | `MobileCore`, `CoreEvent`, `SessionState` |
-| `mew-web-bridge` | TCP+WS bridge + static UI server | `handle_connection`, `proxy` |
-| `mew-client-core` | Shared session and transport state for native clients | `ClientEngine` |
-| `mew-web-client` | TypeScript client for the wire protocol | `MewClient`, `MewClientEvents` |
+For remote access, builds with the `iroh` feature listen over iroh (QUIC with
+hole punching and relays) via `mew daemon --remote` or `mew daemon --iroh`.
+`mew pair` prints a QR invite for `mew daemon --remote`. See
+[iOS App](/docs/using-mew/ios-app/) and
+[Mobile Core Development](/docs/development/dev-mobile/).
+
+## Native and Electron desktop clients
+
+The native GPUI desktop client (`apps/mew-desktop`) connects to a local daemon
+on loopback port `25566` (overridable with `MEW_DESKTOP_DAEMON_PORT` or
+`MEW_DESKTOP_DAEMON_URL`). `mew-desktop-supervisor` checks WebSocket health on
+that port and attaches to an existing daemon, or spawns and owns `mew daemon`
+for the app's lifetime (`MEW_DESKTOP_DAEMON_BINARY` selects an alternate
+executable). Remote desktop profiles connect over iroh via `mew-client-iroh`.
+
+Browser workbench tabs in the native desktop client embed Chromium via
+`mew-browser-host` and `native/cef-host`, exposing a loopback CDP endpoint to
+`agent-browser` while tracking the active tab per conversation on the daemon.
+Embedded PTY terminal tabs run through `mew-pty`. An opt-in macOS Electron
+shell (`apps/mew-electron`) runs the shared `mew-web-ui` bundle over `mew
+desktop-host`.
+
+## Workspace map
+
+| Member | Purpose | Key types / modules |
+|--------|---------|---------------------|
+| `mew` | CLI binary and TUI/daemon wiring | `Cli`, `Commands`, `build_provider`, `build_tools` |
+| `mew-message` | Canonical messages, parts, tool state, manifests | `Message`, `Part`, `ToolState`, `TurnManifest` |
+| `mew-agent` | Conversation state, turn loop, compaction, todos | `Agent`, `AgentEvent`, `turn_loop` |
+| `mew-provider` | Provider trait, streaming events, OAuth/auth helpers | `Provider`, `ProviderEvent`, `EventStream` |
+| `mew-provider-openai` | OpenAI Chat Completions SSE adapter | `Adapter`, `ToolCallAccumulator`, `RetryPolicy` |
+| `mew-provider-anthropic` | Anthropic Messages SSE adapter | `Adapter` |
+| `mew-provider-responses` | OpenAI Responses and Codex OAuth adapter | `Adapter` |
+| `mew-provider-router` | Tiered router (`nano` / `micro` / `deci`) | `Router`, `Routed` |
+| `mew-provider-fake` | Deterministic scripted test provider | `FakeProvider` |
+| `mew-tools` | Tool trait and built-in tools | `Tool`, `ToolCtx`, `ToolOutput`, `Sensitivity` |
+| `mew-hashline` | Line-anchored edits and 3-way-merge recovery | `Patcher`, `SnapshotStore`, `Patch` |
+| `mew-diff` | Line-level workspace diff calculation | `ChangeStats` |
+| `mew-protocol` | JSON WebSocket wire types and command registry | `ClientMessage`, `ServerMessage`, `PROTOCOL_VERSION` |
+| `mew-daemon` | WebSocket server, session ownership, iroh listener | `DaemonServer`, `Session`, `SessionManager` |
+| `mew-config` | Config, credentials, permissions, shell parsing | `Config`, `State`, `PermissionEngine` |
+| `mew-session` | JSONL transcripts, `meta.json`, `policy.json`, groups | `Writer`, `Reader`, `Meta`, `SessionPolicy` |
+| `mew-catalog` | models.dev catalog and thinking-variant cache | `Catalog`, `Model`, `ThinkingVariant` |
+| `mew-context` | `AGENTS.md` / `CLAUDE.md` discovery and VFS context | `Loader` |
+| `mew-skills` | `SKILL.md` discovery and loading | `Skill`, `Loader` |
+| `mew-personas` | `PERSONA.md` definitions and model/tool policies | `Persona`, `Loader` |
+| `mew-subagents` | Subagent definitions and outcomes | `SubagentDef`, `Loader`, `SubagentOutcome` |
+| `mew-prompts` | Embedded prompt templates and minijinja rendering | `template` |
+| `mew-harness` | Shared Markdown discovery and frontmatter parsing | `load_markdown_dirs_with_extra` |
+| `mew-mcp` | MCP stdio/HTTP client and `McpTool` wrapper | `McpClient`, `McpTool` |
+| `mew-hooks` | Hook dispatcher trait, types, and `PluginHost` | `Dispatcher`, `PluginHost`, `PermissionMode` |
+| `mew-hooks-runtime` | Subprocess JSON-RPC plugin transport | `SubprocessDispatcher` |
+| `mew-ext-broker` | Extension manifests, capabilities, consent, Seatbelt | `ExtensionBroker`, `Capability`, `ConsentState` |
+| `mew-tui` | Ratatui app, event loop, display store, harness | `Event`, `EventLoop`, `App`, `Action` |
+| `mew-raster` | Deterministic ratatui buffer to PNG/MP4 rasterizer | `rasterize` |
+| `ratatui-mdstream` | Streaming Markdown rendering and syntax themes | `MdStream`, `DocumentState`, `RenderCache` |
+| `mew-client-core` | Shared session and reconnect state for native clients | `ClientEngine` |
+| `mew-client-local` | Local WebSocket transport | `LocalWebSocketTransport` |
+| `mew-client-iroh` | Remote iroh WebSocket transport | `IrohWebSocketTransport` |
+| `mew-ui-model` | Shared native UI projection models | `ConversationModel` |
+| `mew-desktop-supervisor` | Loopback daemon attach/spawn lifecycle | `Supervisor` |
+| `mew-browser-host` | Embedded browser abstraction and target tracking | `BrowserHost` |
+| `mew-pty` | Embedded terminal PTY backend | `PtySession` |
+| `apps/mew-desktop` | Native GPUI desktop application | `shell`, `workbench` |
+| `native/cef-host` | macOS CEF helper process and `NSView` bridge | `CefHost` |
+| `mew-web-bridge` | Browser TCP/WS bridge and embedded UI server | `handle_connection`, `proxy` |
+| `mew-mobile-core` | Rust core and UniFFI bindings for iOS | `MobileCore`, `CoreEvent`, `SessionState` |
+| `mew-web-client` | TypeScript wire-protocol client (`@mew/web-client`) | `MewClient`, `MewClientEvents` |
 | `mew-web-ui` | React chat UI | `SessionState`, `VirtualChatSurface` |
-| `mew-config` | config.toml + credentials + permissions | `Config`, `PermissionEngine` |
-| `mew-session` | JSONL session persistence | `Writer`, `Reader`, `Meta` |
-| `mew-catalog` | models.dev catalog with 24h cache | `Catalog`, `Model`, `ThinkingVariant` |
-| `mew-mcp` | MCP server client + McpTool wrapper | `McpClient`, `McpTool` |
-| `mew-hooks-runtime` | Subprocess plugin dispatcher | `SubprocessDispatcher`, `PluginHost` |
-| `mew-context` | Discover `AGENTS.md` / `CLAUDE.md` from cwd up to git root | `ContextResolver` |
-| `mew-skills` | Skill discovery + loading from `.mew/skills`, `.opencode/skills`, etc. | `Skill`, `SkillRegistry` |
-| `mew-personas` | Switchable system prompts + model pinning + tool allowlists | `Persona`, `PersonaLoader` |
-| `ratatui-mdstream` | Streaming markdown to ratatui Lines | `MdStream`, `DocumentState` |
 
 ## Startup: building the agent
 
-The daemon builds an agent for each session using its `AgentBuilder` closure.
-Frontends connect to a session and send prompts. The builder follows
-these steps.
+For each session, the daemon runs its `AgentBuilder` closure:
 
-1. Resolves the model and provider from the session's policy and configured
-   defaults.
-2. Selects an adapter in `crates/mew/src/setup/providers.rs`. The supported
-   provider shapes are `openai`, `anthropic`, and `responses`. Router providers
-   wrap other models behind `Routed`.
-3. Registers tools in `crates/mew/src/setup/agent.rs`. Session configuration
-   determines optional tools such as `skill` and `edit_hashline`.
-4. Adds the daemon's configured MCP tools and applies the session's permission
-   policy.
-5. Sets catalog-derived capabilities and supplies a session writer so
-   messages persist to that session's JSONL log.
+1. Resolve the provider and model from the session's `policy.json`, state, and
+   configured defaults.
+2. Select a provider adapter (`openai`, `anthropic`, or `responses`) in
+   `crates/mew/src/setup/providers.rs`, wrapping router providers with `Routed`.
+3. Register built-in and conditional tools (`skill`, `edit_hashline`, `python`,
+   browser tools) in `crates/mew/src/setup/agent.rs`.
+4. Append the daemon's MCP tools and configure the session's permission engine.
+5. Attach catalog capabilities and a `mew_session::Writer` bound to the
+   session's JSONL transcript.
 
 ## How input becomes a provider stream
 
-Each frontend has its own event loop and display store. The TUI's is covered
-in [TUI Architecture](/docs/development/dev-tui/); here is the daemon-side
-path shared by all frontends.
+See [TUI Architecture](/docs/development/dev-tui/) for TUI key handling. On the
+daemon side, every frontend follows the same path:
 
-1. The user submits a prompt in an attached frontend.
-2. The frontend sends `ClientMessage::SubmitPrompt` with the session and
-   request IDs, text, and attachments. Older clients can use `Prompt`.
-3. The daemon's `handle_connection` looks up the attached `Session` and
-   acquires `session.turn_lock` to serialize turns.
-4. It broadcasts `ServerMessage::UserMessage` to all attached clients so
-   every frontend shows the prompt immediately.
-5. It calls `agent.run_with_parts` with the text, attachment parts, and a
-   cancellation token, and pumps the
-   resulting `AgentEvent`s through `forward_events`.
-6. `translate_event` converts each `AgentEvent` to one or more
-   `ServerMessage`s. `Provider` events become wire provider events;
-   channel-bearing events (`PermissionRequest`, `AskUser`) are assigned a
-   request ID and stashed in `session.pending_permissions` /
-   `pending_ask_user`.
-7. `session.broadcast(msg)` sends the wire event to every attached client.
-8. Each frontend updates its local display store and re-renders.
+1. The frontend sends `ClientMessage::SubmitPrompt` with `session_id`,
+   `request_id`, text, and attachments (older clients may send `Prompt`).
+2. `handle_connection` locates the attached `Session` and acquires
+   `session.turn_lock` to serialize turns.
+3. The daemon broadcasts `ServerMessage::UserMessage` to every attached client.
+4. The daemon calls `agent.run_with_parts` with the prompt parts and a
+   `CancellationToken`, then pumps `AgentEvent`s through `forward_events`.
+5. `translate_event` converts each `AgentEvent` into `ServerMessage` frames.
+   Channel-bearing requests (`PermissionRequest`, `AskUser`, `GoalProposed`,
+   `WorkspacePermissionRequest`) receive a `request_id` stored on `Session`.
+6. `session.broadcast(msg)` fans out every wire event to attached clients so
+   each frontend updates its display store.
 
 ## Web UI
 
-The web UI is a React app served by `mew-web-bridge`. It uses the
-`mew-web-client` TypeScript library to speak the daemon wire protocol and
-Zustand for local state. Key pieces:
-
-- **`mew-web-bridge`** (Rust): listens on TCP for browser HTTP/WebSocket
-  connections, proxies WebSocket frames to the daemon's Unix socket, and
-  serves the built React app from embedded `mew-web-ui/dist/` assets.
-- **`mew-web-client`** (TypeScript): typed `MewClient` class that manages the
-  WebSocket, dispatches events, and provides promise-based request/response
-  helpers.
-- **`mew-web-ui`** (TypeScript/React): React app with TanStack Router. The
-  `SessionState` Zustand store holds messages, streaming state, model
-  selection, and the session list; `bridgeClientToStore` wires client events
-  to store actions.
-
-The web UI supports session switching through a sidebar rail, model switching
-via the `ModelPill` component, and permission/ask-user modals that any attached
-client can answer. See [Web UI Development](/docs/development/dev-web/) for
-build commands, component inventory, and the end-to-end event checklist.
+`mew-web-bridge` serves the compiled React bundle from embedded
+`mew-web-ui/dist/` assets and proxies browser WebSocket connections to the
+daemon's Unix socket. `mew-web-ui` drives `MewClient` (`@mew/web-client`),
+stores session state in Zustand (`SessionState` via `bridgeClientToStore`), and
+renders sessions through `components/session-rail.tsx`, `components/model-pill.tsx`,
+and permission/question modals. See
+[Web UI Development](/docs/development/dev-web/) for build recipes and the
+event checklist.
 
 ## The turn loop
 
-`turn_loop` (`turn.rs`) is the core agent loop:
+`turn_loop` (`crates/mew-agent/src/turn.rs`) executes each turn:
 
-1. Build tool definitions from the agent's tool map.
-2. Clone messages, apply `on_chat_message` hook, strip empty text parts.
-3. Check if context compaction is needed (estimated tokens vs threshold).
-4. Build the request: system prompt, messages, tools, reasoning config.
-5. Call `provider.stream(req)` to get an `EventStream`.
-6. Stream events until the stream ends or cancellation:
-   - `PartStart`: create a new assistant message part.
-   - `PartDelta`: append content to the current part.
-   - `PartEnd`: finalize the part.
-   - `MessageEnd`: record finish reason + usage.
-7. After the stream ends: check for pending tool calls.
-   - If no tool calls: end the turn.
-   - If tool calls: execute them sequentially, then loop back for another
-     provider turn.
+1. Build tool definitions from the agent's active tool map.
+2. Clone history messages, run `on_chat_message`, and strip empty text parts.
+3. Run context compaction when estimated tokens cross the model's threshold.
+4. Construct the provider `Request` (system prompt, messages, tools, reasoning).
+5. Call `provider.stream(req)` to obtain an `EventStream`.
+6. Consume streaming events (`PartStart`, `PartDelta`, `PartEnd`, `MessageEnd`).
+7. If tool calls are pending, run `execute_pending_tool_calls` sequentially and
+   loop back to step 1; otherwise end the turn.
 
-Tool execution happens in `execute_pending_tool_calls`. Each tool runs
-sequentially. Permission requests are emitted as `AgentEvent::PermissionRequest`
-with an `oneshot::Sender`. The agent blocks until the user responds.
+During tool execution, channel-bearing events block on a `oneshot::Sender`
+until an attached client responds or the turn cancels.
 
 ## Hashline edits
 
-mew implements line-anchored file edits in `crates/mew-hashline`. The
-high-level flow is:
+`crates/mew-hashline` powers line-anchored edits:
 
-1. `read` records a snapshot of the file content and returns a
-   `[path#hash]` header plus numbered lines.
-2. The model calls `edit_hashline` with one or more `[path#hash]` sections
-   and operations like `SWAP`, `DEL`, `INS.*`, `SWAP.BLK`, `REM`, or `MV`.
-3. `mew-hashline::Patcher` preflights every section in memory: it validates
-   the hash, resolves block ops, checks seen-line bounds, and applies the
-   edits to LF-normalized text.
-4. If the live file has drifted, the patcher tries 3-way-merge recovery from
-   the in-memory `SnapshotStore`.
-5. Only when every section prepares successfully does the patcher commit
-   writes, deletes, and moves.
+1. `read` records a snapshot and emits numbered lines with a `[path#hash]` header.
+2. The model invokes `edit_hashline` with section headers and operations
+   (`SWAP`, `DEL`, `INS.*`, `SWAP.BLK`, `DEL.BLK`, `INS.BLK.POST`, `REM`, `MV`).
+3. `Patcher` prepares every section in memory (hash validation, tree-sitter
+   block resolution, seen-line bounds check, LF normalization).
+4. On hash drift, `Patcher` attempts 3-way-merge recovery using the in-memory
+   `SnapshotStore`.
+5. Once all sections prepare cleanly, `Patcher` commits writes, deletes, and
+   moves through the `HashlineFs` trait.
 
-The crate is filesystem-agnostic: it calls a small `HashlineFs` trait. The
-`edit_hashline` tool provides a tokio-fs implementation. See
-[Hashline Internals](/docs/development/dev-hashline/) for the full architecture and
-extension points.
+See [Hashline Internals](/docs/development/dev-hashline/) for details.
 
 ## AgentEvent variants
 
-The daemon translates `AgentEvent` into `ServerMessage` and broadcasts it to
-attached frontends. The table lists common variants.
+`AgentEvent` (`crates/mew-agent/src/lib.rs`) carries streaming, tool, and
+lifecycle updates from the agent to `translate_event`:
 
 | Variant | Purpose |
 |---------|---------|
-| `Provider(ProviderEvent)` | Raw streaming event from the provider |
-| `ToolStart { call_id }` | Tool execution started |
-| `ToolEnd { call_id, success }` | Tool execution finished |
-| `PartUpdated { part_id, part }` | A part's content/state changed |
-| `PermissionRequest { call, tx }` | Request user approval (oneshot channel) |
-| `SubagentStart { ... }` | A subagent was spawned |
-| `SubagentStatus { ... }` | Subagent progress update |
-| `SubagentEnd { ... }` | Subagent finished |
-| `TodosUpdated { todos }` | Todo list changed |
-| `JobUpdate { ... }` | Background shell job state changed |
-| `Error(String)` | Terminal error |
-| `AskUser { questions, tx }` | Ask the user free-text questions |
-
-Channel-bearing variants (`PermissionRequest`, `AskUser`) use `oneshot::Sender`
-to receive the user's response. The daemon turns these into ID-paired wire
-requests via `ServerMessage::PermissionRequest` / `AskUserRequest`.
+| `Provider(ProviderEvent)` | Raw provider stream event |
+| `ToolStart` / `ToolEnd` | Top-level tool execution boundaries |
+| `NestedToolStart` / `NestedToolEnd` | Nested tool calls inside a Python cell |
+| `ToolProgress` | Intermediate tool output chunk |
+| `PartUpdated` | Updated message part content or tool state |
+| `PermissionRequest` / `SubagentPermissionRequest` | Tool approval request (with `oneshot::Sender`) |
+| `WorkspacePermissionRequest` | Outside-workspace path approval (with `oneshot::Sender`) |
+| `AskUser` / `SubagentAskUser` | User question prompt (with `oneshot::Sender`) |
+| `GoalProposed` | Goal approval prompt (with `oneshot::Sender`) |
+| `SubagentStart` / `SubagentProgress` / `SubagentStatus` / `SubagentEnd` | Subagent lifecycle and progress |
+| `ChildGuidanceContinuation` | Accepted guidance continued a child run |
+| `TodosUpdated` / `FlaggedFilesChanged` / `FileDelta` | Sidebar todos, flagged files, and diff stats |
+| `JobUpdate` | Background shell job state update |
+| `Error(String)` | Terminal turn error |
 
 ## Sessions and multisession
 
-The daemon owns every session. Frontends connect over WebSocket and ask to
-`NewSession`, `AttachSession`, or `ListSessions`. A session ID is a ULID
-prefixed with `sess_`, generated by `SessionManager::create` and persisted in
-the session directory.
+The daemon owns every session. Frontends send `NewSession`, `AttachSession`, or
+`ListSessions`. `SessionManager::create` generates a `sess_`-prefixed ULID and
+persists `session.jsonl`, `meta.json`, `policy.json`, and `todos.json`.
 
-Multi-session support is implemented today: `SessionManager` maintains an
-`active` map of in-memory sessions and can resume idle sessions from disk on
-demand. The web UI exposes this through a session rail (`SessionRail.tsx`) that
-lists sessions, attaches to them, renames them, and deletes them.
+`SessionManager` holds active sessions in memory (`SessionManager.active`) and
+reloads unloaded sessions from `mew_session::session_dir()` on demand. Empty
+sessions (zero messages) are omitted from `ListSessions`.
 
 ### One session, many clients
 
-A WebSocket connection is bound to exactly one session, but a session can have
-many attached clients at the same time. `Session::attach_client` assigns each
-client a monotonically increasing `client_id`. `Session::broadcast` sends every
-server message to all attached clients, dropping any that have disconnected.
+Each WebSocket connection binds to one session, while a session can have any
+number of attached clients (`Session.clients`). `Session::broadcast` forwards
+live events (`UserMessage`, provider deltas, tool events, `RequestResolved`) to
+every attached client, while `SessionHistoryPage` goes only to the newly
+attached client.
 
-This means you can have the web UI and another frontend viewing the same
-conversation simultaneously. All clients see `UserMessage`, tool progress, and
-`RequestResolved`. History pages are sent only to the client that just
-attached; other clients already have the state.
+### Session switching and ownership
 
-### Active vs idle sessions
-
-| State | Where it lives | How it is reached |
-|-------|----------------|-------------------|
-| Active | `SessionManager.active` | In memory while attached or running work, or until the daemon unloads an unused runtime |
-| Unloaded | `mew_session::session_dir()/<id>/` | On disk. Loaded into `active` by `AttachSession` |
-| Empty | The session has no messages | Omitted from session lists |
-
-`SessionManager::list()` returns both active and idle top-level sessions as
-`SessionInfo` records, including model, provider, created/last-message times,
-summary, and attached client count.
-
-### Session switching
-
-A single frontend connection can switch sessions by sending a new
-`NewSession` or `AttachSession`. The web UI keeps `sessionId` in `localStorage`
-and re-attaches on reload; the session rail lets the user jump between
-sessions without reconnecting the WebSocket.
-
-Wire messages that change or inspect sessions:
-
-| Message | Purpose |
-|---------|---------|
-| `NewSession { cwd }` | Create a fresh session |
-| `AttachSession { session_id }` | Attach to an active or idle session |
-| `ListSessions` | List all top-level sessions |
-| `DeleteSession { session_id }` | Delete a session from disk and memory |
-| `RenameSession { session_id, title }` | Set a custom title |
-
-### State ownership
+A connection switches sessions by sending `NewSession { cwd, client_kind }` or
+`AttachSession { session_id, client_kind }`. `ListSessions`, `DeleteSession`,
+`DeleteSessionConfirmed`, and `RenameSession` manage saved sessions.
 
 | State | Owner |
 |-------|-------|
-| Canonical message history | Daemon `Agent.messages` + `mew_session::Writer` JSONL |
-| Session metadata (title, summary, timestamps) | `meta.json` on disk |
-| Active session registry | `SessionManager.active` in the daemon |
-| Per-session load lock | `SessionManager.loading` |
-| Attached client list | `Session.clients` in the daemon |
-| Pending permission / ask-user requests | `Session.pending_permissions` / `pending_ask_user` |
-| Display/render state | Each frontend (TUI `App`, web UI store) |
-| Model/provider per session | `Session.model` / `Session.provider` |
-| Permission mode per session | `Agent.permission_mode` |
+| Canonical message history | `Agent.messages` and `mew_session::Writer` JSONL |
+| Session metadata | `meta.json` |
+| Effective model, persona, thinking, permission | `policy.json` (`SessionPolicy`) |
+| Active session registry and load lock | `SessionManager.active` / `SessionManager.loading` |
+| Attached clients and pending prompts | `Session.clients`, `pending_permissions`, `pending_ask_user` |
+| Display state | Frontend (`App`, `ClientEngine`, Zustand `SessionState`) |
 
 ### Lifecycle
 
-```
+```text
 Client connects
-  → NewSession { cwd }  or  AttachSession { session_id }
-  → SessionManager creates or resumes the session
-  → SessionReady + recent history (to attaching client)
-  → Prompt and streaming events broadcast to all clients
+  -> NewSession { cwd, client_kind } or AttachSession { session_id, client_kind }
+  -> SessionManager creates or reloads session
+  -> SessionReady + SessionHistoryPage (to attaching client)
+  -> SubmitPrompt / Prompt -> events broadcast to all attached clients
 Client disconnects
-  → detach_client
-  → after the last client: check every 30s until the runtime is unused
+  -> detach_client
+  -> check every 30s after last client leaves; unload when idle
 ```
 
-Idle sessions are loaded from disk on `AttachSession`. The JSONL log is replayed
-through `Agent::load_messages`, and the writer is reopened so new messages
-append to the same file. Subagent sessions (`meta.depth != 0`) are excluded from
-`ListSessions` and cannot be attached directly.
+Subagent sessions (`meta.depth != 0`) are hidden from `ListSessions` and cannot
+be attached directly.
 
-## Multitenancy and isolation
+## Scope and isolation
 
-mew is single-user, multi-session. The daemon runs as the local user and all
-sessions share the same OS identity, config file, credential resolution, and
-MCP server pool. There is no authentication or per-user sandboxing.
+Mew is a single-user daemon supporting multiple concurrent sessions. Sessions
+run under the daemon's OS user and share `config.toml`, credentials, the MCP
+server pool, and the hook dispatcher.
 
-Session-level isolation exists for the things that matter to a conversation:
-
-- **Message history**: each session has its own JSONL log and `Agent.messages`.
-- **Model/provider**: `Session.model` / `Session.provider` are per-session, and
-  `SwitchModel` only affects the attached session.
-- **Permission mode**: `SetPermissionMode` is per-session.
-- **Workspace roots**: each session's agent gets its own `workspace_roots`
-  (defaulting to the `cwd` supplied in `NewSession` or the current directory).
-- **Turn lock**: `session.turn_lock` serializes turns within a session, but
-  different sessions run independently.
-
-What is **not** isolated:
-
-- **Config and credentials**: all sessions read the same `config.toml`,
-  credentials, and provider defaults.
-- **MCP servers**: MCP tools are registered once per daemon startup and shared
-  across sessions.
-- **Hooks/dispatcher**: the same dispatcher instance is used for every session.
-
-This is enough for one person to run many independent conversations, but it is
-not multi-tenant in the SaaS sense. A shared daemon would need user accounts,
-namespaces, and per-session config overrides before it could safely serve
-multiple people.
+Each session isolates its own conversation history, `cwd`, `workspace_roots`,
+`policy.json` (model, provider, persona, thinking variant, permission mode),
+and `turn_lock`. Serving untrusted multi-user traffic would require separate
+user accounts, config isolation, and per-tenant process boundaries.
 
 ## Continuing a session in another client
 
-The TUI and web UI both attach to existing sessions. The daemon broadcasts
-client presence and keeps a detached session in memory while its turn or
-background shell jobs are running. See [Session handover](/docs/development/handover/)
-for the commands and lifecycle.
-
-See [Daemon Protocol](/docs/development/dev-protocol/) for the wire messages.
+TUI, desktop, browser, and iOS clients can attach to the same daemon session.
+Detached sessions continue running active turns and background jobs while the
+daemon checks idle runtimes every 30 seconds. See
+[Session handover](/docs/development/handover/) and
+[Daemon Protocol](/docs/development/dev-protocol/).

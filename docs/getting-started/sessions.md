@@ -3,34 +3,33 @@ title: Sessions
 description: Find and resume conversations, clear context, and compact history.
 ---
 
-Mew saves conversations to disk as you work. You can reopen a past
-conversation, archive it, or clear the context used by the model.
+Mew saves conversations to disk as you work so you can reopen a past session,
+archive it, or manage its context.
 
 ## Where sessions live
 
-Sessions are stored as JSONL files under a per-session directory:
+Mew writes each session as JSON files under its own ULID directory:
 
-```
+```text
 ~/.local/share/mew/sessions/<session-id>/
-  ├── session.jsonl    # one JSON message per line
+  ├── session.jsonl    # one JSON event/message per line
   ├── meta.json        # session metadata
-  └── todos.json       # session todo list (if any)
+  ├── policy.json      # persisted model, persona, thinking, and permission policy
+  └── todos.json       # session todo list (when present)
 ```
 
-On macOS and Linux, Mew uses `~/.local/share/mew/sessions/` by default.
-With `XDG_DATA_HOME` set, it uses `$XDG_DATA_HOME/mew/sessions/`.
-Setting `MEW_DATA_DIR` changes the parent data directory. To override
-the session directory directly, set `MEW_SESSION_DIR` before launching
-Mew. For a remote session, the daemon stores these files on its host.
+On macOS and Linux, Mew defaults to `~/.local/share/mew/sessions/`. Set
+`XDG_DATA_HOME` to move it to `$XDG_DATA_HOME/mew/sessions/`, `MEW_DATA_DIR` to
+change the parent data directory, or `MEW_SESSION_DIR` to override the session
+directory directly. Remote daemons store sessions on the daemon host.
 
-Subagent sessions nest under their parent:
+Subagent sessions nest beneath their parent session:
 
-```
+```text
 sessions/<parent-id>/subagents/<child-id>/
 ```
 
-The `/sessions` command lists top-level sessions only. Subagent sessions
-are hidden from the list.
+Session listings show top-level conversations and omit subagent sessions.
 
 ## Session metadata
 
@@ -38,71 +37,69 @@ are hidden from the list.
 
 | Field | Description |
 |-------|-------------|
-| `id` | Session identifier (ULID) |
-| `model` | Model used for this session |
-| `parent_session_id` | Set for subagent sessions |
-| `children_session_ids` | Subagent sessions spawned under this one |
-| `depth` | Nesting level (0 for top-level) |
-| `subagent_name` | Subagent type name (if applicable) |
-| `created_at` | Unix timestamp in milliseconds |
+| `id` | Session ULID (sorts chronologically by creation time) |
+| `created_at` | Creation timestamp in Unix milliseconds |
+| `last_message_at` | Timestamp of the latest message in Unix milliseconds |
+| `custom_title` | User-assigned title |
+| `summary` | Auto-generated conversation summary |
+| `cwd` | Session working directory |
+| `model` | Last model used in the session |
+| `parent_session_id` | Parent ULID for subagent sessions |
+| `children_session_ids` | Spawned subagent session IDs |
+| `depth` | Nesting depth (`0` for top-level sessions) |
+| `subagent_name` | Subagent definition name (when applicable) |
+| `last_turn_failed` | Whether the latest turn ended with an error |
+| `archived` | Whether the session is archived |
+| `group_id` | Sidebar group identifier |
+| `pinned` | Exempts the session from auto-archiving |
+| `change_stats` | Cumulative diff line counts |
+| `usage` | Cumulative token counts, cost, and turn count |
+| `context_tokens` | Latest request prompt token count |
 
 ## Listing sessions
 
-```
+```text
 /sessions
 ```
 
-Opens the terminal conversation picker. Type to filter conversations
-and press `Enter` to open one.
+Opens the terminal conversation picker. Type to filter by title or metadata,
+then press `Enter` to attach.
 
-- `Tab` switches between current and archived conversations.
-- `Ctrl+Alt+A` archives or restores the selected conversation.
-- `Ctrl+Alt+P` toggles the selected conversation's pin.
+- `Tab`: switch between active and archived conversations.
+- `Ctrl+Alt+A`: archive or restore the selected conversation.
+- `Ctrl+Alt+P`: pin or unpin the selected conversation.
 
 ## Resuming a session
 
-```
+```text
 /resume <session-id>
 ```
 
-Attaches to a conversation by ID and restores its history and todos.
-The session ID is the directory name under the session storage root.
-Run `/resume` without an ID to open the conversation picker.
+Attaches to `<session-id>` and restores its history, todos, working directory,
+and `policy.json` settings (provider, model, persona, thinking variant, and
+permission mode). Run `/resume` with no ID to open the conversation picker.
+Daemon-backed clients do not support rewinding a session to an earlier turn.
 
-## Rewinding
-
-The terminal client uses daemon sessions, which currently lack rewind
-support.
+Multiple clients can attach to the same daemon session at once. See
+[Daemon Protocol](/docs/development/dev-protocol/) and
+[Session handover](/docs/development/handover/) for details.
 
 ## Clearing the context
 
-```
+```text
 /clear
 ```
 
-Resets the model's conversational context. Mew writes a clear marker
-to the session log and keeps earlier messages on disk. When you
-resume, the model uses the context after the marker.
-
-Tool approvals granted with "Allow session" remain active.
+Appends a clear marker to `session.jsonl` while preserving earlier lines on disk.
+Later turns and resumed sessions start from messages after the marker. Tool
+approvals granted with "Allow session" remain active.
 
 ## Compaction
 
-```
+```text
 /compact
 ```
 
-Schedules compaction for the next turn. Mew can also compact
-automatically when a conversation approaches the model's context
-limit, summarizing earlier messages to free space.
-
-## Session IDs
-
-Session IDs are ULIDs (Universally Unique Lexicographically Sortable
-Identifiers). They sort chronologically by creation time.
-
-## Daemon sessions
-
-The daemon manages sessions, and multiple clients can attach to the
-same one. See
-[Daemon Protocol](/docs/development/dev-protocol/) for the wire-level details.
+Compacts earlier messages into a summary to free context space. Mew also runs
+compaction automatically when a conversation approaches the model's context
+limit.

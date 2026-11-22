@@ -3,200 +3,148 @@ title: Hashline Internals
 description: Architecture of the mew-hashline crate and edit_hashline tool.
 ---
 
-The hashline implementation lives in `crates/mew-hashline` and is wrapped by
-the `edit_hashline` tool in `crates/mew-tools`. This page walks through the
-parser, patcher, recovery, and how to extend it.
+`crates/mew-hashline` implements line-anchored file edits, wrapped by the
+`edit_hashline` tool in `crates/mew-tools`.
 
 ## Crate map
 
 | Module | Purpose |
 |--------|---------|
+| `types` | Shared public edit, operation, warning, and result types |
 | `format` | Hash computation, LF/BOM normalization, line-ending detection, header formatting |
 | `tokenizer` | Classifies patch text into `LineToken`s |
-| `parser` | Turns tokens into a flat list of `Edit`s and optional `FileOp`s |
-| `patch` | Splits tokens into `PatchSection`s and merges same-path sections |
-| `patcher` | Preflights, validates, recovers, and commits edits to a `HashlineFs` |
-| `apply` | Applies concrete edits to LF-normalized text |
-| `block` | Tree-sitter-backed block resolution |
-| `snapshot` | In-memory version history keyed by content hash |
-| `recovery` | 3-way-merge recovery for stale tags |
-| `fs` | Minimal async filesystem trait used by the patcher |
-| `error` | `HashlineError` enum |
+| `parser` | Converts tokens into `Edit` items and optional `FileOp`s |
+| `patch` | Splits tokens into `PatchSection`s and merges sections sharing a path |
+| `patcher` | Preflights, validates, recovers, and commits edits through `HashlineFs` |
+| `apply` | Applies concrete edits bottom-up to LF-normalized text |
+| `block` | Tree-sitter syntactic block resolution |
+| `snapshot` | In-memory file version history keyed by content hash |
+| `recovery` | 3-way-merge recovery for stale content hashes |
+| `fs` | Minimal async filesystem trait |
+| `error` | `HashlineError` variants |
 
-## The patch lifecycle
+## Patch pipeline
 
-```
+```text
 patch text
-   │
-   ▼
-tokenizer → LineToken[]
-   │
-   ▼
-patch splitter → PatchSection[]
-   │
-   ▼
-parser → Vec<Edit> + Option<FileOp> + warnings
-   │
-   ▼
-block resolver → concrete edits (block ops expanded)
-   │
-   ▼
-patcher prepare → hash check / recovery / seen-line guard
-   │
-   ▼
-apply_edits → new text
-   │
-   ▼
-commit → HashlineFs.write_text
+   |
+   v
+tokenizer -> LineToken[]
+   |
+   v
+patch splitter -> PatchSection[]
+   |
+   v
+parser -> Vec<Edit> + Option<FileOp> + warnings
+   |
+   v
+block resolver -> concrete edits
+   |
+   v
+patcher prepare -> path recovery / hash check / seen-line guard / apply_edits
+   |
+   v
+commit -> HashlineFs writes, deletes, and renames
 ```
 
-The patcher preflights every section in memory before writing. If a
-filesystem operation fails during commit, earlier writes can remain.
+`Patcher` preflights every section in memory before committing changes. If a
+later I/O call fails during commit, earlier commits remain on disk.
 
-## Tokenizer
+## Tokenizer, parser, and patch sections
 
-`tokenizer::tokenize` walks patch text line by line and classifies each line
-as one of:
+`tokenizer::tokenize` classifies each line as `Blank`, `Header { path, hash }`,
+`Op { target }`, `PayloadLiteral { text }` (`+`-prefixed payload), or `Raw { text }`.
+Range separators accept `.=`, `..`, `-`, and `…`, and dotted inserts accept both
+`INS.POST 1:` and `INS .POST 1:`.
 
-- `Blank`
-- `Header { path, hash }` - `[path#hash]`
-- `Op { target }` - `SWAP`, `DEL`, `INS.*`, `SWAP.BLK`, `DEL.BLK`, `REM`, `MV`, etc.
-- `PayloadLiteral { text }` - lines starting with `+`
-- `Raw { text }` - everything else
+`parser::parse_section` turns section tokens into ordered `Edit` values plus an
+optional `FileOp::Rem` or `FileOp::Move`. `SWAP` decomposes into replacement
+`Insert`s followed by `Delete`s over the original lines; block ops become
+`Edit::Block` nodes resolved later. The parser rejects unified-diff hunk
+headers, `apply_patch` markers, and `-old` lines, and strips accidental `12:`
+line-number prefixes from raw payload lines with a warning.
 
-Headers tolerate whitespace before/after the brackets. The hash is optional
-but required by the patcher. Operation keywords accept several range
-separators (`.=`, `..`, `-`, `…`) and both dotted insert forms (`INS.POST 1:`
-and `INS .POST 1:`).
+`patch::Patch::parse` splits sections at `[path#hash]` headers and merges
+repeated sections targeting the same file, rejecting conflicting hashes or
+duplicate file-level operations.
 
-## Parser
+## Patcher and apply engine
 
-`parser::parse_section` consumes the body tokens for one section and produces:
+`patcher::Patcher` holds a `SnapshotStore` and an optional `BlockResolver`.
+`Patcher::apply` runs three steps:
 
-- A `Vec<Edit>` in the order they should be applied.
-- An optional `FileOp::Rem` or `FileOp::Move`.
-- A list of warnings.
+1. **Prepare all sections in memory**: read the target file, recover relative
+   path mismatches if needed, validate the hash (or recover via 3-way merge),
+   resolve block ops, check seen-line bounds, and run `apply_edits`.
+2. **Reject no-ops**: fail the entire patch if any section produces identical text.
+3. **Commit**: write modified files and apply deletes and renames.
 
-`SWAP` is decomposed into replacement `Insert`s followed by `Delete`s for the
-old range. `INS.*` becomes one or more `Insert`s. `Block` operations become
-`Edit::Block` nodes that are resolved later.
+`apply::apply_edits` buckets edits by anchor line and applies them bottom-up so
+earlier line numbers remain valid. `Insert` supports `BeforeAnchor`,
+`AfterAnchor`, `Bof`, and `Eof`, preserving trailing-newline conventions and
+empty-file semantics.
 
-The parser also detects common contamination (unified-diff hunk headers,
-`apply_patch` sentinels, `-old` payload rows) and rejects them with a clear
-error.
+### Hash validation and recovery
 
-## Patch sections
+If the authored path is missing on disk and its hash uniquely matches a
+snapshot recorded for another path with the same filename, `Patcher` switches
+to that path.
 
-`patch::Patch::parse` splits the token stream on headers, calls
-`parse_section` for each body, then merges sections that target the same path.
-Conflicting hashes or multiple file-level ops for the same path are rejected.
+When the live file differs from the section hash, `recovery::try_recover`
+attempts 3-way-merge recovery from `SnapshotStore`:
 
-## Patcher
+1. Replay edits directly if the live file matches the recorded snapshot.
+2. Compute a line-level LCS diff between the snapshot and the live file via `similar`.
+3. Remap surviving anchor lines (mapping deleted anchors to the nearest
+   surviving line, or skipping deleted anchors for deletes) while keeping
+   BOF/EOF inserts.
+4. Reject the patch with `HashlineError::HashMismatch` if no anchors survive or
+   if the result equals the live text; otherwise emit a warning listing the
+   remapped anchor count.
 
-`patcher::Patcher` is the only component that touches the filesystem. It is
-constructed with:
+### Seen-line validation
 
-- A `SnapshotStore` for recovery and seen-line tracking.
-- An optional `BlockResolver` (tree-sitter by default in the tool wrapper).
-
-`Patcher::apply` does three things:
-
-1. **Prepare every section in memory.** This reads the file, checks the hash,
-   resolves block ops, applies edits in memory, and validates that anchors are
-   within seen lines.
-2. **Reject no-ops.** If any section produces no change, the whole patch
-   fails so the model doesn't think it changed something it didn't.
-3. **Commit.** Only after all sections prepare successfully does it write
-   files, delete files, or move files.
-
-### Hash validation
-
-The patcher's `prepare` step compares the section hash against the current
-file hash. If they match, edits proceed normally. If not, it tries recovery.
-
-### Path recovery
-
-If the authored path doesn't exist but the hash matches a single snapshot for
-a different path with the same filename, the patcher switches to that path.
-This handles cases where the model uses a relative path that differs from the
-one `read` recorded.
-
-### Seen-line guard
-
-When a snapshot records `seen_lines`, every anchor in the section must fall
-inside that set. This prevents edits anchored on lines the model never saw,
-which is common when `read` was called with `offset`/`limit`.
-
-## Apply engine
-
-`apply::apply_edits` takes LF-normalized text and a list of concrete edits.
-
-- Edits are bucketed by anchor line and applied **bottom-up** so line numbers
-  stay stable.
-- `Insert` cursors can be `BeforeAnchor`, `AfterAnchor`, `Bof`, or `Eof`.
-- Replacement inserts are combined with deletes to replace a range in place.
-- BOF/EOF inserts handle empty files and trailing-newline preservation.
-
-The function returns the new text, the first changed line, and any warnings.
+When `read` runs with `offset` and `limit`, `SnapshotStore` records `seen_lines`.
+`Patcher` rejects edits anchored on lines outside that set so the model only
+edits lines it read.
 
 ## Block resolver
 
-`block::default_block_resolver` builds a tree-sitter-backed resolver for:
+`block::default_block_resolver` uses tree-sitter grammars for:
 
 - Rust (`.rs`)
-- TypeScript/TSX/JavaScript/JSX (`.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.cjs`)
+- TypeScript / TSX / JavaScript / JSX (`.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.cjs`)
 - Python (`.py`)
 - Go (`.go`)
 - Markdown (`.md`, `.markdown`)
+- Gleam (`.gleam`)
 
-For a given anchor line, it walks the parse tree and picks the deepest node
-that starts on that line and spans more than one line. `INS.BLK.POST` uses the
-node's end line as the insert anchor; `SWAP.BLK` and `DEL.BLK` delete the full
-node span.
+Given an anchor line, the resolver selects the deepest syntax node starting on
+that line and spanning multiple lines. `INS.BLK.POST` anchors after the node's
+end line (falling back to `INS.POST` with a warning when unresolved);
+`SWAP.BLK` and `DEL.BLK` target the full node span and error when unresolved.
 
-If the resolver returns `None`:
+To add a language:
 
-- `SWAP.BLK` and `DEL.BLK` error.
-- `INS.BLK.POST` degrades to `INS.POST` with a warning.
-
-To add a language, add its tree-sitter `Language` and extension mapping to
-`block::build_language_table`.
+1. Add its tree-sitter grammar crate to `crates/mew-hashline/Cargo.toml`.
+2. Import its `LANGUAGE` constant in `crates/mew-hashline/src/block.rs`.
+3. Add its extensions to `build_language_table`.
+4. Add a unit test in `block.rs`.
 
 ## Snapshot store
 
-`snapshot::InMemorySnapshotStore` keeps the last few versions of each path,
-keyed by content hash. It is shared across all tool calls in a session via
-`ToolCtxShared`, so `read`, `edit_hashline`, and any other hashline-aware tool
-see the same history.
+`snapshot::InMemorySnapshotStore` retains up to four versions per path in
+`ToolCtxShared`, shared across `read` and `edit_hashline`:
 
-- `record(path, text, seen_lines)` stores a version and returns its hash.
-- `by_hash(path, hash)` looks up a specific version.
-- `find_by_hash(hash)` finds all paths that ever had a given hash (used for
-  path recovery).
-- `invalidate(path)` and `relocate(from, to)` handle deletes and moves.
-
-The default history limit is four versions per path.
-
-## Recovery
-
-`recovery::try_recover` handles stale tags.
-
-1. If the live text exactly matches the snapshot, it applies the edits
-   directly.
-2. Otherwise it builds a line-level mapping between the snapshot and the live
-   text using `similar`'s LCS diff.
-3. It remaps anchor lines. Lines that were deleted map to the nearest
-   surviving line (or are skipped for deletes). BOF/EOF inserts are preserved.
-4. The remapped edits are applied to the live text.
-
-If the result is identical to the live text or no anchors survive, recovery
-fails and the patcher returns a hash mismatch error. On success, a warning
-explains that the patch was recovered by 3-way merge and how many anchors were
-remapped.
+- `record(path, text, seen_lines)`: stores a snapshot (returns `()`).
+- `by_hash(path, hash)`: fetches a version by path and tag.
+- `find_by_hash(hash)`: finds all paths matching a tag (for path recovery).
+- `invalidate(path)` / `relocate(from, to)`: updates history on deletes and moves.
 
 ## Filesystem trait
 
-`fs::HashlineFs` is intentionally tiny:
+`fs::HashlineFs` abstracts disk access (`mew-tools` implements it with
+`tokio::fs`; tests use an in-memory map):
 
 ```rust
 #[async_trait]
@@ -206,76 +154,32 @@ pub trait HashlineFs: Send + Sync {
     async fn delete(&self, path: &str) -> std::io::Result<()>;
     async fn rename(&self, from: &str, to: &str) -> std::io::Result<()>;
     fn canonical_path(&self, path: &str) -> String;
+    async fn exists(&self, path: &str) -> bool { ... }
 }
 ```
 
-`mew-tools` implements this with direct tokio fs. Tests implement it with
-in-memory maps. Keeping the trait small lets the crate stay independent of any
-filesystem backend.
+Run crate unit tests with:
 
-## Testing
-
-Unit tests cover each layer:
-
-- `format`: hash stability, normalization rules, header formatting.
-- `tokenizer`: header parsing, operation classification, invalid ranges.
-- `parser`: payload handling, `REM`/`MV`, bare-row prefix stripping.
-- `patch`: multi-section parsing, same-path merging.
-- `apply`: single-line replacement, deletion, EOF insertion, bounds checking.
-- `block`: Rust function resolution, single-line block rejection, unknown
-  extension handling, `INS.BLK.POST` degradation.
-- `recovery`: exact replay, drifted anchors, deleted anchors, multi-edit
-  remapping.
-- `snapshot`: record/head, seen-line merging, history bound, relocation.
-
-Run them with:
-
-```bash
+```sh
 cargo test -p mew-hashline
 ```
 
-## Adding a language to block ops
-
-1. Add the tree-sitter crate to `crates/mew-hashline/Cargo.toml`.
-2. Import its `LANGUAGE` constant in `crates/mew-hashline/src/block.rs`.
-3. Add the extension mapping to `build_language_table`.
-4. Add a unit test in `block.rs` covering a realistic construct.
-
-No other module needs to change.
-
 ## Patch format reference
 
-The hashline patch format is what the `edit_hashline` tool consumes. The
-`read` tool produces hashline-formatted output automatically; the model
-uses the line numbers and hash from `read` output to construct patches.
+`read` prepends `[path#hash]` (low 16 bits of xxHash32 after stripping `\r` and
+trailing horizontal whitespace while preserving a final newline) and 1-indexed
+line numbers:
 
-### Read output format
-
-`read` returns a `[path#hash]` header followed by numbered lines:
-
-```
+```text
 [src/lib.rs#A1B2]
 1:pub fn add(a: i32, b: i32) -> i32 {
 2:    a + b
 3:}
-4:
-5:pub fn sub(a: i32, b: i32) -> i32 {
-6:    a - b
-7:}
 ```
 
-- The hash (`A1B2`) is the low 16 bits of a stable xxHash32 of
-  the normalized file content.
-- Normalization strips trailing spaces/tabs/`\r` but preserves a
-  trailing newline.
-- Line numbers are 1-indexed.
+`edit_hashline` accepts one or more `[path#hash]` sections:
 
-### Patch structure
-
-A patch is one or more file sections. Each section starts with a header
-and contains operations:
-
-```
+```text
 [src/lib.rs#A1B2]
 SWAP 2.=2:
 +    a + b + 1
@@ -286,71 +190,31 @@ INS.POST 4:
 +}
 ```
 
-Anchors refer to the original snapshot. The engine applies edits from the
-bottom of the file upward so earlier anchors retain their line numbers.
-Multiple sections for the same path are merged automatically.
-
-### Line operations
+### Line and block operations
 
 | Operation | Syntax | Description |
 |-----------|--------|-------------|
-| SWAP | `SWAP 2.=3:` | Replace lines 2–3 with payload. `2.=2:` replaces one line. Separators: `.=`, `..`, `-`, `…` |
-| DEL | `DEL 5` or `DEL 2.=4` | Delete a line or range. No payload. |
-| INS.PRE | `INS.PRE 3:` | Insert before line 3. |
-| INS.POST | `INS.POST 3:` | Insert after line 3. |
-| INS.HEAD | `INS.HEAD:` | Insert at top of file. |
-| INS.TAIL | `INS.TAIL:` | Insert at end of file. |
-| REM | `REM` | Delete the file. |
-| MV | `MV src/new_name.rs` | Rename the file. |
+| `SWAP` | `SWAP 2.=3:` | Replace lines 2 to 3 (`2.=2:` replaces one line) |
+| `DEL` | `DEL 5` or `DEL 2.=4` | Delete a line or range (no payload) |
+| `INS.PRE` | `INS.PRE 3:` | Insert before line 3 |
+| `INS.POST` | `INS.POST 3:` | Insert after line 3 |
+| `INS.HEAD` | `INS.HEAD:` | Insert at top of file |
+| `INS.TAIL` | `INS.TAIL:` | Insert at end of file |
+| `SWAP.BLK` | `SWAP.BLK 5:` | Replace the syntactic block starting at line 5 |
+| `DEL.BLK` | `DEL.BLK 5` | Delete the syntactic block starting at line 5 |
+| `INS.BLK.POST` | `INS.BLK.POST 5:` | Insert after the syntactic block at line 5 (falls back to `INS.POST`) |
+| `REM` | `REM` | Delete the file |
+| `MV` | `MV src/new_name.rs` | Rename the file |
 
-### Block-aware operations
-
-For Rust, TypeScript/JavaScript/JSX, Python, Go, and Markdown, block
-ops target the syntactic block containing an anchor line:
-
-| Operation | Syntax | Description |
-|-----------|--------|-------------|
-| SWAP.BLK | `SWAP.BLK 5:` | Replace the block containing line 5. |
-| DEL.BLK | `DEL.BLK 5` | Delete the block containing line 5. |
-| INS.BLK.POST | `INS.BLK.POST 5:` | Insert after the block containing line 5. Degrades to `INS.POST` if tree-sitter can't resolve. |
-
-### Payload rules
-
-- Payload lines start with `+`.
-- Blank lines inside a payload count as part of the payload if they
-  appear after the first `+` line.
-- Raw lines (without `+`) are accepted as payload for paste
-  convenience, but `+` is canonical.
-- If a raw payload line accidentally includes a read-output line-number
-  prefix like `12:content`, mew strips it and adds a warning.
-
-### Staleness and recovery
-
-If the live file no longer matches the section hash:
-
-1. **Exact replay**: if the live file matches the snapshot, apply
-   directly.
-2. **3-way merge**: diff snapshot against live file, remap anchors,
-   replay edits.
-3. **Hash mismatch error**: if recovery fails, the patch is rejected and
-   no file is modified.
-
-Recovery requires a recent in-memory snapshot. After a restart, or if
-recovery fails, read the file again to get a fresh hash.
-
-### Seen-line validation
-
-When `read` returns a sliced view (`offset`/`limit`), the snapshot
-records which lines were displayed. `edit_hashline` rejects anchors on
-lines that were not shown, preventing edits to content the model never
-saw.
+Payload lines start with `+` (blank lines after the first `+` count as blank
+payload lines; unprefixed lines are tolerated for convenience).
 
 ### Common errors
 
 | Error | Meaning |
 |-------|---------|
-| `hash mismatch for path: expected X, found Y` | File changed since `read`. `read` it again. |
-| `line N does not exist` | Anchor line is past end of file. |
-| `invalid range: N.M ends before it starts` | End line < start line. |
-| `block resolver unavailable` | `SWAP.BLK`/`DEL.BLK` couldn't resolve syntax block. |
-| `line N was not shown in the read that minted the tag` | Anchor outside the `offset`/`limit` window. |
+| `hash mismatch for path: expected X, found Y` | File changed since `read` and recovery could not remap |
+| `line N does not exist (file has M lines)` | Anchor exceeds file length |
+| `invalid range: N.M ends before it starts` | Inverted line range |
+| `block resolver unavailable or could not resolve block at line N` | `SWAP.BLK` or `DEL.BLK` could not resolve a block |
+| `line N was not shown in the read that minted the tag` | Anchor falls outside `offset` / `limit` window |

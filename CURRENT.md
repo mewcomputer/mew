@@ -4772,3 +4772,25 @@ WebSocket and session-lifetime tests, TUI client flow, and web UI/client tests.
 
 Refresh window-navigation snapshots for the unknown context meter after
 compaction. Verified the full TUI test suite.
+
+### 2026-11-21: Verify and rewrite public documentation
+
+Verified all 38 Markdown pages under `docs/` against the codebase and rewrote
+them for direct, concise prose while leaving the homepage lander
+(`site/src/pages/index.astro`) untouched.
+
+Fixed factual drift across user and developer guides, including the TUI layout
+diagram and bottom status bar in `docs/getting-started/quick-start.md`,
+workspace/permission details in `docs/getting-started/configuration.md` and
+`docs/using-mew/permissions.md`, Codex model IDs and per-model provider shapes
+in `docs/using-mew/providers.md`, extension manifest/consent/token rules in
+`docs/using-mew/extensions.md` and `docs/development/dev-extensions.md`, protocol
+revision 4 and `SubmitPrompt`/`Prompt` concurrency in
+`docs/development/dev-protocol.md`, workspace crate maps and GPUI desktop notes
+in `docs/development/dev-architecture.md`, tool sensitivities in
+`docs/development/dev-tools.md`, and implemented TUI UX status in
+`docs/development/dev-tui-ux.md`.
+
+Verified the site build (`ASTRO_TELEMETRY_DISABLED=1 ./node_modules/.bin/astro build`)
+and test suite (`node --test tests/*.test.mjs`, 12/12 passing, 40 pages built
+with zero Expressive Code warnings).
