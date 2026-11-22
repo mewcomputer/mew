@@ -1,0 +1,24 @@
+[package]
+name = "mew-agy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mew-message.workspace = true
+mew-provider.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+serde_json.workspace = true
+tempfile = "3"
+url = "2"
+bytes = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+jsonschema.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+ulid.workspace = true
+reqwest.workspace = true

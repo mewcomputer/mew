@@ -4989,3 +4989,13 @@ remain unscoped so they cannot reuse a conversation's provider state.
 
 Verified the parent/parallel-child regression, all 323 `mew-agent` library tests,
 and test compilation for the daemon and existing provider adapters.
+
+### 2026-11-21: Add AGY bridge building blocks
+
+Added a private AGY launch policy, bounded local MCP listener, CLI stream parser,
+and structured conversation replay projection. The policy uses a minimal custom
+agent and explicit tool grants without blanket permission skipping. These components
+do not yet expose an AGY provider or provide an OS isolation boundary.
+
+Verified the crate tests and clippy, a real AGY text stream, a conflicting system
+instruction probe, and an official AGY MCP call through the restricted relay.

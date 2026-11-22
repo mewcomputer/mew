@@ -8,6 +8,7 @@ members = [
     "crates/mew-provider-router",
     "crates/mew-provider-fake",
     "crates/mew-provider-responses",
+    "crates/mew-agy",
     "crates/mew-protocol",
     "crates/mew-daemon",
     "crates/mew-web-bridge",
