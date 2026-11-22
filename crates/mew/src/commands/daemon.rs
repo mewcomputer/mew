@@ -310,6 +310,17 @@ fn build_daemon_server_with_config(
         let cfg_switcher = Arc::clone(&cfg_for_models);
         let cat_switcher = Arc::clone(&cat_for_models);
 
+        #[cfg(unix)]
+        let agy_models = {
+            let cache = Arc::new(crate::setup::antigravity::ModelCache::new(
+                cfg_lister.antigravity.isolated,
+            ));
+            if cfg_lister.providers.contains_key("antigravity") {
+                cache.refresh();
+            }
+            cache
+        };
+
         // Model lister: returns all catalog models that belong to
         // configured providers with credentials.
         let lister: mew_daemon::ModelLister = Arc::new(move || {
@@ -376,6 +387,12 @@ fn build_daemon_server_with_config(
                         }
                     }
                 }
+            }
+
+            #[cfg(unix)]
+            if cred_pids.iter().any(|provider| provider == "antigravity") {
+                models.extend(agy_models.models());
+                agy_models.refresh();
             }
 
             models.sort_by(|a, b| a.provider.cmp(&b.provider).then(a.model.cmp(&b.model)));

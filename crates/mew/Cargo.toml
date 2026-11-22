@@ -60,6 +60,9 @@ tiny-skia = "0.12"
 
 iroh = { workspace = true, optional = true }
 
+[target.'cfg(unix)'.dependencies]
+mew-agy = { path = "../mew-agy" }
+
 [features]
 default = []
 iroh = ["dep:iroh", "mew-daemon/iroh"]

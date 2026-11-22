@@ -26,6 +26,8 @@ pub struct Config {
     #[serde(default)]
     pub code_mode: CodeModeConfig,
     #[serde(default)]
+    pub antigravity: AntigravityConfig,
+    #[serde(default)]
     pub permissions: PermissionsConfig,
     #[serde(default)]
     pub secrets: SecretsConfig,
@@ -50,6 +52,20 @@ pub struct Config {
     /// nesting depth).
     #[serde(default)]
     pub orchestration: OrchestrationConfig,
+}
+
+/// Local Antigravity CLI settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AntigravityConfig {
+    /// Restrict the CLI using an OS sandbox. Disabling this permits AGY to access local files.
+    #[serde(default = "default_true")]
+    pub isolated: bool,
+}
+
+impl Default for AntigravityConfig {
+    fn default() -> Self {
+        Self { isolated: true }
+    }
 }
 
 /// Whether the model invokes mew tools through a persistent Python session.
@@ -258,6 +274,13 @@ impl Default for Config {
                 ..Default::default()
             },
         );
+        providers.insert(
+            "antigravity".into(),
+            ProviderConfig {
+                shape: "antigravity".into(),
+                ..Default::default()
+            },
+        );
         // Kimi (Moonshot AI) coding endpoint — OpenAI-compatible.
         // Base URL includes /v1 so the adapter hits /v1/chat/completions.
         // Models: k3 (Kimi K3, thinking-capable), kimi-for-coding (Kimi K2.7
@@ -307,6 +330,7 @@ impl Default for Config {
             default_model: String::new(),
             models: Vec::new(),
             code_mode: CodeModeConfig::default(),
+            antigravity: AntigravityConfig::default(),
             permissions: PermissionsConfig::default(),
             secrets: SecretsConfig::default(),
             plugins: HashMap::new(),
@@ -969,6 +993,17 @@ mod tests {
         assert_eq!(config.code_mode.for_model("codex", "gpt-6-luna"), None);
         assert!(config.code_mode.isolated);
         assert_eq!(config.code_mode.max_idle_workers, 3);
+    }
+
+    #[test]
+    fn antigravity_isolation_is_enabled_unless_explicitly_disabled() {
+        let default = super::Config::default();
+        assert!(default.antigravity.isolated);
+        let unspecified: super::Config = toml::from_str("").unwrap();
+        assert!(unspecified.antigravity.isolated);
+        let disabled: super::Config = toml::from_str("[antigravity]\nisolated = false").unwrap();
+        assert!(!disabled.antigravity.isolated);
+        assert!(toml::from_str::<super::Config>("[antigravity]\nisolated = 'false'").is_err());
     }
 
     #[test]

@@ -5036,3 +5036,70 @@ mismatched continuations, cancellation, pending approvals and server shutdown.
 Provider errors retain the session's sanitized quota, authentication and
 capacity categories without exposing raw CLI error text. Verified with the
 provider subprocess tests, including a secret canary in the CLI error.
+
+### 2026-11-22: Preserve Mew tool names through AGY
+
+AGY-facing aliases now accommodate long or non-ASCII Mew tool names while
+restoring the exact Mew name for execution. Alias generation avoids collisions
+with real tool names. Verified with provider subprocess and MCP handoff tests.
+
+### 2026-11-22: Add local AGY sandbox building blocks
+
+Added a macOS Seatbelt boundary with a restricted Google CONNECT proxy and
+per-session MCP endpoint. AGY retains access to its own normal CLI settings
+folder and the separate app-data profile. Other supported platforms fail closed.
+
+Verified sandbox filesystem, process and port canaries, proxy denial and
+shutdown, IPv6 port reservation, and a live Google CONNECT. Authenticated AGY
+execution remains to be verified.
+
+### 2026-11-22: Verify local AGY startup
+
+The isolated official CLI starts its help command, but an authenticated prompt
+fails under the strict local boundary. AGY requires an ephemeral TCP listener;
+tested Seatbelt rules that allowed it also accepted connections through a
+non-loopback interface. A temporary listener experiment reached an AGY
+authentication error even after securityd and trustd lookup allowances.
+Those experimental permissions were removed; the local provider remains
+fail-closed and the authenticated prompt has not passed.
+
+The local auth probe attempted `play.googleapis.com`; allowing that exact host
+made its CONNECT succeed, but AGY still returned an authentication error.
+Temporarily permitting loopback connections and securityd/trustd lookups did
+not resolve it, and those experimental permissions were removed. Verified the
+proxy policy against live Google CONNECTs and reran the isolated CLI suite.
+
+### 2026-11-22: Reuse the existing local AGY identity
+
+The local provider no longer creates or redirects to a Mew-specific AGY profile.
+It discovers `agy` on PATH and preserves the existing AGY and XDG identity
+settings, with read-only access to the observed Gemini configuration. Verified
+with the isolated bridge suite and focused Mew tests. The user's CLI returned
+its model list with its normal environment, but a real sandboxed prompt still
+fails at the previously documented listener and authentication boundaries.
+
+### 2026-11-22: Add explicit local AGY execution
+
+An explicit `[antigravity] isolated = false` setting uses the existing local
+`agy` executable and account without an OS sandbox; isolation remains the
+default. Client tools are routed through Mew's MCP server and its permission
+engine. AGY is told how to discover those tools through its MCP interface.
+
+Verified a real local-AGY text prompt and client-tool round trip, a full Mew
+read task, a permitted temporary write and an explicit deny rule. The AGY
+crate and Mew CLI test suites pass with isolated Mew state. `mew run` itself
+automatically approves permission requests; explicit deny rules still apply.
+
+A live daemon check verified explicit denial and allow-once approval for AGY
+write calls, plus asynchronous discovery of 23 local models. In a two-subagent
+run one child completed and the other was reported aborted; its underlying
+failure was not retained. The agent currently can mask provider failures as
+aborts, which needs correction before interpreting that result.
+
+### 2026-11-22: Preserve AGY errors in child sessions
+
+AGY session failures without an active tool no longer cancel their owning turn
+before the provider error is delivered. Active tool cancellation still stops
+the owning turn. After the fix, a retained live daemon run started two distinct
+AGY-backed Mew subagents, waited for both and received both expected results.
+The earlier aborted child's original cause remains unknown.

@@ -5003,6 +5003,7 @@ dependencies = [
  "iroh",
  "libc",
  "mew-agent",
+ "mew-agy",
  "mew-catalog",
  "mew-client-core",
  "mew-client-local",

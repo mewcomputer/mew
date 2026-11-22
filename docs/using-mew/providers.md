@@ -16,6 +16,7 @@ speak. You can use the built-in providers or configure custom endpoints.
 | `deepseek` | `openai` (`responses` for `deepseek-v4-flash`) | `MEW_CRED_DEEPSEEK` |
 | `umans` | `anthropic` | `MEW_CRED_UMANS` |
 | `codex` | `responses` | `MEW_CRED_CODEX` (API key) or OAuth |
+| `antigravity` | local `agy` CLI | Existing AGY sign-in |
 | `kimi-for-coding` | `openai` | `MEW_CRED_KIMI_FOR_CODING` |
 | `alibaba-token-plan` | `openai` | `MEW_CRED_ALIBABA_TOKEN_PLAN` |
 | `alibaba-token-plan-cn` | `openai` | `MEW_CRED_ALIBABA_TOKEN_PLAN_CN` |
@@ -45,6 +46,37 @@ mew run --provider codex --model gpt-5.6-sol "Reply with hello."
 
 Run `mew auth logout codex` to delete Mew's saved OAuth session.
 
+## Use Antigravity
+
+Mew uses the official `agy` executable on `PATH` and its existing local
+account. If needed, run `mew auth login antigravity` to sign in through AGY.
+The model picker discovers models through that installation.
+
+The isolated local mode is enabled by default, but its macOS sandbox currently
+blocks a listener required by AGY; other platforms fail closed. To use the
+explicit unsandboxed mode, add this to `config.toml`:
+
+```toml
+[antigravity]
+isolated = false
+```
+
+In this mode AGY runs without an OS sandbox. Mew restricts AGY's native tools
+and routes client tool calls through Mew's permission policy, but a failure in
+AGY's own restrictions could expose local files or commands. `mew run` is
+non-interactive and automatically approves permission requests; explicit deny
+rules still apply. Interactive clients can show permission requests normally.
+
+Select an available model, for example:
+
+```sh
+mew run --provider antigravity --model gemini-4-argon-low "Reply with hello."
+```
+
+AGY's native subagents and browser tools, attachments, and structured output
+are not supported by this bridge. Mew's own tools and subagents remain
+available through the MCP bridge.
+
 ## Provider shapes
 
 | Shape | Protocol |
@@ -52,6 +84,7 @@ Run `mew auth logout codex` to delete Mew's saved OAuth session.
 | `openai` | OpenAI-compatible Chat Completions |
 | `anthropic` | Anthropic-compatible Messages |
 | `responses` | OpenAI Responses |
+| `antigravity` | Local AGY CLI bridge |
 
 The adapter shape selects how Mew formats requests and parses streaming
 responses. See [Adding a Provider](/docs/development/dev-providers/) for

@@ -465,10 +465,9 @@ pub enum VfsCommands {
 
 #[derive(Subcommand)]
 pub enum AuthCommands {
-    /// Log in to OpenAI via ChatGPT OAuth (browser-based PKCE flow).
-    /// Uses your ChatGPT Plus/Pro subscription credits.
+    /// Log in to a provider.
     Login {
-        /// Provider to log in to (currently only "codex").
+        /// Provider to log in to ("codex" or "antigravity").
         provider: Option<String>,
         /// Use the device-code flow instead of opening a browser. For
         /// headless machines or when a browser can't be launched.

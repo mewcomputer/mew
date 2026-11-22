@@ -66,6 +66,10 @@ fn apply_model_metadata(agent: &mut Agent, cat: Option<&Catalog>, model_id: &str
     agent.default_max_output_tokens = cat
         .and_then(|catalog| catalog.max_output(model_id))
         .map_or(0, |max| max.min(32_768));
+    if agent.provider_id == "antigravity" {
+        agent.default_max_output_tokens = 0;
+        agent.supports_vision = false;
+    }
     apply_catalog_pricing(agent, cat, model_id);
 }
 use mew_message::SessionId;
@@ -831,6 +835,52 @@ mod tests {
         let provider = Arc::new(FakeProvider::new(vec![]));
         let dispatcher: Arc<dyn mew_hooks::Dispatcher> = Arc::new(mew_hooks::NopDispatcher);
         mew_agent::Agent::new(provider, dispatcher, None, vec![], None)
+    }
+
+    #[test]
+    fn antigravity_ignores_unrelated_catalog_capabilities() {
+        let mut agent = make_agent();
+        let mut catalog = Catalog::empty();
+        catalog.merge_local(vec![Model {
+            id: "shared".into(),
+            provider: "other".into(),
+            max_output: 4096,
+            vision: true,
+            ..Default::default()
+        }]);
+        agent.set_model_info("shared", "antigravity");
+        apply_model_metadata(&mut agent, Some(&catalog), "shared");
+        assert_eq!(agent.default_max_output_tokens, 0);
+        assert!(!agent.supports_vision);
+    }
+
+    #[test]
+    fn switching_to_antigravity_clears_catalog_output_limit() {
+        let mut agent = make_agent();
+        let root = tempfile::tempdir().unwrap();
+        agent.cwd = root.path().to_path_buf();
+        let mut catalog = Catalog::empty();
+        catalog.merge_local(vec![Model {
+            id: "shared".into(),
+            provider: "other".into(),
+            max_output: 4096,
+            vision: true,
+            ..Default::default()
+        }]);
+        agent.set_model_info("shared", "other");
+        apply_model_metadata(&mut agent, Some(&catalog), "shared");
+        assert_eq!(agent.default_max_output_tokens, 4096);
+        switch_session_model(
+            &mut agent,
+            &Config::default(),
+            Some(&catalog),
+            Arc::new(FakeProvider::new(vec![])),
+            "antigravity",
+            "shared",
+            false,
+        );
+        assert_eq!(agent.default_max_output_tokens, 0);
+        assert!(!agent.supports_vision);
     }
 
     #[test]

@@ -18,6 +18,19 @@ use mew_provider_anthropic::Adapter as AnthropicAdapter;
 use mew_provider_openai::Adapter as OpenAIAdapter;
 use mew_provider_responses::Adapter as ResponsesAdapter;
 
+#[cfg(unix)]
+pub(crate) fn find_agy_on_path(path: &std::ffi::OsStr) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::split_paths(path).find_map(|dir| {
+        let candidate = dir.join("agy");
+        let metadata = candidate.metadata().ok()?;
+        if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+            return None;
+        }
+        candidate.canonicalize().ok()
+    })
+}
+
 /// Static fallback for Codex models that require the Responses Lite transport.
 /// The catalog is the authoritative source, but this keeps the known lite
 /// models working when the catalog is stale or offline.
@@ -385,6 +398,9 @@ pub(crate) fn provider_thinking_variants(
     provider_id: &str,
     model_id: &str,
 ) -> Vec<mew_catalog::ThinkingVariant> {
+    if provider_id == "antigravity" {
+        return Vec::new();
+    }
     if let Some(model) = provider_catalog_model(cat, provider_id, model_id) {
         if !model.thinking_variants.is_empty() {
             return model.thinking_variants.clone();
@@ -406,6 +422,9 @@ fn provider_thinking_budget(
     provider_id: &str,
     model_id: &str,
 ) -> Option<mew_catalog::ThinkingBudget> {
+    if provider_id == "antigravity" {
+        return None;
+    }
     if let Some(model) = provider_catalog_model(cat, provider_id, model_id) {
         return model
             .thinking_budget
@@ -670,6 +689,16 @@ fn credential_for_provider(
 /// credential is the token file at `auth/codex.json`, not a
 /// `credential_ref` slot). Used to gate which catalog models the picker shows.
 pub(crate) fn provider_available(cfg: &Config, provider_id: &str) -> bool {
+    if provider_id == "antigravity" {
+        #[cfg(unix)]
+        return cfg.providers.contains_key(provider_id)
+            && (cfg!(target_os = "macos") || !cfg.antigravity.isolated)
+            && std::env::var_os("PATH")
+                .and_then(|path| find_agy_on_path(&path))
+                .is_some();
+        #[cfg(not(unix))]
+        return false;
+    }
     if provider_has_credential(cfg, provider_id) {
         return true;
     }
@@ -743,6 +772,27 @@ pub(crate) fn build_direct_provider(
     raw: bool,
     session_id: Option<SessionId>,
 ) -> Result<Arc<dyn Provider>> {
+    if provider_id == "antigravity" {
+        #[cfg(unix)]
+        {
+            if cfg.antigravity.isolated && !cfg!(target_os = "macos") {
+                anyhow::bail!("Antigravity isolation is unavailable on this platform");
+            }
+            if model_override.is_empty() {
+                anyhow::bail!("select an Antigravity model explicitly");
+            }
+            let executable = std::env::var_os("PATH")
+                .and_then(|path| find_agy_on_path(&path))
+                .context("agy executable not found on PATH")?;
+            return Ok(Arc::new(super::antigravity::LocalAgyProvider::new(
+                executable,
+                model_override.to_owned(),
+                cfg.antigravity.isolated,
+            )));
+        }
+        #[cfg(not(unix))]
+        anyhow::bail!("Antigravity local CLI is available only on Unix");
+    }
     // Non-fatal: some providers (codex with OAuth) don't need an API key, so we
     // resolve lazily per shape arm. For API-key shapes (`openai`/`anthropic`)
     // we propagate `get_credential`'s error directly instead of swallowing it
@@ -1011,6 +1061,42 @@ impl MainModelResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn finds_first_executable_agy_on_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let first = a.path().join("agy");
+        let second = b.path().join("agy");
+        std::fs::write(&first, "not executable").unwrap();
+        std::fs::write(&second, "executable").unwrap();
+        std::fs::set_permissions(&first, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(&second, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = std::env::join_paths([a.path(), b.path()]).unwrap();
+        assert_eq!(
+            find_agy_on_path(&path),
+            Some(second.canonicalize().unwrap())
+        );
+        std::fs::set_permissions(&second, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(find_agy_on_path(&path), None);
+    }
+
+    #[test]
+    fn antigravity_is_a_builtin_provider_with_its_own_shape() {
+        let cfg = Config::default();
+        let provider = cfg.providers.get("antigravity").expect("built-in provider");
+        assert_eq!(provider.shape, "antigravity");
+        assert!(provider.credential_ref.is_empty());
+    }
+
+    #[test]
+    fn antigravity_does_not_inherit_other_provider_thinking_controls() {
+        let catalog = Catalog::empty();
+        assert!(provider_thinking_variants(&catalog, "antigravity", "deepseek-v4").is_empty());
+        assert!(resolve_reasoning(Some(&catalog), "antigravity", "deepseek-v4", None).is_none());
+    }
 
     // --- build_custom_model ---
 

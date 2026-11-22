@@ -43,6 +43,15 @@ fn select_provider(
 pub async fn auth_cmd(command: AuthCommands) -> Result<()> {
     match command {
         AuthCommands::Login { provider, headless } => {
+            if provider.as_deref() == Some("antigravity") {
+                if headless {
+                    anyhow::bail!("Antigravity sign-in does not support --headless");
+                }
+                #[cfg(unix)]
+                return crate::setup::antigravity::login().await;
+                #[cfg(not(unix))]
+                anyhow::bail!("Antigravity local CLI is available only on Unix");
+            }
             let registry = providers();
             let selected = select_or_prompt(provider, &registry)?;
             mew_provider::auth::login(selected.as_ref(), headless).await?;
@@ -68,9 +77,16 @@ pub async fn auth_cmd(command: AuthCommands) -> Result<()> {
                     }
                 }
             }
+            #[cfg(unix)]
+            println!("antigravity: uses the local AGY account; sign-in status unavailable");
             Ok(())
         }
         AuthCommands::Logout { provider } => {
+            if provider.as_deref() == Some("antigravity") {
+                anyhow::bail!(
+                    "Antigravity sign-out is not available in Mew. Manage the existing account with the official AGY CLI."
+                );
+            }
             let registry = providers();
             let selected = select_or_prompt(provider, &registry)?;
             mew_provider::auth::logout(selected.as_ref())?;
@@ -147,6 +163,29 @@ mod tests {
     fn test_registry_contains_codex() {
         let registry = providers();
         assert!(registry.iter().any(|p| p.slug() == "codex"));
+    }
+
+    #[tokio::test]
+    async fn antigravity_rejects_unsupported_headless_sign_in() {
+        let error = auth_cmd(AuthCommands::Login {
+            provider: Some("antigravity".into()),
+            headless: true,
+        })
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("does not support --headless"));
+    }
+
+    #[tokio::test]
+    async fn antigravity_logout_reports_the_explicit_limitation() {
+        let error = auth_cmd(AuthCommands::Logout {
+            provider: Some("antigravity".into()),
+        })
+        .await
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("sign-out is not available"));
+        assert!(message.contains("existing account"));
     }
 
     #[test]
