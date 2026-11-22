@@ -55,6 +55,8 @@ pub enum ToolChoice {
 
 #[derive(Debug, Clone)]
 pub struct Request {
+    /// Conversation owning this request. Auxiliary one-off requests have no session.
+    pub session_id: Option<mew_message::SessionId>,
     pub model: String,
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDef>,
@@ -80,6 +82,7 @@ pub struct Request {
 impl Default for Request {
     fn default() -> Self {
         Self {
+            session_id: None,
             model: String::new(),
             messages: Vec::new(),
             tools: Vec::new(),

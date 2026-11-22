@@ -733,6 +733,7 @@ impl Agent {
         );
 
         let request = mew_provider::Request {
+            session_id: None,
             model,
             messages: vec![mew_message::Message {
                 id: ulid::Ulid::new(),

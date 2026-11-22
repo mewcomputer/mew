@@ -1116,6 +1116,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_requests_identify_parent_and_concurrent_child_sessions() {
+        let directory = tempfile::tempdir().unwrap();
+        let parent_id = SessionId::new();
+        let (requests, mut incoming) = tokio::sync::mpsc::channel(3);
+        let (responses, reply) = tokio::sync::mpsc::channel(3);
+        let provider = Arc::new(ControlledProvider {
+            requests,
+            responses: tokio::sync::Mutex::new(reply),
+        });
+        let mut parent = crate::Agent::new(
+            provider.clone(),
+            Arc::new(mew_hooks::NopDispatcher),
+            None,
+            vec![],
+            Some(parent_id),
+        );
+        responses.send(turn("parent done")).await.unwrap();
+        let mut parent_events = parent.run("parent task".into());
+        while parent_events.recv().await.is_some() {}
+        assert_eq!(incoming.recv().await.unwrap().session_id, Some(parent_id));
+
+        let runner = SimpleRunner::new(provider, vec![], Arc::new(mew_hooks::NopDispatcher))
+            .with_agent_registry(&mut parent)
+            .with_session_root(directory.path().to_path_buf());
+        let first_def = make_def(Some(5), Some(30));
+        let second_def = make_def(Some(5), Some(30));
+        let (first_tx, mut first_events) = tokio::sync::mpsc::channel(16);
+        let (second_tx, mut second_events) = tokio::sync::mpsc::channel(16);
+        let first = runner.run(SubagentRunOptions {
+            def: &first_def,
+            prompt: "first child".into(),
+            parent_call_id: "first".into(),
+            parent_session_id: parent_id,
+            event_tx: first_tx,
+            cancel: Default::default(),
+            model: None,
+            parent_depth: 0,
+        });
+        let second = runner.run(SubagentRunOptions {
+            def: &second_def,
+            prompt: "second child".into(),
+            parent_call_id: "second".into(),
+            parent_session_id: parent_id,
+            event_tx: second_tx,
+            cancel: Default::default(),
+            model: None,
+            parent_depth: 0,
+        });
+        let observe = async {
+            let Some(SubagentEvent::Started {
+                child_session_id: first_id,
+                ..
+            }) = first_events.recv().await
+            else {
+                panic!("first child did not start")
+            };
+            let Some(SubagentEvent::Started {
+                child_session_id: second_id,
+                ..
+            }) = second_events.recv().await
+            else {
+                panic!("second child did not start")
+            };
+            let first_id: SessionId = first_id.parse().unwrap();
+            let second_id: SessionId = second_id.parse().unwrap();
+            assert_ne!(first_id, second_id);
+            assert_ne!(first_id, parent_id);
+            assert_ne!(second_id, parent_id);
+            let first_request = incoming.recv().await.unwrap();
+            let second_request = incoming.recv().await.unwrap();
+            let observed = [
+                first_request.session_id.unwrap(),
+                second_request.session_id.unwrap(),
+            ];
+            assert!(observed.contains(&first_id));
+            assert!(observed.contains(&second_id));
+            responses.send(turn("first done")).await.unwrap();
+            responses.send(turn("second done")).await.unwrap();
+            while first_events.recv().await.is_some() {}
+            while second_events.recv().await.is_some() {}
+        };
+        let (first, second, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(first, second, observe)
+        })
+        .await
+        .unwrap();
+        assert!(matches!(first.unwrap(), SubagentResult::Complete { .. }));
+        assert!(matches!(second.unwrap(), SubagentResult::Complete { .. }));
+    }
+
+    #[tokio::test]
     async fn child_guidance_is_durable_at_its_next_request_and_retry_is_idempotent() {
         for (boundary, previous_answer) in [
             (tool_turn("continue"), "continue"),

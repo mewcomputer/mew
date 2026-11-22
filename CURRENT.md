@@ -4805,7 +4805,6 @@ behavior while removing the numbered eyebrows and keeping the existing H1.
 Updated `site/tests/homepage.test.mjs` and verified `astro build` plus all 12
 site tests.
 
-
 ### 2026-11-21: Replace ownership verbs and refine homepage lede
 
 Updated the homepage lede in `site/src/pages/index.astro` and `site/tests/homepage.test.mjs`,
@@ -4981,3 +4980,12 @@ Allowed the Xcode Python framework's `Python3` library in the isolated worker's 
 ### 2026-11-21: Verify and commit desktop work
 
 Verified the current desktop changes with 247 web UI tests, the catalog and daemon suites, 65 provider setup tests, homepage tests, theme codegen and architecture checks. The pre-commit hook passed with Zig 0.15.2 and the installed macOS 15.4 SDK. Built and installed the Electron app from this worktree.
+
+### 2026-11-21: Preserve provider request session identity
+
+Provider requests from agent turns now carry their session ID, including distinct
+IDs for parallel subagents. Independent classifier and daemon summary requests
+remain unscoped so they cannot reuse a conversation's provider state.
+
+Verified the parent/parallel-child regression, all 323 `mew-agent` library tests,
+and test compilation for the daemon and existing provider adapters.

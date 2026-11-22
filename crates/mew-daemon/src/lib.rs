@@ -3820,6 +3820,7 @@ fn utility_request(
         .unwrap_or(0);
 
     mew_provider::Request {
+        session_id: None,
         model: String::new(),
         messages: vec![Message {
             id: Ulid::new(),

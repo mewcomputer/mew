@@ -329,6 +329,7 @@ impl Agent {
                 .await;
 
             let mut req = Request {
+                session_id: Some(self.session_id),
                 model: String::new(),
                 messages: self.prepare_messages().await,
                 tools: tool_defs,
@@ -1260,6 +1261,7 @@ impl Agent {
     /// Returns the number of messages removed.
     pub async fn compact_context(&mut self) -> Result<usize, String> {
         let mut request = Request {
+            session_id: Some(self.session_id),
             messages: self.prepare_messages().await,
             system: self.request_system().await,
             ..Request::default()
