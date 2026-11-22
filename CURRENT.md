@@ -4805,6 +4805,179 @@ behavior while removing the numbered eyebrows and keeping the existing H1.
 Updated `site/tests/homepage.test.mjs` and verified `astro build` plus all 12
 site tests.
 
+
+### 2026-11-21: Replace ownership verbs and refine homepage lede
+
+Updated the homepage lede in `site/src/pages/index.astro` and `site/tests/homepage.test.mjs`,
+and replaced vague responsibility verbs (`owns`, `handles`, `drives`, `manages`,
+`powers`, `governs`, `holds`) across `site/src/pages/index.astro` and `docs/`
+with concrete action verbs. Verified `astro build` (40 pages) and all 12 site
+tests.
+
+
+### 2026-11-21: Inset window frame for the web/electron UI
+
+Switched the session rail to the shadcn `inset` sidebar variant and made the
+desktop panel group a rounded content card on the sidebar background. Route
+headers (conversation, settings) now portal into a frame titlebar row above the
+card via `FrameTitlebar`; the conversation title renders as `workspace / title`.
+Focus-restore lookups for the workbench and summary triggers now search the
+document, since those buttons live in the titlebar. Verified web-ui `tsc` and
+all 242 vitest tests; `vite build` was not run (esbuild spawn blocked in the
+sandbox).
+
+
+### 2026-11-21: Clear build warnings and package the electron debug app
+
+Removed unused `mew-provider-router` and `qrcode` workspace dependencies. Shiki
+core and engine now load lazily, and React is split into its own chunk, cutting
+the web-ui entry chunk from 807 kB to 491 kB; `chunkSizeWarningLimit` is 650 kB
+to cover the lazy oniguruma wasm chunk. Packaged the debug Electron app
+(requires agent-browser >= 0.34 and the electron binary download). Verified
+clean `cargo build --locked -p mew`, clean web-ui build, and 242 vitest tests.
+
+
+### 2026-11-21: Redesign session rail, draggable sidebar, and titlebar workbench tabs
+
+Redesigned `SessionRail` to match the inset frame aesthetic: moved sidebar
+collapse and search to the top chrome row, added a full-width `+ New chat` pill
+button, added a section header (`Conversations` / `Projects` / `Groups`) with a
+compact `ListFilter` dropdown and `FolderPlus` trigger, and updated `SessionRow`
+with relative timestamps (`1m`, `2h`) and single-line rows in workspace mode.
+Switched the sidebar to `collapsible="offcanvas"` and added a draggable resize
+handle (`200px`–`440px`, persisted in `mew.workspaceSurfaces`) with Apple-style
+proximity pill indicators on both split handles. Portaled the desktop workbench
+tab strip into the window titlebar via `FrameWorkbenchTitlebar`, tracking the
+live workbench split via `ResizeObserver`, and smoothed drag-collapse/expand
+transitions on the summary and workbench panes. Verified all 243 vitest tests,
+clean `tsc`, and packaged debug Electron build.
+
+
+### 2026-11-21: Two-stage model and thinking effort picker with search
+
+Replaced `ModelPill`'s single long dropdown with a two-stage popover modeled on
+Codex: stage 1 renders a compact effort card with a pill track + step-dot
+visualization (`Off` plus the active model's thinking variants), quick off/reset
+controls, and a center model button (`Model Name >`) that advances to stage 2;
+stage 2 provides an instant search input and scrollable provider-grouped model
+list with a back button to return to the effort stage (models without thinking
+variants open directly to stage 2). Updated `model-pill.test.tsx` and verified
+all 243 vitest tests and packaged debug Electron build.
+
+
+### 2026-11-21: Add Jianghu website themes, Instrument Sans + Sentient default fonts, and effort card polish
+
+Added `jianghu-dark` and `jianghu-light` themes (matching `jianghu/mew-palette.css`)
+to `crates/mew-tui/resources/theme_manifest.json` and `mew-web-ui/src/themes.json`,
+and ran `theme_codegen`. Bundled `instrument-sans.woff2` and `sentient.woff2` in
+`mew-web-ui/public/fonts/` and made `jianghu` (`Instrument Sans` + `Sentient`)
+the default font choice in `mew-web-ui`. Polished the thinking effort slider
+track with a recessed inner well, distinct circular thumb cap on the filled
+capsule, and refined center pill borders. Verified all 244 vitest tests and
+packaged debug Electron build.
+
+
+### 2026-11-21: Split title and body font pickers and rename Codex theme display names to Argenteus
+
+Split the Appearance font selector into independent **Title font** (`data-title-font`
+→ `--font-display`, default `sentient`) and **Body text font** (`data-body-font`
+→ `--font-sans`, default `instrument-sans`) pickers in `theme.tsx`, `index.css`,
+and `settings.tsx`. Updated the display names for `codex-dark` and `codex-light`
+in `mew-web-ui/src/themes.json` to **Argenteus dark** and **Argenteus light**.
+Verified all 244 vitest tests and packaged debug Electron build.
+
+
+### 2026-11-21: Simplify composer left controls and add project/repo selector on new chat screens
+
+Simplified the left side of the composer (`input-area.tsx`, `persona-pill.tsx`,
+`status-footer.tsx`): converted the static permission label into an interactive
+`PermissionPill` dropdown that renders as a compact shield icon when in default
+(`standard`) mode and shows a label only when overridden; updated `PersonaPill`
+to render as a compact user icon when on `default` and show a label only when a
+custom persona is selected; hid the floating `...` `StatusFooter` button on
+empty/idle sessions until tokens, cost, subagents, or multi-client activity
+exist. Added `WorkspaceSelectorPill` (`chat-surface.tsx`, `routes/index.tsx`)
+under `"What can we work on?"` on empty/new conversation screens with quick
+recent-repo chips and a folder browser trigger. Verified all 244 vitest tests
+and packaged debug Electron build.
+
+
+### 2026-11-21: Remove the duplicate thinking-off buttons in the model popover
+
+The effort stage of the model popover had two controls bound to the same
+command: a lightning bolt ("Turn thinking off") and a reset arrow ("Reset
+effort"). Both called `setVariant("")`; the arrow was only disabled when the
+effort was already off, so it read as a second affordance for one action. Both
+are gone. "Off" remains reachable as the first step of the effort slider.
+
+The center pill (effort label + model name, opens the model picker) lost its
+`bg-accent/55` fill, border, and shadow, so it now sits on the popover
+background and only takes `bg-accent` on hover.
+
+Added a test that turns thinking off through the slider's Off step, the only
+remaining path now that the two buttons are gone.
+
+Verified `tsc -b` in `mew-web-ui` and all 245 vitest tests.
+
+
+### 2026-11-21: Derive reasoning levels from models.dev, fix title generation requests
+
+DeepSeek V4.1 Flash 1017 (catalog id `deepseek-flash`, provider `deepseek`)
+showed no reasoning levels. models.dev publishes `reasoning_options: [toggle,
+effort(low, high, max)]` for it, but the parser discarded that for every
+provider outside a hardcoded `opencode`/`opencode-go`/`openrouter` + `hy3`/`hy4`
+allowlist, and the built-in fallback keys on `id.contains("deepseek") &&
+id.contains("v4")`, which `deepseek-flash` fails because "V4.1" only appears in
+the display name. Result: an empty variant list, so the model picker had no
+effort stage.
+
+`Model` now carries `effort_levels` (the raw levels a provider publishes) instead
+of guessing wire params at parse time. `setup::providers::derive_effort_variants`
+encodes them as `thinking_variants` at load, for providers whose shape is
+`openai` or `responses` only, since those adapters send `reasoning_effort`
+verbatim; levels mew already encodes keep their built-in params (Qwen's
+`enable_thinking`, its explicit `off`), and levels only the catalog knows are
+added as plain `reasoning_effort`. Anthropic-shaped providers are skipped: they
+spell effort as `thinking` + `output_config.effort`.
+
+Title regeneration never produced a generated title: every titled session on
+disk held the truncated first user message instead, and the auto-title path
+shares the same code. The title and summary calls sent
+`reasoning: {"type": "disabled"}`, which no adapter understands: the OpenAI and
+Anthropic adapters copy reasoning params into the body verbatim, so it went out
+as an unknown top-level `type` field, and only the Responses adapter had a
+special case for it. Both calls also capped output at 30/60 tokens with
+`temperature: 0.3`; providers count thinking tokens against that cap, so a
+reasoning model could spend the whole budget before emitting text and return
+nothing (one session stored just `,`). Both now go through `utility_request`,
+which leaves reasoning unset, drops the forced temperature, and allows 512
+tokens. Title-generation failures log at `warn` instead of `debug` so the
+fallback is visible.
+
+Verified `cargo test -p mew-catalog` (56), `cargo test -p mew --bin mew
+setup::providers` (65), `cargo test -p mew-daemon` (183 across suites, including
+the e2e regenerate-title path), `cargo clippy --all-targets` clean for
+`mew-catalog`, `mew-daemon`, and `mew`. Not verified: the fixed title request
+against a live provider, and whether DeepSeek accepts `reasoning_effort` at all
+three published levels (models.dev is the only source for that).
+
+
+### 2026-11-21: Add conversation timeline tick scrubber and hover preview card
+
+Added `ConversationMinimap` (`mew-web-ui/src/components/conversation-minimap.tsx`)
+and mounted it on the left edge of `VirtualChatSurface` and `ChatSurface`. The
+rail pairs user messages with subsequent assistant responses into navigable
+turns, renders a vertical tick ruler with proximity wave magnification, tracks
+the active visible turn, and reveals a floating preview card with the user
+prompt, a 3-line assistant snippet (with inline bold formatting), and a
+per-session turn bookmark toggle. Clicking a tick or the preview card scrolls
+the transcript to that turn. Added `conversation-minimap.test.tsx` and verified
+all 247 vitest tests, clean `tsc`, and packaged debug Electron build.
+
 ### 2026-11-21: Fix isolated Xcode Python startup
 
 Allowed the Xcode Python framework's `Python3` library in the isolated worker's macOS sandbox. Added a regression test using `/usr/bin/python3`, which reproduced the dyld sandbox failure before the fix. Verified `cargo test -p mew-agent isolated_python -- --nocapture` (3 tests) and `cargo fmt --all -- --check`.
+
+### 2026-11-21: Verify and commit desktop work
+
+Verified the current desktop changes with 247 web UI tests, the catalog and daemon suites, 65 provider setup tests, homepage tests, theme codegen and architecture checks. The pre-commit hook passed with Zig 0.15.2 and the installed macOS 15.4 SDK. Built and installed the Electron app from this worktree.
