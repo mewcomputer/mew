@@ -4999,3 +4999,15 @@ do not yet expose an AGY provider or provide an OS isolation boundary.
 
 Verified the crate tests and clippy, a real AGY text stream, a conflicting system
 instruction probe, and an official AGY MCP call through the restricted relay.
+
+### 2026-11-21: Add bounded AGY process supervision
+
+Added Unix subprocess supervision with explicit launch specifications, bounded
+stderr capture, per-process-group cancellation and workspace ownership through
+cleanup. A caller must supply an actual isolation boundary; supervising a host
+Docker client does not by itself stop its container workload.
+
+Verified the crate tests and clippy, 20 repeated macOS lifecycle runs, and the
+Linux lifecycle suite in a disposable container with an init process. An earlier
+macOS EPERM did not recur after group verification was moved before reaping;
+the exact original syscall failure was not captured.
