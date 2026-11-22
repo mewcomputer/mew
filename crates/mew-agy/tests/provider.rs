@@ -87,6 +87,203 @@ fn fixture(dir: &Path, script: &str) -> FixtureBoundary {
     FixtureBoundary { script: path }
 }
 
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "requires a signed-in local AGY installation and network"]
+async fn official_agy_responds_through_local_sandbox() {
+    use mew_agy::{proxy::EgressProxy, sandbox::SeatbeltBoundary};
+    let binary = PathBuf::from(std::env::var_os("MEW_AGY_TEST_BIN").expect("agy binary"));
+    let workspace = tempfile::tempdir().unwrap();
+    let proxy = EgressProxy::start().await.unwrap();
+    let boundary = SeatbeltBoundary::new(proxy.port()).unwrap();
+    let provider = AgyProvider::new(
+        Config {
+            executable: binary,
+            workspace_parent: workspace.path().to_owned(),
+            environment: vec![],
+            lifetime: Duration::from_secs(120),
+        },
+        boundary,
+    );
+    let mut req = request();
+    req.model = std::env::var("MEW_AGY_TEST_MODEL").expect("test model");
+    req.tools.clear();
+    let events: Vec<_> = tokio::time::timeout(Duration::from_secs(120), async {
+        provider.stream(req).await.unwrap().collect().await
+    })
+    .await
+    .expect("AGY prompt timed out");
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::PartDelta { field: "text", .. })),
+        "no text: {events:?}"
+    );
+    assert!(
+        matches!(
+            events.last(),
+            Some(ProviderEvent::MessageEnd {
+                finish: Finish::Stop,
+                ..
+            })
+        ),
+        "no successful completion: {events:?}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "requires signed-in local AGY, network, and explicit unsandboxed execution"]
+async fn official_agy_responds_with_existing_local_account() {
+    use mew_agy::process::UnsandboxedBoundary;
+    let binary = PathBuf::from(std::env::var_os("MEW_AGY_TEST_BIN").expect("agy binary"));
+    let workspace = tempfile::tempdir().unwrap();
+    let provider = AgyProvider::new(
+        Config {
+            executable: binary,
+            workspace_parent: workspace.path().to_owned(),
+            environment: vec![],
+            lifetime: Duration::from_secs(180),
+        },
+        UnsandboxedBoundary,
+    );
+    let mut req = request();
+    req.model = std::env::var("MEW_AGY_TEST_MODEL").expect("test model");
+    req.tools.clear();
+    let events: Vec<_> = tokio::time::timeout(Duration::from_secs(180), async {
+        provider.stream(req).await.unwrap().collect().await
+    })
+    .await
+    .expect("AGY prompt timed out");
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::PartDelta { field: "text", .. })),
+        "no text: {events:?}"
+    );
+    assert!(
+        matches!(
+            events.last(),
+            Some(ProviderEvent::MessageEnd {
+                finish: Finish::Stop,
+                ..
+            })
+        ),
+        "no successful completion: {events:?}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "requires signed-in local AGY, network, and explicit unsandboxed execution"]
+async fn official_agy_calls_client_tool_and_receives_its_result() {
+    use mew_agy::process::UnsandboxedBoundary;
+    let binary = PathBuf::from(std::env::var_os("MEW_AGY_TEST_BIN").expect("agy binary"));
+    let workspace = tempfile::tempdir().unwrap();
+    let provider = AgyProvider::new(
+        Config {
+            executable: binary,
+            workspace_parent: workspace.path().to_owned(),
+            environment: vec![],
+            lifetime: Duration::from_secs(180),
+        },
+        UnsandboxedBoundary,
+    );
+    let mut req = request();
+    req.model = std::env::var("MEW_AGY_TEST_MODEL").expect("test model");
+    if let Part::Text(text) = &mut req.messages[0].parts[0] {
+        text.text = "Call the echo tool with text 'mew-bridge-canary'. After receiving its result, report the tool result.".into();
+    }
+    let events: Vec<_> = tokio::time::timeout(Duration::from_secs(120), async {
+        provider.stream(req.clone()).await.unwrap().collect().await
+    })
+    .await
+    .expect("AGY tool call timed out");
+    let call = events
+        .iter()
+        .find_map(|event| match event {
+            ProviderEvent::PartStart {
+                part: Part::ToolCall(call),
+            } => Some(call.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("AGY did not call the client tool: {events:?}"));
+    assert_eq!(call.tool_name, "echo");
+    let input = match &call.state {
+        ToolState::Pending(state) => state.input.clone(),
+        _ => panic!("unexpected call state"),
+    };
+    assert_eq!(input["text"], "mew-bridge-canary");
+    let mut parts = Vec::new();
+    let mut text = String::new();
+    for event in &events {
+        if let ProviderEvent::PartDelta {
+            field: "text",
+            delta,
+            ..
+        } = event
+        {
+            text.push_str(delta);
+        }
+    }
+    if !text.is_empty() {
+        parts.push(Part::Text(TextPart {
+            base: base(),
+            text,
+            synthetic: false,
+        }));
+    }
+    let mut done = call.clone();
+    done.state = ToolState::Completed(ToolStateCompleted {
+        input,
+        output: "mew-tool-result-canary".into(),
+        metadata: None,
+        diff: None,
+        images: vec![],
+        time: ToolTime {
+            start: 0,
+            end: Some(1),
+        },
+    });
+    parts.push(Part::ToolCall(done));
+    let mut continuation = req;
+    continuation.messages.push(msg(Role::Assistant, parts));
+    continuation.messages.push(msg(
+        Role::User,
+        vec![Part::ToolResult(ToolResultPart {
+            base: base(),
+            call_id: call.call_id,
+        })],
+    ));
+    let final_events: Vec<_> = tokio::time::timeout(Duration::from_secs(120), async {
+        provider.stream(continuation).await.unwrap().collect().await
+    })
+    .await
+    .expect("AGY tool continuation timed out");
+    let text: String = final_events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderEvent::PartDelta {
+                field: "text",
+                delta,
+                ..
+            } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        text.contains("mew-tool-result-canary"),
+        "tool result not reflected in final response"
+    );
+    assert!(matches!(
+        final_events.last(),
+        Some(ProviderEvent::MessageEnd {
+            finish: Finish::Stop,
+            ..
+        })
+    ));
+}
+
 #[tokio::test]
 async fn provider_reports_safe_quota_errors_without_disclosing_cli_details() {
     let parent = tempfile::tempdir().unwrap();
@@ -121,6 +318,50 @@ r=json.loads(b)
 print(json.dumps({'event':'step_update','step_update':{'step_type':'agent_response','text_delta':r['result']['content'][0]['text']}}),flush=True)
 print(json.dumps({'event':'result','result':{'status':'SUCCESS'}}),flush=True)
 "#;
+
+#[tokio::test]
+async fn long_mcp_name_is_aliased_for_agy_and_restored_for_mew() {
+    let parent = tempfile::tempdir().unwrap();
+    let script = TOOL_SCRIPT.replace("'name':'echo'", "'name':'mew_tool_0'");
+    let provider = AgyProvider::new(config(parent.path()), fixture(parent.path(), &script));
+    let mut req = request();
+    let name = format!("mcp__server__{}", "long_name_".repeat(10));
+    req.tools[0].name = name.clone();
+    let events: Vec<_> = provider.stream(req).await.unwrap().collect().await;
+    let call = events
+        .iter()
+        .find_map(|event| match event {
+            ProviderEvent::PartStart {
+                part: Part::ToolCall(call),
+            } => Some(call),
+            _ => None,
+        })
+        .expect("tool call");
+    assert_eq!(call.tool_name, name);
+}
+
+#[tokio::test]
+async fn generated_alias_does_not_shadow_a_real_tool_name() {
+    let parent = tempfile::tempdir().unwrap();
+    let script = TOOL_SCRIPT.replace("'name':'echo'", "'name':'mew_tool_0_1'");
+    let provider = AgyProvider::new(config(parent.path()), fixture(parent.path(), &script));
+    let mut req = request();
+    req.tools[0].name = "non-ascii-工具".into();
+    let mut other = req.tools[0].clone();
+    other.name = "mew_tool_0".into();
+    req.tools.push(other);
+    let events: Vec<_> = provider.stream(req).await.unwrap().collect().await;
+    let call = events
+        .iter()
+        .find_map(|event| match event {
+            ProviderEvent::PartStart {
+                part: Part::ToolCall(call),
+            } => Some(call),
+            _ => None,
+        })
+        .expect("tool call");
+    assert_eq!(call.tool_name, "non-ascii-工具");
+}
 #[tokio::test]
 async fn tool_handoff_resumes_only_with_matching_history_and_result() {
     let parent = tempfile::tempdir().unwrap();

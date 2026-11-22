@@ -6,7 +6,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-const AGENT: &str = "---\nname: mew-boundary\ndescription: Client tool bridge\nmainAgent: true\nsubagent: false\nexcludeDefaultComponents: true\ninheritMcp: true\ninheritCustomizations: false\ntools: []\nagents: []\nrules: []\nskills: []\n---\nUse the available client tools to respond to the request.\n";
+const AGENT: &str = "---\nname: mew-boundary\ndescription: Client tool bridge\nmainAgent: true\nsubagent: false\nexcludeDefaultComponents: true\ninheritMcp: true\ninheritCustomizations: false\ntools: []\nagents: []\nrules: []\nskills: []\n---\nMew's client tools are available on MCP server `mew`. Use the available MCP interface, including `call_mcp_tool` when provided, to call those tools for workspace operations.\n";
 
 /// Capabilities not supported by this launch policy.
 #[derive(Debug, Default, Clone, Copy)]

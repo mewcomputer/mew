@@ -2,6 +2,28 @@ use mew_agy::launch::{prepare, Capabilities};
 use std::fs;
 
 #[test]
+fn agent_instructions_identify_the_client_mcp_tool_server() {
+    let parent = tempfile::tempdir().unwrap();
+    let launch = prepare(
+        parent.path(),
+        "model",
+        &["read"],
+        "http://127.0.0.1:12345/0123456789abcdef",
+        Capabilities::default(),
+        "",
+    )
+    .unwrap();
+    let instructions = fs::read_to_string(
+        launch
+            .workspace()
+            .join(".agents/agents/mew-boundary/agent.md"),
+    )
+    .unwrap();
+    assert!(instructions.contains("MCP server `mew`"));
+    assert!(instructions.contains("call_mcp_tool"));
+}
+
+#[test]
 fn creates_private_workspace_with_minimal_agent_and_exact_permissions() {
     let parent = tempfile::tempdir().unwrap();
     let launch = prepare(
@@ -211,7 +233,7 @@ fn system_instructions_are_preserved_verbatim_after_fixed_agent_preamble() {
             .workspace()
             .join(".agents/agents/mew-boundary/agent.md");
         let bytes = fs::read(&file).unwrap();
-        let marker = b"Use the available client tools to respond to the request.\n";
+        let marker = b"Use the available MCP interface, including `call_mcp_tool` when provided, to call those tools for workspace operations.\n";
         let offset = bytes
             .windows(marker.len())
             .position(|b| b == marker)

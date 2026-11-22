@@ -45,6 +45,7 @@ impl jsonschema::Retrieve for NoExternalSchemas {
 
 pub struct Tool {
     name: String,
+    original_name: String,
     description: String,
     schema: Value,
     validator: jsonschema::Validator,
@@ -52,12 +53,16 @@ pub struct Tool {
 
 impl Tool {
     pub fn new(name: &str, description: &str, schema: Value) -> Result<Self, String> {
-        if name.is_empty()
-            || name.len() > 64
-            || !name
-                .bytes()
-                .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
-        {
+        Self::aliased(name, name, description, schema)
+    }
+
+    pub(crate) fn aliased(
+        name: &str,
+        original_name: &str,
+        description: &str,
+        schema: Value,
+    ) -> Result<Self, String> {
+        if !valid_name(name) || original_name.is_empty() {
             return Err("invalid tool name".into());
         }
         if description.len() > MAX_DESCRIPTION || json_size(&schema, MAX_SCHEMA).is_err() {
@@ -69,11 +74,20 @@ impl Tool {
             .map_err(|e| format!("invalid schema: {e}"))?;
         Ok(Self {
             name: name.into(),
+            original_name: original_name.into(),
             description: description.into(),
             schema,
             validator,
         })
     }
+}
+
+pub(crate) fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
 }
 
 #[derive(Debug)]
@@ -144,6 +158,10 @@ impl McpServer {
             .await
             .map_err(|e| e.to_string())?;
         let addr = listener.local_addr().map_err(|e| e.to_string())?;
+        #[cfg(target_os = "macos")]
+        let reserved_ipv6 = TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, addr.port()))
+            .await
+            .map_err(|e| e.to_string())?;
         let path = format!("/{}", random_id()?);
         let (tx, rx) = mpsc::channel(max_pending);
         let state = Arc::new(State {
@@ -157,6 +175,8 @@ impl McpServer {
         let stop = CancellationToken::new();
         let stopped = stop.clone();
         let task = tokio::spawn(async move {
+            #[cfg(target_os = "macos")]
+            let _reserved_ipv6 = reserved_ipv6;
             let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
             let mut jobs = JoinSet::new();
             loop {
@@ -454,7 +474,7 @@ async fn handle_inner(req: Request<Incoming>, state: Arc<State>) -> Response<Bod
         .calls
         .try_send(ToolCall {
             id: call_id,
-            name: name.into(),
+            name: tool.original_name.clone(),
             arguments: arguments.clone(),
             cancellation,
         })

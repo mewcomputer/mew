@@ -428,9 +428,22 @@ mod unix {
                 },
             }
         };
+        let cancel_turn = pending_call.is_some()
+            || matches!(
+                failure,
+                Some(
+                    "consumer disconnected"
+                        | "session closed"
+                        | "MCP call cancelled"
+                        | "turn cancelled"
+                        | "AGY finished with pending MCP calls"
+                )
+            );
         if let Some(message) = failure {
             if let Some(active) = &active {
-                active.turn_cancel.cancel();
+                if cancel_turn {
+                    active.turn_cancel.cancel();
+                }
                 if let Some(events) = &active.events {
                     let _ = events.try_send(Err(invalid(message)));
                 }
@@ -443,7 +456,9 @@ mod unix {
         });
         if let Err(error) = cleanup.and(server_cleanup) {
             if let Some(active) = &active {
-                active.turn_cancel.cancel();
+                if cancel_turn {
+                    active.turn_cancel.cancel();
+                }
                 if let Some(events) = &active.events {
                     let _ = events.try_send(Err(invalid("AGY process cleanup failed")));
                 }

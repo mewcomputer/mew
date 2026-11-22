@@ -2,6 +2,18 @@ use mew_agy::mcp::{McpServer, Tool};
 use serde_json::{json, Value};
 use std::time::Duration;
 
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn mcp_reserves_the_same_ipv6_loopback_port() {
+    let (server, _, _) = setup().await;
+    let url = url::Url::parse(server.url()).unwrap();
+    assert!(
+        tokio::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, url.port().unwrap()))
+            .await
+            .is_err()
+    );
+}
+
 async fn setup() -> (
     McpServer,
     tokio::sync::mpsc::Receiver<mew_agy::mcp::ToolCall>,

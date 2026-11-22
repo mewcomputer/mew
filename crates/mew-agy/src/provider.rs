@@ -1,5 +1,4 @@
-//! Provider integration for an explicitly isolated AGY process.
-//! No concrete isolation boundary is supplied by this module.
+//! Provider integration for an AGY process with an explicit execution boundary.
 
 #[cfg(unix)]
 mod unix {
@@ -19,7 +18,7 @@ mod unix {
     use mew_provider::{EventStream, Provider, ProviderError, ProviderEvent, Request};
     use serde_json::{json, Value};
     use std::{
-        collections::HashMap,
+        collections::{HashMap, HashSet},
         ffi::OsString,
         path::PathBuf,
         pin::Pin,
@@ -274,14 +273,41 @@ mod unix {
                 if guard.session.is_some() {
                     return Err(invalid("AGY session is already active"));
                 }
-                let mut defs = Vec::new();
-                for t in &request.tools {
+                let mut seen = HashSet::new();
+                for tool in &request.tools {
+                    if !seen.insert(tool.name.as_str()) {
+                        return Err(invalid("duplicate tool name"));
+                    }
+                }
+                let mut used: HashSet<String> = request
+                    .tools
+                    .iter()
+                    .filter(|tool| crate::mcp::valid_name(&tool.name))
+                    .map(|tool| tool.name.clone())
+                    .collect();
+                let mut names = Vec::with_capacity(request.tools.len());
+                let mut defs = Vec::with_capacity(request.tools.len());
+                for (index, tool) in request.tools.iter().enumerate() {
+                    let alias = if crate::mcp::valid_name(&tool.name) {
+                        tool.name.clone()
+                    } else {
+                        let mut candidate = format!("mew_tool_{index}");
+                        let mut suffix = 0usize;
+                        while used.contains(&candidate) {
+                            suffix += 1;
+                            candidate = format!("mew_tool_{index}_{suffix}");
+                        }
+                        used.insert(candidate.clone());
+                        candidate
+                    };
                     defs.push(
-                        Tool::new(&t.name, &t.description, t.schema.clone()).map_err(invalid)?,
-                    )
+                        Tool::aliased(&alias, &tool.name, &tool.description, tool.schema.clone())
+                            .map_err(invalid)?,
+                    );
+                    names.push(alias);
                 }
                 let (server, calls) = McpServer::bind(defs, 16).await.map_err(invalid)?;
-                let names: Vec<_> = request.tools.iter().map(|t| t.name.as_str()).collect();
+                let names: Vec<_> = names.iter().map(String::as_str).collect();
                 let launch = launch::prepare(
                     &self.config.workspace_parent,
                     &request.model,

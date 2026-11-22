@@ -1,4 +1,4 @@
-//! Process lifecycle behind an explicitly supplied isolation boundary.
+//! Process lifecycle behind an explicitly selected execution boundary.
 //!
 //! A process group is a cleanup mechanism, not a filesystem or network sandbox.
 
@@ -39,7 +39,7 @@ mod unix {
         pub cwd: PathBuf,
     }
 
-    /// Wraps the spec in a caller-provided OS/container boundary, or fails closed.
+    /// Prepares the spec for the caller-selected execution boundary.
     ///
     /// The launched process group must own the workload it confines. A local
     /// `docker exec` client does not own the process inside the container:
@@ -47,6 +47,61 @@ mod unix {
     /// stop the actual container, or independently prove workload termination.
     pub trait IsolationBoundary {
         fn wrap(&self, spec: LaunchSpec, workspace: &Path) -> io::Result<LaunchSpec>;
+    }
+
+    /// Launch the local CLI without an OS sandbox. Process-group cleanup still applies.
+    pub struct UnsandboxedBoundary;
+
+    impl IsolationBoundary for UnsandboxedBoundary {
+        fn wrap(&self, mut spec: LaunchSpec, _: &Path) -> io::Result<LaunchSpec> {
+            fn allowed(key: &std::ffi::OsStr) -> bool {
+                let Some(key) = key.to_str() else {
+                    return false;
+                };
+                matches!(
+                    key,
+                    "HOME"
+                        | "PATH"
+                        | "USER"
+                        | "LOGNAME"
+                        | "TMPDIR"
+                        | "LANG"
+                        | "LANGUAGE"
+                        | "TERM"
+                        | "HTTP_PROXY"
+                        | "HTTPS_PROXY"
+                        | "NO_PROXY"
+                        | "http_proxy"
+                        | "https_proxy"
+                        | "no_proxy"
+                        | "SSL_CERT_FILE"
+                        | "SSL_CERT_DIR"
+                        | "NODE_EXTRA_CA_CERTS"
+                        | "GOOGLE_APPLICATION_CREDENTIALS"
+                        | "GOOGLE_CLOUD_PROJECT"
+                        | "GOOGLE_CLOUD_QUOTA_PROJECT"
+                        | "XDG_CONFIG_HOME"
+                        | "XDG_CACHE_HOME"
+                        | "XDG_DATA_HOME"
+                        | "XDG_STATE_HOME"
+                        | "XDG_RUNTIME_DIR"
+                ) || key.starts_with("LC_")
+                    || key.starts_with("AGY_")
+                    || key.starts_with("ANTIGRAVITY_")
+                    || key.starts_with("GEMINI_")
+            }
+            let mut environment: Vec<_> = std::env::vars_os()
+                .filter(|(key, _)| allowed(key))
+                .collect();
+            for (key, value) in spec.env {
+                if allowed(&key) {
+                    environment.retain(|(existing, _)| existing != &key);
+                    environment.push((key, value));
+                }
+            }
+            spec.env = environment;
+            Ok(spec)
+        }
     }
 
     #[derive(Debug)]
@@ -565,7 +620,9 @@ mod unix {
 }
 
 #[cfg(unix)]
-pub use unix::{IsolationBoundary, LaunchSpec, ManagedProcess, ProcessOutcome};
+pub use unix::{
+    IsolationBoundary, LaunchSpec, ManagedProcess, ProcessOutcome, UnsandboxedBoundary,
+};
 
 #[cfg(all(test, unix))]
 mod tests {

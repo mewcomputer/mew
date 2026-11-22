@@ -176,11 +176,16 @@ async fn mcp_cancellation_after_handoff_cancels_the_owning_turn() {
 #[tokio::test]
 async fn early_cli_eof_is_an_error_and_does_not_report_completion() {
     let (session, _, _, _, _) = setup("exit 0").await;
-    let mut turn = session.start(b"", CancellationToken::new()).await.unwrap();
+    let cancel = CancellationToken::new();
+    let mut turn = session.start(b"", cancel.clone()).await.unwrap();
     assert!(tokio::time::timeout(Duration::from_secs(5), turn.next())
         .await
         .unwrap()
         .is_err());
+    assert!(
+        !cancel.is_cancelled(),
+        "unexpected EOF should remain a provider error"
+    );
 }
 
 #[tokio::test]
@@ -300,14 +305,23 @@ async fn unresolved_handoff_expires_and_cleans_up() {
 async fn quota_failure_reports_category_without_exposing_cli_text() {
     let script = r#"printf '%s\n' '{"event":"result","result":{"status":"ERROR","error":"quota exceeded private-secret-value"}}'"#;
     let (session, _, _, _, _) = setup(script).await;
-    let mut turn = session.start(b"", CancellationToken::new()).await.unwrap();
-    let error = tokio::time::timeout(Duration::from_secs(3), turn.next())
-        .await
-        .unwrap()
-        .unwrap_err()
-        .to_string();
+    let cancel = CancellationToken::new();
+    let mut turn = session.start(b"", cancel.clone()).await.unwrap();
+    let error = tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => panic!("provider error was masked by cancellation"),
+            result = turn.next() => result.unwrap_err().to_string(),
+        }
+    })
+    .await
+    .unwrap();
     assert!(error.to_lowercase().contains("quota"));
     assert!(!error.contains("private-secret-value"));
+    assert!(
+        !cancel.is_cancelled(),
+        "provider errors must not become cancellations"
+    );
 }
 
 #[tokio::test]
