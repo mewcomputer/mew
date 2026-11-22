@@ -3821,6 +3821,7 @@ fn utility_request(
 
     mew_provider::Request {
         session_id: None,
+        cancel_token: Default::default(),
         model: String::new(),
         messages: vec![Message {
             id: Ulid::new(),

@@ -330,6 +330,7 @@ impl Agent {
 
             let mut req = Request {
                 session_id: Some(self.session_id),
+                cancel_token: self.cancel_token.clone(),
                 model: String::new(),
                 messages: self.prepare_messages().await,
                 tools: tool_defs,

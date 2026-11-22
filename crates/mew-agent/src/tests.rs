@@ -7340,3 +7340,293 @@ async fn shell_job_preserves_unicode_split_across_pipe_writes() {
     assert_eq!(chunk.output, "日\n");
     assert!(chunk.done && !chunk.incomplete);
 }
+
+#[tokio::test]
+async fn provider_or_user_cancellation_during_direct_tool_approval_stops_the_turn() {
+    for cancel_from_provider in [false, true] {
+        let workspace = tempfile::tempdir().unwrap();
+        let provider = Arc::new(CapturingProvider::new(vec![FakeProvider::tool_call(
+            "write",
+            "cancel-write",
+            serde_json::json!({"path":"marker.txt","content":"must not be written"}),
+        )]));
+        let mut agent = Agent::new(
+            provider.clone(),
+            Arc::new(NopDispatcher),
+            None,
+            vec![Arc::new(mew_tools::tools::write::Write)],
+            None,
+        );
+        agent.cwd = workspace.path().to_path_buf();
+        agent.workspace_roots = vec![workspace.path().to_path_buf()];
+        agent.max_turns = Some(1);
+        let turn_cancel = tokio_util::sync::CancellationToken::new();
+        let mut events = agent.run_with_parts("write".into(), vec![], Some(turn_cancel.clone()));
+        let permission = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(AgentEvent::PermissionRequest { tx, .. }) = events.recv().await {
+                    break tx;
+                }
+            }
+        })
+        .await
+        .expect("permission request");
+        let provider_token = provider.captured.lock().unwrap()[0].cancel_token.clone();
+        if cancel_from_provider {
+            provider_token.cancel();
+        } else {
+            turn_cancel.cancel();
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while events.recv().await.is_some() {}
+        })
+        .await
+        .expect("cancelled turn stopped");
+        assert!(provider_token.is_cancelled());
+        assert!(turn_cancel.is_cancelled());
+        assert!(
+            permission
+                .send(mew_hooks::PermissionDecision::AllowOnce)
+                .is_err(),
+            "late approval must be closed"
+        );
+        assert!(!workspace.path().join("marker.txt").exists());
+    }
+}
+
+#[tokio::test]
+async fn cancelling_a_child_provider_request_does_not_cancel_a_sibling_turn() {
+    let root = tokio_util::sync::CancellationToken::new();
+    let first_cancel = root.child_token();
+    let second_cancel = root.child_token();
+    let first_provider = Arc::new(CapturingProvider::new(vec![FakeProvider::tool_call(
+        "write",
+        "first",
+        serde_json::json!({"path":"first.txt","content":"first"}),
+    )]));
+    let second_provider = Arc::new(CapturingProvider::new(vec![FakeProvider::tool_call(
+        "write",
+        "second",
+        serde_json::json!({"path":"second.txt","content":"second"}),
+    )]));
+    let first_dir = tempfile::tempdir().unwrap();
+    let second_dir = tempfile::tempdir().unwrap();
+    let mut first = Agent::new(
+        first_provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![Arc::new(mew_tools::tools::write::Write)],
+        None,
+    );
+    first.cwd = first_dir.path().to_path_buf();
+    first.workspace_roots = vec![first_dir.path().to_path_buf()];
+    first.max_turns = Some(1);
+    let mut second = Agent::new(
+        second_provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![Arc::new(mew_tools::tools::write::Write)],
+        None,
+    );
+    second.cwd = second_dir.path().to_path_buf();
+    second.workspace_roots = vec![second_dir.path().to_path_buf()];
+    second.max_turns = Some(1);
+    let mut first_events = first.run_with_parts("first".into(), vec![], Some(first_cancel.clone()));
+    let mut second_events =
+        second.run_with_parts("second".into(), vec![], Some(second_cancel.clone()));
+    async fn approval(
+        events: &mut tokio::sync::mpsc::Receiver<AgentEvent>,
+    ) -> tokio::sync::oneshot::Sender<mew_hooks::PermissionDecision> {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(AgentEvent::PermissionRequest { tx, .. }) = events.recv().await {
+                    break tx;
+                }
+            }
+        })
+        .await
+        .unwrap()
+    }
+    let first_reply = approval(&mut first_events).await;
+    let second_reply = approval(&mut second_events).await;
+    first_provider.captured.lock().unwrap()[0]
+        .cancel_token
+        .cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while first_events.recv().await.is_some() {}
+    })
+    .await
+    .unwrap();
+    assert!(first_reply
+        .send(mew_hooks::PermissionDecision::AllowOnce)
+        .is_err());
+    assert!(!root.is_cancelled());
+    assert!(!second_cancel.is_cancelled());
+    second_reply
+        .send(mew_hooks::PermissionDecision::AllowOnce)
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while second_events.recv().await.is_some() {}
+    })
+    .await
+    .unwrap();
+    assert!(!first_dir.path().join("first.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(second_dir.path().join("second.txt")).unwrap(),
+        "second"
+    );
+}
+
+#[tokio::test]
+async fn provider_cancellation_closes_workspace_approval_without_writing() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let provider = Arc::new(CapturingProvider::new(vec![FakeProvider::tool_call(
+        "write",
+        "outside",
+        serde_json::json!({"path":outside.path().join("marker.txt"),"content":"forbidden"}),
+    )]));
+    let mut agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![Arc::new(mew_tools::tools::write::Write)],
+        None,
+    );
+    agent.cwd = root.path().to_path_buf();
+    agent.workspace_roots = vec![root.path().to_path_buf()];
+    agent.max_turns = Some(1);
+    let mut events = agent.run_with_parts(
+        "write".into(),
+        vec![],
+        Some(tokio_util::sync::CancellationToken::new()),
+    );
+    let workspace_reply = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match events.recv().await {
+                Some(AgentEvent::PermissionRequest { tx, .. }) => {
+                    tx.send(mew_hooks::PermissionDecision::AllowOnce).unwrap();
+                }
+                Some(AgentEvent::WorkspacePermissionRequest { tx, .. }) => break tx,
+                None => panic!("turn ended before workspace permission"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    provider.captured.lock().unwrap()[0].cancel_token.cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while events.recv().await.is_some() {}
+    })
+    .await
+    .unwrap();
+    assert!(workspace_reply
+        .send(mew_hooks::PermissionDecision::AllowOnce)
+        .is_err());
+    assert!(!outside.path().join("marker.txt").exists());
+}
+
+#[tokio::test]
+async fn cancelling_provider_token_in_real_child_preserves_sibling_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let script = FakeProvider::tool_call(
+        "write",
+        "child-write",
+        serde_json::json!({"path":"child.txt","content":"approved"}),
+    );
+    let (agent, provider) = subagent_with_real_runner(
+        tmp.path(),
+        vec![script.clone(), script],
+        vec![Arc::new(mew_tools::tools::write::Write)],
+        tmp.path().to_path_buf(),
+        vec![tmp.path().to_path_buf()],
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::channel(128);
+    let first = agent
+        .start_subagent("worker", "first", None, None, &tx)
+        .await
+        .unwrap();
+    let second = agent
+        .start_subagent("worker", "second", None, None, &tx)
+        .await
+        .unwrap();
+    let mut sessions = std::collections::HashMap::new();
+    let mut approvals = std::collections::HashMap::new();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while approvals.len() < 2 || sessions.len() < 2 {
+            match rx.recv().await {
+                Some(AgentEvent::SubagentStart {
+                    parent_call_id,
+                    child_session_id,
+                    ..
+                }) => {
+                    sessions.insert(parent_call_id, child_session_id);
+                }
+                Some(AgentEvent::SubagentPermissionRequest {
+                    parent_call_id, tx, ..
+                }) => {
+                    approvals.insert(parent_call_id, tx);
+                }
+                None => panic!("child events closed"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let first_session = &sessions[&first];
+    let second_session = &sessions[&second];
+    assert_ne!(first_session, second_session);
+    let (first_token, second_token) = {
+        let captured = provider.captured.lock().unwrap();
+        let token = |id: &str| {
+            captured
+                .iter()
+                .find(|r| r.session_id.is_some_and(|s| s.to_string() == id))
+                .unwrap()
+                .cancel_token
+                .clone()
+        };
+        (token(first_session), token(second_session))
+    };
+    first_token.cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Some(AgentEvent::SubagentEnd { parent_call_id, .. }) = rx.recv().await {
+                if parent_call_id == first {
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(approvals
+        .remove(&first)
+        .unwrap()
+        .send(mew_hooks::PermissionDecision::AllowOnce)
+        .is_err());
+    assert!(!agent.cancel_token.is_cancelled());
+    assert!(!second_token.is_cancelled());
+    approvals
+        .remove(&second)
+        .unwrap()
+        .send(mew_hooks::PermissionDecision::AllowOnce)
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Some(AgentEvent::SubagentEnd { parent_call_id, .. }) = rx.recv().await {
+                if parent_call_id == second {
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("child.txt")).unwrap(),
+        "approved"
+    );
+}

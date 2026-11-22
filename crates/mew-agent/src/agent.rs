@@ -734,6 +734,7 @@ impl Agent {
 
         let request = mew_provider::Request {
             session_id: None,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
             model,
             messages: vec![mew_message::Message {
                 id: ulid::Ulid::new(),

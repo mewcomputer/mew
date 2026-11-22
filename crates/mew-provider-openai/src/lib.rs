@@ -2387,6 +2387,7 @@ mod tests {
             headers: reqwest::header::HeaderMap::new(),
             supports_vision: false,
             session_id: None,
+            cancel_token: Default::default(),
         };
         let body = adapter.build_request_body(&req).await.unwrap();
         let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();

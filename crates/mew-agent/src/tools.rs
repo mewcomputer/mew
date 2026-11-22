@@ -374,16 +374,20 @@ impl Agent {
                 );
                 if is_python && python_guard.is_none() {
                     (PermissionDecision::Deny, Some("cancelled".into()))
-                } else if is_python {
+                } else {
                     tokio::select! {
+                        biased;
                         _ = self.cancel_token.cancelled() => (PermissionDecision::Deny, Some("cancelled".into())),
                         result = permission => result,
                     }
-                } else {
-                    permission.await
                 }
             };
 
+            let (decision, deny_reason) = if self.cancel_token.is_cancelled() {
+                (PermissionDecision::Deny, Some("cancelled".into()))
+            } else {
+                (decision, deny_reason)
+            };
             if decision == PermissionDecision::AllowSession {
                 if let Some(ref engine) = self.permission_engine {
                     engine.add_session_allow(&tc.tool_name).await;
@@ -707,6 +711,9 @@ impl Agent {
                 }
             }
 
+            if self.cancel_token.is_cancelled() {
+                break;
+            }
             tracing::info!(tool = %tc.tool_name, call_id = %call_id, input = %input, "executing tool");
             let mut nested_calls = Vec::new();
             let exec_result = if is_python {

@@ -48,7 +48,12 @@ impl Agent {
             })
             .await;
 
-        match rx.await {
+        let decision = tokio::select! {
+            biased;
+            _ = self.cancel_token.cancelled() => return Err("cancelled".into()),
+            result = rx => result,
+        };
+        match decision {
             Ok(PermissionDecision::AllowOnce | PermissionDecision::AllowSession) => {
                 self.workspace_allowances.lock().await.insert(dir);
                 Ok(())

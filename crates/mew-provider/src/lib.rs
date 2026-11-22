@@ -57,6 +57,8 @@ pub enum ToolChoice {
 pub struct Request {
     /// Conversation owning this request. Auxiliary one-off requests have no session.
     pub session_id: Option<mew_message::SessionId>,
+    /// Shared cancellation for this request's owning turn.
+    pub cancel_token: tokio_util::sync::CancellationToken,
     pub model: String,
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDef>,
@@ -83,6 +85,7 @@ impl Default for Request {
     fn default() -> Self {
         Self {
             session_id: None,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
             model: String::new(),
             messages: Vec::new(),
             tools: Vec::new(),
@@ -414,5 +417,14 @@ mod tests {
                 "client error (400): bad request".to_string()
             )
         );
+    }
+    #[test]
+    fn default_requests_have_independent_cancellation_and_clones_share_it() {
+        let first = Request::default();
+        let clone = first.clone();
+        let independent = Request::default();
+        clone.cancel_token.cancel();
+        assert!(first.cancel_token.is_cancelled());
+        assert!(!independent.cancel_token.is_cancelled());
     }
 }

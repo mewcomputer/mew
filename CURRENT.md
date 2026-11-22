@@ -5011,3 +5011,12 @@ Verified the crate tests and clippy, 20 repeated macOS lifecycle runs, and the
 Linux lifecycle suite in a disposable container with an init process. An earlier
 macOS EPERM did not recur after group verification was moved before reaping;
 the exact original syscall failure was not captured.
+
+### 2026-11-21: Propagate cancellation through provider turns
+
+Provider requests now share their owning turn's cancellation token. Direct and
+workspace permission waits stop on cancellation, and a late approval cannot
+start the tested write. Independent child turns retain separate tokens.
+
+Verified cancellation and two-subagent behavior, provider adapter and daemon
+checks, and targeted clippy with isolated Mew state directories.
