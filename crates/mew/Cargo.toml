@@ -59,7 +59,6 @@ mew-raster = { path = "../mew-raster" }
 tiny-skia = "0.12"
 
 iroh = { workspace = true, optional = true }
-qrcode = { workspace = true }
 
 [features]
 default = []

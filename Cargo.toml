@@ -174,7 +174,6 @@ mew-agent = { path = "crates/mew-agent" }
 mew-tui = { path = "crates/mew-tui" }
 mew-provider-openai = { path = "crates/mew-provider-openai" }
 mew-provider-anthropic = { path = "crates/mew-provider-anthropic" }
-mew-provider-router = { path = "crates/mew-provider-router" }
 mew-provider-fake = { path = "crates/mew-provider-fake" }
 mew-provider-responses = { path = "crates/mew-provider-responses" }
 mew-protocol = { path = "crates/mew-protocol" }
@@ -194,9 +193,6 @@ rand = "0.8"
 
 # P2P transport (iroh) for mobile/remote daemon access.
 iroh = "1"
-
-# QR code generation for `mew pair` pairing flow.
-qrcode = "0.14"
 
 # UniFFI for generating Swift/Kotlin bindings from mew-mobile-core.
 uniffi = "0.32"
