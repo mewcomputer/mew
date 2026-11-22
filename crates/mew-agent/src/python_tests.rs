@@ -1211,6 +1211,19 @@ async fn isolated_python_cannot_open_host_files_connect_to_localhost_or_spawn() 
     assert_eq!(std::fs::read_to_string(secret.path()).unwrap(), "untouched");
 }
 
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn isolated_python_starts_with_the_system_interpreter() {
+    let mut worker = PythonWorker::start(&PythonOptions {
+        executable: PathBuf::from("/usr/bin/python3"),
+        isolated: true,
+        cwd: std::env::current_dir().unwrap(),
+    })
+    .await
+    .unwrap();
+    assert_eq!(run(&mut worker, "text(42)").await["output"], "42\n");
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[tokio::test]
 async fn isolated_python_uses_the_selected_virtual_environment() {

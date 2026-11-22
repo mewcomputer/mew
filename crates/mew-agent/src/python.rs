@@ -568,6 +568,9 @@ async fn isolated_command(python: &Path, scratch: &Path) -> io::Result<Command> 
                 executable.clone()
             };
             let mut allowed = paths;
+            if let Ok(library) = std::fs::canonicalize(Path::new(base).join("Python3")) {
+                allowed.insert(library);
+            }
             for path in ["/System", "/usr/lib", "/usr/share/zoneinfo"] {
                 if Path::new(path).exists() {
                     allowed.insert(PathBuf::from(path));

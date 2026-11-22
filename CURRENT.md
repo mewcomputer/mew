@@ -4804,3 +4804,7 @@ behavior while removing the numbered eyebrows and keeping the existing H1.
 
 Updated `site/tests/homepage.test.mjs` and verified `astro build` plus all 12
 site tests.
+
+### 2026-11-21: Fix isolated Xcode Python startup
+
+Allowed the Xcode Python framework's `Python3` library in the isolated worker's macOS sandbox. Added a regression test using `/usr/bin/python3`, which reproduced the dyld sandbox failure before the fix. Verified `cargo test -p mew-agent isolated_python -- --nocapture` (3 tests) and `cargo fmt --all -- --check`.
