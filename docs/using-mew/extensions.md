@@ -143,8 +143,8 @@ capabilities while existing consent decisions remain active.
 
 ## Attach tokens
 
-The CLI manages attach tokens for a planned extension attach flow; the daemon
-does not validate extension attach tokens yet.
+The CLI prints, revokes, and rotates attach tokens for a planned extension
+attach flow; the daemon does not validate extension attach tokens yet.
 
 ### Show a token
 

@@ -3,8 +3,8 @@ title: Mobile Core Development
 description: Build and test mew-mobile-core and the SwiftUI iOS client.
 ---
 
-`mew-mobile-core` holds all iroh and daemon protocol logic in Rust and exposes
-typed events to the `mew-ios` SwiftUI client through UniFFI.
+`mew-mobile-core` implements the iroh transport and daemon protocol in Rust and
+exposes typed events to the `mew-ios` SwiftUI client through UniFFI.
 
 ## Prerequisites
 

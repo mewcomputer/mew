@@ -1,6 +1,6 @@
 ---
 title: TUI Architecture
-description: How the ratatui frontend handles input, daemon updates, and rendering.
+description: How the ratatui frontend reads input, applies daemon updates, and renders frames.
 ---
 
 The terminal UI is a ratatui client for `mew-daemon`. Plain `mew chat` connects

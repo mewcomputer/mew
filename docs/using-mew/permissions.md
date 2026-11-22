@@ -112,7 +112,7 @@ without workspace prompts:
 roots = ["~/code/myproject"]
 ```
 
-It drives two enforcement layers:
+Mew enforces it in two layers:
 
 - **Agent layer** (`read`, `write`, `edit_str_replace`, `edit_hashline`, `glob`,
   `grep`): targets outside `roots` (or the current directory when `roots` is

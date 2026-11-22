@@ -127,9 +127,9 @@ session commands:
   disturbing unrelated parent requests, and cancelling the child closes its
   pending questions.
 
-`SessionManager` (`crates/mew-daemon/src/session.rs`) owns sessions:
-`session.broadcast(msg)` drops disconnected clients, `turn_lock` serializes turns,
-and `Cancel` fires the turn's `CancellationToken`.
+`SessionManager` (`crates/mew-daemon/src/session.rs`) creates, caches, and
+reloads sessions: `session.broadcast(msg)` drops disconnected clients, `turn_lock`
+serializes turns, and `Cancel` fires the turn's `CancellationToken`.
 
 ## Connection lifecycle
 
@@ -154,8 +154,8 @@ it).
   `AgentEvent` variants to `ServerMessage` and turns oneshot channels
   (`PermissionRequest`, `WorkspacePermissionRequest`, `AskUser`, `GoalProposed`)
   into ID-keyed requests stored on `Session`.
-- **Client inbound**: native clients (`TuiClient` and desktop) drive
-  `mew_client_core::ClientEngine`; `DaemonClient` (`crates/mew-daemon/src/client.rs`)
+- **Client inbound**: native clients (`TuiClient` and desktop) feed wire messages
+  into `mew_client_core::ClientEngine`; `DaemonClient` (`crates/mew-daemon/src/client.rs`)
   also offers `translate_server_message` for `AgentEvent` consumers.
 
 ## Adding a new message type

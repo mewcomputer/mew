@@ -4,7 +4,7 @@ description: Continue a daemon session in another Mew client.
 ---
 
 Multiple clients can attach to the same daemon session simultaneously because
-the daemon owns conversation history, policy, and turn execution.
+the daemon stores conversation history and policy and runs each turn.
 
 ## Open an existing session
 

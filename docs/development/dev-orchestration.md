@@ -9,8 +9,8 @@ for user configuration and examples.
 
 ## Todos and goals
 
-`mew-agent::todos` manages session todos via the `todo_*` tools; users inspect
-and edit them with `/todo`. Todos persist in `<session>/todos.json` across
+`mew-agent::todos` creates, updates, completes, and deletes session todos via
+the `todo_*` tools; users inspect and edit them with `/todo`. Todos persist in `<session>/todos.json` across
 compaction and session resume. Dependencies gate `todo_complete` without
 scheduling execution order.
 

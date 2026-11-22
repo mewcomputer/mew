@@ -3,8 +3,8 @@ title: Mew Docs
 description: Install Mew, choose a client, and learn how to guide your agent.
 ---
 
-Mew is an AI coding assistant backed by a local daemon. The daemon owns your
-sessions and connects to the model provider you configure.
+Mew is an AI coding assistant backed by a local daemon. The daemon runs your
+sessions, stores their history, and connects to the model provider you configure.
 
 ## Get started
 

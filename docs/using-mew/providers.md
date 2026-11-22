@@ -53,8 +53,9 @@ Run `mew auth logout codex` to delete Mew's saved OAuth session.
 | `anthropic` | Anthropic-compatible Messages |
 | `responses` | OpenAI Responses |
 
-The adapter shape governs request formatting and streaming response parsing. See
-[Adding a Provider](/docs/development/dev-providers/) for adapter internals.
+The adapter shape selects how Mew formats requests and parses streaming
+responses. See [Adding a Provider](/docs/development/dev-providers/) for
+adapter internals.
 
 ## Adding a custom provider
 

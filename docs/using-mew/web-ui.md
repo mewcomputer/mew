@@ -57,8 +57,8 @@ Browser -> mew-web (bridge) -> mew daemon (Unix socket)
   when idle, and serves Vite-hashed React assets embedded from `mew-web-ui/dist/`
   at compile time.
 - **`@mew/web-client`** (`mew-web-client/`, TypeScript): ESM package with `.d.ts`
-  types exporting `MewClient`, which manages the WebSocket connection, events,
-  and request/response calls.
+  types exporting `MewClient`, which opens the WebSocket connection, dispatches
+  incoming events, and matches request/response calls.
 - **`mew-web-ui`** (`mew-web-ui/`, TypeScript/React): Vite React app using
   TanStack Router and Zustand.
 

@@ -91,8 +91,8 @@ MessageEnd { finish, usage, cost }
   (`content_block_start`, `content_block_delta`, `content_block_stop`,
   `message_delta`, `message_stop`) and typed blocks (`text` -> text, `thinking`
   -> `Part::Reasoning`, `tool_use` -> `Part::ToolCall` with `partial_json`).
-- **`mew-provider-responses`**: handles the OpenAI Responses API using API keys
-  for compatible endpoints or Codex OAuth for `codex`.
+- **`mew-provider-responses`**: sends OpenAI Responses API requests using API
+  keys for compatible endpoints or Codex OAuth for `codex`.
 - **`mew-provider-router`**: `Router` selects `deci` when message history
   contains a tool result, `nano` for the initial turn if configured, and `micro`
   otherwise; `Routed` preserves display labels.

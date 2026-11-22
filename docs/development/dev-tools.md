@@ -97,6 +97,6 @@ reading files or capturing command output. See `read.rs`, `grep.rs`, and
 
 ## Subagent tools
 
-`mew-agent` owns the subagent task registry and runner, forwarding child
-progress and completion events to attached clients. See
+`mew-agent` tracks subagent tasks, runs child agents, and forwards their progress
+and completion events to attached clients. See
 [Tasks and orchestration](/docs/development/dev-orchestration/).

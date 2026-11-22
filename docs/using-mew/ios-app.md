@@ -144,11 +144,12 @@ commands.
 
 ### Settings
 
-**App settings** manages the chat font, this phone's copyable Node ID, saved
-machine links, appearance overrides (system, light, or dark), review formatting
-(line wrapping, line numbers, and diff text size), and diagnostics. The
-shareable connection report in **About** includes versions and connection states
-while stripping names, Node IDs, credentials, raw errors, paths, and messages.
+**App settings** configures the chat font, appearance overrides (system, light,
+or dark), and review formatting (line wrapping, line numbers, and diff text
+size), and displays this phone's copyable Node ID, saved machine links, and
+diagnostics. The shareable connection report in **About** includes versions and
+connection states while stripping names, Node IDs, credentials, raw errors,
+paths, and messages.
 
 Haptic feedback fires on accepted prompts, completed turns, permission/question
 requests, and errors. Foreground alert preferences let you mute completion,

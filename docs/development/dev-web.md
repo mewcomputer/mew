@@ -4,9 +4,9 @@ description: How to develop and extend the Mew web UI.
 ---
 
 `mew-web-ui` is a React application communicating with `mew-daemon` over
-WebSocket through `@mew/web-client`. The same compiled React bundle also powers
-the opt-in Electron shell (`apps/mew-electron`) via `mew desktop-host`
-(`DesktopRelay` in `crates/mew-web-bridge/src/desktop.rs`).
+WebSocket through `@mew/web-client`. The opt-in Electron shell
+(`apps/mew-electron`) renders the same compiled React bundle via
+`mew desktop-host` (`DesktopRelay` in `crates/mew-web-bridge/src/desktop.rs`).
 
 ## Getting started
 

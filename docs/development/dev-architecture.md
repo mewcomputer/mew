@@ -45,8 +45,8 @@ hole punching and relays) via `mew daemon --remote` or `mew daemon --iroh`.
 The native GPUI desktop client (`apps/mew-desktop`) connects to a local daemon
 on loopback port `25566` (overridable with `MEW_DESKTOP_DAEMON_PORT` or
 `MEW_DESKTOP_DAEMON_URL`). `mew-desktop-supervisor` checks WebSocket health on
-that port and attaches to an existing daemon, or spawns and owns `mew daemon`
-for the app's lifetime (`MEW_DESKTOP_DAEMON_BINARY` selects an alternate
+that port and attaches to an existing daemon, or spawns `mew daemon` and stops it
+when the app exits (`MEW_DESKTOP_DAEMON_BINARY` selects an alternate
 executable). Remote desktop profiles connect over iroh via `mew-client-iroh`.
 
 Browser workbench tabs in the native desktop client embed Chromium via
@@ -140,7 +140,7 @@ daemon side, every frontend follows the same path:
 
 `mew-web-bridge` serves the compiled React bundle from embedded
 `mew-web-ui/dist/` assets and proxies browser WebSocket connections to the
-daemon's Unix socket. `mew-web-ui` drives `MewClient` (`@mew/web-client`),
+daemon's Unix socket. `mew-web-ui` connects through `MewClient` (`@mew/web-client`),
 stores session state in Zustand (`SessionState` via `bridgeClientToStore`), and
 renders sessions through `components/session-rail.tsx`, `components/model-pill.tsx`,
 and permission/question modals. See
@@ -165,7 +165,7 @@ until an attached client responds or the turn cancels.
 
 ## Hashline edits
 
-`crates/mew-hashline` powers line-anchored edits:
+`crates/mew-hashline` implements line-anchored edits:
 
 1. `read` records a snapshot and emits numbered lines with a `[path#hash]` header.
 2. The model invokes `edit_hashline` with section headers and operations
@@ -203,7 +203,7 @@ lifecycle updates from the agent to `translate_event`:
 
 ## Sessions and multisession
 
-The daemon owns every session. Frontends send `NewSession`, `AttachSession`, or
+The daemon creates, stores, and runs every session. Frontends send `NewSession`, `AttachSession`, or
 `ListSessions`. `SessionManager::create` generates a `sess_`-prefixed ULID and
 persists `session.jsonl`, `meta.json`, `policy.json`, and `todos.json`.
 
@@ -223,7 +223,8 @@ attached client.
 
 A connection switches sessions by sending `NewSession { cwd, client_kind }` or
 `AttachSession { session_id, client_kind }`. `ListSessions`, `DeleteSession`,
-`DeleteSessionConfirmed`, and `RenameSession` manage saved sessions.
+`DeleteSessionConfirmed`, and `RenameSession` list, delete, and rename saved
+sessions.
 
 | State | Owner |
 |-------|-------|
