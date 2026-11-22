@@ -5020,3 +5020,13 @@ start the tested write. Independent child turns retain separate tokens.
 
 Verified cancellation and two-subagent behavior, provider adapter and daemon
 checks, and targeted clippy with isolated Mew state directories.
+
+### 2026-11-21: Coordinate AGY tool handoffs
+
+Added a session coordinator and provider adapter that forward client-owned MCP
+calls through Mew's tool loop. Handoffs check the conversation and tool result,
+propagate cancellation, and wait for process and listener cleanup. No concrete
+isolation boundary or provider configuration is wired into the application yet.
+
+Verified the complete `mew-agy` crate suite with isolated state, including
+mismatched continuations, cancellation, pending approvals and server shutdown.

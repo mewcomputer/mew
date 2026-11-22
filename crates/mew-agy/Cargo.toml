@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+async-trait.workspace = true
+futures.workspace = true
+ulid.workspace = true
 mew-message.workspace = true
 mew-provider.workspace = true
 tokio.workspace = true
@@ -23,5 +26,4 @@ rand.workspace = true
 libc = "0.2"
 
 [dev-dependencies]
-ulid.workspace = true
 reqwest.workspace = true

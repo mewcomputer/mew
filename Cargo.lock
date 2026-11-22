@@ -5082,7 +5082,9 @@ dependencies = [
 name = "mew-agy"
 version = "0.2.0"
 dependencies = [
+ "async-trait",
  "bytes",
+ "futures",
  "http-body-util",
  "hyper",
  "hyper-util",

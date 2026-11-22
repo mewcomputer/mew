@@ -94,6 +94,7 @@ struct Registry {
     sessions: HashMap<String, Session>,
     pending: HashMap<String, oneshot::Sender<Value>>,
     requests: HashMap<(String, String), String>,
+    quiesced: bool,
 }
 
 struct State {
@@ -107,7 +108,8 @@ struct State {
 pub struct McpServer {
     url: String,
     state: Arc<State>,
-    task: JoinHandle<()>,
+    stop: CancellationToken,
+    task: Option<JoinHandle<()>>,
 }
 
 impl McpServer {
@@ -152,11 +154,14 @@ impl McpServer {
             slots: Arc::new(Semaphore::new(max_pending)),
         });
         let owned = state.clone();
+        let stop = CancellationToken::new();
+        let stopped = stop.clone();
         let task = tokio::spawn(async move {
             let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
             let mut jobs = JoinSet::new();
             loop {
                 tokio::select! {
+                    _ = stopped.cancelled() => break,
                     accepted = listener.accept() => {
                         let Ok((socket, _)) = accepted else { break };
                         let Ok(permit) = connections.clone().try_acquire_owned() else { continue };
@@ -170,18 +175,41 @@ impl McpServer {
                     Some(_) = jobs.join_next(), if !jobs.is_empty() => {}
                 }
             }
+            jobs.shutdown().await;
         });
         Ok((
             Self {
                 url: format!("http://{addr}{path}"),
                 state,
-                task,
+                stop,
+                task: Some(task),
             },
             rx,
         ))
     }
     pub fn url(&self) -> &str {
         &self.url
+    }
+
+    /// Stop accepting requests and wait until all connections have closed.
+    pub async fn shutdown(&mut self) -> std::io::Result<()> {
+        self.stop.cancel();
+        if let Some(task) = self.task.as_mut() {
+            task.await.map_err(std::io::Error::other)?;
+            self.task.take();
+        }
+        Ok(())
+    }
+
+    /// Stop admitting tool calls and report whether all existing calls settled.
+    pub fn quiesce(&self) -> bool {
+        let mut registry = self
+            .state
+            .registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        registry.quiesced = true;
+        registry.requests.is_empty()
     }
     pub fn resolve(&self, id: &str, result: Value) -> Result<(), &'static str> {
         let sender = self
@@ -209,7 +237,10 @@ impl McpServer {
 }
 impl Drop for McpServer {
     fn drop(&mut self) {
-        self.task.abort();
+        self.stop.cancel();
+        if let Some(task) = &self.task {
+            task.abort();
+        }
     }
 }
 
@@ -341,7 +372,7 @@ async fn handle_inner(req: Request<Incoming>, state: Arc<State>) -> Response<Bod
         if !reg.sessions.get(&sid).is_some_and(|s| s.initialized) {
             return response(StatusCode::NOT_FOUND, "");
         }
-        if let Some(call_id) = reg.requests.remove(&(sid, request_id.to_string())) {
+        if let Some(call_id) = reg.requests.get(&(sid, request_id.to_string())).cloned() {
             reg.pending.remove(&call_id);
         }
         return response(StatusCode::ACCEPTED, "");
@@ -405,6 +436,9 @@ async fn handle_inner(req: Request<Incoming>, state: Arc<State>) -> Response<Bod
     let request_key = (sid, id.to_string());
     {
         let mut reg = state.registry.lock().unwrap_or_else(|e| e.into_inner());
+        if reg.quiesced {
+            return rpc_error(id, -32000, "server is no longer accepting tool calls");
+        }
         reg.pending.insert(call_id.clone(), tx);
         reg.requests.insert(request_key.clone(), call_id.clone());
     }

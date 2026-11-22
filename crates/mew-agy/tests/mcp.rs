@@ -11,6 +11,28 @@ async fn setup() -> (
     let (server, calls) = McpServer::bind(vec![tool], 2).await.unwrap();
     (server, calls, reqwest::Client::new())
 }
+
+#[tokio::test]
+async fn shutdown_waits_for_pending_connections_to_close() {
+    let (mut server, mut calls, client) = setup().await;
+    let session = initialize(&server, &client).await;
+    let url = server.url().to_owned();
+    let request = tokio::spawn(async move {
+        client
+            .post(url)
+            .header("mcp-session-id", session)
+            .json(&json!({
+                "jsonrpc":"2.0", "id":2, "method":"tools/call",
+                "params":{"name":"echo","arguments":{"text":"wait"}}
+            }))
+            .send()
+            .await
+    });
+    let call = calls.recv().await.unwrap();
+    server.shutdown().await.unwrap();
+    assert!(call.cancellation.is_cancelled());
+    assert!(request.await.unwrap().is_err());
+}
 async fn initialize(server: &McpServer, client: &reqwest::Client) -> String {
     let response = client.post(server.url()).json(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}})).send().await.unwrap();
     assert_eq!(response.status(), 200);
@@ -408,4 +430,42 @@ async fn second_initialization_and_concurrent_initializations_fail_closed() {
         .await
         .unwrap();
     assert!(retry.get("error").is_some());
+}
+
+#[tokio::test]
+async fn quiesce_atomically_rejects_new_calls_and_reports_existing_calls() {
+    let (server, mut calls, client) = setup().await;
+    let session = initialize(&server, &client).await;
+    let request = json!({"jsonrpc":"2.0","id":91,"method":"tools/call","params":{"name":"echo","arguments":{"text":"one"}}});
+    let client2 = client.clone();
+    let url = server.url().to_owned();
+    let session2 = session.clone();
+    let waiting = tokio::spawn(async move {
+        client2
+            .post(url)
+            .header("mcp-session-id", session2)
+            .json(&request)
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()
+    });
+    let call = tokio::time::timeout(Duration::from_secs(3), calls.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!server.quiesce());
+    let rejected: Value = client.post(server.url()).header("mcp-session-id", &session).json(&json!({"jsonrpc":"2.0","id":92,"method":"tools/call","params":{"name":"echo","arguments":{"text":"two"}}})).send().await.unwrap().json().await.unwrap();
+    assert!(rejected.get("error").is_some());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), calls.recv())
+            .await
+            .is_err()
+    );
+    server.resolve(&call.id, json!({"content":[]})).unwrap();
+    assert!(!server.quiesce(), "the HTTP request is still completing");
+    assert!(waiting.await.unwrap().get("result").is_some());
+    assert!(server.quiesce());
 }
