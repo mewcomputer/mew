@@ -515,8 +515,13 @@ mod unix {
                 Ok(None) => {
                     break "AGY session ended unexpectedly";
                 }
-                Err(_) => {
-                    break "AGY session failed";
+                Err(error) => {
+                    break match error.to_string().as_str() {
+                        "AGY quota or rate limit reached" => "AGY quota or rate limit reached",
+                        "AGY authentication failed" => "AGY authentication failed",
+                        "AGY service is overloaded" => "AGY service is overloaded",
+                        _ => "AGY session failed",
+                    };
                 }
             }
         };
@@ -526,10 +531,13 @@ mod unix {
             let _ = session.shutdown().await;
         }
         drop(slot);
-        let _ = send!(Delivery::Event(ProviderEvent::Error(MessageError {
+        let error = Delivery::Event(ProviderEvent::Error(MessageError {
             kind: ErrorKind::ProviderApi,
             message: failure.into(),
-        })));
+        }));
+        if let Err(mpsc::error::TrySendError::Full(error)) = tx.try_send(error) {
+            let _ = send!(error);
+        }
     }
 }
 #[cfg(unix)]

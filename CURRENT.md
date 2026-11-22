@@ -5030,3 +5030,9 @@ isolation boundary or provider configuration is wired into the application yet.
 
 Verified the complete `mew-agy` crate suite with isolated state, including
 mismatched continuations, cancellation, pending approvals and server shutdown.
+
+### 2026-11-21: Preserve safe AGY failure categories
+
+Provider errors retain the session's sanitized quota, authentication and
+capacity categories without exposing raw CLI error text. Verified with the
+provider subprocess tests, including a secret canary in the CLI error.

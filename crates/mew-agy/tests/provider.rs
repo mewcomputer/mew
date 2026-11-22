@@ -86,6 +86,26 @@ fn fixture(dir: &Path, script: &str) -> FixtureBoundary {
     std::fs::write(&path, script).unwrap();
     FixtureBoundary { script: path }
 }
+
+#[tokio::test]
+async fn provider_reports_safe_quota_errors_without_disclosing_cli_details() {
+    let parent = tempfile::tempdir().unwrap();
+    let script = r#"import sys,json
+sys.stdin.readline()
+print(json.dumps({'event':'result','result':{'status':'ERROR','error':'quota exhausted secret-canary'}}),flush=True)
+"#;
+    let provider = AgyProvider::new(config(parent.path()), fixture(parent.path(), script));
+    let events: Vec<_> = provider.stream(request()).await.unwrap().collect().await;
+    let error = events
+        .iter()
+        .find_map(|event| match event {
+            ProviderEvent::Error(error) => Some(&error.message),
+            _ => None,
+        })
+        .expect("provider must report the error");
+    assert!(error.contains("quota"));
+    assert!(!error.contains("secret-canary"));
+}
 const TOOL_SCRIPT: &str = r#"import sys,json,urllib.request
 line=sys.stdin.readline()
 with open('.agents/mcp_config.json') as f: url=json.load(f)['mcpServers']['mew']['serverUrl']
