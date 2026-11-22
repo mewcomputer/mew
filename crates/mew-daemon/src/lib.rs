@@ -3795,11 +3795,22 @@ async fn forward_events(
     had_error
 }
 
-/// Generate a short session title using the LLM.
-/// Falls back to text truncation if the provider call fails.
-async fn generate_session_title(agent: &Agent, prompt_text: &str) -> String {
+/// Builds the request for a small utility call (title, summary) on the
+/// session's model.
+///
+/// Reasoning is left unset. mew has no provider-agnostic way to switch thinking
+/// off, and the old `{"type": "disabled"}` marker was not understood by the
+/// OpenAI- or Anthropic-shaped adapters: they merge reasoning params into the
+/// request body verbatim, so it went out as an unknown top-level `type` field.
+/// `max_tokens` has to leave room for thinking tokens, which providers count
+/// against the same budget; starving it returns an empty answer.
+fn utility_request(
+    system: &str,
+    text: String,
+    max_tokens: i32,
+    supports_vision: bool,
+) -> mew_provider::Request {
     use mew_message::{Message, Part, PartBase, Role, TextPart, Time};
-    use mew_provider::{ChatParams, ProviderEvent, ReasoningConfig, Request};
     use std::time::{SystemTime, UNIX_EPOCH};
     use ulid::Ulid;
 
@@ -3808,51 +3819,53 @@ async fn generate_session_title(agent: &Agent, prompt_text: &str) -> String {
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
 
-    let system = "You generate concise session titles. Respond with ONLY a 3-5 word title. No quotes, no punctuation at the end, no explanation.".to_string();
-
-    let user_msg = Message {
-        id: Ulid::new(),
-        session_id: Ulid::new(),
-        role: Role::User,
-        parts: vec![Part::Text(TextPart {
-            base: PartBase {
-                id: Ulid::new(),
-                message_id: Ulid::new(),
-                session_id: Ulid::new(),
-            },
-            text: format!(
-                "Generate a 3-5 word title for a session that starts with this message:\n\n{}",
-                prompt_text.chars().take(500).collect::<String>()
-            ),
-            synthetic: false,
-        })],
-        time: Time {
-            created: now,
-            completed: None,
-        },
-        assistant: None,
-    };
-
-    // Explicitly disable thinking/reasoning for the title generation call.
-    let mut reasoning_params = serde_json::Map::new();
-    reasoning_params.insert("type".into(), "disabled".into());
-
-    let req = Request {
+    mew_provider::Request {
         model: String::new(),
-        messages: vec![user_msg],
+        messages: vec![Message {
+            id: Ulid::new(),
+            session_id: Ulid::new(),
+            role: Role::User,
+            parts: vec![Part::Text(TextPart {
+                base: PartBase {
+                    id: Ulid::new(),
+                    message_id: Ulid::new(),
+                    session_id: Ulid::new(),
+                },
+                text,
+                synthetic: false,
+            })],
+            time: Time {
+                created: now,
+                completed: None,
+            },
+            assistant: None,
+        }],
         tools: vec![],
-        system,
-        reasoning: Some(ReasoningConfig {
-            params: reasoning_params,
-        }),
-        params: Some(ChatParams {
-            temperature: Some(0.3),
-            max_tokens: Some(30),
+        system: system.to_string(),
+        reasoning: None,
+        params: Some(mew_provider::ChatParams {
+            max_tokens: Some(max_tokens),
             ..Default::default()
         }),
         headers: Default::default(),
-        supports_vision: agent.supports_vision,
-    };
+        supports_vision,
+    }
+}
+
+/// Generate a short session title using the LLM.
+/// Falls back to text truncation if the provider call fails.
+async fn generate_session_title(agent: &Agent, prompt_text: &str) -> String {
+    use mew_provider::ProviderEvent;
+
+    let req = utility_request(
+        "You generate concise session titles. Respond with ONLY a 3-5 word title. No quotes, no punctuation at the end, no explanation.",
+        format!(
+            "Generate a 3-5 word title for a session that starts with this message:\n\n{}",
+            prompt_text.chars().take(500).collect::<String>()
+        ),
+        512,
+        agent.supports_vision,
+    );
 
     match agent.provider.stream(req).await {
         Ok(mut stream) => {
@@ -3861,7 +3874,7 @@ async fn generate_session_title(agent: &Agent, prompt_text: &str) -> String {
             while let Some(event) = futures::StreamExt::next(&mut stream).await {
                 match event {
                     ProviderEvent::PartStart { part } => {
-                        current_part_is_text = matches!(part, Part::Text(_));
+                        current_part_is_text = matches!(part, mew_message::Part::Text(_));
                     }
                     ProviderEvent::PartDelta { delta, .. } => {
                         if current_part_is_text {
@@ -3880,7 +3893,7 @@ async fn generate_session_title(agent: &Agent, prompt_text: &str) -> String {
             }
         }
         Err(e) => {
-            tracing::debug!(error = %e, "title generation failed, using fallback");
+            tracing::warn!(error = %e, "title generation failed, using fallback");
             derive_session_title(prompt_text)
         }
     }
@@ -4104,7 +4117,7 @@ async fn idle_summary_task(
 /// Generate a short summary of the session's conversation.
 async fn generate_session_summary(agent: &Agent) -> Option<String> {
     use mew_message::Role;
-    use mew_provider::{ChatParams, ProviderEvent, ReasoningConfig};
+    use mew_provider::ProviderEvent;
     let messages = agent.messages.lock().await.clone();
     if messages.is_empty() {
         return None;
@@ -4128,45 +4141,12 @@ async fn generate_session_summary(agent: &Agent) -> Option<String> {
             break;
         }
     }
-    let user_msg = mew_message::Message {
-        id: ulid::Ulid::new(),
-        session_id: ulid::Ulid::new(),
-        role: Role::User,
-        parts: vec![mew_message::Part::Text(mew_message::TextPart {
-            base: mew_message::PartBase {
-                id: ulid::Ulid::new(),
-                message_id: ulid::Ulid::new(),
-                session_id: ulid::Ulid::new(),
-            },
-            text: transcript.chars().take(2000).collect(),
-            synthetic: false,
-        })],
-        time: mew_message::Time {
-            created: 0,
-            completed: None,
-        },
-        assistant: None,
-    };
-    let mut reasoning_params = serde_json::Map::new();
-    reasoning_params.insert("type".into(), "disabled".into());
-    let req = mew_provider::Request {
-        model: String::new(),
-        messages: vec![user_msg],
-        tools: vec![],
-        system:
-            "You write concise 1-2 sentence summaries. No preamble, no quotes, no bullet points."
-                .to_string(),
-        reasoning: Some(ReasoningConfig {
-            params: reasoning_params,
-        }),
-        params: Some(ChatParams {
-            temperature: Some(0.3),
-            max_tokens: Some(60),
-            ..Default::default()
-        }),
-        headers: Default::default(),
-        supports_vision: agent.supports_vision,
-    };
+    let req = utility_request(
+        "You write concise 1-2 sentence summaries. No preamble, no quotes, no bullet points.",
+        transcript.chars().take(2000).collect(),
+        512,
+        agent.supports_vision,
+    );
     match agent.provider.stream(req).await {
         Ok(mut stream) => {
             let mut summary = String::new();
@@ -4957,5 +4937,22 @@ mod tests {
             changed_workspace_paths(&previous, &next),
             vec!["first.txt", "second.txt", "third.txt"]
         );
+    }
+
+    #[test]
+    fn utility_request_sends_no_reasoning_config() {
+        // OpenAI- and Anthropic-shaped adapters copy reasoning params into the
+        // request body verbatim, so a fake "thinking off" marker reaches the
+        // provider as an unknown top-level field. Utility calls (titles,
+        // summaries) leave reasoning unset and give the answer room inside the
+        // token cap.
+        let req = utility_request("sys", "hello".into(), 512, false);
+        assert!(req.reasoning.is_none());
+        assert_eq!(req.params.as_ref().and_then(|p| p.max_tokens), Some(512));
+        assert_eq!(req.system, "sys");
+        match &req.messages[0].parts[0] {
+            mew_message::Part::Text(text) => assert_eq!(text.text, "hello"),
+            other => panic!("expected a text part, got {other:?}"),
+        }
     }
 }

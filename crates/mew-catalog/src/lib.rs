@@ -74,6 +74,14 @@ pub struct Model {
     /// When empty, built-in defaults are used.
     #[serde(default)]
     pub thinking_variants: Vec<ThinkingVariant>,
+    /// Effort levels the model's provider publishes (models.dev
+    /// `reasoning_options` entries of type `effort`, in the provider's order).
+    /// These are request values the upstream API accepts; the wire field is
+    /// adapter-specific, so `mew::setup::providers` turns them into
+    /// `thinking_variants` only for providers whose adapter sends
+    /// `reasoning_effort`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effort_levels: Vec<String>,
     /// True for OpenAI Codex models that use the Responses Lite transport
     /// (e.g. gpt-5.6-sol/terra/luna). Drives request-body/ header differences
     /// in the responses adapter.
@@ -768,27 +776,13 @@ fn parse_models_dev_model(val: &serde_json::Value, provider_id: &str) -> Option<
         })
         .unwrap_or_default();
 
-    // These gateways accept OpenAI-style reasoning_effort for Hy models.
-    // Other providers can use different request fields for the same levels.
-    let thinking_variants = if reasoning
-        && matches!(provider_id, "opencode" | "opencode-go" | "openrouter")
-        && id.rsplit('/').next().is_some_and(|name| {
-            let name = name.to_ascii_lowercase();
-            name.starts_with("hy3") || name.starts_with("hy4")
-        }) {
+    // The effort levels the provider publishes. The wire field is
+    // adapter-specific (`reasoning_effort` for OpenAI-compatible providers,
+    // `thinking`/`output_config` for others), so they stay raw levels here and
+    // `mew::setup::providers` encodes the ones its adapter can send.
+    let effort_levels = if reasoning {
         val.get("reasoning_options")
             .and_then(|options| options.as_array())
-            .filter(|options| {
-                let has_toggle = options
-                    .iter()
-                    .any(|option| option.get("type").and_then(|v| v.as_str()) == Some("toggle"));
-                let has_off_effort = options
-                    .iter()
-                    .filter_map(|option| option.get("values").and_then(|v| v.as_array()))
-                    .flatten()
-                    .any(|value| value.as_str() == Some("none"));
-                !has_toggle || has_off_effort
-            })
             .and_then(|options| {
                 options
                     .iter()
@@ -799,11 +793,7 @@ fn parse_models_dev_model(val: &serde_json::Value, provider_id: &str) -> Option<
             .map(|values| {
                 values
                     .iter()
-                    .filter_map(|value| value.as_str())
-                    .map(|effort| ThinkingVariant {
-                        name: effort.to_string(),
-                        params: serde_json::json!({"reasoning_effort": effort}),
-                    })
+                    .filter_map(|value| value.as_str().map(str::to_owned))
                     .collect()
             })
             .unwrap_or_default()
@@ -823,7 +813,8 @@ fn parse_models_dev_model(val: &serde_json::Value, provider_id: &str) -> Option<
         text_output,
         shape: String::new(),
         pricing,
-        thinking_variants,
+        thinking_variants: Vec::new(),
+        effort_levels,
         responses_lite: false,
         prompt_cache_retention_secs: None,
         multi_agent_version: None,
@@ -1082,6 +1073,7 @@ fn parse_umans(data: &[u8]) -> Result<Vec<Model>, CatalogError> {
             shape: "anthropic".into(),
             pricing: Pricing::default(),
             thinking_variants: build_umans_thinking_variants(entry.capabilities.reasoning.as_ref()),
+            effort_levels: Vec::new(),
             responses_lite: false,
             prompt_cache_retention_secs: None,
             multi_agent_version: None,
@@ -1276,6 +1268,7 @@ pub fn parse_codex(data: &[u8]) -> Result<Vec<Model>, CatalogError> {
             shape: "responses".into(),
             pricing: Pricing::default(),
             thinking_variants,
+            effort_levels: Vec::new(),
             responses_lite: m.use_responses_lite,
             prompt_cache_retention_secs: None,
             multi_agent_version: m.multi_agent_version.clone(),
@@ -2112,7 +2105,9 @@ mod tests {
     }
 
     #[test]
-    fn models_dev_hy_efforts_are_scoped_to_each_provider() {
+    fn models_dev_effort_levels_are_scoped_to_each_provider() {
+        // The same model id can publish different levels per provider; parsing
+        // keeps each provider's own list, in the provider's order.
         let catalog = parse(
             br#"{
           "opencode-go": {"models": {"hy3": {
@@ -2126,49 +2121,36 @@ mod tests {
         }"#,
         )
         .unwrap();
-        for (provider, names) in [
+        for (provider, levels) in [
             ("opencode-go", vec!["none", "low", "high"]),
             ("openrouter", vec!["none", "high"]),
         ] {
-            let model = &catalog.providers[provider]["hy3"];
-            assert_eq!(
-                model
-                    .thinking_variants
-                    .iter()
-                    .map(|v| v.name.as_str())
-                    .collect::<Vec<_>>(),
-                names
-            );
-            for variant in &model.thinking_variants {
-                assert_eq!(variant.params["reasoning_effort"], variant.name);
-            }
+            assert_eq!(catalog.providers[provider]["hy3"].effort_levels, levels);
         }
     }
 
     #[test]
-    fn models_dev_does_not_guess_wire_fields_or_fabricate_hy_levels() {
+    fn models_dev_parsing_never_invents_wire_params() {
+        // Levels survive parsing; the wire encoding is chosen later, once the
+        // adapter shape is known (see mew::setup::providers::derive_effort_variants).
         let catalog = parse(
             br#"{
-          "other": {"models": {"hy3": {"id": "hy3", "reasoning": true,
-            "reasoning_options": [{"type": "effort", "values": ["low", "high"]}]
+          "deepseek": {"models": {"deepseek-flash": {"id": "deepseek-flash",
+            "name": "DeepSeek V4.1 Flash 1017", "reasoning": true,
+            "reasoning_options": [{"type": "toggle"}, {"type": "effort", "values": ["low", "high", "max"]}]
           }}},
           "opencode-go": {"models": {"hy4": {"id": "hy4", "reasoning": true,
             "reasoning_options": [{"type": "toggle"}]
-          }}},
-          "opencode": {"models": {"hy3-free": {"id": "hy3-free", "reasoning": true,
-            "reasoning_options": [{"type": "toggle"}, {"type": "effort", "values": ["low", "high"]}]
           }}}
         }"#,
         )
         .unwrap();
-        assert!(catalog.providers["other"]["hy3"]
-            .thinking_variants
-            .is_empty());
+        let deepseek = &catalog.providers["deepseek"]["deepseek-flash"];
+        assert_eq!(deepseek.effort_levels, vec!["low", "high", "max"]);
+        assert!(deepseek.thinking_variants.is_empty());
+        // A bare toggle publishes no levels: on/off is not an effort axis.
         assert!(catalog.providers["opencode-go"]["hy4"]
-            .thinking_variants
-            .is_empty());
-        assert!(catalog.providers["opencode"]["hy3-free"]
-            .thinking_variants
+            .effort_levels
             .is_empty());
     }
 

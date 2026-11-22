@@ -154,7 +154,7 @@ impl Adapter {
                 body["reasoning"] = reasoning_obj;
             } else if self.use_responses_lite {
                 // Reasoning is configured but didn't match the two shapes above
-                // (e.g. {"type": "disabled"} for title generation). Lite still
+                // (a config-defined variant with its own params). Lite still
                 // requires the context field.
                 body["reasoning"] = json!({"context": "all_turns"});
                 body["include"] = json!(["reasoning.encrypted_content"]);

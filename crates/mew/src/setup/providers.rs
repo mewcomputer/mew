@@ -233,6 +233,8 @@ pub(crate) async fn load_catalog(cfg: &Config) -> Option<Catalog> {
             return None;
         }
     };
+    derive_effort_variants(&mut cat, cfg);
+
     let custom: Vec<mew_catalog::Model> = cfg
         .models
         .iter()
@@ -297,6 +299,69 @@ pub(crate) async fn load_catalog(cfg: &Config) -> Option<Catalog> {
     }
 
     Some(cat)
+}
+
+/// Encodes the effort levels a provider publishes on models.dev as thinking
+/// variants.
+///
+/// Only providers whose adapter forwards OpenAI-style `reasoning_effort` are
+/// eligible: on other shapes the same level is spelled differently on the wire
+/// (Anthropic wants `thinking` + `output_config.effort`), so those keep their
+/// built-in or configured variants. Levels mew already knows for the model keep
+/// their built-in params; levels only the catalog publishes are added as plain
+/// `reasoning_effort`.
+///
+/// This is what keeps a model whose catalog id matches no built-in pattern
+/// (`deepseek-flash`, the renamed `deepseek-v4-flash`) from losing its effort
+/// picker entirely.
+fn derive_effort_variants(cat: &mut Catalog, cfg: &Config) {
+    let builtin_catalog = Catalog::empty();
+    let mut updates = Vec::new();
+    for (configured, provider) in &cfg.providers {
+        if !matches!(provider.shape.as_str(), "openai" | "responses") {
+            continue;
+        }
+        for (catalog_provider, models) in &cat.providers {
+            if !catalog_provider_matches(configured, catalog_provider) {
+                continue;
+            }
+            for model in models.values() {
+                if model.effort_levels.is_empty() {
+                    continue;
+                }
+                let known = builtin_catalog.thinking_variants(&model.id);
+                let mut variants: Vec<mew_catalog::ThinkingVariant> = model
+                    .effort_levels
+                    .iter()
+                    .map(|level| {
+                        known
+                            .iter()
+                            .find(|variant| variant.name.eq_ignore_ascii_case(level))
+                            .cloned()
+                            .unwrap_or_else(|| mew_catalog::ThinkingVariant {
+                                name: level.clone(),
+                                params: serde_json::json!({ "reasoning_effort": level }),
+                            })
+                    })
+                    .collect();
+                // Keep levels mew knows but the provider did not publish (Qwen
+                // has an explicit `off`) so disabling thinking still sends that
+                // family's wire fields.
+                for variant in known {
+                    if !variants
+                        .iter()
+                        .any(|derived| derived.name.eq_ignore_ascii_case(&variant.name))
+                    {
+                        variants.push(variant);
+                    }
+                }
+                let mut updated = model.clone();
+                updated.thinking_variants = variants;
+                updates.push(updated);
+            }
+        }
+    }
+    cat.merge_local(updates);
 }
 
 fn provider_catalog_model<'a>(
@@ -1991,5 +2056,94 @@ mod tests {
             "error should include the CredentialNotFound message\ngot: {}",
             joined
         );
+    }
+
+    // --- derive_effort_variants ---
+
+    fn cfg_with_shape(id: &str, shape: &str) -> Config {
+        let mut cfg = Config::default();
+        cfg.providers.insert(
+            id.into(),
+            ProviderConfig {
+                shape: shape.into(),
+                ..Default::default()
+            },
+        );
+        cfg
+    }
+
+    fn catalog_model(provider: &str, id: &str, levels: &[&str]) -> mew_catalog::Model {
+        mew_catalog::Model {
+            id: id.into(),
+            provider: provider.into(),
+            reasoning: true,
+            effort_levels: levels.iter().map(|l| (*l).to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn derive_effort_variants_encodes_levels_for_openai_shaped_providers() {
+        // `deepseek-flash` (DeepSeek V4.1 Flash 1017) matches no built-in id
+        // pattern, so only the catalog's published levels can produce a picker.
+        let cfg = cfg_with_shape("deepseek", "openai");
+        let mut cat = Catalog::empty();
+        cat.merge_local(vec![catalog_model(
+            "deepseek",
+            "deepseek-flash",
+            &["low", "high", "max"],
+        )]);
+
+        derive_effort_variants(&mut cat, &cfg);
+
+        let variants = provider_thinking_variants(&cat, "deepseek", "deepseek-flash");
+        let names: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, vec!["low", "high", "max"]);
+        for variant in &variants {
+            assert_eq!(variant.params["reasoning_effort"], variant.name);
+        }
+        let resolved = resolve_reasoning(Some(&cat), "deepseek", "deepseek-flash", Some("max"))
+            .expect("max should resolve to provider params");
+        assert_eq!(resolved.0.params["reasoning_effort"], "max");
+        assert_eq!(resolved.1, "max");
+    }
+
+    #[test]
+    fn derive_effort_variants_skips_shapes_that_use_other_wire_fields() {
+        // Anthropic-shaped providers spell effort as `thinking` +
+        // `output_config.effort`; a raw level would be sent as an unsupported
+        // field, so those keep their built-in or configured variants.
+        let cfg = cfg_with_shape("umans", "anthropic");
+        let mut cat = Catalog::empty();
+        cat.merge_local(vec![catalog_model(
+            "umans",
+            "deepseek-flash",
+            &["low", "high", "max"],
+        )]);
+
+        derive_effort_variants(&mut cat, &cfg);
+
+        assert!(provider_thinking_variants(&cat, "umans", "deepseek-flash").is_empty());
+    }
+
+    #[test]
+    fn derive_effort_variants_keeps_builtin_params_and_off_variant() {
+        // Qwen3.8 needs `enable_thinking` on every level and its own explicit
+        // `off`; the catalog publishes the same levels but no wire detail.
+        let cfg = cfg_with_shape("alibaba-token-plan", "openai");
+        let mut cat = Catalog::empty();
+        cat.merge_local(vec![catalog_model(
+            "alibaba-token-plan",
+            "qwen3.8-max",
+            &["low", "medium", "xhigh"],
+        )]);
+
+        derive_effort_variants(&mut cat, &cfg);
+
+        let variants = provider_thinking_variants(&cat, "alibaba-token-plan", "qwen3.8-max");
+        let names: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, vec!["low", "medium", "xhigh", "off"]);
+        assert_eq!(variants[0].params["enable_thinking"], true);
+        assert_eq!(variants[3].params["enable_thinking"], false);
     }
 }
