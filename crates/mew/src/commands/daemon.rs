@@ -405,6 +405,15 @@ fn build_daemon_server_with_config(
                     raw2,
                 );
                 apply_session_thinking(agent, cat_ref, model_id, None)?;
+                if let Ok(mut state) = mew_config::load_state() {
+                    let full_id = format!("{provider_id}/{model_id}");
+                    state.last_provider = provider_id.to_string();
+                    state.last_model = model_id.to_string();
+                    state.recent_models.retain(|m| m != &full_id);
+                    state.recent_models.insert(0, full_id);
+                    state.recent_models.truncate(6);
+                    let _ = mew_config::save_state(&state);
+                }
                 Ok((provider_id.to_string(), model_id.to_string()))
             },
         );

@@ -23,8 +23,7 @@ export function ConversationLayout({ children }: { children: ReactNode }) {
       const nextPinned = entry.contentRect.width >= 1040;
       if (nextPinned !== pinned.current) {
         animateChange.current = measured.current
-          && !window.matchMedia("(prefers-reduced-motion: reduce)").matches
-          && document.activeElement?.getAttribute("role") !== "separator";
+          && !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
         positions.current = animateChange.current
           ? Array.from(element.querySelectorAll<HTMLElement>(".mew-conversation-width"), (column) => [column, column.getBoundingClientRect().left])
           : [];
@@ -47,7 +46,7 @@ export function ConversationLayout({ children }: { children: ReactNode }) {
     if (returnSummaryFocus.current) {
       const target = returnSummaryFocus.current === "card"
         ? summary.current?.querySelector<HTMLButtonElement>("button")
-        : pane.current?.querySelector<HTMLButtonElement>('[aria-label="Open summary"]');
+        : document.querySelector<HTMLButtonElement>('[aria-label="Open summary"]');
       target?.focus();
       returnSummaryFocus.current = null;
     }
@@ -81,8 +80,8 @@ export function ConversationLayout({ children }: { children: ReactNode }) {
       <ConversationHeader summaryPinned={summaryPinned} />
       <div className="flex min-h-0 flex-1">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">{children}</div>
-        <aside ref={summary} aria-label="Conversation summary" aria-hidden={!summaryPinned} inert={!summaryPinned} data-state={summaryPinned ? "open" : "closed"} className="relative shrink-0" style={{ width: summaryPinned ? "16rem" : 0 }}>
-          <div className="mew-summary-content absolute inset-y-0 right-0 w-64 overflow-y-auto p-2 pl-0 pt-1">
+        <aside ref={summary} aria-label="Conversation summary" aria-hidden={!summaryPinned} inert={!summaryPinned} data-state={summaryPinned ? "open" : "closed"} className="mew-summary-aside relative shrink-0 overflow-hidden" style={{ width: summaryPinned ? "16rem" : 0 }}>
+          <div className="mew-summary-content absolute inset-y-0 right-0 w-64 overflow-y-auto p-3 pl-0">
             <div className="rounded-2xl border border-border/60 bg-popover p-3 text-popover-foreground">
               <ConversationSummaryContent onOpenSurface={openWorkbenchSurface} />
             </div>

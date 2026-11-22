@@ -1,7 +1,15 @@
 import { createFileRoute, useRouter } from "@tanstack/react-router";
+import { FrameTitlebar } from "@/components/workspace-frame";
 import { useState, useMemo } from "react";
 import { useSessionStore } from "@/stores/session";
-import { useTheme, FONT_CHOICES, type ThemeDef, type FontChoiceId } from "@/lib/theme";
+import {
+  useTheme,
+  TITLE_FONT_CHOICES,
+  BODY_FONT_CHOICES,
+  type ThemeDef,
+  type TitleFontChoiceId,
+  type BodyFontChoiceId,
+} from "@/lib/theme";
 import { getClient } from "@/lib/client";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -50,7 +58,17 @@ type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]["id"];
 function SettingsRouteComponent() {
   const router = useRouter();
   const sessionId = useSessionStore((s) => s.sessionId);
-  const { themeId, setThemeId, fontId, setFontId, themes, themeMode, setThemeMode } = useTheme();
+  const {
+    themeId,
+    setThemeId,
+    titleFontId,
+    setTitleFontId,
+    bodyFontId,
+    setBodyFontId,
+    themes,
+    themeMode,
+    setThemeMode,
+  } = useTheme();
   const [query, setQuery] = useState("");
   const [activeSection, setActiveSection] = useState<SettingsSectionId>("general");
 
@@ -84,6 +102,7 @@ function SettingsRouteComponent() {
 
   return (
     <>
+      <FrameTitlebar>
       <div className="mew-conversation-header mew-drag-region flex h-9 shrink-0 items-center gap-2 px-3">
         <Button
           variant="ghost"
@@ -102,6 +121,7 @@ function SettingsRouteComponent() {
         </Button>
         <span className="text-xs font-medium text-muted-foreground">Settings</span>
       </div>
+      </FrameTitlebar>
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <nav aria-label="Settings sections" className="hidden w-56 shrink-0 border-r border-border p-3 md:block">
@@ -172,25 +192,52 @@ function SettingsRouteComponent() {
             {activeSection === "permissions" && <PermissionModeSection />}
 
             {activeSection === "appearance" && <>
-          <SettingsSection title="Font">
+          <SettingsSection title="Title font">
             <div className="grid gap-2 sm:grid-cols-2">
-              {FONT_CHOICES.map((font) => (
+              {TITLE_FONT_CHOICES.map((font) => (
                 <button
                   key={font.id}
-                  onClick={() => setFontId(font.id as FontChoiceId)}
+                  onClick={() => setTitleFontId(font.id as TitleFontChoiceId)}
                   className={cn(
                     "flex items-center justify-between rounded-lg border p-3 text-left transition-colors",
-                    font.id === fontId
+                    font.id === titleFontId
                       ? "border-primary bg-primary/5 ring-1 ring-primary"
                       : "border-border hover:bg-accent/30",
                   )}
                 >
-                  <div className={cn("min-w-0", font.id === "junicode" && "font-serif", font.id === "goudy" && "font-serif")}>
+                  <div className="min-w-0">
                     <div className="text-sm font-medium text-foreground">{font.name}</div>
                     <div className="mt-0.5 text-[10px] text-muted-foreground">{font.description}</div>
-                    <div className="mt-2 text-sm text-foreground">The quick brown fox</div>
+                    <div className="mt-2 text-base text-foreground" style={{ fontFamily: font.family }}>
+                      The quick brown fox
+                    </div>
                   </div>
-                  {font.id === fontId && <Check className="h-4 w-4 shrink-0 text-primary" />}
+                  {font.id === titleFontId && <Check className="h-4 w-4 shrink-0 text-primary" />}
+                </button>
+              ))}
+            </div>
+          </SettingsSection>
+          <SettingsSection title="Body text font">
+            <div className="grid gap-2 sm:grid-cols-2">
+              {BODY_FONT_CHOICES.map((font) => (
+                <button
+                  key={font.id}
+                  onClick={() => setBodyFontId(font.id as BodyFontChoiceId)}
+                  className={cn(
+                    "flex items-center justify-between rounded-lg border p-3 text-left transition-colors",
+                    font.id === bodyFontId
+                      ? "border-primary bg-primary/5 ring-1 ring-primary"
+                      : "border-border hover:bg-accent/30",
+                  )}
+                >
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium text-foreground">{font.name}</div>
+                    <div className="mt-0.5 text-[10px] text-muted-foreground">{font.description}</div>
+                    <div className="mt-2 text-sm text-foreground" style={{ fontFamily: font.family }}>
+                      The quick brown fox
+                    </div>
+                  </div>
+                  {font.id === bodyFontId && <Check className="h-4 w-4 shrink-0 text-primary" />}
                 </button>
               ))}
             </div>

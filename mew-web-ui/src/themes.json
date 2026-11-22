@@ -1,7 +1,35 @@
 [
   {
+    "id": "jianghu-dark",
+    "name": "Jianghu dark",
+    "description": "Lantern-lit ink and jade garden",
+    "category": "mew",
+    "baseText": "#e9e6df",
+    "preview": [
+      "#0e1213",
+      "#7fbba6",
+      "#e86a4c",
+      "#161b1d",
+      "#262d30"
+    ]
+  },
+  {
+    "id": "jianghu-light",
+    "name": "Jianghu light",
+    "description": "Warm parchment, ink, and jade",
+    "category": "mew",
+    "baseText": "#1a1f20",
+    "preview": [
+      "#f3f0e8",
+      "#2d6a58",
+      "#b3361d",
+      "#fbf9f4",
+      "#d9d3c6"
+    ]
+  },
+  {
     "id": "codex-dark",
-    "name": "Codex dark",
+    "name": "Argenteus dark",
     "description": "Neutral charcoal workspace",
     "category": "mew",
     "baseText": "#eeeeee",
@@ -15,7 +43,7 @@
   },
   {
     "id": "codex-light",
-    "name": "Codex light",
+    "name": "Argenteus light",
     "description": "Neutral light workspace",
     "category": "mew",
     "baseText": "#202020",

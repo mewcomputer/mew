@@ -1,5 +1,3 @@
-import { createHighlighterCore, createCssVariablesTheme } from "shiki/core";
-import { createOnigurumaEngine } from "shiki/engine/oniguruma";
 import type { HighlighterCore } from "shiki/core";
 
 let highlighter: HighlighterCore | null = null;
@@ -14,6 +12,8 @@ async function initHighlighter() {
 
   initPromise = (async () => {
     const [
+      { createHighlighterCore, createCssVariablesTheme },
+      { createOnigurumaEngine },
       rust,
       ts,
       js,
@@ -29,6 +29,8 @@ async function initHighlighter() {
       tsx,
       jsx,
     ] = await Promise.all([
+      import("shiki/core"),
+      import("shiki/engine/oniguruma"),
       import("@shikijs/langs/rust"),
       import("@shikijs/langs/typescript"),
       import("@shikijs/langs/javascript"),

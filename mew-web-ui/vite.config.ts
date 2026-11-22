@@ -37,5 +37,15 @@ export default defineConfig({
   build: {
     outDir: "dist",
     sourcemap: true,
+    // Shiki's oniguruma engine ships as one ~620 kB inlined wasm chunk. It is
+    // loaded lazily on first highlight and cannot be split further.
+    chunkSizeWarningLimit: 650,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (/node_modules\/(?:\.pnpm\/[^/]+\/node_modules\/)?(?:react|react-dom|scheduler)\//.test(id)) return "react";
+        },
+      },
+    },
   },
 });

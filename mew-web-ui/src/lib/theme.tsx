@@ -24,14 +24,30 @@ export interface ThemeDef {
 
 export const THEMES: ThemeDef[] = themes as ThemeDef[];
 
-export const FONT_CHOICES = [
-  { id: "system", name: "System", description: "Use the platform font." },
-  { id: "mi-sans", name: "Mi Sans", description: "mew's default sans-serif." },
-  { id: "junicode", name: "Junicode", description: "A literary serif face." },
-  { id: "goudy", name: "OFL Goudy", description: "A warm classic serif face." },
+export const TITLE_FONT_CHOICES = [
+  { id: "sentient", name: "Sentient", description: "Editorial display serif from the website.", family: '"Sentient", ui-serif, Georgia, serif' },
+  { id: "instrument-sans", name: "Instrument Sans", description: "Clean humanist sans-serif.", family: '"Instrument Sans", "Noto Sans SC", ui-sans-serif, system-ui, sans-serif' },
+  { id: "banga", name: "Banga", description: "Expressive display face.", family: '"Banga", "MiSans", ui-sans-serif, system-ui, sans-serif' },
+  { id: "mi-sans", name: "Mi Sans", description: "Clean geometric sans-serif.", family: '"MiSans", ui-sans-serif, system-ui, sans-serif' },
+  { id: "system", name: "System", description: "Use the platform font.", family: "ui-sans-serif, system-ui, sans-serif" },
+  { id: "junicode", name: "Junicode", description: "A literary serif face.", family: '"Junicode", ui-serif, Georgia, serif' },
+  { id: "goudy", name: "OFL Goudy", description: "A warm classic serif face.", family: '"OFLGoudy", ui-serif, Georgia, serif' },
 ] as const;
 
-export type FontChoiceId = (typeof FONT_CHOICES)[number]["id"];
+export const BODY_FONT_CHOICES = [
+  { id: "instrument-sans", name: "Instrument Sans", description: "mew's default editorial sans-serif.", family: '"Instrument Sans", "Noto Sans SC", ui-sans-serif, system-ui, sans-serif' },
+  { id: "system", name: "System", description: "Use the platform font.", family: "ui-sans-serif, system-ui, sans-serif" },
+  { id: "mi-sans", name: "Mi Sans", description: "Clean geometric sans-serif.", family: '"MiSans", ui-sans-serif, system-ui, sans-serif' },
+  { id: "sentient", name: "Sentient", description: "Warm editorial serif.", family: '"Sentient", ui-serif, Georgia, serif' },
+  { id: "junicode", name: "Junicode", description: "A literary serif face.", family: '"Junicode", ui-serif, Georgia, serif' },
+  { id: "goudy", name: "OFL Goudy", description: "A warm classic serif face.", family: '"OFLGoudy", ui-serif, Georgia, serif' },
+] as const;
+
+export const FONT_CHOICES = BODY_FONT_CHOICES;
+
+export type TitleFontChoiceId = (typeof TITLE_FONT_CHOICES)[number]["id"];
+export type BodyFontChoiceId = (typeof BODY_FONT_CHOICES)[number]["id"];
+export type FontChoiceId = BodyFontChoiceId;
 
 // ---------------------------------------------------------------------------
 // Color utilities (for light/dark detection only)
@@ -67,6 +83,10 @@ interface ThemeContextValue {
   themes: ThemeDef[];
   themeMode: "system" | ResolvedMode;
   setThemeMode: (mode: "system" | ResolvedMode) => void;
+  titleFontId: TitleFontChoiceId;
+  setTitleFontId: (id: TitleFontChoiceId) => void;
+  bodyFontId: BodyFontChoiceId;
+  setBodyFontId: (id: BodyFontChoiceId) => void;
   fontId: FontChoiceId;
   setFontId: (id: FontChoiceId) => void;
 }
@@ -77,7 +97,10 @@ const STORAGE_KEY = "mew-theme-id";
 const DEFAULT_THEME = "codex-dark";
 const APPEARANCE_STORAGE_KEY = "mew-appearance";
 const FONT_STORAGE_KEY = "mew-font-choice";
-const DEFAULT_FONT: FontChoiceId = "system";
+const TITLE_FONT_STORAGE_KEY = "mew-title-font-choice";
+const BODY_FONT_STORAGE_KEY = "mew-body-font-choice";
+const DEFAULT_TITLE_FONT: TitleFontChoiceId = "sentient";
+const DEFAULT_BODY_FONT: BodyFontChoiceId = "instrument-sans";
 
 function hostThemeDefinition(value: HostTheme): ThemeDef {
   const builtin = THEMES.find((theme) => theme.id === value.id);
@@ -86,12 +109,27 @@ function hostThemeDefinition(value: HostTheme): ThemeDef {
   return { id: value.id, name: value.id, description: "Installed theme", category: "Custom", baseText: color("foreground", "#ffffff"), preview: [color("background", "#181818"), color("primary", "#aaaaaa"), color("text-success", "#888888")] };
 }
 
-function getInitialFontId(): FontChoiceId {
-  if (typeof window === "undefined") return DEFAULT_FONT;
-  const stored = localStorage.getItem(FONT_STORAGE_KEY);
-  return FONT_CHOICES.some((font) => font.id === stored)
-    ? (stored as FontChoiceId)
-    : DEFAULT_FONT;
+function getInitialTitleFontId(): TitleFontChoiceId {
+  if (typeof window === "undefined") return DEFAULT_TITLE_FONT;
+  const stored = localStorage.getItem(TITLE_FONT_STORAGE_KEY);
+  if (TITLE_FONT_CHOICES.some((font) => font.id === stored)) {
+    return stored as TitleFontChoiceId;
+  }
+  const legacy = localStorage.getItem(FONT_STORAGE_KEY);
+  if (legacy === "mi-sans") return "banga";
+  if (legacy && TITLE_FONT_CHOICES.some((font) => font.id === legacy)) {
+    return legacy as TitleFontChoiceId;
+  }
+  return DEFAULT_TITLE_FONT;
+}
+
+function getInitialBodyFontId(): BodyFontChoiceId {
+  if (typeof window === "undefined") return DEFAULT_BODY_FONT;
+  const stored = localStorage.getItem(BODY_FONT_STORAGE_KEY) ?? localStorage.getItem(FONT_STORAGE_KEY);
+  if (BODY_FONT_CHOICES.some((font) => font.id === stored)) {
+    return stored as BodyFontChoiceId;
+  }
+  return DEFAULT_BODY_FONT;
 }
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
@@ -118,7 +156,8 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     return defaults;
   });
   const [systemDark, setSystemDark] = useState(() => window.matchMedia("(prefers-color-scheme: dark)").matches);
-  const [fontId, setFontIdState] = useState<FontChoiceId>(getInitialFontId);
+  const [titleFontId, setTitleFontIdState] = useState<TitleFontChoiceId>(getInitialTitleFontId);
+  const [bodyFontId, setBodyFontIdState] = useState<BodyFontChoiceId>(getInitialBodyFontId);
   const mode: ResolvedMode = preferences.themeMode === "system" ? (systemDark ? "dark" : "light") : preferences.themeMode;
   const themeId = mode === "dark" ? preferences.darkTheme : preferences.lightTheme;
   const theme = availableThemes.find((item) => item.id === themeId) ?? availableThemes[0]!;
@@ -156,8 +195,14 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     return () => style.remove();
   }, [host]);
 
-  const setFontId = (id: FontChoiceId) => {
-    setFontIdState(id);
+  const setTitleFontId = (id: TitleFontChoiceId) => {
+    setTitleFontIdState(id);
+    localStorage.setItem(TITLE_FONT_STORAGE_KEY, id);
+  };
+
+  const setBodyFontId = (id: BodyFontChoiceId) => {
+    setBodyFontIdState(id);
+    localStorage.setItem(BODY_FONT_STORAGE_KEY, id);
     localStorage.setItem(FONT_STORAGE_KEY, id);
   };
 
@@ -168,11 +213,27 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   }, [theme.id, mode]);
 
   useEffect(() => {
-    document.documentElement.setAttribute("data-font", fontId);
-  }, [fontId]);
+    document.documentElement.setAttribute("data-title-font", titleFontId);
+    document.documentElement.setAttribute("data-body-font", bodyFontId);
+    document.documentElement.setAttribute("data-font", bodyFontId);
+  }, [titleFontId, bodyFontId]);
 
   return (
-    <ThemeContext.Provider value={{ themeId: theme.id, setThemeId, theme, mode, themes: availableThemes, themeMode: preferences.themeMode, setThemeMode, fontId, setFontId }}>
+    <ThemeContext.Provider value={{
+      themeId: theme.id,
+      setThemeId,
+      theme,
+      mode,
+      themes: availableThemes,
+      themeMode: preferences.themeMode,
+      setThemeMode,
+      titleFontId,
+      setTitleFontId,
+      bodyFontId,
+      setBodyFontId,
+      fontId: bodyFontId,
+      setFontId: setBodyFontId,
+    }}>
       {children}
     </ThemeContext.Provider>
   );

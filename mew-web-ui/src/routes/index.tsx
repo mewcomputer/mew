@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { Attachment } from "@mew/web-client";
 import { getClient, SESSION_ID_KEY } from "@/lib/client";
 import { ConversationLayout } from "@/components/conversation-layout";
+import { WorkspaceSelectorPill } from "@/components/chat-surface";
 import { Button } from "@/components/ui/button";
 import { InputArea } from "@/components/input-area";
 import { useSessionStore } from "@/stores/session";
@@ -19,6 +20,7 @@ function HomeComponent() {
   const retryConnection = useSessionStore((s) => s.retryConnection);
   const attemptedResume = useRef(false);
   const newChatId = useRef<string | null>(null);
+  const [selectedCwd, setSelectedCwd] = useState<string | null>(null);
   const [resumeState, setResumeState] = useState<"idle" | "loading" | "failed">("idle");
 
   useEffect(() => {
@@ -53,7 +55,7 @@ function HomeComponent() {
     const location = router.state.location;
     if (newChatId.current === null) {
       useSessionStore.getState().reset();
-      newChatId.current = await client.newSession();
+      newChatId.current = await client.newSession(selectedCwd ?? undefined);
     }
     const newId = newChatId.current;
     const isCurrent = () => router.state.location === location && location.pathname === "/";
@@ -91,8 +93,15 @@ function HomeComponent() {
           )}
           {connectionState === "connected" && resumeState !== "loading" && (
             <>
-              <div className="space-y-2">
+              <div className="flex flex-col items-center space-y-3">
                 <h1 className="text-[24px] font-medium tracking-tight">What can we work on?</h1>
+                <WorkspaceSelectorPill
+                  selectedCwd={selectedCwd}
+                  onSelectCwd={(cwd) => {
+                    newChatId.current = null;
+                    setSelectedCwd(cwd);
+                  }}
+                />
                 {showResumeFailure && <p className="text-sm text-muted-foreground">Start a new chat to continue.</p>}
               </div>
             </>

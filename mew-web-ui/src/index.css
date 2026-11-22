@@ -96,6 +96,22 @@
   font-display: swap;
 }
 
+@font-face {
+  font-family: "Instrument Sans";
+  src: url("/fonts/instrument-sans.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 400 500;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Sentient";
+  src: url("/fonts/sentient.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 200 700;
+  font-display: swap;
+}
+
 /* Context inspector color palette — shared across all themes. */
 :root {
   --mew-code-background: var(--markdown-code-fence-bg);
@@ -131,9 +147,9 @@
 }
 
 @theme inline {
-  --font-sans: ui-sans-serif, system-ui, sans-serif;
-  --font-serif: ui-serif, Georgia, serif;
-  --font-display: ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Instrument Sans", "Noto Sans SC", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Sentient", ui-serif, Georgia, serif;
+  --font-display: "Sentient", ui-serif, Georgia, serif;
   --font-mono:
     "IoskeleyMono", ui-monospace, SF Mono, SF Mono Regular, Consolas,
     "Liberation Mono", Menlo, Courier, monospace;
@@ -200,25 +216,57 @@
   --color-markdown-link-text: var(--markdown-link-text);
 }
 
-/* The choices mirror the iOS app. Mi Sans is the shared default. */
-[data-font="system"] {
-  --font-sans: ui-sans-serif, system-ui, sans-serif;
-  --font-display: ui-sans-serif, system-ui, sans-serif;
+/* Title / display font choices (--font-display) and body font choices (--font-sans). */
+[data-title-font="sentient"] {
+  --font-display: "Sentient", ui-serif, Georgia, serif;
 }
 
-[data-font="mi-sans"] {
-  --font-sans: "MiSans", ui-sans-serif, system-ui, sans-serif;
+[data-title-font="instrument-sans"] {
+  --font-display: "Instrument Sans", "Noto Sans SC", ui-sans-serif, system-ui, sans-serif;
+}
+
+[data-title-font="banga"] {
   --font-display: "Banga", "MiSans", ui-sans-serif, system-ui, sans-serif;
 }
 
-[data-font="junicode"] {
-  --font-sans: "Junicode", ui-serif, Georgia, serif;
+[data-title-font="mi-sans"] {
+  --font-display: "MiSans", ui-sans-serif, system-ui, sans-serif;
+}
+
+[data-title-font="system"] {
+  --font-display: ui-sans-serif, system-ui, sans-serif;
+}
+
+[data-title-font="junicode"] {
   --font-display: "Junicode", ui-serif, Georgia, serif;
 }
 
-[data-font="goudy"] {
-  --font-sans: "OFLGoudy", ui-serif, Georgia, serif;
+[data-title-font="goudy"] {
   --font-display: "OFLGoudy", ui-serif, Georgia, serif;
+}
+
+[data-body-font="instrument-sans"] {
+  --font-sans: "Instrument Sans", "Noto Sans SC", ui-sans-serif, system-ui, sans-serif;
+}
+
+[data-body-font="system"] {
+  --font-sans: ui-sans-serif, system-ui, sans-serif;
+}
+
+[data-body-font="mi-sans"] {
+  --font-sans: "MiSans", ui-sans-serif, system-ui, sans-serif;
+}
+
+[data-body-font="sentient"] {
+  --font-sans: "Sentient", ui-serif, Georgia, serif;
+}
+
+[data-body-font="junicode"] {
+  --font-sans: "Junicode", ui-serif, Georgia, serif;
+}
+
+[data-body-font="goudy"] {
+  --font-sans: "OFLGoudy", ui-serif, Georgia, serif;
 }
 
 .typeset-docs {
@@ -277,12 +325,8 @@ body {
   padding-left: 4.5rem;
 }
 
-[data-desktop-host][data-sidebar-open="false"] [data-sidebar="header"] {
-  padding-top: 2.5rem;
-}
-
 [data-desktop-host][data-sidebar-open="false"] .mew-conversation-header {
-  padding-left: 3rem;
+  padding-left: 5.5rem;
 }
 
 @media (max-width: 767px) {
@@ -481,8 +525,20 @@ button:focus-visible,
   transition-timing-function: var(--ease-out);
 }
 
+[data-sidebar-resizing="true"] .motion-panel-size {
+  transition: none !important;
+}
+
 .mew-workspace-panels[data-workbench-motion="true"]:not(:has([data-separator="active"], [data-separator="focus"])) > [data-panel] {
   transition: flex-grow var(--motion-panel) var(--ease-drawer);
+}
+
+.mew-workspace-panels[data-workbench-motion="true"]:has([data-separator="active"], [data-separator="focus"]) > [data-panel] {
+  transition: flex-grow var(--motion-menu) var(--ease-out);
+}
+
+.mew-summary-aside {
+  transition: width var(--motion-menu) var(--ease-out);
 }
 
 .mew-summary-content {
@@ -499,6 +555,7 @@ button:focus-visible,
   transform: translateX(12px);
 }
 
+[data-summary-animate="false"] .mew-summary-aside,
 [data-summary-animate="false"] .mew-summary-content {
   transition: none;
 }

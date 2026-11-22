@@ -21,6 +21,30 @@ vi.mock("../components/ui/resizable", () => ({
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); delete window.mewQuery; localStorage.clear(); });
 
 describe("native workspace navigation", () => {
+  it("renders the conversation title in the window titlebar outside the content card", () => {
+    useSessionStore.setState({ sessionId: "titled-chat", sessionTitles: new Map([["titled-chat", "Frame Redesign"]]), availableSessions: [{ session_id: "titled-chat", cwd: "/Users/me/code/mew" } as never] });
+    render(<WorkspaceFrame><ConversationLayout><article>Conversation</article></ConversationLayout></WorkspaceFrame>);
+    const titlebar = document.querySelector(".mew-titlebar")!;
+    expect(within(titlebar as HTMLElement).getByText("Frame Redesign")).toBeTruthy();
+    expect(within(titlebar as HTMLElement).getByText("mew")).toBeTruthy();
+    expect(document.getElementById("mew-workspace-panels")!.contains(titlebar)).toBe(false);
+  });
+
+  it("resizes the sidebar by dragging or keyboard and persists the width", () => {
+    render(<WorkspaceFrame><article>Conversation</article></WorkspaceFrame>);
+    const handle = screen.getByRole("separator", { name: "Resize sidebar" });
+    expect(handle.getAttribute("aria-valuenow")).toBe("256");
+    fireEvent.mouseDown(handle, { button: 0, clientX: 256 });
+    fireEvent.mouseMove(window, { clientX: 310 });
+    fireEvent.mouseUp(window);
+    expect(handle.getAttribute("aria-valuenow")).toBe("310");
+    expect(JSON.parse(localStorage.getItem("mew.workspaceSurfaces")!).sidebarWidth).toBe(310);
+    fireEvent.keyDown(handle, { key: "ArrowLeft" });
+    expect(handle.getAttribute("aria-valuenow")).toBe("294");
+    fireEvent.doubleClick(handle);
+    expect(handle.getAttribute("aria-valuenow")).toBe("256");
+  });
+
   it("restores the initial pane without motion during strict effect replay", () => {
     localStorage.setItem("mew.workspaceSurfaces", JSON.stringify({ workbenchOpen: true }));
     const frame = vi.spyOn(window, "requestAnimationFrame").mockReturnValue(1);
@@ -139,7 +163,7 @@ describe("native workspace navigation", () => {
     within(summary).getByRole("button", { name: /Changes/ }).focus();
     act(() => resize!([{ contentRect: { width: 700 } }] as ResizeObserverEntry[], {} as ResizeObserver));
     expect(screen.queryByRole("complementary", { name: "Conversation summary" })).toBeNull();
-    const trigger = within(screen.getByRole("region", { name: "Chat" })).getByRole("button", { name: "Open summary" });
+    const trigger = within(document.querySelector<HTMLElement>(".mew-titlebar")!).getByRole("button", { name: "Open summary" });
     expect(document.activeElement).toBe(trigger);
     expect(summary.isConnected).toBe(true);
     expect(summary.getAttribute("aria-hidden")).toBe("true");

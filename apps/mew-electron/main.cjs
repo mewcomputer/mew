@@ -70,7 +70,7 @@ async function start() {
   });
   window = new BrowserWindow({
     title: 'mew', width: 1440, height: 960, minWidth: 760, minHeight: 540,
-    titleBarStyle: 'hidden', trafficLightPosition: { x: 14, y: 18 },
+    titleBarStyle: 'hidden', trafficLightPosition: { x: 14, y: 12 },
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#181818' : '#ffffff',
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'), session: hostSession,

@@ -1,4 +1,5 @@
 import { createFileRoute, useRouter } from "@tanstack/react-router";
+import { FrameTitlebar } from "@/components/workspace-frame";
 import { useState, useMemo, useEffect } from "react";
 import { useSessionStore } from "@/stores/session";
 import { getClient, SESSION_ID_KEY } from "@/lib/client";
@@ -103,6 +104,7 @@ function SessionsRouteComponent() {
 
   return (
     <>
+      <FrameTitlebar>
       <div className="mew-conversation-header mew-drag-region flex h-9 shrink-0 items-center gap-2 px-3">
         <Button
           variant="ghost"
@@ -117,6 +119,7 @@ function SessionsRouteComponent() {
           Sessions
         </span>
       </div>
+      </FrameTitlebar>
 
       <div className="flex-1 overflow-y-auto p-4">
         <div className="mx-auto max-w-2xl space-y-4">

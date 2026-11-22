@@ -30,12 +30,9 @@ import { getClient } from "../lib/client-ref";
 import { isElectronHost } from "../lib/host";
 import { FileTreePanel, ChangesPanel } from "./file-tree";
 import { BrowserPanel } from "./browser-panel";
-import {
-  Sheet,
-  SheetContent,
-  SheetTitle,
-} from "@/components/ui/sheet";
+import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { FrameWorkbenchTitlebar, useOptionalWorkspaceFrame } from "./workspace-frame";
 
 const SubagentConversation = lazy(() => import("./subagent-conversation"));
 
@@ -75,6 +72,8 @@ export function RightRail({
   onWorkbenchTabsAction,
 }: RightRailProps) {
   const isMobile = useIsMobile();
+  const frame = useOptionalWorkspaceFrame();
+  const inFrameTitlebar = mode === "dock" && !isMobile && Boolean(frame?.workbenchTitlebar);
   const tabList = useRef<HTMLDivElement>(null);
   const [uncontrolledWorkbenchTabs, setUncontrolledWorkbenchTabs] = useState(DEFAULT_WORKBENCH_TABS);
   const selectedWorkbenchTabs = onWorkbenchTabsChange || onWorkbenchTabsAction
@@ -196,6 +195,88 @@ export function RightRail({
     return () => { window.removeEventListener("keydown", handleKeyDown); window.removeEventListener("mew:menu-action", menu); };
   }, [open, selectedWorkbenchTab, selectedWorkbenchTabs, sessionId]);
 
+  const tabStrip = (
+    <div
+      className={cn(
+        "mew-drag-region flex h-9 min-w-0 shrink-0 items-center",
+        inFrameTitlebar ? "w-full gap-0.5" : "border-b border-border/70 bg-sidebar/60",
+      )}
+    >
+      <TabsList
+        ref={tabList}
+        aria-label="Workbench tabs"
+        className={cn(
+          "mew-tab-strip h-9 min-w-0 flex-none justify-start gap-0.5 overflow-x-auto rounded-none border-0 bg-transparent p-0 px-1",
+          inFrameTitlebar ? "max-w-[calc(100%_-_2.25rem)]" : "max-w-[calc(100%_-_4.5rem)]",
+        )}
+      >
+        {selectedWorkbenchTabs.tabs.length === 0 && <span className="mx-1 flex h-7 items-center gap-1.5 rounded-md border border-border bg-muted/70 px-2 text-[11px]"><Globe className="h-3.5 w-3.5" />New tab</span>}
+        {selectedWorkbenchTabs.tabs.map((tab) => {
+          const meta = workbenchTabMeta(tab.kind);
+          const Icon = meta.icon;
+          const count = tab.kind === "agents"
+            ? activeCounts.subagents
+            : tab.kind === "jobs"
+              ? activeCounts.jobs
+              : tab.kind === "changes"
+                ? gitStatus.length
+                : 0;
+          return (
+            <div
+              key={tab.id}
+              className={cn("group my-1 flex h-7 shrink-0 items-center rounded-md border border-transparent", tab.id === selectedWorkbenchTab?.id && "border-border bg-muted/70")}
+            >
+              <TabsTrigger
+                value={tabValue(tab.id)}
+                aria-label={tab.title}
+                onClick={() => applyWorkbenchAction({ type: "select", id: tab.id })}
+                className="h-7 gap-1.5 rounded-md border-0 px-2 text-[11px] font-normal text-muted-foreground shadow-none hover:text-foreground data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none"
+              >
+                <Icon className="h-3.5 w-3.5" aria-hidden="true" />
+                <span className="max-w-32 truncate">{tab.title}</span>
+                {count > 0 && <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-primary/10 px-1 text-[9px] text-primary">{count}</span>}
+              </TabsTrigger>
+              {tab.closable && (
+                <button
+                  type="button"
+                  onClick={() => applyWorkbenchAction({ type: "close", id: tab.id })}
+                  className={cn("motion-pressable mr-1 rounded p-1 text-muted-foreground opacity-0 hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100", tab.id === selectedWorkbenchTab?.id && "opacity-100")}
+                  aria-label={`Close ${tab.title}`}
+                  title={`Close ${tab.title}`}
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </TabsList>
+      <div className="relative shrink-0">
+        <button
+          type="button"
+          onClick={openAddWorkbenchMenu}
+          className="motion-pressable ml-1 rounded p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          aria-label="Add workbench tab"
+          title="Add workbench tab"
+        >
+          <Plus className="h-3.5 w-3.5" />
+        </button>
+      </div>
+      <div className="flex-1" />
+      {!inFrameTitlebar && (
+        <button
+          type="button"
+          onClick={() => onOpenChange(false)}
+          className="motion-pressable mr-1 rounded p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          aria-label="Close workbench"
+          title="Close workbench"
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+      )}
+    </div>
+  );
+
   const workbenchContent = (
     <div className="flex min-h-0 flex-1 flex-col">
       <Tabs
@@ -209,75 +290,7 @@ export function RightRail({
           selectedWorkbenchTab?.kind === "browser" && "bg-background",
         )}
       >
-        <div className="mew-drag-region flex h-9 min-w-0 shrink-0 items-center border-b border-border/70 bg-sidebar/60">
-          <TabsList
-            ref={tabList}
-            aria-label="Workbench tabs"
-            className="mew-tab-strip h-9 min-w-0 max-w-[calc(100%_-_4.5rem)] flex-none justify-start gap-0.5 overflow-x-auto rounded-none border-0 bg-transparent p-0 px-1"
-          >
-            {selectedWorkbenchTabs.tabs.length === 0 && <span className="mx-1 flex h-7 items-center gap-1.5 rounded-md border border-border bg-muted/70 px-2 text-[11px]"><Globe className="h-3.5 w-3.5" />New tab</span>}
-            {selectedWorkbenchTabs.tabs.map((tab) => {
-              const meta = workbenchTabMeta(tab.kind);
-              const Icon = meta.icon;
-              const count = tab.kind === "agents"
-                ? activeCounts.subagents
-                : tab.kind === "jobs"
-                  ? activeCounts.jobs
-                  : tab.kind === "changes"
-                    ? gitStatus.length
-                    : 0;
-              return (
-                <div
-                  key={tab.id}
-                  className={cn("group my-1 flex h-7 shrink-0 items-center rounded-md border border-transparent", tab.id === selectedWorkbenchTab?.id && "border-border bg-muted/70")}
-                >
-                  <TabsTrigger
-                    value={tabValue(tab.id)}
-                    aria-label={tab.title}
-                    onClick={() => applyWorkbenchAction({ type: "select", id: tab.id })}
-                    className="h-7 gap-1.5 rounded-md border-0 px-2 text-[11px] font-normal text-muted-foreground shadow-none hover:text-foreground data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none"
-                  >
-                    <Icon className="h-3.5 w-3.5" aria-hidden="true" />
-                    <span className="max-w-32 truncate">{tab.title}</span>
-                    {count > 0 && <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-primary/10 px-1 text-[9px] text-primary">{count}</span>}
-                  </TabsTrigger>
-                  {tab.closable && (
-                    <button
-                      type="button"
-                      onClick={() => applyWorkbenchAction({ type: "close", id: tab.id })}
-                      className={cn("motion-pressable mr-1 rounded p-1 text-muted-foreground opacity-0 hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100", tab.id === selectedWorkbenchTab?.id && "opacity-100")}
-                      aria-label={`Close ${tab.title}`}
-                      title={`Close ${tab.title}`}
-                    >
-                      <X className="h-3 w-3" />
-                    </button>
-                  )}
-                </div>
-              );
-            })}
-          </TabsList>
-          <div className="relative shrink-0">
-            <button
-              type="button"
-              onClick={openAddWorkbenchMenu}
-              className="motion-pressable ml-1 rounded p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              aria-label="Add workbench tab"
-              title="Add workbench tab"
-            >
-              <Plus className="h-3.5 w-3.5" />
-            </button>
-          </div>
-          <div className="flex-1" />
-          <button
-            type="button"
-            onClick={() => onOpenChange(false)}
-            className="motion-pressable mr-1 rounded p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            aria-label="Close workbench"
-            title="Close workbench"
-          >
-            <X className="h-3.5 w-3.5" />
-          </button>
-        </div>
+        {inFrameTitlebar ? ((open || present) && <FrameWorkbenchTitlebar>{tabStrip}</FrameWorkbenchTitlebar>) : tabStrip}
         <div className="min-h-0 flex-1 overflow-hidden">
           {selectedWorkbenchTabs.tabs.length === 0 && (
             renderWorkbenchSurface(createWorkbenchTab("browser", { id: "launcher" }), true)
@@ -364,7 +377,7 @@ export function RightRail({
         aria-label="Workspace workbench"
         data-open={open}
         aria-hidden={!open}
-        className="motion-panel-size @container flex h-full min-w-0 overflow-hidden border-l border-border bg-background"
+        className="motion-panel-size @container flex h-full min-w-0 overflow-hidden bg-background data-[open=true]:border-l data-[open=true]:border-border"
       >
         <div className="flex min-w-0 flex-1 flex-col">{workbenchContent}</div>
       </aside>

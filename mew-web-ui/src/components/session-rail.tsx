@@ -37,7 +37,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import {
   PanelLeft,
-  SquarePen,
   ChevronDown,
   Plus,
   RotateCcw,
@@ -54,6 +53,7 @@ import {
   ChevronRight,
   Search,
   List,
+  ListFilter,
   Layers,
   ShieldAlert,
   MessageCircleQuestion,
@@ -81,8 +81,7 @@ export function SessionRail({ client }: SessionRailProps) {
   const connectionState = useSessionStore((s) => s.connectionState);
   const groups = useSessionStore((s) => s.groups);
   const projects = useSessionStore((s) => s.projects);
-  const { setOpenMobile, state: sidebarState, isMobile, setOpen } = useSidebar();
-  const compact = sidebarState === "collapsed" && !isMobile;
+  const { setOpenMobile, setOpen } = useSidebar();
   const searchInput = useRef<HTMLInputElement>(null);
   const searchTrigger = useRef<HTMLButtonElement>(null);
   const searchRequested = useRef(false);
@@ -91,14 +90,15 @@ export function SessionRail({ client }: SessionRailProps) {
   const [showArchived, setShowArchived] = useState(false);
   const [showProjectPicker, setShowProjectPicker] = useState(false);
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set());
+  const [conversationsCollapsed, setConversationsCollapsed] = useState(false);
   const [query, setQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
 
   useEffect(() => {
-    if (compact || !searchRequested.current) return;
+    if (!searchRequested.current) return;
     searchRequested.current = false;
     searchInput.current?.focus();
-  }, [compact, searchOpen]);
+  }, [searchOpen]);
 
   const closeSearch = () => {
     searchRequested.current = false;
@@ -251,88 +251,57 @@ export function SessionRail({ client }: SessionRailProps) {
   );
 
   return (
-    <Sidebar side="left" variant="sidebar" collapsible="icon">
+    <Sidebar side="left" variant="inset" collapsible="offcanvas" className="pt-0">
       <TooltipProvider delayDuration={200}>
-        {compact ? <>
-          <SidebarHeader className="p-2">
-            <SidebarMenu>
-              <SidebarMenuItem>
-                <SidebarMenuButton aria-label="Expand sidebar" tooltip="Expand sidebar" onClick={() => setOpen(true)}>
-                  <PanelLeft />
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-            </SidebarMenu>
-          </SidebarHeader>
-          <SidebarContent>
-            <SidebarGroup className="p-2">
-              <SidebarMenu>
-                <SidebarMenuItem>
-                  <SidebarMenuButton aria-label="New chat" tooltip="New chat" disabled={!client || connectionState !== "connected"} onClick={handleNewSession}>
-                    <Plus />
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-                <SidebarMenuItem>
-                  <SidebarMenuButton aria-label="Search chats" tooltip="Search chats" onClick={() => {
-                    searchRequested.current = true;
-                    setSearchOpen(true);
-                    setOpen(true);
-                  }}>
-                    <Search />
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-                <SidebarMenuItem>
-                  <SidebarMenuButton aria-label={showArchived ? "Hide archived sessions" : "Show archived sessions"} tooltip="Archived chats" isActive={showArchived} onClick={() => {
-                    setShowArchived((value) => !value);
-                    setOpen(true);
-                  }}>
-                    <Archive />
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              </SidebarMenu>
-            </SidebarGroup>
-          </SidebarContent>
-          <SidebarFooter className="p-2">
-            <SidebarMenu>
-              <SidebarMenuItem>
-                <SidebarMenuButton aria-label="Open settings" tooltip="Settings" onClick={() => router.navigate({ to: "/settings" })}>
-                  <Settings />
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-            </SidebarMenu>
-          </SidebarFooter>
-        </> : <>
-      <SidebarHeader className="px-2 pb-2 pt-0">
-        <div className="mew-navigation-header mew-drag-region flex h-9 items-center justify-between gap-1">
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="sm" aria-label="mew menu" className="h-7 gap-1 px-2 text-xs font-semibold">mew <ChevronDown className="h-3 w-3 text-muted-foreground" /></Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="w-52">
-              <DropdownMenuLabel>Chat view</DropdownMenuLabel>
-              {[{ value: "timeline" as const, label: "Notifications", icon: List }, { value: "workspace" as const, label: "Workspace", icon: Folder }, { value: "grouped" as const, label: "Grouped", icon: Layers }].map(({ value, label, icon: Icon }) => <DropdownMenuItem key={value} onSelect={() => setView(value)}><Icon className="h-3.5 w-3.5" />{label}{view === value && <Check className="ml-auto h-3 w-3" />}</DropdownMenuItem>)}
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onSelect={() => { client?.listProjects(); setShowProjectPicker(true); }}><FolderPlus className="h-3.5 w-3.5" />New chat from a project</DropdownMenuItem>
-              {continueTarget && <DropdownMenuItem onSelect={() => handleAttach(continueTarget.session_id)}><RotateCcw className="h-3.5 w-3.5" />Continue latest</DropdownMenuItem>}
-              <DropdownMenuItem onSelect={() => setShowArchived((value) => !value)}><Archive className="h-3.5 w-3.5" />{showArchived ? "Hide archived chats" : "Archived chats"}</DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-          <div className="flex items-center gap-0.5">
-            <Button variant="ghost" size="icon" className="h-6 w-6" aria-label="Compose new chat" title="New chat" disabled={!client || connectionState !== "connected"} onClick={handleNewSession}><SquarePen className="h-3.5 w-3.5" /></Button>
-            <Button ref={searchTrigger} variant="ghost" size="icon" className={cn("h-6 w-6", searchOpen && "bg-sidebar-accent text-sidebar-accent-foreground")} aria-label="Search chats" title="Search chats" aria-expanded={searchOpen} onClick={() => {
-              if (searchOpen) closeSearch();
-              else { searchRequested.current = true; setSearchOpen(true); }
-            }}><Search className="h-3.5 w-3.5" /></Button>
-          </div>
+      <SidebarHeader className="gap-1.5 px-2 pb-1 pt-0">
+        <div className="mew-navigation-header mew-drag-region flex h-9 items-center justify-end gap-0.5">
+          <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-sidebar-foreground" aria-label="Collapse sidebar" title="Collapse sidebar" onClick={() => setOpen(false)}>
+            <PanelLeft className="h-3.5 w-3.5" />
+          </Button>
+          <Button ref={searchTrigger} variant="ghost" size="icon" className={cn("h-7 w-7 text-muted-foreground hover:text-sidebar-foreground", searchOpen && "bg-sidebar-accent text-sidebar-accent-foreground")} aria-label="Search chats" title="Search chats" aria-expanded={searchOpen} onClick={() => {
+            if (searchOpen) closeSearch();
+            else { searchRequested.current = true; setSearchOpen(true); }
+          }}><Search className="h-3.5 w-3.5" /></Button>
         </div>
-        <Button onClick={handleNewSession} disabled={!client || connectionState !== "connected"} variant="ghost" size="sm" className="h-7 justify-start gap-2 px-2 text-xs font-normal"><SquarePen className="h-3.5 w-3.5" />New chat</Button>
+        <Button onClick={handleNewSession} disabled={!client || connectionState !== "connected"} variant="ghost" size="sm" className="h-8 w-full justify-start gap-2 rounded-lg border border-sidebar-border/80 bg-sidebar-accent/40 px-2.5 text-xs font-medium text-sidebar-foreground shadow-2xs hover:bg-sidebar-accent"><Plus className="h-3.5 w-3.5 text-muted-foreground" />New chat</Button>
         {searchOpen && <Input ref={searchInput} value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => {
           if (event.key !== "Escape") return;
           event.preventDefault();
           closeSearch();
           searchTrigger.current?.focus();
         }} placeholder="Search chats" aria-label="Search sessions" className="h-7 text-xs" />}
+        <div className="flex items-center justify-between px-1 pt-2">
+          <button
+            type="button"
+            onClick={() => setConversationsCollapsed((value) => !value)}
+            className="flex items-center gap-1 rounded px-1 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:text-sidebar-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
+          >
+            <span>{view === "workspace" ? "Projects" : view === "grouped" ? "Groups" : "Conversations"}</span>
+            <ChevronDown className={cn("h-3 w-3 opacity-70 transition-transform", conversationsCollapsed && "-rotate-90")} />
+          </button>
+          <div className="flex items-center gap-0.5">
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="icon" className={cn("h-6 w-6 text-muted-foreground hover:text-sidebar-foreground", (view !== "timeline" || showArchived) && "text-sidebar-foreground")} aria-label="mew menu" title="Group & filter">
+                  <ListFilter className="h-3.5 w-3.5" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" sideOffset={6} className="w-44">
+                <DropdownMenuLabel>Group by</DropdownMenuLabel>
+                {[{ value: "timeline" as const, label: "Notifications", icon: List }, { value: "workspace" as const, label: "Workspace", icon: Folder }, { value: "grouped" as const, label: "Grouped", icon: Layers }].map(({ value, label, icon: Icon }) => <DropdownMenuItem key={value} onSelect={() => setView(value)}><Icon />{label}{view === value && <Check className="ml-auto" />}</DropdownMenuItem>)}
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onSelect={() => { client?.listProjects(); setShowProjectPicker(true); }}><FolderPlus />New chat from a project</DropdownMenuItem>
+                {continueTarget && <DropdownMenuItem onSelect={() => handleAttach(continueTarget.session_id)}><RotateCcw />Continue latest</DropdownMenuItem>}
+                <DropdownMenuItem onSelect={() => setShowArchived((value) => !value)}><Archive />{showArchived ? "Hide archived chats" : "Archived chats"}</DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground hover:text-sidebar-foreground" aria-label="New chat from project" title="New chat from a project" onClick={() => { client?.listProjects(); setShowProjectPicker(true); }}>
+              <FolderPlus className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+        </div>
       </SidebarHeader>
-      <SidebarContent>
+      <SidebarContent className={cn(conversationsCollapsed && "hidden")}>
         {sorted.length === 0 && <div role="status" className="px-4 py-5 text-xs leading-relaxed text-muted-foreground">
           {loading ? "Loading sessions…" : query.trim() ? "No sessions match “" + query.trim() + "”" : "No sessions yet"}
         </div>}
@@ -354,28 +323,28 @@ export function SessionRail({ client }: SessionRailProps) {
               return next;
             });
           return (
-          <SidebarGroup key={section.groupId ?? section.label}>
+          <SidebarGroup key={section.groupId ?? section.label} className="px-2 py-1">
             {(
-              <SidebarGroupLabel className="flex items-center gap-1">
+              <SidebarGroupLabel className="flex h-7 items-center gap-1.5 px-2 text-[11px] font-medium text-muted-foreground/85">
                 {view === "timeline" && section.label}
                 {view === "workspace" && (
                   <button
                     type="button"
                     onClick={toggleCollapse}
-                    className="flex min-w-0 flex-1 items-center gap-1 rounded py-1 text-left hover:text-sidebar-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
+                    className="flex min-w-0 flex-1 items-center gap-1.5 rounded py-1 text-left text-muted-foreground hover:text-sidebar-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
                     title={section.cwd ?? undefined}
                     aria-label={`${isCollapsed ? "Expand" : "Collapse"} workspace ${section.label}`}
                     aria-expanded={!isCollapsed}
                   >
+                    <Folder className="h-3.5 w-3.5 shrink-0 opacity-80" />
+                    <span className="truncate font-normal">{section.label}</span>
+                    <span className="shrink-0 text-[10px] text-muted-foreground/60">({section.items.length})</span>
                     <ChevronRight
                       className={cn(
-                        "h-3 w-3 transition-transform",
+                        "ml-auto h-3 w-3 shrink-0 opacity-60 transition-transform",
                         !isCollapsed && "rotate-90",
                       )}
                     />
-                    <Folder className="h-3 w-3 shrink-0" />
-                    <span className="truncate">{section.label}</span>
-                    <span className="shrink-0 text-muted-foreground">({section.items.length})</span>
                   </button>
                 )}
                 {view === "grouped" && section.groupId && (
@@ -394,12 +363,13 @@ export function SessionRail({ client }: SessionRailProps) {
             )}
             {(!isCollapsed || view !== "workspace") && (
             <SidebarGroupContent>
-              <SidebarMenu className="gap-0.5">
+              <SidebarMenu className={cn("gap-0.5", view === "workspace" && "pl-3")}>
                 {section.items.map((s) => (
                   <SidebarMenuItem key={s.session_id}>
                     <SessionRow
                       session={s}
                       isActive={s.session_id === currentSessionId}
+                      showWorkspace={view !== "workspace"}
                       title={displaySessionTitle(sessionTitles.get(s.session_id), s)}
                       summary={sessionSummaries.get(s.session_id) ?? s.summary}
                       onClick={() => handleAttach(s.session_id)}
@@ -429,7 +399,6 @@ export function SessionRail({ client }: SessionRailProps) {
         )}
       </SidebarContent>
       <SidebarFooter className="px-2 py-2"><Button variant="ghost" size="sm" className="h-7 justify-start gap-2 px-2 text-xs font-normal text-muted-foreground" aria-label="Open settings" onClick={() => router.navigate({ to: "/settings" })}><Settings className="h-3.5 w-3.5" />Settings</Button></SidebarFooter>
-        </>}
       </TooltipProvider>
       <ProjectPickerModal
         open={showProjectPicker}
@@ -441,23 +410,59 @@ export function SessionRail({ client }: SessionRailProps) {
   );
 }
 
-function SessionRow({ session: s, isActive, title, summary, onClick, onArchive, onPin, onRegenerateTitle, groups, client, attention }: {
-  session: SessionInfo; isActive: boolean; title: string; summary?: string;
+function formatRelativeAge(timestampMs: number): string {
+  const diffSec = Math.max(0, Math.floor((Date.now() - timestampMs) / 1000));
+  if (diffSec < 60) return "now";
+  const mins = Math.floor(diffSec / 60);
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d`;
+  const months = Math.floor(days / 30);
+  return `${months}mo`;
+}
+
+function SessionRow({ session: s, isActive, showWorkspace, title, summary, onClick, onArchive, onPin, onRegenerateTitle, groups, client, attention }: {
+  session: SessionInfo; isActive: boolean; showWorkspace: boolean; title: string; summary?: string;
   onClick: () => void; onArchive: (a: boolean) => void; onPin: (p: boolean) => void;
   onRegenerateTitle: () => void; groups: GroupInfo[]; client: MewClient | null; attention: SessionAttention[];
 }) {
+  const age = formatRelativeAge(s.last_message_at ?? s.created_at);
+  const hasStatus = s.state === "running" || attention.length > 0 || s.last_turn_failed;
+  const twoLine = (showWorkspace && Boolean(s.cwd)) || attention.length > 0 || Boolean(summary && summary !== title);
   return <div className="group/chat-row relative">
-    <SidebarMenuButton isActive={isActive} aria-current={isActive ? "page" : undefined} onClick={onClick} title={`${title}\nLast active ${new Date(s.last_message_at ?? s.created_at).toLocaleString()}`} className="h-auto min-h-10 flex-col items-start gap-0.5 rounded-md px-2 py-1.5">
-      <div className="flex w-full items-center gap-2 pr-5">
-        <span className={cn("min-w-0 flex-1 truncate text-xs leading-4", isActive ? "font-medium" : "font-normal")}>{title}</span>
-        {(s.state === "running" || attention.length > 0 || s.last_turn_failed) && <StatusDot state={s.state} failed={s.last_turn_failed} attention={attention[0]} />}
+    <SidebarMenuButton
+      isActive={isActive}
+      aria-current={isActive ? "page" : undefined}
+      onClick={onClick}
+      title={`${title}\nLast active ${new Date(s.last_message_at ?? s.created_at).toLocaleString()}`}
+      className={cn(
+        "h-auto flex-col items-start gap-0.5 rounded-lg px-2.5 transition-colors",
+        twoLine ? "min-h-9 py-1.5" : "min-h-7 py-1",
+        isActive
+          ? "bg-sidebar-accent/80 text-sidebar-foreground ring-1 ring-sidebar-border"
+          : "text-sidebar-foreground/75 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground",
+      )}
+    >
+      <div className="flex w-full items-center gap-2">
+        <span className={cn("min-w-0 flex-1 truncate text-xs leading-4", isActive ? "font-medium text-sidebar-foreground" : "font-normal")}>{title}</span>
+        <span className="flex shrink-0 items-center gap-1.5 text-[11px] tabular-nums text-muted-foreground/80 transition-opacity group-hover/chat-row:opacity-0 group-focus-within/chat-row:opacity-0">
+          {hasStatus && <StatusDot state={s.state} failed={s.last_turn_failed} attention={attention[0]} />}
+          <span aria-hidden="true">{age}</span>
+        </span>
       </div>
-      {summary && summary !== title && <span className="line-clamp-2 text-[11px] leading-[14px] text-muted-foreground">{summary}</span>}
+      {summary && summary !== title && <span className="line-clamp-1 text-[11px] leading-[14px] text-muted-foreground/80">{summary}</span>}
       {attention.length > 0 && <span className="flex items-center gap-1 text-[10px] text-text-warning"><AttentionIcon kind={attention[0]!.kind} />{attention[0]!.label}</span>}
-      {s.cwd && <span className="flex max-w-full items-center gap-1 truncate text-[10px] leading-[14px] text-muted-foreground"><Folder className="h-2.5 w-2.5 shrink-0" />{deriveWorkspaceName(s.cwd)}</span>}
+      {showWorkspace && s.cwd && (
+        <span className="flex max-w-full items-center gap-1.5 truncate text-[11px] leading-[14px] text-muted-foreground/75">
+          <Folder className="h-3 w-3 shrink-0 opacity-75" />
+          <span className="truncate">{deriveWorkspaceName(s.cwd)}</span>
+        </span>
+      )}
     </SidebarMenuButton>
     <DropdownMenu>
-      <DropdownMenuTrigger asChild><button type="button" aria-label={`Chat actions: ${title}`} className="absolute right-1 top-1 rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:opacity-100 group-hover/chat-row:opacity-100 group-focus-within/chat-row:opacity-100 data-[state=open]:opacity-100"><MoreHorizontal className="h-3 w-3" /></button></DropdownMenuTrigger>
+      <DropdownMenuTrigger asChild><button type="button" aria-label={`Chat actions: ${title}`} className="absolute right-1.5 top-1.5 rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:opacity-100 group-hover/chat-row:opacity-100 group-focus-within/chat-row:opacity-100 data-[state=open]:opacity-100"><MoreHorizontal className="h-3.5 w-3.5" /></button></DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-48">
         <DropdownMenuItem onSelect={() => onPin(!s.pinned)}><Pin className="h-3.5 w-3.5" />{s.pinned ? "Unpin chat" : "Pin chat"}</DropdownMenuItem>
         <DropdownMenuItem onSelect={() => onArchive(!s.archived)}><Archive className="h-3.5 w-3.5" />{s.archived ? "Restore chat" : "Archive chat"}</DropdownMenuItem>

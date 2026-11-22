@@ -54,20 +54,17 @@ describe("SessionRail workspace collapse", () => {
     });
   });
 
-  it("renders an icon rail without expanded controls or chat titles when collapsed", () => {
+  it("collapses completely offcanvas when closed", () => {
     useSessionStore.setState({ availableSessions: [makeSession({ first_message: "A chat title that should not clip", model: "fake" })] });
-    renderRail(null, false);
-    for (const name of ["Expand sidebar", "New chat", "Search chats", "Show archived sessions", "Open settings"]) {
-      expect(screen.getByRole("button", { name }).textContent?.trim()).toBe("");
-    }
+    const { container } = renderRail(null, false);
+    const sidebar = container.querySelector('[data-slot="sidebar"]')!;
+    expect(sidebar.getAttribute("data-state")).toBe("collapsed");
+    expect(sidebar.getAttribute("data-collapsible")).toBe("offcanvas");
     expect(screen.queryByRole("textbox", { name: "Search sessions" })).toBeNull();
-    expect(screen.queryByText("A chat title that should not clip")).toBeNull();
-    expect(screen.queryByText("Continue latest")).toBeNull();
-    expect(screen.queryByRole("button", { name: "mew menu" })).toBeNull();
   });
 
-  it("expands the compact rail and focuses its real chat search", async () => {
-    renderRail(null, false);
+  it("opens and focuses the real chat search when toggled", async () => {
+    renderRail();
     fireEvent.click(screen.getByRole("button", { name: "Search chats" }));
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Search sessions" })));
     fireEvent.change(screen.getByRole("textbox", { name: "Search sessions" }), { target: { value: "missing chat" } });

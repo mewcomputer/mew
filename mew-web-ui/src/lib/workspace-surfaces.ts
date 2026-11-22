@@ -11,6 +11,7 @@ export interface WorkspaceSurfacesState {
   sessionId?: string;
   sessionTabs?: Record<string, WorkbenchTabsState>;
   sidebarOpen: boolean;
+  sidebarWidth?: number;
   workbenchOpen: boolean;
   workbenchTabs: WorkbenchTabsState;
   workbenchSize: number;
@@ -19,6 +20,7 @@ export interface WorkspaceSurfacesState {
 export type WorkspaceSurfacesAction =
   | { type: "select-session"; sessionId: string }
   | { type: "set-sidebar-open"; open: boolean }
+  | { type: "set-sidebar-width"; width: number }
   | { type: "toggle-sidebar" }
   | { type: "toggle-workbench" }
   | { type: "set-workbench-open"; open: boolean }
@@ -27,6 +29,10 @@ export type WorkspaceSurfacesAction =
   | { type: "workbench-tabs-action"; sessionId?: string; action: WorkbenchTabsAction };
 
 export const WORKSPACE_SURFACES_STORAGE_KEY = "mew.workspaceSurfaces";
+
+export const DEFAULT_SIDEBAR_WIDTH = 256;
+export const MIN_SIDEBAR_WIDTH = 200;
+export const MAX_SIDEBAR_WIDTH = 440;
 
 export const DEFAULT_WORKSPACE_SURFACES: WorkspaceSurfacesState = {
   sidebarOpen: true,
@@ -51,6 +57,8 @@ export function workspaceSurfacesReducer(
     }
     case "set-sidebar-open":
       return { ...state, sidebarOpen: action.open };
+    case "set-sidebar-width":
+      return { ...state, sidebarWidth: clampSidebarWidth(action.width) };
     case "toggle-sidebar":
       return { ...state, sidebarOpen: !state.sidebarOpen };
     case "toggle-workbench":
@@ -94,6 +102,7 @@ export function loadWorkspaceSurfaces(
     return {
       ...(typeof value.sessionId === "string" ? { sessionId: value.sessionId } : {}),
       ...(sessionTabs ? { sessionTabs } : {}),
+      ...(typeof value.sidebarWidth === "number" ? { sidebarWidth: clampSidebarWidth(value.sidebarWidth) } : {}),
       sidebarOpen: typeof value.sidebarOpen === "boolean"
         ? value.sidebarOpen
         : typeof value.summaryOpen === "boolean"
@@ -114,6 +123,10 @@ export function loadWorkspaceSurfaces(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+export function clampSidebarWidth(value: number): number {
+  return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, Math.round(value)));
 }
 
 function clampWorkbenchSize(value: number): number {

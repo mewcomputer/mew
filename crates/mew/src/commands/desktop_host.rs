@@ -19,6 +19,8 @@ struct Bootstrap {
     light_theme: String,
     dark_theme: String,
     themes: Vec<HostTheme>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    recent_models: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -72,6 +74,7 @@ impl Bootstrap {
                     }
                 })
                 .collect(),
+            recent_models: state.recent_models,
         }
     }
 

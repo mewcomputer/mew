@@ -10,6 +10,7 @@ export function PersonaPill() {
   const availablePersonas = useSessionStore((s) => s.availablePersonas);
   const selectPersona = useSessionStore((s) => s.selectPersona);
   const label = persona ?? "default";
+  const isCustom = Boolean(persona && persona !== "default");
   const options = [{ name: "default", description: "Use the default agent", color: undefined }, ...availablePersonas.filter((item) => item.name !== "default")];
 
   return (
@@ -17,7 +18,7 @@ export function PersonaPill() {
       <DropdownMenuTrigger asChild>
         <button type="button" title="Persona" className="motion-pressable flex h-7 min-w-0 max-w-32 items-center gap-1.5 rounded-md px-1.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-accent-foreground data-[state=open]:bg-accent">
           <User className="h-3.5 w-3.5 shrink-0" />
-          <span className="truncate capitalize">{label}</span>
+          <span className={isCustom ? "truncate capitalize text-foreground" : "sr-only"}>{label}</span>
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent side="top" align="start" sideOffset={10} aria-label="Persona" className="w-60 max-w-[calc(100vw-2rem)] rounded-xl p-1.5">

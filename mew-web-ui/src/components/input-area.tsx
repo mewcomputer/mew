@@ -15,6 +15,15 @@ import { useSessionStore } from "../stores/session";
 import { useSidebar } from "@/components/ui/sidebar";
 import { ModelPill } from "./model-pill";
 import { PersonaPill } from "./persona-pill";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from "./ui/dropdown-menu";
+import { getClient } from "../lib/client-ref";
 import type { Attachment } from "@mew/web-client";
 
 interface InputAreaProps {
@@ -429,10 +438,7 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
                 >
                   <Plus className="h-4 w-4" />
                 </button>
-                  <span className="flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap px-1 text-[11px] text-muted-foreground" title={`Permission mode: ${permissionMode}`} aria-label={`Permission mode: ${permissionMode}`}>
-                    <Shield className="h-3.5 w-3.5 shrink-0" />
-                    <span className="mew-composer-permission-label">{permissionMode === "dangerous" ? "Full access" : permissionMode === "standard" ? "Default permissions" : permissionMode.replace("_", " ")}</span>
-                  </span>
+                  <PermissionPill mode={permissionMode} />
                   <PersonaPill />
                 </div>
                 <div className="flex min-w-0 flex-1 items-center justify-end gap-1">
@@ -497,6 +503,58 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
     );
   },
 );
+
+const PERMISSION_OPTIONS = [
+  { id: "standard", label: "Standard", description: "Prompt on edits & commands" },
+  { id: "permissive", label: "Permissive", description: "Auto-allow edits, prompt on dangerous" },
+  { id: "auto", label: "Auto", description: "Classifier reviews tool calls" },
+  { id: "auto_plus", label: "Auto+", description: "Classifier reviews, no escalation" },
+  { id: "dangerous", label: "Full access", description: "Bypass all permission prompts" },
+] as const;
+
+function PermissionPill({ mode }: { mode: string }) {
+  const isCustom = mode !== "standard";
+  const label = mode === "dangerous"
+    ? "Full access"
+    : mode === "standard"
+      ? "Standard"
+      : mode.replace("_", " ");
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          title={`Permission mode: ${mode}`}
+          aria-label={`Permission mode: ${mode}`}
+          className={cn(
+            "motion-pressable flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-1.5 text-[11px] hover:bg-accent hover:text-accent-foreground data-[state=open]:bg-accent",
+            mode === "dangerous"
+              ? "text-destructive"
+              : isCustom
+                ? "text-foreground"
+                : "text-muted-foreground",
+          )}
+        >
+          <Shield className="h-3.5 w-3.5 shrink-0" />
+          {isCustom && <span className="mew-composer-permission-label capitalize">{label}</span>}
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent side="top" align="start" sideOffset={10} aria-label="Permissions" className="w-56 max-w-[calc(100vw-2rem)] rounded-xl p-1.5">
+        <DropdownMenuLabel className="text-[11px] font-normal text-muted-foreground">Permissions</DropdownMenuLabel>
+        <DropdownMenuRadioGroup value={mode} onValueChange={(next) => getClient()?.setPermissionMode(next)}>
+          {PERMISSION_OPTIONS.map((option) => (
+            <DropdownMenuRadioItem key={option.id} value={option.id} className="min-h-8 rounded-lg text-xs">
+              <span className="min-w-0 flex-1">
+                <span className={cn("block truncate font-medium", option.id === "dangerous" && "text-destructive")}>{option.label}</span>
+                <span className="block truncate text-[10px] text-muted-foreground">{option.description}</span>
+              </span>
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
 
 function MenuPanel({
   title,

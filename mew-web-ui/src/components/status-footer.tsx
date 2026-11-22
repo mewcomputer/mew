@@ -51,6 +51,18 @@ export function StatusFooter() {
     useSessionStore.getState().clearYieldedControl();
   };
 
+  const hasNotableActivity =
+    yieldedByClient !== null ||
+    runningSubs > 0 ||
+    pendingPermissions.length > 0 ||
+    attachedClients.length > 1 ||
+    contextTokens > 0 ||
+    cost > 0;
+
+  if (!hasNotableActivity && !open) {
+    return null;
+  }
+
   return (
     <div ref={ref} className="mew-conversation-width relative mx-auto shrink-0 px-4 pb-2">
       {/* Yielded-control banner */}

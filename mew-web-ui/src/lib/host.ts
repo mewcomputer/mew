@@ -14,6 +14,7 @@ export interface HostBootstrap {
   lightTheme: string;
   darkTheme: string;
   themes: HostTheme[];
+  recentModels?: string[];
 }
 
 export interface NativeBrowserEvent {
