@@ -4794,3 +4794,13 @@ in `docs/development/dev-architecture.md`, tool sensitivities in
 Verified the site build (`ASTRO_TELEMETRY_DISABLED=1 ./node_modules/.bin/astro build`)
 and test suite (`node --test tests/*.test.mjs`, 12/12 passing, 40 pages built
 with zero Expressive Code warnings).
+
+
+### 2026-11-21: Tighten homepage lander copy and remove section numbers
+
+Rewrote the homepage lede and garden room sections in `site/src/pages/index.astro`
+with concrete multi-client, subagent, persona, permission, and local-session
+behavior while removing the numbered eyebrows and keeping the existing H1.
+
+Updated `site/tests/homepage.test.mjs` and verified `astro build` plus all 12
+site tests.

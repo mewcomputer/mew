@@ -10,7 +10,7 @@ import InstallPicker from "../components/InstallPicker.astro";
 import "../../../jianghu/mew.css";
 
 const title = "mew";
-const description = "An extensible, moddable harness for all your needs.";
+const description = "A local agent you can inspect, modify, and run with any model.";
 const socialImage = new URL("/og/mew.jpg", Astro.site);
 const notice = `<!--\n${spriteNotice}\n${fontNotice}-->`;
 const packedGarden = `/garden.glb.gz?v=${encodeURIComponent(garden)}`;
@@ -79,7 +79,7 @@ const packedGarden = `/garden.glb.gz?v=${encodeURIComponent(garden)}`;
           <section class="hero" id="top" data-focus="garden">
             <div class="intro">
               <h1>Mew is an agent harness designed for your work.</h1>
-              <p class="lede">An extensible, moddable harness for all your needs.</p>
+              <p class="lede">A local agent you can inspect, modify, and run with any model.</p>
               <div class="ctas">
                 <a class="mew-button primary" href="#start">Get started with mew <span aria-hidden="true">→</span></a>
                 <a class="mew-button" href="https://github.com/mewcomputer/mew">View on GitHub</a>
@@ -91,55 +91,48 @@ const packedGarden = `/garden.glb.gz?v=${encodeURIComponent(garden)}`;
 
           <section class="room" data-focus="hall" data-side="left">
             <div class="panel">
-              <p class="num">01</p>
-              <h2>Give it a task.</h2>
-              <p>Ask mew to explore a codebase, investigate a problem, or make a change. It can search and read files, edit them, and run commands as the work takes shape. If a test fails, ask mew to trace the error back to the code that triggered it.</p>
-              <p>You can follow along, answer questions, and change direction at any point.</p>
+              <h2>Give it a task, and pick up from any client.</h2>
+              <p>Ask mew to explore a project, dig through docs, or make a change. It reads and searches files, checks that files have not changed before writing so outdated edits fail safely, and runs commands when the work calls for it.</p>
+              <p>A local background service owns the conversation, tool calls, and session history. Start a turn in the terminal, then attach to the same live session from the browser or desktop app. Follow along, answer questions, or steer a running turn without starting over.</p>
             </div>
           </section>
 
           <section class="room" data-focus="pavilion" data-side="right">
             <div class="panel">
-              <p class="num">02</p>
               <h2>Bring in another agent.</h2>
-              <p>Give a subagent a focused task while mew continues working. Ask for an investigation, a review, or a second perspective on a plan. The subagent reports its result back to the conversation.</p>
-              <p>You can give subagents their own instructions and choose which models and tools they use.</p>
-              <p>If you’re replacing an API, ask a subagent to look for callers that still depend on it while you work on the replacement.</p>
+              <p>Give a subagent a focused task in its own context while the main thread keeps moving. Send a read-only researcher to find every caller of an API you are replacing, ask a reviewer to check a plan, or run several subagents in parallel.</p>
+              <p>Each subagent can carry its own instructions, model, tool list, and turn or time limits. Only the final answer returns to your conversation, while the full child transcript stays saved beneath the parent session.</p>
             </div>
           </section>
 
           <section class="room" data-focus="gallery" data-side="left">
             <div class="panel">
-              <p class="num">03</p>
               <h2>Make an agent for the job.</h2>
-              <p>Personas let you give an agent a role and its own instructions. You might set up one for coding, one for research, or one that’s just there for conversation.</p>
-              <p>Each persona can use a different model and tool set. Give a coding persona access to the shell, or leave tools off entirely.</p>
-              <p>For a bigger change, start with the built-in planner. Once you’ve read its plan, switch to the builder and ask it to make the edits.</p>
+              <p>Personas let you switch roles without rewriting your setup. Keep one for coding with shell access, one for research restricted to read-only tools, or one with no tools at all for conversation and writing.</p>
+              <p>Each persona can pin a model, choose which tools and external integrations it can reach, and adapt its instructions to the active model. For larger changes, start with the built-in planner to draft and review a plan, then switch to the builder to carry it out.</p>
             </div>
           </section>
 
           <section class="room" data-focus="wall" data-side="right">
             <div class="panel">
-              <p class="num">04</p>
               <h2>Decide what needs approval.</h2>
-              <p>Set permissions for the actions you want to review. You can configure rules for tools, commands, and paths, then choose a permission mode that suits the work. Let mew run the tests and ask before pushing a branch.</p>
+              <p>Every tool call passes through a permission check before it runs. Write rules by tool, command, or path, and keep file access and shell checks scoped to your workspace. Let tests run silently while pushing a branch or reading secret files still stops and asks.</p>
+              <p>Switch permission modes per session as the work changes, from strict prompts on every edit to automatic checks routed through a separate review model. Configured secrets are redacted from tool output before reaching the model.</p>
             </div>
           </section>
 
           <section class="room" data-focus="gate" data-side="left">
             <div class="panel">
-              <p class="num">05</p>
               <h2>Pick up where you left off.</h2>
-              <p>Add project instructions and reusable skills for the things you do often. Mew can load them into a conversation as needed. A release skill can spell out which checks to run before cutting a tag.</p>
-              <p>Your sessions are saved locally, so you can return to a conversation and see what happened.</p>
+              <p>Keep permanent project instructions on hand, and save repeatable workflows as skills that load only when a task calls for them. A release skill can spell out the exact checks to run before cutting a tag without crowding unrelated turns.</p>
+              <p>Every conversation saves locally as plain files alongside its history, todos, and active settings. Search past transcripts on disk, resume any session later, or connect external tools when you need more reach.</p>
             </div>
           </section>
 
           <section class="room" id="start" data-focus="tower" data-side="left">
             <div class="panel">
-              <p class="num">06</p>
               <h2>Try mew in your project.</h2>
-              <p>Choose a supported provider, open a session, and tell mew what you want to work on.</p>
+              <p>Install the nightly build, connect a supported model provider, and open a session in your working directory.</p>
               <InstallPicker />
               <div class="ctas">
                 <a class="mew-button" href="/docs/getting-started/installation/">Read the install guide</a>
