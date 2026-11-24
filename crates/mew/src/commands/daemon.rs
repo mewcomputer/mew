@@ -289,16 +289,19 @@ fn build_daemon_server_with_config(
                 Ok((provider.to_owned(), model.to_owned()))
             });
         let lister: mew_daemon::ModelLister = Arc::new(|| {
-            vec![mew_protocol::ModelInfo {
-                id: "fake/fake".into(),
-                provider: "fake".into(),
-                model: "fake".into(),
-                display_name: None,
-                description: Some("local test model · standard".into()),
-                thinking_variants: Vec::new(),
-                thinking_budget: None,
-                context_window: None,
-            }]
+            (
+                vec![mew_protocol::ModelInfo {
+                    id: "fake/fake".into(),
+                    provider: "fake".into(),
+                    model: "fake".into(),
+                    display_name: None,
+                    description: Some("local test model · standard".into()),
+                    thinking_variants: Vec::new(),
+                    thinking_budget: None,
+                    context_window: None,
+                }],
+                None,
+            )
         });
         server = server.with_model_management(switcher, lister);
     } else {
@@ -316,7 +319,7 @@ fn build_daemon_server_with_config(
                 cfg_lister.antigravity.isolated,
             ));
             if cfg_lister.providers.contains_key("antigravity") {
-                cache.refresh();
+                let _ = cache.refresh();
             }
             cache
         };
@@ -390,13 +393,29 @@ fn build_daemon_server_with_config(
             }
 
             #[cfg(unix)]
-            if cred_pids.iter().any(|provider| provider == "antigravity") {
-                models.extend(agy_models.models());
-                agy_models.refresh();
-            }
-
+            let update: Option<mew_daemon::ModelListUpdate> =
+                if cred_pids.iter().any(|provider| provider == "antigravity") {
+                    let mut refreshed = models.clone();
+                    let cache = Arc::clone(&agy_models);
+                    let pending = agy_models.refresh();
+                    models.extend(agy_models.models());
+                    pending.map(|pending| {
+                        Box::pin(async move {
+                            crate::setup::antigravity::wait_for_model_refresh(pending).await;
+                            refreshed.extend(cache.models());
+                            refreshed.sort_by(|a, b| {
+                                a.provider.cmp(&b.provider).then(a.model.cmp(&b.model))
+                            });
+                            refreshed
+                        }) as mew_daemon::ModelListUpdate
+                    })
+                } else {
+                    None
+                };
+            #[cfg(not(unix))]
+            let update = None;
             models.sort_by(|a, b| a.provider.cmp(&b.provider).then(a.model.cmp(&b.model)));
-            models
+            (models, update)
         });
 
         // Model switcher: rebuilds the provider on the agent.
@@ -743,7 +762,9 @@ pub(crate) async fn pair_cmd() -> Result<()> {
         mew_daemon::remote::default_state_path(),
     )?);
     if !remote_store.snapshot().enabled {
-        anyhow::bail!("remote access is not active; start `mew daemon --remote` before creating a pairing invite");
+        anyhow::bail!(
+            "remote access is not active; start `mew daemon --remote` before creating a pairing invite"
+        );
     }
     let remote_token = remote_store.create_pairing(
         mew_protocol::RemoteScope::Control,
@@ -1046,6 +1067,37 @@ mod tests {
 mod model_list_tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "requires a signed-in local AGY and network"]
+    async fn initial_model_request_includes_local_agy_discovery() {
+        let mut cfg = mew_config::Config::default();
+        cfg.antigravity.isolated = false;
+        let server = build_daemon_server_with_config(
+            Vec::new(),
+            cfg,
+            None,
+            false,
+            "antigravity",
+            Some("gemini-4-argon-low".into()),
+            false,
+            mew_hooks::PermissionMode::Standard,
+        )
+        .unwrap();
+        let (initial, update) = server.model_lister.unwrap()();
+        let models = if initial.iter().any(|model| model.provider == "antigravity") {
+            initial
+        } else {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(35),
+                update.expect("AGY refresh not started"),
+            )
+            .await
+            .expect("model discovery timed out")
+        };
+        assert!(models.iter().any(|model| model.provider == "antigravity"));
+    }
+
     #[test]
     fn catalog_names_survive_daemon_model_listing() {
         // Isolate credential and session discovery in a child test process.
@@ -1100,7 +1152,7 @@ mod model_list_tests {
             mew_hooks::PermissionMode::Standard,
         )
         .unwrap();
-        let models = server.model_lister.unwrap()();
+        let (models, _) = server.model_lister.unwrap()();
         let values = models
             .iter()
             .map(|model| {

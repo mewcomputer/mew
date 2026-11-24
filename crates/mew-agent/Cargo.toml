@@ -37,4 +37,5 @@ nix = { workspace = true }
 
 [dev-dependencies]
 mew-provider-fake = { workspace = true }
+mew-agy = { path = "../mew-agy" }
 tokio = { workspace = true, features = ["test-util"] }

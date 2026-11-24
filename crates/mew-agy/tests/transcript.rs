@@ -100,6 +100,88 @@ fn preserves_order_and_exact_tool_input_and_output_but_not_private_metadata() {
 }
 
 #[test]
+fn oversized_tool_results_are_replaced_only_in_the_projected_history() {
+    for (output, was_error) in [
+        ("x".repeat(1_048_577), false),
+        ("\u{0000}".repeat(180_000), true),
+    ] {
+        let state = if was_error {
+            ToolState::Error(ToolStateError {
+                input: json!({}),
+                error: output.clone(),
+                time: ToolTime {
+                    start: 0,
+                    end: Some(1),
+                },
+            })
+        } else {
+            completed(&output)
+        };
+        let req = Request {
+            messages: vec![
+                message(Role::Assistant, vec![call("large", state)]),
+                message(Role::User, vec![result("large")]),
+            ],
+            ..Default::default()
+        };
+        let projected: Value = serde_json::from_str(&project(&req).unwrap()).unwrap();
+        let result = &projected["messages"][1]["content"][0];
+        assert_eq!(result["is_error"], true);
+        let message = result["content"].as_str().unwrap();
+        assert!(message.contains("offset") && message.contains("limit"));
+        match &req.messages[0].parts[0] {
+            Part::ToolCall(call) => match &call.state {
+                ToolState::Completed(state) => assert_eq!(state.output, output),
+                ToolState::Error(state) => assert_eq!(state.error, output),
+                _ => panic!("unexpected state"),
+            },
+            _ => panic!("expected tool call"),
+        }
+    }
+}
+
+#[test]
+fn historical_result_limit_matches_encoded_mcp_response_boundary() {
+    for is_error in [false, true] {
+        let overhead =
+            serde_json::to_vec(&json!({"content":[{"type":"text","text":""}],"isError":is_error}))
+                .unwrap()
+                .len();
+        for extra in [0, 1] {
+            let output = "x".repeat(1_048_576 - overhead + extra);
+            let state = if is_error {
+                ToolState::Error(ToolStateError {
+                    input: json!({}),
+                    error: output.clone(),
+                    time: ToolTime {
+                        start: 0,
+                        end: Some(1),
+                    },
+                })
+            } else {
+                completed(&output)
+            };
+            let req = Request {
+                messages: vec![
+                    message(Role::Assistant, vec![call("limit", state)]),
+                    message(Role::User, vec![result("limit")]),
+                ],
+                ..Default::default()
+            };
+            let projected: Value = serde_json::from_str(&project(&req).unwrap()).unwrap();
+            let item = &projected["messages"][1]["content"][0];
+            if extra == 0 {
+                assert_eq!(item["content"], output);
+                assert_eq!(item["is_error"], is_error);
+            } else {
+                assert_eq!(item["is_error"], true);
+                assert!(item["content"].as_str().unwrap().contains("offset"));
+            }
+        }
+    }
+}
+
+#[test]
 fn tool_errors_and_compaction_are_preserved_once_without_reasoning() {
     let err = ToolState::Error(ToolStateError {
         input: json!({}),

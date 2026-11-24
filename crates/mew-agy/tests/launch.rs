@@ -57,6 +57,7 @@ fn creates_private_workspace_with_minimal_agent_and_exact_permissions() {
         config["mcpServers"]["mew"]["serverUrl"],
         "http://127.0.0.1:12345/0123456789abcdef0123456789abcdef"
     );
+    assert_eq!(config["mcpServers"]["mew"]["timeoutSeconds"], -1);
     let args = launch.args();
     assert!(!args.iter().any(|a| a == "--dangerously-skip-permissions"));
     assert!(args

@@ -17,7 +17,7 @@ use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioIo, TokioTimer};
 use rand::{rngs::OsRng, RngCore};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
@@ -31,6 +31,7 @@ const MAX_DESCRIPTION: usize = 8192;
 const MAX_TOOLS: usize = 256;
 const MAX_IDS: usize = 4096;
 const MAX_CONNECTIONS: usize = 64;
+pub(crate) const OVERSIZED_TOOL_OUTPUT: &str = "Tool output exceeded the bridge limit. Request less output or paginate; for file reads, retry with offset and limit.";
 type Body = Full<Bytes>;
 
 struct NoExternalSchemas;
@@ -189,7 +190,11 @@ impl McpServer {
                         jobs.spawn(async move {
                             let _permit = permit;
                             let service = service_fn(move |req| handle(req, state.clone()));
-                            let _ = tokio::time::timeout(Duration::from_secs(630), hyper::server::conn::http1::Builder::new().keep_alive(false).serve_connection(TokioIo::new(socket), service)).await;
+                            let mut http = hyper::server::conn::http1::Builder::new();
+                            http.keep_alive(false)
+                                .timer(TokioTimer::new())
+                                .header_read_timeout(Duration::from_secs(15));
+                            let _ = http.serve_connection(TokioIo::new(socket), service).await;
                         });
                     }
                     Some(_) = jobs.join_next(), if !jobs.is_empty() => {}
@@ -240,9 +245,11 @@ impl McpServer {
             .pending
             .remove(id)
             .ok_or("unknown call")?;
-        if json_size(&result, MAX_BODY).is_err() {
-            return Err("tool result too large");
-        }
+        let result = if json_size(&result, MAX_BODY).is_err() {
+            json!({"isError":true,"content":[{"type":"text","text":OVERSIZED_TOOL_OUTPUT}]})
+        } else {
+            result
+        };
         sender.send(result).map_err(|_| "call cancelled")
     }
     pub fn is_cancelled(&self, id: &str) -> bool {
@@ -482,13 +489,13 @@ async fn handle_inner(req: Request<Incoming>, state: Arc<State>) -> Response<Bod
     {
         return rpc_error(id, -32000, "tool queue unavailable");
     }
-    let answer = tokio::time::timeout(Duration::from_secs(600), rx).await;
-    guard.completed = matches!(answer, Ok(Ok(_)));
+    let answer = rx.await;
+    guard.completed = answer.is_ok();
     drop(guard);
     drop(permit);
     match answer {
-        Ok(Ok(value)) => rpc_result(id, value),
-        _ => rpc_error(id, -32000, "tool call cancelled or timed out"),
+        Ok(value) => rpc_result(id, value),
+        Err(_) => rpc_error(id, -32000, "tool call cancelled"),
     }
 }
 fn random_id() -> Result<String, String> {
@@ -537,8 +544,37 @@ impl std::io::Write for SizeLimit {
         Ok(())
     }
 }
-fn json_size(value: &Value, limit: usize) -> Result<usize, serde_json::Error> {
+fn json_size<T: serde::Serialize>(value: &T, limit: usize) -> Result<usize, serde_json::Error> {
     let mut writer = SizeLimit { size: 0, limit };
     serde_json::to_writer(&mut writer, value)?;
     Ok(writer.size)
+}
+
+/// Project the result exactly as it would fit in an MCP tool response, without
+/// copying large tool output. Mew's stored tool result remains unchanged.
+pub(crate) fn bounded_tool_output(output: &str, is_error: bool) -> (&str, bool) {
+    #[derive(serde::Serialize)]
+    struct Text<'a> {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        text: &'a str,
+    }
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ResultEnvelope<'a> {
+        content: [Text<'a>; 1],
+        is_error: bool,
+    }
+    let envelope = ResultEnvelope {
+        content: [Text {
+            kind: "text",
+            text: output,
+        }],
+        is_error,
+    };
+    if json_size(&envelope, MAX_BODY).is_err() {
+        (OVERSIZED_TOOL_OUTPUT, true)
+    } else {
+        (output, is_error)
+    }
 }

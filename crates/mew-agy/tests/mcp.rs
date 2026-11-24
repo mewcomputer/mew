@@ -378,7 +378,7 @@ async fn tool_calls_accept_object_metadata_and_reject_invalid_or_unknown_fields(
 }
 
 #[tokio::test]
-async fn oversized_tool_result_fails_closed_and_releases_pending_capacity() {
+async fn oversized_tool_result_returns_a_recoverable_error() {
     let (server, mut calls, client) = setup().await;
     let session = initialize(&server, &client).await;
     let url = server.url().to_owned();
@@ -391,19 +391,117 @@ async fn oversized_tool_result_fails_closed_and_releases_pending_capacity() {
         .await
         .unwrap()
         .unwrap();
-    assert!(server
+    server
         .resolve(
             &call.id,
-            json!({"content":[{"type":"text","text":"a".repeat(1_048_577)}]})
+            json!({"content":[{"type":"text","text":"a".repeat(1_048_577)}]}),
         )
-        .is_err());
+        .unwrap();
+    let value = tokio::time::timeout(Duration::from_secs(3), response)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(value["result"]["isError"], true);
+    let message = value["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(message.contains("limit"));
+    assert!(message.contains("offset") && message.contains("limit"));
+    assert!(message.len() < 512);
+    assert!(server.is_cancelled(&call.id));
+
+    let url = server.url().to_owned();
+    let client2 = client.clone();
+    let response = tokio::spawn(async move {
+        client2.post(url).header("mcp-session-id", session).json(&json!({"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"echo","arguments":{"text":"retry"}}})).send().await.unwrap().json::<Value>().await.unwrap()
+    });
+    let retry = calls.recv().await.unwrap();
+    // JSON escaping can take a raw result below the limit over the wire limit.
+    server
+        .resolve(
+            &retry.id,
+            json!({"content":[{"type":"text","text":"\u{0000}".repeat(180_000)}]}),
+        )
+        .unwrap();
+    assert_eq!(response.await.unwrap()["result"]["isError"], true);
+}
+
+#[tokio::test(start_paused = true)]
+async fn pending_tool_outlives_old_fixed_timeout_and_can_be_cancelled() {
+    let (server, mut calls, client) = setup().await;
+    let sid = initialize(&server, &client).await;
+    let url = server.url().to_owned();
+    let client2 = client.clone();
+    let sid2 = sid.clone();
+    let response = tokio::spawn(async move {
+        client2.post(url).header("mcp-session-id", sid2).json(&json!({"jsonrpc":"2.0","id":41,"method":"tools/call","params":{"name":"echo","arguments":{"text":"wait"}}})).send().await
+    });
+    let call = calls.recv().await.unwrap();
+    tokio::time::advance(Duration::from_secs(631)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        !call.cancellation.is_cancelled(),
+        "fixed transport timeout cancelled a live call"
+    );
+    assert!(
+        !response.is_finished(),
+        "live tool request returned before its owner resolved it"
+    );
+    tokio::time::resume();
+    client
+        .post(server.url())
+        .header("mcp-session-id", &sid)
+        .json(
+            &json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":41}}),
+        )
+        .send()
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), call.cancellation.cancelled())
+        .await
+        .unwrap();
     assert!(tokio::time::timeout(Duration::from_secs(3), response)
         .await
         .unwrap()
-        .unwrap()
-        .get("error")
-        .is_some());
-    assert!(server.is_cancelled(&call.id));
+        .is_ok());
+}
+
+#[tokio::test(start_paused = true)]
+async fn incomplete_http_headers_are_closed_without_occupying_a_slot_forever() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (server, _, _) = setup().await;
+    let url = url::Url::parse(server.url()).unwrap();
+    let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", url.port().unwrap()))
+        .await
+        .unwrap();
+    socket.write_all(b"POST / HTTP/1.1\r\nHost:").await.unwrap();
+    let mut byte = [0];
+    let mut closed = false;
+    for _ in 0..25 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        match tokio::time::timeout(Duration::from_millis(20), socket.read(&mut byte)).await {
+            Ok(Ok(0)) => {
+                closed = true;
+                break;
+            }
+            Ok(Err(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+                ) =>
+            {
+                closed = true;
+                break;
+            }
+            Ok(result) => {
+                panic!("incomplete request remained open or errored unexpectedly: {result:?}")
+            }
+            Err(_) => continue,
+        }
+    }
+    assert!(
+        closed,
+        "incomplete request remained open past header timeout"
+    );
 }
 
 #[test]

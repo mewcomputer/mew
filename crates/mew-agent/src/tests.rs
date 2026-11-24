@@ -937,6 +937,199 @@ impl Provider for CapturingProvider {
     }
 }
 
+struct ReplayBudgetProvider {
+    captured: StdMutex<Vec<Request>>,
+    max_bytes: usize,
+}
+
+#[async_trait]
+impl Provider for ReplayBudgetProvider {
+    fn name(&self) -> &str {
+        "replay-budget-test"
+    }
+
+    async fn replay_budget(&self, req: &Request) -> Result<Option<(usize, usize)>, ProviderError> {
+        Ok(Some((
+            serde_json::to_vec(&req.messages).unwrap().len(),
+            self.max_bytes,
+        )))
+    }
+
+    async fn stream(&self, req: Request) -> Result<EventStream, ProviderError> {
+        self.captured.lock().unwrap().push(req);
+        Ok(Box::pin(futures::stream::iter(
+            FakeProvider::text_response("ok"),
+        )))
+    }
+}
+
+#[tokio::test]
+async fn unknown_context_compacts_history_for_provider_replay_budget() {
+    let provider = Arc::new(ReplayBudgetProvider {
+        captured: StdMutex::new(vec![]),
+        max_bytes: 2_000,
+    });
+    let mut agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    agent.context_window = 0;
+    agent.keep_turns = 8;
+    agent
+        .load_messages(vec![
+            context_message(Role::User, "old".into()),
+            context_message(Role::Assistant, "x".repeat(6_000)),
+        ])
+        .await;
+    let mut events = agent.run("latest request".into());
+    while events.recv().await.is_some() {}
+    let captured = provider.captured.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    assert!(serde_json::to_vec(&captured[0].messages).unwrap().len() <= provider.max_bytes);
+    assert!(captured[0].messages.iter().any(|message| message
+        .parts
+        .iter()
+        .any(|part| matches!(part, Part::Text(text) if text.text == "latest request"))));
+    assert!(captured[0].messages.iter().any(|message| message
+        .parts
+        .iter()
+        .any(|part| matches!(part, Part::Compaction(_)))));
+}
+
+#[tokio::test]
+async fn latest_message_that_exceeds_replay_budget_is_rejected_without_provider_call() {
+    let provider = Arc::new(ReplayBudgetProvider {
+        captured: StdMutex::new(vec![]),
+        max_bytes: 2_000,
+    });
+    let mut agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    agent.context_window = 0;
+    let mut events = agent.run("x".repeat(6_000));
+    let mut error = None;
+    while let Some(event) = events.recv().await {
+        if let AgentEvent::Error(message) = event {
+            error = Some(message);
+        }
+    }
+    assert!(error
+        .as_deref()
+        .is_some_and(|message| message.contains("replay") && message.contains("limit")));
+    assert!(provider.captured.lock().unwrap().is_empty());
+    assert_eq!(agent.messages.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn replay_budget_compaction_preserves_configured_recent_messages_when_they_fit() {
+    let provider = Arc::new(ReplayBudgetProvider {
+        captured: StdMutex::new(vec![]),
+        max_bytes: 3_000,
+    });
+    let mut agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    agent.context_window = 0;
+    agent.keep_turns = 3;
+    agent
+        .load_messages(vec![
+            context_message(Role::User, "old".into()),
+            context_message(Role::Assistant, "x".repeat(6_000)),
+            context_message(Role::User, "recent question".into()),
+            context_message(Role::Assistant, "recent answer".into()),
+        ])
+        .await;
+    let mut events = agent.run("latest request".into());
+    while events.recv().await.is_some() {}
+    let captured = provider.captured.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    for expected in ["recent question", "recent answer", "latest request"] {
+        assert!(
+            captured[0].messages.iter().any(|message| message
+                .parts
+                .iter()
+                .any(|part| matches!(part, Part::Text(text) if text.text == expected))),
+            "missing {expected}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn replay_budget_uses_smaller_tail_only_when_configured_tail_does_not_fit() {
+    let provider = Arc::new(ReplayBudgetProvider {
+        captured: StdMutex::new(vec![]),
+        max_bytes: 3_000,
+    });
+    let mut agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    agent.context_window = 0;
+    agent.keep_turns = 3;
+    agent
+        .load_messages(vec![
+            context_message(Role::User, "old".into()),
+            context_message(Role::Assistant, "old text".repeat(500)),
+            context_message(Role::User, "recent question".into()),
+            context_message(Role::Assistant, "recent text".repeat(500)),
+        ])
+        .await;
+    let mut events = agent.run("latest request".into());
+    while events.recv().await.is_some() {}
+    let captured = provider.captured.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    assert!(serde_json::to_vec(&captured[0].messages).unwrap().len() <= provider.max_bytes);
+    assert!(captured[0].messages.iter().any(|message| message
+        .parts
+        .iter()
+        .any(|part| matches!(part, Part::Text(text) if text.text == "latest request"))));
+    assert!(!captured[0].messages.iter().any(|message| message
+        .parts
+        .iter()
+        .any(|part| matches!(part, Part::Text(text) if text.text.contains("recent text")))));
+}
+
+#[tokio::test]
+async fn child_guidance_that_exceeds_replay_budget_is_not_admitted() {
+    let provider = Arc::new(ReplayBudgetProvider {
+        captured: StdMutex::new(vec![]),
+        max_bytes: 2_000,
+    });
+    let mut agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let guidance = Arc::new(crate::child_guidance::ChildGuidance::default());
+    agent.child_guidance = Some(guidance.clone());
+    let mut receipt = Box::pin(guidance.guide("replay-test", "x".repeat(6_000)));
+    assert!(futures::poll!(&mut receipt).is_pending());
+    let mut events = agent.run("small request".into());
+    while events.recv().await.is_some() {}
+    assert!(
+        matches!(receipt.await, Err(mew_subagents::ChildGuidanceError::Rejected(message)) if message.contains("replay limit"))
+    );
+    let captured = provider.captured.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    assert!(serde_json::to_vec(&captured[0].messages).unwrap().len() <= provider.max_bytes);
+}
+
 #[tokio::test]
 async fn pre_cancelled_turn_persists_input_without_requesting_provider() {
     let directory = tempfile::tempdir().unwrap();
@@ -1137,6 +1330,192 @@ impl Tool for BlockingTool {
             file_delta: None,
         })
     }
+}
+
+#[cfg(unix)]
+struct AgyFixtureBoundary(std::path::PathBuf);
+#[cfg(unix)]
+impl mew_agy::process::IsolationBoundary for AgyFixtureBoundary {
+    fn wrap(
+        &self,
+        mut spec: mew_agy::process::LaunchSpec,
+        _: &std::path::Path,
+    ) -> std::io::Result<mew_agy::process::LaunchSpec> {
+        spec.program = "/usr/bin/python3".into();
+        spec.args = vec!["-u".into(), self.0.as_os_str().into()];
+        Ok(spec)
+    }
+}
+
+#[cfg(unix)]
+struct AgyFixtureProvider(mew_agy::provider::AgyProvider<AgyFixtureBoundary>);
+#[cfg(unix)]
+#[async_trait]
+impl Provider for AgyFixtureProvider {
+    fn name(&self) -> &str {
+        "agy-fixture"
+    }
+    async fn stream(&self, mut req: Request) -> Result<EventStream, ProviderError> {
+        req.model = "fixture".into();
+        self.0.stream(req).await
+    }
+    async fn replay_budget(&self, req: &Request) -> Result<Option<(usize, usize)>, ProviderError> {
+        self.0.replay_budget(req).await
+    }
+    async fn can_accept_guidance(&self, req: &Request) -> Result<bool, ProviderError> {
+        self.0.can_accept_guidance(req).await
+    }
+}
+
+#[cfg(unix)]
+fn agy_fixture_provider(directory: &std::path::Path) -> Arc<AgyFixtureProvider> {
+    let script = directory.join("agy-fixture.py");
+    std::fs::write(&script, r#"import sys,json,urllib.request
+prompt=json.loads(sys.stdin.readline())['message']['content']
+if 'steer now' in prompt:
+ print(json.dumps({'event':'step_update','step_update':{'step_type':'agent_response','text_delta':'guidance received'}}),flush=True)
+ print(json.dumps({'event':'result','result':{'status':'SUCCESS'}}),flush=True)
+ sys.exit()
+with open('.agents/mcp_config.json') as f: url=json.load(f)['mcpServers']['mew']['serverUrl']
+def post(body,sid=None):
+ h={'Content-Type':'application/json'}
+ if sid: h['mcp-session-id']=sid
+ with urllib.request.urlopen(urllib.request.Request(url,data=json.dumps(body).encode(),headers=h)) as r: return r.headers,r.read()
+h,_=post({'jsonrpc':'2.0','id':1,'method':'initialize','params':{'protocolVersion':'2025-06-18','capabilities':{},'clientInfo':{'name':'fixture','version':'1'}}})
+sid=h['mcp-session-id']
+post({'jsonrpc':'2.0','method':'notifications/initialized'},sid)
+post({'jsonrpc':'2.0','id':2,'method':'tools/call','params':{'name':'blocking','arguments':{'input':'first'}}},sid)
+print(json.dumps({'event':'step_update','step_update':{'step_type':'agent_response','text_delta':'first response'}}),flush=True)
+print(json.dumps({'event':'result','result':{'status':'SUCCESS'}}),flush=True)
+"#).unwrap();
+    Arc::new(AgyFixtureProvider(mew_agy::provider::AgyProvider::new(
+        mew_agy::provider::Config {
+            executable: "/usr/bin/python3".into(),
+            workspace_parent: directory.into(),
+            environment: vec![],
+            lifetime: std::time::Duration::from_secs(20),
+        },
+        AgyFixtureBoundary(script),
+    )))
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn agy_rejects_child_guidance_during_tool_before_persisting_and_completes_tool() {
+    let directory = tempfile::tempdir().unwrap();
+    let provider = agy_fixture_provider(directory.path());
+    let (tool, mut started, release) = BlockingTool::new();
+    let mut agent = Agent::new(provider, Arc::new(NopDispatcher), None, vec![tool], None);
+    agent.set_permission_engine(Arc::new(mew_config::permissions::PermissionEngine::new(
+        vec![],
+    )));
+    let guidance = Arc::new(crate::child_guidance::ChildGuidance::default());
+    agent.child_guidance = Some(guidance.clone());
+    let mut events = agent.run("call the tool".into());
+    loop {
+        tokio::select! {
+            result = started.recv() => { assert!(result.is_some()); break; }
+            event = events.recv() => match event {
+                Some(AgentEvent::PermissionRequest { tx, .. }) => { let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce); }
+                Some(AgentEvent::Error(message)) => panic!("unexpected error: {message}"),
+                Some(_) => {},
+                None => panic!("turn ended before tool"),
+            }
+        }
+    }
+    let mut receipt = Box::pin(guidance.guide("id", "steer now".into()));
+    assert!(futures::poll!(&mut receipt).is_pending());
+    release.send(()).await.unwrap();
+    let mut text = String::new();
+    while let Some(event) = events.recv().await {
+        match event {
+            AgentEvent::Provider(ProviderEvent::PartDelta {
+                field: "text",
+                delta,
+                ..
+            }) => text.push_str(&delta),
+            AgentEvent::Error(message) => panic!("unexpected error: {message}"),
+            _ => {}
+        }
+    }
+    assert!(
+        matches!(receipt.await, Err(mew_subagents::ChildGuidanceError::Rejected(message)) if message.contains("tool") && message.contains("retry"))
+    );
+    assert_eq!(text, "first response");
+    assert!(started.try_recv().is_err(), "tool executed more than once");
+    assert!(!agent
+        .messages
+        .lock()
+        .await
+        .iter()
+        .flat_map(|message| &message.parts)
+        .any(|part| matches!(part, Part::Text(text) if text.text == "steer now")));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn agy_defers_queued_guidance_until_after_tool_without_replaying_the_tool() {
+    let directory = tempfile::tempdir().unwrap();
+    let provider = agy_fixture_provider(directory.path());
+    let (tool, mut started, release) = BlockingTool::new();
+    let mut agent = Agent::new(provider, Arc::new(NopDispatcher), None, vec![tool], None);
+    agent.set_permission_engine(Arc::new(mew_config::permissions::PermissionEngine::new(
+        vec![],
+    )));
+    let mut events = agent.run("call the tool".into());
+    loop {
+        tokio::select! {
+            result = started.recv() => { assert!(result.is_some()); break; }
+            event = events.recv() => match event {
+                Some(AgentEvent::PermissionRequest { tx, .. }) => { let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce); }
+                Some(AgentEvent::Error(message)) => panic!("unexpected error: {message}"),
+                Some(_) => {},
+                None => panic!("turn ended before tool"),
+            }
+        }
+    }
+    agent.enqueue_guidance("steer now".into()).await;
+    release.send(()).await.unwrap();
+    let mut text = String::new();
+    while let Some(event) = events.recv().await {
+        match event {
+            AgentEvent::Provider(ProviderEvent::PartDelta {
+                field: "text",
+                delta,
+                ..
+            }) => text.push_str(&delta),
+            AgentEvent::Error(message) => panic!("unexpected error: {message}"),
+            _ => {}
+        }
+    }
+    assert_eq!(text, "first responseguidance received");
+    assert!(started.try_recv().is_err(), "tool executed more than once");
+    assert!(agent.pending_guidance.lock().await.is_empty());
+    let messages = agent.messages.lock().await;
+    let visible: Vec<_> = messages
+        .iter()
+        .flat_map(|message| &message.parts)
+        .filter_map(|part| match part {
+            Part::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    let first = visible
+        .iter()
+        .position(|text| *text == "first response")
+        .unwrap();
+    let guide = visible
+        .iter()
+        .position(|text| *text == "steer now")
+        .unwrap();
+    let final_text = visible
+        .iter()
+        .position(|text| *text == "guidance received")
+        .unwrap();
+    assert!(
+        first < guide && guide < final_text,
+        "guidance should follow the completed handoff"
+    );
 }
 
 // ------------------------------------------------------------------

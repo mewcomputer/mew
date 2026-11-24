@@ -69,8 +69,11 @@ fn apply_model_metadata(agent: &mut Agent, cat: Option<&Catalog>, model_id: &str
     if agent.provider_id == "antigravity" {
         agent.default_max_output_tokens = 0;
         agent.supports_vision = false;
+        agent.context_window = 0;
+        apply_catalog_pricing(agent, None, model_id);
+    } else {
+        apply_catalog_pricing(agent, cat, model_id);
     }
-    apply_catalog_pricing(agent, cat, model_id);
 }
 use mew_message::SessionId;
 use mew_session::Writer as SessionWriter;
@@ -845,6 +848,15 @@ mod tests {
             id: "shared".into(),
             provider: "other".into(),
             max_output: 4096,
+            context_window: 8192,
+            pricing: Pricing {
+                input: 1.5,
+                output: 6.0,
+                cache_read: 0.15,
+                cache_write: 2.25,
+                reasoning: 9.0,
+            },
+            prompt_cache_retention_secs: Some(14_400),
             vision: true,
             ..Default::default()
         }]);
@@ -852,6 +864,16 @@ mod tests {
         apply_model_metadata(&mut agent, Some(&catalog), "shared");
         assert_eq!(agent.default_max_output_tokens, 0);
         assert!(!agent.supports_vision);
+        assert_eq!(agent.context_window, 0);
+        assert_eq!(agent.input_price, 0.0);
+        assert_eq!(agent.output_price, 0.0);
+        assert_eq!(agent.cache_read_price, 0.0);
+        assert_eq!(agent.cache_write_price, 0.0);
+        assert_eq!(agent.reasoning_price, 0.0);
+        assert_eq!(
+            agent.prompt_cache_retention(),
+            mew_agent::PromptCacheRetention::Unknown
+        );
     }
 
     #[test]
@@ -864,12 +886,19 @@ mod tests {
             id: "shared".into(),
             provider: "other".into(),
             max_output: 4096,
+            context_window: 8192,
+            pricing: Pricing {
+                input: 1.5,
+                ..Default::default()
+            },
             vision: true,
             ..Default::default()
         }]);
         agent.set_model_info("shared", "other");
         apply_model_metadata(&mut agent, Some(&catalog), "shared");
         assert_eq!(agent.default_max_output_tokens, 4096);
+        assert_eq!(agent.context_window, 8192);
+        assert_eq!(agent.input_price, 1.5);
         switch_session_model(
             &mut agent,
             &Config::default(),
@@ -881,6 +910,8 @@ mod tests {
         );
         assert_eq!(agent.default_max_output_tokens, 0);
         assert!(!agent.supports_vision);
+        assert_eq!(agent.context_window, 0);
+        assert_eq!(agent.input_price, 0.0);
     }
 
     #[test]

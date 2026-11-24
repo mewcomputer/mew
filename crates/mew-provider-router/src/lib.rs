@@ -61,6 +61,17 @@ impl Provider for Router {
         provider.stream(req).await
     }
 
+    async fn stream_auxiliary(&self, req: Request) -> Result<EventStream, ProviderError> {
+        self.select(&req).stream_auxiliary(req).await
+    }
+
+    async fn replay_budget(&self, req: &Request) -> Result<Option<(usize, usize)>, ProviderError> {
+        self.select(req).replay_budget(req).await
+    }
+    async fn can_accept_guidance(&self, req: &Request) -> Result<bool, ProviderError> {
+        self.select(req).can_accept_guidance(req).await
+    }
+
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         let mut models = self.deci.list_models().await?;
         models.extend(self.micro.list_models().await?);
@@ -100,6 +111,17 @@ impl Provider for Routed {
         self.inner.stream(req).await
     }
 
+    async fn stream_auxiliary(&self, req: Request) -> Result<EventStream, ProviderError> {
+        self.inner.stream_auxiliary(req).await
+    }
+
+    async fn replay_budget(&self, req: &Request) -> Result<Option<(usize, usize)>, ProviderError> {
+        self.inner.replay_budget(req).await
+    }
+    async fn can_accept_guidance(&self, req: &Request) -> Result<bool, ProviderError> {
+        self.inner.can_accept_guidance(req).await
+    }
+
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         self.inner.list_models().await
     }
@@ -135,6 +157,112 @@ mod tests {
             });
             Ok(Box::pin(rx))
         }
+    }
+
+    struct AuxiliaryOnly;
+
+    struct LimitedProvider(usize);
+    #[async_trait]
+    impl Provider for LimitedProvider {
+        fn name(&self) -> &str {
+            "limited"
+        }
+        async fn stream(&self, _: Request) -> Result<EventStream, ProviderError> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+        async fn replay_budget(
+            &self,
+            _: &Request,
+        ) -> Result<Option<(usize, usize)>, ProviderError> {
+            Ok(Some((7, self.0)))
+        }
+    }
+
+    #[tokio::test]
+    async fn router_delegates_replay_budget_to_the_selected_provider() {
+        let router = Router::new(
+            None,
+            Arc::new(LimitedProvider(10)),
+            Arc::new(LimitedProvider(20)),
+        );
+        assert_eq!(
+            router
+                .replay_budget(&empty_request(vec![empty_message()]))
+                .await
+                .unwrap(),
+            Some((7, 10))
+        );
+        let routed = Routed::new(router, "p".into(), "m".into());
+        assert_eq!(
+            routed
+                .replay_budget(&empty_request(vec![empty_message()]))
+                .await
+                .unwrap(),
+            Some((7, 10))
+        );
+    }
+
+    #[async_trait]
+    impl Provider for AuxiliaryOnly {
+        fn name(&self) -> &str {
+            "auxiliary-only"
+        }
+
+        async fn stream(&self, _: Request) -> Result<EventStream, ProviderError> {
+            Err(ProviderError::Message(
+                "ordinary stream is unsupported".into(),
+            ))
+        }
+
+        async fn stream_auxiliary(&self, _: Request) -> Result<EventStream, ProviderError> {
+            let stream = futures::stream::iter([mew_provider::ProviderEvent::MessageEnd {
+                finish: mew_message::Finish::Stop,
+                usage: mew_message::Tokens::default(),
+                cost: 0.0,
+            }]);
+            Ok(Box::pin(stream))
+        }
+    }
+
+    #[tokio::test]
+    async fn router_preserves_auxiliary_semantics_for_selected_provider() {
+        use futures::StreamExt;
+        let selected = Arc::new(AuxiliaryOnly);
+        let router = Router::new(None, selected.clone(), selected);
+        let request = empty_request(vec![empty_message()]);
+        assert!(router.stream(request.clone()).await.is_err());
+        let events: Vec<_> = router
+            .stream_auxiliary(request)
+            .await
+            .unwrap()
+            .collect()
+            .await;
+        assert!(matches!(
+            events.last(),
+            Some(mew_provider::ProviderEvent::MessageEnd {
+                finish: mew_message::Finish::Stop,
+                ..
+            })
+        ));
+        let selected = Arc::new(AuxiliaryOnly);
+        let routed = Routed::new(
+            Router::new(None, selected.clone(), selected),
+            "fixture".into(),
+            "fixture".into(),
+        );
+        let events: Vec<_> = routed
+            .stream_auxiliary(empty_request(vec![empty_message()]))
+            .await
+            .unwrap()
+            .collect()
+            .await;
+        assert!(matches!(
+            events.last(),
+            Some(mew_provider::ProviderEvent::MessageEnd {
+                finish: mew_message::Finish::Stop,
+                ..
+            })
+        ));
     }
 
     fn empty_request(messages: Vec<Message>) -> Request {

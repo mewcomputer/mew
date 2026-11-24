@@ -78,6 +78,31 @@ fn call(
 }
 
 #[tokio::test]
+async fn accepts_a_two_megabyte_historical_replay() {
+    let (session, _, _, _, _) = setup("cat >/dev/null").await;
+    let replay = vec![b'a'; 2 * 1024 * 1024];
+    let turn = tokio::time::timeout(
+        Duration::from_secs(3),
+        session.start(&replay, CancellationToken::new()),
+    )
+    .await
+    .unwrap()
+    .expect("historical replay should fit the bridge input limit");
+    drop(turn);
+}
+
+#[tokio::test]
+async fn rejects_replay_above_the_bounded_input_limit() {
+    let (session, _, _, _, _) = setup("sleep 10").await;
+    let replay = vec![b'a'; 16 * 1024 * 1024 + 1];
+    let error = match session.start(&replay, CancellationToken::new()).await {
+        Ok(_) => panic!("oversized replay unexpectedly accepted"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("input too large"));
+}
+
+#[tokio::test]
 async fn queued_calls_require_exact_handoff_and_single_correlated_result() {
     let (session, client, url, sid, _) = setup("sleep 10").await;
     let cancel = CancellationToken::new();
@@ -391,7 +416,7 @@ async fn dropping_ack_future_before_receipt_still_cancels_handoff() {
 }
 
 #[tokio::test]
-async fn oversized_result_does_not_consume_pending_tool() {
+async fn oversized_result_reaches_cli_as_recoverable_tool_error() {
     let (session, client, url, sid, _) = setup("sleep 10").await;
     let mut turn = session.start(b"", CancellationToken::new()).await.unwrap();
     let pending = call(&client, &url, &sid, 2, "hello");
@@ -400,14 +425,21 @@ async fn oversized_result_does_not_consume_pending_tool() {
     };
     turn.ack_handoff(&tool.id).await.unwrap();
     drop(turn);
+    let next = session
+        .resume(
+            &tool.id,
+            json!({"content":[{"type":"text","text":"x".repeat(1_048_577)}]}),
+        )
+        .await
+        .unwrap();
+    let result = pending.await.unwrap().unwrap()["result"].clone();
+    assert_eq!(result["isError"], true);
+    let message = result["content"][0]["text"].as_str().unwrap();
+    assert!(message.contains("offset") && message.contains("limit"));
     assert!(session
-        .resume(&tool.id, json!({"text":"x".repeat(1_048_577)}))
+        .resume(&tool.id, json!({"content":[]}))
         .await
         .is_err());
-    assert!(!pending.is_finished());
-    let result = json!({"content":[]});
-    let next = session.resume(&tool.id, result.clone()).await.unwrap();
-    assert_eq!(pending.await.unwrap().unwrap()["result"], result);
     drop(next);
 }
 

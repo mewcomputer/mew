@@ -192,6 +192,66 @@ mod unix {
         fn name(&self) -> &str {
             "antigravity"
         }
+        async fn can_accept_guidance(&self, request: &Request) -> Result<bool, ProviderError> {
+            let slot = request.session_id.and_then(|id| {
+                self.sessions
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&id)
+                    .cloned()
+            });
+            Ok(match slot {
+                Some(slot) => slot.lock().await.pending.is_none(),
+                None => true,
+            })
+        }
+        async fn replay_budget(
+            &self,
+            request: &Request,
+        ) -> Result<Option<(usize, usize)>, ProviderError> {
+            let slot = request.session_id.and_then(|id| {
+                self.sessions
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&id)
+                    .cloned()
+            });
+            if let Some(slot) = slot {
+                if slot.lock().await.pending.is_some() {
+                    return Ok(None);
+                }
+            }
+            let size = transcript::replay_size(request).map_err(invalid)?;
+            Ok(Some((size, crate::session::MAX_INPUT)))
+        }
+        async fn stream_auxiliary(
+            &self,
+            mut request: Request,
+        ) -> Result<EventStream, ProviderError> {
+            if request.session_id.is_some() || !request.tools.is_empty() {
+                return Err(invalid(
+                    "AGY auxiliary requests must be sessionless and tool-free",
+                ));
+            }
+            if request.reasoning.as_ref().is_some_and(|reasoning| {
+                reasoning.params.len() != 1
+                    || reasoning.params.get("type") != Some(&json!("disabled"))
+            }) {
+                return Err(invalid("AGY reasoning controls are not supported"));
+            }
+            if request
+                .params
+                .as_ref()
+                .is_some_and(|params| params.top_p.is_some() || params.tool_choice.is_some())
+            {
+                return Err(invalid(
+                    "AGY sampling and tool-choice controls are not supported",
+                ));
+            }
+            request.reasoning = None;
+            request.params = None;
+            self.stream(request).await
+        }
         async fn stream(&self, request: Request) -> Result<EventStream, ProviderError> {
             let (contract, history, system) = match checked(&request) {
                 Ok(checked) => checked,
@@ -328,7 +388,7 @@ mod unix {
                     ManagedProcess::spawn(spec, &self.boundary, workspace, self.config.lifetime)?;
                 let session = Session::new(process, server, calls, self.config.lifetime)?;
                 let replay = transcript::project(&request).map_err(invalid)?;
-                let prompt=format!("Historical conversation follows as JSON. Historical tool calls are complete; do not repeat them. Respond to the latest user message.\n{replay}");
+                let prompt = format!("{}{replay}", transcript::REPLAY_PREFIX);
                 let mut input =
                     serde_json::to_vec(&json!({"event":"user","message":{"content":prompt}}))?;
                 input.push(b'\n');

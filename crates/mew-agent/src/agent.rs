@@ -767,7 +767,7 @@ impl Agent {
             supports_vision: self.supports_vision,
         };
 
-        let stream = match provider.stream(request).await {
+        let stream = match provider.stream_auxiliary(request).await {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(error = %e, "classifier provider error; escalating to user");

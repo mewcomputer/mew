@@ -71,3 +71,4 @@ iroh = ["dep:iroh", "mew-daemon/iroh"]
 serde_yaml = "0.9"
 strum = { version = "0.26", features = ["derive"] }
 tempfile = "3"
+tokio = { workspace = true, features = ["test-util"] }

@@ -52,20 +52,24 @@ Mew uses the official `agy` executable on `PATH` and its existing local
 account. If needed, run `mew auth login antigravity` to sign in through AGY.
 The model picker discovers models through that installation.
 
-The isolated local mode is enabled by default, but its macOS sandbox currently
-blocks a listener required by AGY; other platforms fail closed. To use the
-explicit unsandboxed mode, add this to `config.toml`:
-
-```toml
-[antigravity]
-isolated = false
-```
-
-In this mode AGY runs without an OS sandbox. Mew restricts AGY's native tools
+AGY runs without an OS sandbox by default. Mew restricts AGY's native tools
 and routes client tool calls through Mew's permission policy, but a failure in
 AGY's own restrictions could expose local files or commands. `mew run` is
 non-interactive and automatically approves permission requests; explicit deny
 rules still apply. Interactive clients can show permission requests normally.
+AGY also starts enabled MCP servers from its own global configuration, including
+during model discovery. Those servers run outside Mew's permission system;
+disable them in AGY if you do not want them active during Mew sessions.
+
+To request an OS sandbox, add this to `config.toml`:
+
+```toml
+[antigravity]
+isolated = true
+```
+
+The macOS sandbox currently blocks a listener required by AGY. On other
+platforms, isolation is unavailable and the provider fails closed.
 
 Select an available model, for example:
 

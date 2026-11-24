@@ -20,6 +20,21 @@ pub struct ModelInfo {
 pub trait Provider: Send + Sync {
     fn name(&self) -> &str;
     async fn stream(&self, req: Request) -> Result<EventStream, ProviderError>;
+    /// Return the encoded size and hard limit for a replay-based request, if
+    /// the provider has one. A live continuation may not require a replay.
+    async fn replay_budget(&self, _req: &Request) -> Result<Option<(usize, usize)>, ProviderError> {
+        Ok(None)
+    }
+    /// Whether a user message can be appended to this request before it is sent.
+    async fn can_accept_guidance(&self, _req: &Request) -> Result<bool, ProviderError> {
+        Ok(true)
+    }
+    /// Run an internal, tool-free helper request. Temperature, max tokens and
+    /// disabled reasoning are advisory here: a provider without those controls
+    /// may use its defaults. Ordinary turns must use `stream` instead.
+    async fn stream_auxiliary(&self, req: Request) -> Result<EventStream, ProviderError> {
+        self.stream(req).await
+    }
     /// List available models from the provider API.
     /// Default implementation returns an empty list.
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {

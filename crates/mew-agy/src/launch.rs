@@ -113,7 +113,7 @@ pub fn prepare(
     agent.push_str(AGENT);
     agent.push_str(system);
     write_private(agent_dir.join("agent.md"), agent.as_bytes())?;
-    let config = serde_json::json!({ "mcpServers": { "mew": { "serverUrl": mcp_url } } });
+    let config = serde_json::json!({ "mcpServers": { "mew": { "serverUrl": mcp_url, "timeoutSeconds": -1 } } });
     write_private(
         workspace.path().join(".agents/mcp_config.json"),
         config.to_string().as_bytes(),

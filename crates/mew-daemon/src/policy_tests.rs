@@ -1,6 +1,171 @@
 use super::*;
 use crate::request_tests::{connect, flush, send};
 
+#[tokio::test]
+async fn initial_model_list_returns_other_models_before_delayed_discovery() {
+    let root = tempfile::tempdir().unwrap();
+    let signal = Arc::new(tokio::sync::Notify::new());
+    let complete = signal.clone();
+    let lister: ModelLister = Arc::new(move || {
+        let complete = complete.clone();
+        let immediate = mew_protocol::ModelInfo {
+            id: "other/example".into(),
+            provider: "other".into(),
+            model: "example".into(),
+            display_name: None,
+            description: None,
+            thinking_variants: Vec::new(),
+            thinking_budget: None,
+            context_window: None,
+        };
+        let current = vec![immediate.clone()];
+        let update = Box::pin(async move {
+            complete.notified().await;
+            vec![
+                immediate,
+                mew_protocol::ModelInfo {
+                    id: "antigravity/example".into(),
+                    provider: "antigravity".into(),
+                    model: "example".into(),
+                    display_name: None,
+                    description: None,
+                    thinking_variants: Vec::new(),
+                    thinking_budget: None,
+                    context_window: None,
+                },
+            ]
+        });
+        (current, Some(update))
+    });
+    let server = policy_server(root.path().to_path_buf()).with_model_management(
+        Arc::new(|_, provider, model| Ok((provider.into(), model.into()))),
+        lister,
+    );
+    let mut socket = connect(&server).await;
+    send(&mut socket, ClientMessage::ListModels).await;
+    let messages = flush(&mut socket).await;
+    assert!(messages.iter().any(|message| matches!(message, ServerMessage::ModelList { models } if models.len() == 1 && models[0].id == "other/example")));
+    signal.notify_one();
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(3), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let Message::Text(text) = frame else {
+        panic!("expected model list")
+    };
+    let message: ServerMessage = mew_protocol::decode_json(&text).unwrap();
+    assert!(
+        matches!(message, ServerMessage::ModelList { models } if models.len() == 2 && models[1].id == "antigravity/example")
+    );
+}
+
+#[tokio::test]
+async fn disconnect_cancels_pending_model_list_response() {
+    struct NotifyDrop(Option<tokio::sync::oneshot::Sender<()>>);
+    impl Drop for NotifyDrop {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+    let sender = Arc::new(std::sync::Mutex::new(Some(dropped_tx)));
+    let lister: ModelLister = Arc::new({
+        let started = started.clone();
+        move || {
+            let guard = NotifyDrop(sender.lock().unwrap().take());
+            let started = started.clone();
+            let update = Box::pin(async move {
+                let _guard = guard;
+                started.notify_one();
+                std::future::pending::<Vec<mew_protocol::ModelInfo>>().await
+            });
+            (Vec::new(), Some(update))
+        }
+    });
+    let server = policy_server(root.path().to_path_buf()).with_model_management(
+        Arc::new(|_, provider, model| Ok((provider.into(), model.into()))),
+        lister,
+    );
+    let mut socket = connect(&server).await;
+    send(&mut socket, ClientMessage::ListModels).await;
+    tokio::time::timeout(std::time::Duration::from_secs(3), started.notified())
+        .await
+        .unwrap();
+    drop(socket);
+    tokio::time::timeout(std::time::Duration::from_secs(3), dropped_rx)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn newer_model_list_request_cancels_stale_update() {
+    let root = tempfile::tempdir().unwrap();
+    let signal = Arc::new(tokio::sync::Notify::new());
+    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let lister: ModelLister = Arc::new({
+        let signal = signal.clone();
+        move || {
+            let current = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if current == 0 {
+                let signal = signal.clone();
+                (
+                    Vec::new(),
+                    Some(Box::pin(async move {
+                        signal.notified().await;
+                        vec![mew_protocol::ModelInfo {
+                            id: "stale/model".into(),
+                            provider: "stale".into(),
+                            model: "model".into(),
+                            display_name: None,
+                            description: None,
+                            thinking_variants: Vec::new(),
+                            thinking_budget: None,
+                            context_window: None,
+                        }]
+                    })),
+                )
+            } else {
+                (
+                    vec![mew_protocol::ModelInfo {
+                        id: "new/model".into(),
+                        provider: "new".into(),
+                        model: "model".into(),
+                        display_name: None,
+                        description: None,
+                        thinking_variants: Vec::new(),
+                        thinking_budget: None,
+                        context_window: None,
+                    }],
+                    None,
+                )
+            }
+        }
+    });
+    let server = policy_server(root.path().to_path_buf()).with_model_management(
+        Arc::new(|_, provider, model| Ok((provider.into(), model.into()))),
+        lister,
+    );
+    let mut socket = connect(&server).await;
+    send(&mut socket, ClientMessage::ListModels).await;
+    assert!(flush(&mut socket).await.iter().any(
+        |message| matches!(message, ServerMessage::ModelList { models } if models.is_empty())
+    ));
+    send(&mut socket, ClientMessage::ListModels).await;
+    let second = flush(&mut socket).await;
+    assert!(second.iter().any(|message| matches!(message, ServerMessage::ModelList { models } if models.len() == 1 && models[0].id == "new/model")));
+    signal.notify_one();
+    assert!(!flush(&mut socket)
+        .await
+        .iter()
+        .any(|message| matches!(message, ServerMessage::ModelList { .. })));
+}
+
 fn policy_server(root: PathBuf) -> DaemonServer {
     let builder: AgentBuilder = Arc::new(|params| {
         let policy = params.policy.unwrap_or(mew_session::SessionPolicy {
@@ -63,7 +228,7 @@ fn policy_server(root: PathBuf) -> DaemonServer {
                 agent.set_active_thinking_variant(Some("high".into()));
                 Ok((provider.into(), model.into()))
             }),
-            Arc::new(Vec::new),
+            Arc::new(|| (Vec::new(), None)),
         )
         .with_thinking_setter(Arc::new(|agent, _, variant| {
             let variant = (!variant.is_empty()).then(|| variant.to_owned());
@@ -447,7 +612,7 @@ async fn failed_model_policy_write_restores_owned_and_shared_prompt_state() {
             agent.apply_persona(&persona);
             Ok((provider.into(), model.into()))
         }),
-        Arc::new(Vec::new),
+        Arc::new(|| (Vec::new(), None)),
     );
     let session = server.session_manager.create(None).await.unwrap();
     let before_filter = session.agent.lock().await.skill_filter.read().await.clone();

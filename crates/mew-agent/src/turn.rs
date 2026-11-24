@@ -232,6 +232,7 @@ impl Agent {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut turn_count: u32 = 0;
         let mut continuing_for_guidance = false;
+        let mut continuing_for_user_guidance = false;
         loop {
             if self.cancel_token.is_cancelled() {
                 let _ = ev_tx.send(AgentEvent::Error("aborted".into())).await;
@@ -273,10 +274,6 @@ impl Agent {
                     vec![]
                 };
             }
-
-            // Ingest any user guidance queued since the last request so it
-            // steers the next provider request (even a tool-call continuation).
-            self.drain_guidance().await;
 
             // Check if compaction is needed (forced or auto).
             let force = {
@@ -350,6 +347,24 @@ impl Agent {
                 supports_vision: self.supports_vision,
             };
 
+            if !self.pending_guidance.lock().await.is_empty() {
+                match self.provider.can_accept_guidance(&req).await {
+                    Ok(true) => {
+                        self.drain_guidance().await;
+                        req.messages = self.prepare_messages().await;
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        let _ = ev_tx
+                            .send(AgentEvent::Error(format!(
+                                "Could not deliver queued guidance: {error}"
+                            )))
+                            .await;
+                        return Ok(());
+                    }
+                }
+            }
+
             let mut manifest = match self.fit_request_context(&mut req, force).await {
                 Ok((manifest, _)) => manifest,
                 Err(message) => {
@@ -366,16 +381,32 @@ impl Agent {
                 }
             };
             let guided = self.admit_child_guidance(&mut req, &mut manifest).await;
-            if continuing_for_guidance && !guided {
+            if continuing_for_guidance && !guided && !continuing_for_user_guidance {
                 // The previous clean response already completed the original
                 // task. A rejected guide needs no extra provider call.
                 return Ok(());
             }
-            if continuing_for_guidance {
+            if continuing_for_guidance || continuing_for_user_guidance {
                 let _ = ev_tx.send(AgentEvent::ChildGuidanceContinuation).await;
                 continuing_for_guidance = false;
+                continuing_for_user_guidance = false;
             }
             render_compaction_summary(&mut req.messages);
+            match self.provider.replay_budget(&req).await {
+                Ok(Some((size, limit))) if size > limit => {
+                    let _ = ev_tx.send(AgentEvent::Error("The request exceeds its provider's replay limit. Shorten the latest message or attachments.".into())).await;
+                    return Ok(());
+                }
+                Err(error) => {
+                    let _ = ev_tx
+                        .send(AgentEvent::Error(format!(
+                            "Could not measure provider replay: {error}"
+                        )))
+                        .await;
+                    return Ok(());
+                }
+                _ => {}
+            }
             self.dispatcher
                 .on_pre_model_turn(&req.messages, &req.system)
                 .await;
@@ -729,14 +760,28 @@ impl Agent {
                         continue;
                     }
                 }
+                let user_guidance_waiting = !self.pending_guidance.lock().await.is_empty();
+                if finish == Finish::Stop
+                    && user_guidance_waiting
+                    && self.max_turns.is_some_and(|max| turn_count >= max)
+                {
+                    let _ = ev_tx.send(AgentEvent::Error(
+                        "Queued guidance was not delivered because the turn limit was reached; it remains queued for the next turn.".into()
+                    )).await;
+                }
                 if finish == Finish::Stop
                     && self.max_turns.is_none_or(|max| turn_count < max)
-                    && self
+                    && (user_guidance_waiting
+                        || self
+                            .child_guidance
+                            .as_ref()
+                            .is_some_and(|queue| queue.has_waiting_guide()))
+                {
+                    continuing_for_guidance = self
                         .child_guidance
                         .as_ref()
-                        .is_some_and(|queue| queue.has_waiting_guide())
-                {
-                    continuing_for_guidance = true;
+                        .is_some_and(|queue| queue.has_waiting_guide());
+                    continuing_for_user_guidance = user_guidance_waiting;
                     continue;
                 }
 
@@ -885,6 +930,21 @@ impl Agent {
             admission.finish(Err(ChildGuidanceError::Rejected(CHILD_ENDED.into())));
             return false;
         }
+        match self.provider.can_accept_guidance(request).await {
+            Ok(true) => {}
+            Ok(false) => {
+                admission.finish(Err(ChildGuidanceError::Rejected(
+                    "The provider cannot accept guidance while a tool is running; retry after the tool completes.".into(),
+                )));
+                return false;
+            }
+            Err(error) => {
+                admission.finish(Err(ChildGuidanceError::Rejected(format!(
+                    "Could not check whether child guidance can be delivered: {error}"
+                ))));
+                return false;
+            }
+        }
         let message = match self.build_prompt_message(text, vec![]) {
             Ok(message) => message,
             Err(error) => {
@@ -896,8 +956,22 @@ impl Agent {
             .messages
             .push(self.dispatcher.on_chat_message(message.clone()).await);
         let guided_manifest = self.request_manifest(request);
+        let replay_budget = self.provider.replay_budget(request).await;
         let result = if self.cancel_token.is_cancelled() || guidance.is_closed() {
             Err(ChildGuidanceError::Rejected(CHILD_ENDED.into()))
+        } else if let Err(error) = &replay_budget {
+            Err(ChildGuidanceError::Rejected(format!(
+                "Could not measure child guidance replay: {error}"
+            )))
+        } else if replay_budget
+            .as_ref()
+            .ok()
+            .and_then(|budget| *budget)
+            .is_some_and(|(bytes, limit)| bytes > limit)
+        {
+            Err(ChildGuidanceError::Rejected(
+                "Child guidance would exceed its provider's replay limit.".into(),
+            ))
         } else if self.context_window > 0
             && estimated_request_tokens(request, &guided_manifest) > self.context_window
         {
@@ -970,12 +1044,20 @@ impl Agent {
         let threshold = ((self.context_window as f64 * self.compaction_threshold) as u32)
             .min(self.context_window);
         let over_budget = |estimated| self.context_window > 0 && estimated > self.context_window;
-        if !force && (self.context_window == 0 || estimated <= threshold) {
+        let replay = self
+            .provider
+            .replay_budget(request)
+            .await
+            .map_err(|error| format!("Could not measure provider replay: {error}"))?;
+        let replay_over = replay.is_some_and(|(size, limit)| size > limit);
+        let replay_near = replay.is_some_and(|(size, limit)| size > limit - limit / 10);
+        if !force && !replay_near && (self.context_window == 0 || estimated <= threshold) {
             return Ok((manifest, 0));
         }
 
         let before = &request.messages;
         let mut start = compaction_start(before, self.keep_turns);
+        let mut fallback_start = compaction_start(before, 1);
         let latest_user = before.iter().rposition(|message| {
             message.role == Role::User
                 && message.parts.iter().any(|part| match part {
@@ -991,6 +1073,7 @@ impl Agent {
                 .any(|part| matches!(part, Part::File(_)))
         }) {
             start = start.min(index);
+            fallback_start = fallback_start.min(index);
         }
         if self
             .goal
@@ -1005,33 +1088,78 @@ impl Agent {
                 })
             }) {
                 start = start.min(index);
+                fallback_start = fallback_start.min(index);
             }
+        }
+        // Retain the configured tail when possible. If the replay is already
+        // above its hard limit, retry with the smallest valid tail only when
+        // ordinary compaction cannot make enough room.
+        if start == 0 && replay_over {
+            start = fallback_start;
         }
         let dropped = before[..start]
             .iter()
             .filter(|message| !is_compaction_message(message))
             .count();
         if start == 0 || (dropped == 0 && !force) {
-            return if over_budget(estimated) {
+            return if replay_over {
+                Err("The request exceeds its provider's replay limit. Shorten the latest message or attachments.".into())
+            } else if over_budget(estimated) {
                 Err(context_window_error(self.context_window))
             } else {
                 Ok((manifest, 0))
             };
         }
 
-        let summary = self.compaction_summary(&before[..start], latest_user);
         let state_path = self.flagged_files_path().await;
         let shared_flags = self.flagged_files.clone();
         let flags = shared_flags.lock().await.clone();
-        let compacted = self
-            .compacted_messages(&before[start..], force, dropped, summary, &flags)
-            .await?;
-        let previous = std::mem::replace(&mut request.messages, compacted);
-        let mut candidate = self.request_manifest(request);
-        let compacted_estimate = estimated_request_tokens(request, &candidate);
-        if over_budget(compacted_estimate) || (!force && compacted_estimate >= estimated) {
+        let (previous, mut candidate, compacted_estimate, compacted_replay, dropped) = loop {
+            let before = &request.messages;
+            let dropped = before[..start]
+                .iter()
+                .filter(|message| !is_compaction_message(message))
+                .count();
+            let summary = self.compaction_summary(&before[..start], latest_user);
+            let compacted = self
+                .compacted_messages(&before[start..], force, dropped, summary, &flags)
+                .await?;
+            let previous = std::mem::replace(&mut request.messages, compacted);
+            let candidate = self.request_manifest(request);
+            let compacted_estimate = estimated_request_tokens(request, &candidate);
+            let compacted_replay = match self.provider.replay_budget(request).await {
+                Ok(value) => value,
+                Err(error) => {
+                    request.messages = previous;
+                    return Err(format!("Could not measure provider replay: {error}"));
+                }
+            };
+            if replay_over
+                && compacted_replay.is_some_and(|(size, limit)| size > limit)
+                && fallback_start > start
+            {
+                request.messages = previous;
+                start = fallback_start;
+                continue;
+            }
+            break (
+                previous,
+                candidate,
+                compacted_estimate,
+                compacted_replay,
+                dropped,
+            );
+        };
+        let compacted_replay_over = compacted_replay.is_some_and(|(size, limit)| size > limit);
+        let replay_improved = matches!((replay, compacted_replay), (Some((before, _)), Some((after, _))) if after < before);
+        if compacted_replay_over
+            || over_budget(compacted_estimate)
+            || (!force && compacted_estimate >= estimated && !replay_improved)
+        {
             request.messages = previous;
-            return if over_budget(estimated) {
+            return if replay_over || compacted_replay_over {
+                Err("The request exceeds its provider's replay limit after compaction. Shorten the latest message or attachments.".into())
+            } else if over_budget(estimated) {
                 Err(context_window_error(self.context_window))
             } else {
                 Ok((manifest, 0))
@@ -1047,6 +1175,17 @@ impl Agent {
                 && estimated_request_tokens(request, &candidate) > self.context_window
             {
                 return Err(context_window_error(self.context_window));
+            }
+            if self
+                .provider
+                .replay_budget(request)
+                .await
+                .map_err(|error| format!("Could not measure provider replay: {error}"))?
+                .is_some_and(|(size, limit)| size > limit)
+            {
+                return Err(
+                    "The request exceeds its provider's replay limit after compaction.".into(),
+                );
             }
         }
 

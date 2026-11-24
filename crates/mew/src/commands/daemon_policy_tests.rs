@@ -461,7 +461,7 @@ async fn thinking_selection_uses_the_active_provider_for_shared_model_ids() {
         agent.reasoning.as_ref().unwrap().params["reasoning_effort"],
         "high"
     );
-    let models = (server.model_lister.as_ref().unwrap())();
+    let (models, _) = (server.model_lister.as_ref().unwrap())();
     let levels = |id: &str| {
         models
             .iter()

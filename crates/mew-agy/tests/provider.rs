@@ -87,6 +87,49 @@ fn fixture(dir: &Path, script: &str) -> FixtureBoundary {
     FixtureBoundary { script: path }
 }
 
+#[tokio::test]
+async fn auxiliary_sampling_hints_are_advisory_but_regular_turn_controls_are_rejected() {
+    let parent = tempfile::tempdir().unwrap();
+    let script = r#"import sys,json
+sys.stdin.readline()
+print(json.dumps({'event':'step_update','step_update':{'step_type':'agent_response','text_delta':'ALLOW'}}),flush=True)
+print(json.dumps({'event':'result','result':{'status':'SUCCESS'}}),flush=True)
+"#;
+    let provider = AgyProvider::new(config(parent.path()), fixture(parent.path(), script));
+    let mut auxiliary = request();
+    auxiliary.session_id = None;
+    auxiliary.tools.clear();
+    auxiliary.params = Some(mew_provider::ChatParams {
+        temperature: Some(0.0),
+        max_tokens: Some(8),
+        ..Default::default()
+    });
+    let mut disabled = serde_json::Map::new();
+    disabled.insert("type".into(), "disabled".into());
+    auxiliary.reasoning = Some(mew_provider::ReasoningConfig { params: disabled });
+    assert!(provider.stream(auxiliary.clone()).await.is_err());
+    let events: Vec<_> = provider
+        .stream_auxiliary(auxiliary.clone())
+        .await
+        .unwrap()
+        .collect()
+        .await;
+    assert!(events.iter().any(|event| matches!(event, ProviderEvent::PartDelta { field: "text", delta, .. } if delta == "ALLOW")));
+    assert!(matches!(
+        events.last(),
+        Some(ProviderEvent::MessageEnd {
+            finish: Finish::Stop,
+            ..
+        })
+    ));
+
+    auxiliary.params.as_mut().unwrap().top_p = Some(0.5);
+    assert!(provider.stream_auxiliary(auxiliary.clone()).await.is_err());
+    auxiliary.params.as_mut().unwrap().top_p = None;
+    auxiliary.session_id = Some(Ulid::new());
+    assert!(provider.stream_auxiliary(auxiliary).await.is_err());
+}
+
 #[cfg(target_os = "macos")]
 #[tokio::test]
 #[ignore = "requires a signed-in local AGY installation and network"]
@@ -411,6 +454,16 @@ async fn tool_handoff_resumes_only_with_matching_history_and_result() {
             call_id: call.call_id.clone(),
         })],
     ));
+    assert_eq!(
+        provider.replay_budget(&continuation).await.unwrap(),
+        None,
+        "live handoff does not send a replay"
+    );
+    let fresh = AgyProvider::new(config(parent.path()), fixture(parent.path(), TOOL_SCRIPT));
+    assert!(
+        fresh.replay_budget(&continuation).await.unwrap().is_some(),
+        "a fresh process must budget the same history"
+    );
     let output: Vec<_> = provider.stream(continuation).await.unwrap().collect().await;
     assert!(output.iter().any(
         |e| matches!(e,ProviderEvent::PartDelta{field:"text",delta,..} if delta=="tool response")
@@ -422,6 +475,166 @@ async fn tool_handoff_resumes_only_with_matching_history_and_result() {
             ..
         })
     ));
+}
+
+#[tokio::test]
+async fn replay_budget_counts_the_actual_nested_json_framing() {
+    let parent = tempfile::tempdir().unwrap();
+    let provider = AgyProvider::new(config(parent.path()), fixture(parent.path(), ""));
+    let mut req = request();
+    if let Part::Text(text) = &mut req.messages[0].parts[0] {
+        text.text = "quotes \" slash \\ newline\n control \0 unicode Ω".into();
+    }
+    let replay = mew_agy::transcript::project(&req).unwrap();
+    let prompt = format!("Historical conversation follows as JSON. Historical tool calls are complete; do not repeat them. Respond to the latest user message.\n{replay}");
+    let mut wire =
+        serde_json::to_vec(&json!({"event":"user","message":{"content":prompt}})).unwrap();
+    wire.push(b'\n');
+    let budget = provider.replay_budget(&req).await.unwrap().unwrap();
+    assert_eq!(budget.0, wire.len());
+    assert_eq!(budget.1, 16 * 1024 * 1024);
+}
+
+#[tokio::test]
+async fn oversized_tool_output_can_be_retried_and_replayed() {
+    let parent = tempfile::tempdir().unwrap();
+    let script = r#"import sys,json,urllib.request
+sys.stdin.readline()
+with open('.agents/mcp_config.json') as f: url=json.load(f)['mcpServers']['mew']['serverUrl']
+def post(body,sid=None):
+ h={'Content-Type':'application/json'}
+ if sid: h['mcp-session-id']=sid
+ with urllib.request.urlopen(urllib.request.Request(url,data=json.dumps(body).encode(),headers=h)) as r: return r.headers, r.read()
+h,_=post({'jsonrpc':'2.0','id':1,'method':'initialize','params':{'protocolVersion':'2025-06-18','capabilities':{},'clientInfo':{'name':'fixture','version':'1'}}})
+sid=h['mcp-session-id']
+post({'jsonrpc':'2.0','method':'notifications/initialized'},sid)
+for number,text in [(2,'hello'),(3,'retry')]:
+ _,body=post({'jsonrpc':'2.0','id':number,'method':'tools/call','params':{'name':'echo','arguments':{'text':text}}},sid)
+ result=json.loads(body)['result']
+ if number==2:
+  assert result['isError'] is True
+ print(json.dumps({'event':'step_update','step_update':{'step_type':'agent_response','text_delta':result['content'][0]['text']}}),flush=True)
+print(json.dumps({'event':'result','result':{'status':'SUCCESS'}}),flush=True)
+"#;
+    let provider = AgyProvider::new(config(parent.path()), fixture(parent.path(), script));
+    let mut req = request();
+    let events: Vec<_> = provider.stream(req.clone()).await.unwrap().collect().await;
+    let first = events
+        .iter()
+        .find_map(|event| match event {
+            ProviderEvent::PartStart {
+                part: Part::ToolCall(call),
+            } => Some(call.clone()),
+            _ => None,
+        })
+        .expect("first tool call");
+    let mut complete = first.clone();
+    complete.state = ToolState::Completed(ToolStateCompleted {
+        input: json!({"text":"hello"}),
+        output: "x".repeat(1_048_577),
+        metadata: None,
+        diff: None,
+        images: vec![],
+        time: ToolTime {
+            start: 0,
+            end: Some(1),
+        },
+    });
+    req.messages
+        .push(msg(Role::Assistant, vec![Part::ToolCall(complete)]));
+    req.messages.push(msg(
+        Role::User,
+        vec![Part::ToolResult(ToolResultPart {
+            base: base(),
+            call_id: first.call_id,
+        })],
+    ));
+    let events: Vec<_> = provider.stream(req.clone()).await.unwrap().collect().await;
+    let recovery: String = events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderEvent::PartDelta {
+                field: "text",
+                delta,
+                ..
+            } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(recovery.contains("offset") && recovery.contains("limit"));
+    let second = events
+        .iter()
+        .find_map(|event| match event {
+            ProviderEvent::PartStart {
+                part: Part::ToolCall(call),
+            } => Some(call.clone()),
+            _ => None,
+        })
+        .expect("retry tool call");
+    let mut complete = second.clone();
+    complete.state = ToolState::Completed(ToolStateCompleted {
+        input: json!({"text":"retry"}),
+        output: "small result".into(),
+        metadata: None,
+        diff: None,
+        images: vec![],
+        time: ToolTime {
+            start: 0,
+            end: Some(1),
+        },
+    });
+    req.messages.push(msg(
+        Role::Assistant,
+        vec![
+            Part::Text(TextPart {
+                base: base(),
+                text: recovery,
+                synthetic: false,
+            }),
+            Part::ToolCall(complete),
+        ],
+    ));
+    req.messages.push(msg(
+        Role::User,
+        vec![Part::ToolResult(ToolResultPart {
+            base: base(),
+            call_id: second.call_id,
+        })],
+    ));
+    let events: Vec<_> = provider.stream(req.clone()).await.unwrap().collect().await;
+    assert!(events.iter().any(|event| matches!(event, ProviderEvent::PartDelta { field:"text", delta, .. } if delta == "small result")));
+    assert!(matches!(
+        events.last(),
+        Some(ProviderEvent::MessageEnd {
+            finish: Finish::Stop,
+            ..
+        })
+    ));
+
+    // The same original large result must also remain replayable on the next turn.
+    req.messages.push(msg(
+        Role::Assistant,
+        vec![Part::Text(TextPart {
+            base: base(),
+            text: "small result".into(),
+            synthetic: false,
+        })],
+    ));
+    req.messages.push(msg(
+        Role::User,
+        vec![Part::Text(TextPart {
+            base: base(),
+            text: "continue".into(),
+            synthetic: false,
+        })],
+    ));
+    let events: Vec<_> = provider.stream(req).await.unwrap().collect().await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ProviderEvent::PartStart {
+            part: Part::ToolCall(_)
+        }
+    )));
 }
 #[tokio::test]
 async fn unavailable_isolation_fails_before_launch() {

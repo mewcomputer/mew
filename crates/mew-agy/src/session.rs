@@ -18,7 +18,7 @@ mod unix {
     };
 
     const MAX_FRAME: usize = 1_048_576;
-    const MAX_INPUT: usize = 1_048_576;
+    pub(crate) const MAX_INPUT: usize = 16 * 1_048_576;
     const EVENTS: usize = 16;
     const COMMANDS: usize = 8;
 
@@ -198,8 +198,8 @@ mod unix {
             })
         }
         pub async fn resume(&self, id: &str, result: Value) -> io::Result<Turn> {
-            if id.len() > 128 || result_size(&result)? > MAX_FRAME {
-                return Err(invalid("tool result too large"));
+            if id.len() > 128 {
+                return Err(invalid("tool call id too large"));
             }
             let (events, rx) = mpsc::channel(EVENTS);
             let consumer = CancellationToken::new();
@@ -232,24 +232,6 @@ mod unix {
 
     fn invalid(message: &'static str) -> io::Error {
         io::Error::new(io::ErrorKind::InvalidData, message)
-    }
-    fn result_size(value: &Value) -> io::Result<usize> {
-        struct Counter(usize);
-        impl io::Write for Counter {
-            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-                self.0 = self.0.saturating_add(bytes.len());
-                if self.0 > MAX_FRAME {
-                    return Err(invalid("tool result too large"));
-                }
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-        let mut counter = Counter(0);
-        serde_json::to_writer(&mut counter, value).map_err(|_| invalid("tool result too large"))?;
-        Ok(counter.0)
     }
     fn stream_error(error: &io::Error) -> &'static str {
         let message = error.to_string().to_ascii_lowercase();
@@ -478,5 +460,7 @@ mod unix {
     }
 }
 
+#[cfg(unix)]
+pub(crate) use unix::MAX_INPUT;
 #[cfg(unix)]
 pub use unix::{Session, SessionEvent, Turn};

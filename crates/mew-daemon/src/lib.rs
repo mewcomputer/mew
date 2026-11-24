@@ -100,8 +100,12 @@ pub type AgentBuilder =
 pub type ModelSwitcher =
     Arc<dyn Fn(&mut Agent, &str, &str) -> Result<(String, String)> + Send + Sync>;
 
-/// List available models. Returns `Vec<ModelInfo>` for the picker UI.
-pub type ModelLister = Arc<dyn Fn() -> Vec<mew_protocol::ModelInfo> + Send + Sync>;
+/// An optional refresh of the model list after an immediate snapshot.
+pub type ModelListUpdate =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Vec<mew_protocol::ModelInfo>> + Send>>;
+/// List available models immediately, with an optional asynchronous refresh.
+pub type ModelLister =
+    Arc<dyn Fn() -> (Vec<mew_protocol::ModelInfo>, Option<ModelListUpdate>) + Send + Sync>;
 
 /// Set the thinking/reasoning variant on an agent. Takes the agent,
 /// current model ID, and variant name (or empty/"none" to disable).
@@ -854,6 +858,7 @@ where
     let mut client_id: Option<u64> = None;
     let mut terminal: Option<terminal::TerminalHandle> = None;
     let mut workspace_watch: Option<CancellationToken> = None;
+    let mut model_list_update: Option<CancellationToken> = None;
     let guidance_slots = Arc::new(tokio::sync::Semaphore::new(16));
     let mut auto_title_enabled = true;
     let mut summary_updates = auto_summary_enabled.subscribe();
@@ -2682,11 +2687,33 @@ where
                 });
             }
             ClientMessage::ListModels => {
-                let models = match &session_manager.lister {
+                if let Some(previous) = model_list_update.take() {
+                    previous.cancel();
+                }
+                let (models, update) = match &session_manager.lister {
                     Some(lister) => lister(),
-                    None => Vec::new(),
+                    None => (Vec::new(), None),
                 };
-                reply(ServerMessage::ModelList { models });
+                reply(ServerMessage::ModelList {
+                    models: models.clone(),
+                });
+                if let Some(update) = update {
+                    let cancel = CancellationToken::new();
+                    model_list_update = Some(cancel.clone());
+                    let lifetime = connection_lifetime.clone();
+                    let client = client_tx.clone();
+                    tokio::spawn(async move {
+                        let refreshed = tokio::select! {
+                            biased;
+                            _ = lifetime.cancelled() => return,
+                            _ = cancel.cancelled() => return,
+                            refreshed = update => refreshed,
+                        };
+                        if refreshed != models {
+                            let _ = client.send(ServerMessage::ModelList { models: refreshed });
+                        }
+                    });
+                }
             }
             ClientMessage::SwitchModel { provider, model } => {
                 let Some(session) = attached_session.clone() else {
@@ -3869,7 +3896,7 @@ async fn generate_session_title(agent: &Agent, prompt_text: &str) -> String {
         agent.supports_vision,
     );
 
-    match agent.provider.stream(req).await {
+    match agent.provider.stream_auxiliary(req).await {
         Ok(mut stream) => {
             let mut title = String::new();
             let mut current_part_is_text = false;
@@ -4149,7 +4176,7 @@ async fn generate_session_summary(agent: &Agent) -> Option<String> {
         512,
         agent.supports_vision,
     );
-    match agent.provider.stream(req).await {
+    match agent.provider.stream_auxiliary(req).await {
         Ok(mut stream) => {
             let mut summary = String::new();
             let mut current_part_is_text = false;
@@ -4676,6 +4703,52 @@ mod prompt_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn automatic_title_and_summary_use_auxiliary_provider_requests() {
+        struct AuxiliaryOnly;
+        #[async_trait::async_trait]
+        impl mew_provider::Provider for AuxiliaryOnly {
+            fn name(&self) -> &str {
+                "auxiliary-only"
+            }
+            async fn stream(
+                &self,
+                _: mew_provider::Request,
+            ) -> Result<mew_provider::EventStream, mew_provider::ProviderError> {
+                Err(mew_provider::ProviderError::Message(
+                    "ordinary request rejected".into(),
+                ))
+            }
+            async fn stream_auxiliary(
+                &self,
+                request: mew_provider::Request,
+            ) -> Result<mew_provider::EventStream, mew_provider::ProviderError> {
+                assert!(request.session_id.is_none());
+                assert!(request.tools.is_empty());
+                assert!(request.params.as_ref().unwrap().max_tokens.is_some());
+                Ok(Box::pin(futures::stream::iter(
+                    mew_provider_fake::FakeProvider::text_response("Helper result"),
+                )))
+            }
+        }
+        let agent = Agent::new(
+            Arc::new(AuxiliaryOnly),
+            Arc::new(mew_hooks::NopDispatcher),
+            None,
+            vec![],
+            None,
+        );
+        assert_eq!(
+            generate_session_title(&agent, "example prompt").await,
+            "Helper result"
+        );
+        agent.messages.lock().await.push(test_message(1));
+        assert_eq!(
+            generate_session_summary(&agent).await.as_deref(),
+            Some("Helper result")
+        );
+    }
 
     fn test_message(created: i64) -> mew_message::Message {
         mew_message::Message {

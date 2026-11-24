@@ -55,17 +55,11 @@ pub struct Config {
 }
 
 /// Local Antigravity CLI settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AntigravityConfig {
     /// Restrict the CLI using an OS sandbox. Disabling this permits AGY to access local files.
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub isolated: bool,
-}
-
-impl Default for AntigravityConfig {
-    fn default() -> Self {
-        Self { isolated: true }
-    }
 }
 
 /// Whether the model invokes mew tools through a persistent Python session.
@@ -996,13 +990,15 @@ mod tests {
     }
 
     #[test]
-    fn antigravity_isolation_is_enabled_unless_explicitly_disabled() {
+    fn antigravity_isolation_is_disabled_unless_explicitly_enabled() {
         let default = super::Config::default();
-        assert!(default.antigravity.isolated);
+        assert!(!default.antigravity.isolated);
         let unspecified: super::Config = toml::from_str("").unwrap();
-        assert!(unspecified.antigravity.isolated);
-        let disabled: super::Config = toml::from_str("[antigravity]\nisolated = false").unwrap();
-        assert!(!disabled.antigravity.isolated);
+        assert!(!unspecified.antigravity.isolated);
+        let empty: super::Config = toml::from_str("[antigravity]").unwrap();
+        assert!(!empty.antigravity.isolated);
+        let enabled: super::Config = toml::from_str("[antigravity]\nisolated = true").unwrap();
+        assert!(enabled.antigravity.isolated);
         assert!(toml::from_str::<super::Config>("[antigravity]\nisolated = 'false'").is_err());
     }
 

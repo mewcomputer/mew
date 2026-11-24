@@ -4,17 +4,110 @@ use std::collections::{HashMap, HashSet};
 
 use mew_message::{Message, Part, Role, ToolState};
 use mew_provider::Request;
-use serde_json::{json, Value};
+use serde::Serialize;
+use serde_json::Value;
+
+pub(crate) const REPLAY_PREFIX: &str = "Historical conversation follows as JSON. Historical tool calls are complete; do not repeat them. Respond to the latest user message.\n";
+
+#[derive(Serialize)]
+struct Replay<'a> {
+    format: &'static str,
+    messages: Vec<ReplayMessage<'a>>,
+}
+
+#[derive(Serialize)]
+struct ReplayMessage<'a> {
+    role: &'static str,
+    content: Vec<ReplayPart<'a>>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ReplayPart<'a> {
+    Text {
+        text: &'a str,
+    },
+    ToolUse {
+        id: &'a str,
+        name: &'a str,
+        input: &'a Value,
+    },
+    ToolResult {
+        tool_use_id: &'a str,
+        content: &'a str,
+        is_error: bool,
+    },
+    Compaction {
+        summary: &'a str,
+    },
+    PreservedContext {
+        messages: Vec<ReplayMessage<'a>>,
+    },
+}
+
+fn replay(request: &Request) -> Result<Replay<'_>, String> {
+    Ok(Replay {
+        format: "mew_transcript_v1",
+        messages: project_messages(&request.messages)?,
+    })
+}
 
 /// Render a history as JSON. The caller must frame this as historical context,
 /// not as fresh user instructions or tool requests.
 pub fn project(request: &Request) -> Result<String, String> {
-    let messages = project_messages(&request.messages)?;
-    serde_json::to_string(&json!({
-        "format": "mew_transcript_v1",
-        "messages": messages,
-    }))
-    .map_err(|error| format!("cannot serialize transcript: {error}"))
+    serde_json::to_string(&replay(request)?)
+        .map_err(|error| format!("cannot serialize transcript: {error}"))
+}
+
+/// Count the full newline-delimited CLI input, including JSON nested in the
+/// prompt string, without allocating a second serialized copy of the replay.
+pub(crate) fn replay_size(request: &Request) -> Result<usize, String> {
+    use std::io::{self, Write};
+
+    struct Count {
+        len: usize,
+        escape: bool,
+    }
+    impl Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            for byte in bytes {
+                let added = if !self.escape {
+                    1
+                } else {
+                    match byte {
+                        b'"' | b'\\' | b'\x08' | b'\x0c' | b'\n' | b'\r' | b'\t' => 2,
+                        0..=31 => 6,
+                        _ => 1,
+                    }
+                };
+                self.len = self
+                    .len
+                    .checked_add(added)
+                    .ok_or_else(|| io::Error::other("replay size overflow"))?;
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let document = replay(request)?;
+    let mut prefix = Count {
+        len: 0,
+        escape: false,
+    };
+    serde_json::to_writer(&mut prefix, REPLAY_PREFIX).map_err(|error| error.to_string())?;
+    let mut replay = Count {
+        len: 0,
+        escape: true,
+    };
+    serde_json::to_writer(&mut replay, &document).map_err(|error| error.to_string())?;
+    let wrapper = b"{\"event\":\"user\",\"message\":{\"content\":\"\"}}\n".len();
+    wrapper
+        .checked_add(prefix.len - 2)
+        .and_then(|size| size.checked_add(replay.len))
+        .ok_or_else(|| "replay size overflow".into())
 }
 
 /// Combine the request's system prompt and explicit system-message text for
@@ -46,7 +139,7 @@ pub fn system_instructions(request: &Request) -> Result<String, String> {
     Ok(pieces.join("\n\n"))
 }
 
-fn project_messages(messages: &[Message]) -> Result<Vec<Value>, String> {
+fn project_messages(messages: &[Message]) -> Result<Vec<ReplayMessage<'_>>, String> {
     let mut result = Vec::with_capacity(messages.len());
     let mut seen = HashSet::new();
     let mut pending: HashMap<&str, (&str, bool)> = HashMap::new();
@@ -58,7 +151,7 @@ fn project_messages(messages: &[Message]) -> Result<Vec<Value>, String> {
         for part in &message.parts {
             match part {
                 Part::Text(text) if message.role != Role::System => {
-                    content.push(json!({"type":"text", "text":text.text}))
+                    content.push(ReplayPart::Text { text: &text.text })
                 }
                 Part::Text(_) => {}
                 Part::Reasoning(_) => {}
@@ -84,8 +177,15 @@ fn project_messages(messages: &[Message]) -> Result<Vec<Value>, String> {
                     if call.tool_name.is_empty() {
                         return Err("empty tool name".into());
                     }
-                    pending.insert(&call.call_id, (output, is_error));
-                    content.push(json!({"type":"tool_use", "id":call.call_id, "name":call.tool_name, "input":call.state.input()}));
+                    pending.insert(
+                        &call.call_id,
+                        crate::mcp::bounded_tool_output(output, is_error),
+                    );
+                    content.push(ReplayPart::ToolUse {
+                        id: &call.call_id,
+                        name: &call.tool_name,
+                        input: call.state.input(),
+                    });
                 }
                 Part::ToolResult(part) => {
                     if message.role != Role::User {
@@ -94,7 +194,11 @@ fn project_messages(messages: &[Message]) -> Result<Vec<Value>, String> {
                     let (output, is_error) = pending
                         .remove(part.call_id.as_str())
                         .ok_or("orphan or duplicate tool result")?;
-                    content.push(json!({"type":"tool_result", "tool_use_id":part.call_id, "content":output, "is_error":is_error}));
+                    content.push(ReplayPart::ToolResult {
+                        tool_use_id: &part.call_id,
+                        content: output,
+                        is_error,
+                    });
                 }
                 Part::Compaction(part) => {
                     if let Some(summary) = &part.summary {
@@ -104,11 +208,13 @@ fn project_messages(messages: &[Message]) -> Result<Vec<Value>, String> {
                                 .iter()
                                 .any(|p| matches!(p, Part::Text(text) if text.text == *summary));
                         if !already_rendered {
-                            content.push(json!({"type":"compaction", "summary":summary}));
+                            content.push(ReplayPart::Compaction { summary });
                         }
                     }
                     if !part.preserved_context.is_empty() {
-                        content.push(json!({"type":"preserved_context", "messages":project_messages(&part.preserved_context)?}));
+                        content.push(ReplayPart::PreservedContext {
+                            messages: project_messages(&part.preserved_context)?,
+                        });
                     }
                 }
             }
@@ -122,7 +228,7 @@ fn project_messages(messages: &[Message]) -> Result<Vec<Value>, String> {
                 Role::Assistant => "assistant",
                 Role::System => "system",
             };
-            result.push(json!({"role":role,"content":content}));
+            result.push(ReplayMessage { role, content });
         }
     }
     if !pending.is_empty() {

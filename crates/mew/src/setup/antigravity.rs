@@ -20,57 +20,71 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::OnceCell;
 
 pub(crate) struct ModelCache {
-    models: std::sync::RwLock<Vec<mew_protocol::ModelInfo>>,
-    refreshing: std::sync::atomic::AtomicBool,
+    state: std::sync::Mutex<ModelCacheState>,
+    generation: tokio::sync::watch::Sender<u64>,
     isolated: bool,
+}
+
+#[derive(Default)]
+struct ModelCacheState {
+    models: Vec<mew_protocol::ModelInfo>,
+    refreshing: bool,
 }
 
 impl ModelCache {
     pub(crate) fn new(isolated: bool) -> Self {
         Self {
-            models: Default::default(),
-            refreshing: Default::default(),
+            state: Default::default(),
+            generation: tokio::sync::watch::channel(0).0,
             isolated,
         }
     }
-    pub(crate) fn refresh(self: &std::sync::Arc<Self>) {
-        use std::sync::atomic::Ordering;
-        let Some(executable) =
-            std::env::var_os("PATH").and_then(|path| super::providers::find_agy_on_path(&path))
-        else {
-            return;
-        };
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
-        if self.refreshing.swap(true, Ordering::AcqRel) {
-            return;
+    pub(crate) fn refresh(
+        self: &std::sync::Arc<Self>,
+    ) -> Option<tokio::sync::watch::Receiver<u64>> {
+        let executable =
+            std::env::var_os("PATH").and_then(|path| super::providers::find_agy_on_path(&path))?;
+        let runtime = tokio::runtime::Handle::try_current().ok()?;
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let receiver = self.generation.subscribe();
+        if state.refreshing {
+            return Some(receiver);
         }
+        state.refreshing = true;
+        drop(state);
         let cache = self.clone();
         runtime.spawn(async move {
-            match discover_models(executable, cache.isolated).await {
-                Ok(models) => *cache.models.write().unwrap_or_else(|e| e.into_inner()) = models,
+            let result = discover_models(executable, cache.isolated).await;
+            let mut state = cache.state.lock().unwrap_or_else(|e| e.into_inner());
+            match result {
+                Ok(models) => state.models = models,
                 Err(_) => {
-                    cache
-                        .models
-                        .write()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .clear();
+                    state.models.clear();
                     tracing::warn!(
                         "Antigravity model discovery failed; check its sign-in and sandbox setup"
                     );
                 }
             }
-            cache.refreshing.store(false, Ordering::Release);
+            state.refreshing = false;
+            cache
+                .generation
+                .send_modify(|generation| *generation = generation.wrapping_add(1));
         });
+        Some(receiver)
     }
 
     pub(crate) fn models(&self) -> Vec<mew_protocol::ModelInfo> {
-        self.models
-            .read()
+        self.state
+            .lock()
             .unwrap_or_else(|e| e.into_inner())
+            .models
             .clone()
     }
+}
+
+/// Discovery has a 25 second deadline followed by bounded subprocess cleanup.
+pub(crate) async fn wait_for_model_refresh(mut pending: tokio::sync::watch::Receiver<u64>) {
+    let _ = tokio::time::timeout(Duration::from_secs(35), pending.changed()).await;
 }
 
 pub(super) struct LocalAgyProvider {
@@ -296,11 +310,32 @@ impl Provider for LocalAgyProvider {
         "antigravity"
     }
 
+    async fn replay_budget(
+        &self,
+        request: &Request,
+    ) -> Result<Option<(usize, usize)>, ProviderError> {
+        self.ready().await?.provider.replay_budget(request).await
+    }
+    async fn can_accept_guidance(&self, request: &Request) -> Result<bool, ProviderError> {
+        self.ready()
+            .await?
+            .provider
+            .can_accept_guidance(request)
+            .await
+    }
+
     async fn stream(&self, mut request: Request) -> Result<EventStream, ProviderError> {
         if request.model.is_empty() {
             request.model.clone_from(&self.model);
         }
         self.ready().await?.provider.stream(request).await
+    }
+
+    async fn stream_auxiliary(&self, mut request: Request) -> Result<EventStream, ProviderError> {
+        if request.model.is_empty() {
+            request.model.clone_from(&self.model);
+        }
+        self.ready().await?.provider.stream_auxiliary(request).await
     }
 }
 
@@ -327,6 +362,67 @@ fn private_dir(path: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::os::unix::fs::{symlink, PermissionsExt};
+
+    #[tokio::test(start_paused = true)]
+    async fn model_refresh_waits_for_discovery_cleanup_after_request_timeout() {
+        let (sender, receiver) = tokio::sync::watch::channel(0u64);
+        let waiting = tokio::spawn(wait_for_model_refresh(receiver));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(27)).await;
+        assert!(
+            !waiting.is_finished(),
+            "refresh expired during process cleanup"
+        );
+        sender.send(1).unwrap();
+        waiting.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn agy_provider_can_answer_permission_classifier_requests() {
+        struct Fixture(PathBuf);
+        impl IsolationBoundary for Fixture {
+            fn wrap(&self, mut spec: LaunchSpec, _: &Path) -> io::Result<LaunchSpec> {
+                spec.program = "/usr/bin/python3".into();
+                spec.args = vec!["-u".into(), self.0.as_os_str().into()];
+                Ok(spec)
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let script = directory.path().join("classifier.py");
+        std::fs::write(&script, r#"import sys,json
+sys.stdin.readline()
+print(json.dumps({'event':'step_update','step_update':{'step_type':'agent_response','text_delta':'allow'}}),flush=True)
+print(json.dumps({'event':'result','result':{'status':'SUCCESS'}}),flush=True)
+"#).unwrap();
+        let provider = std::sync::Arc::new(AgyProvider::new(
+            Config {
+                executable: "/usr/bin/python3".into(),
+                workspace_parent: directory.path().to_owned(),
+                environment: vec![],
+                lifetime: Duration::from_secs(10),
+            },
+            Fixture(script),
+        ));
+        let mut agent = mew_agent::Agent::new(
+            std::sync::Arc::new(mew_provider_fake::FakeProvider::new(vec![])),
+            std::sync::Arc::new(mew_hooks::NopDispatcher),
+            None,
+            vec![std::sync::Arc::new(mew_tools::tools::write::Write)],
+            None,
+        );
+        agent.set_classifier_provider(provider, Some("model".into()));
+        let decision = agent
+            .classify_permission(&mew_hooks::ToolCall {
+                tool_name: "write".into(),
+                call_id: "test".into(),
+                input: serde_json::json!({"path":"report.txt","content":"hi"}),
+            })
+            .await;
+        assert_eq!(
+            decision,
+            Some(mew_prompts::classifier::ClassifierDecision::Allow)
+        );
+    }
 
     #[tokio::test]
     async fn disabling_isolation_explicitly_selects_direct_launch_without_proxy() {
