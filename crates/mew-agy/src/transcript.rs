@@ -268,39 +268,17 @@ pub(crate) fn build_prompt_blocks(request: &Request) -> Result<(Vec<Value>, usiz
     Ok((blocks, text_size))
 }
 
-fn message_produces_projected_entry(message: &Message) -> Result<bool, String> {
-    for part in &message.parts {
-        match part {
-            Part::Text(_) if message.role != Role::System => return Ok(true),
-            Part::File(_) if message.role == Role::System => {
-                return Err("file attachments in system messages are not supported".into())
-            }
-            Part::File(_) | Part::ToolCall(_) | Part::ToolResult(_) => return Ok(true),
-            Part::Compaction(part) => {
-                if part.summary.is_some() || !part.preserved_context.is_empty() {
-                    return Ok(true);
-                }
-            }
-            Part::Text(_) | Part::Reasoning(_) => {}
-        }
-    }
-    Ok(false)
-}
-
+/// Raw index of the first message not yet delivered, given how many projected
+/// entries the CLI has already seen.
 fn suffix_raw_start(messages: &[Message], seen_projected_len: usize) -> Result<usize, String> {
     if seen_projected_len == 0 {
         return Ok(0);
     }
-    let mut projected = 0usize;
-    for (index, message) in messages.iter().enumerate() {
-        if message_produces_projected_entry(message)? {
-            projected += 1;
-            if projected == seen_projected_len {
-                return Ok(index + 1);
-            }
-        }
-    }
-    Err("seen history exceeds request messages".into())
+    let (_, starts) = project_messages_indexed(messages)?;
+    starts
+        .get(seen_projected_len - 1)
+        .map(|index| index + 1)
+        .ok_or_else(|| "seen history exceeds request messages".to_string())
 }
 
 pub(crate) fn build_delta_prompt_blocks(
@@ -505,10 +483,22 @@ pub fn system_instructions(request: &Request) -> Result<String, String> {
 }
 
 fn project_messages(messages: &[Message]) -> Result<Vec<ReplayMessage<'_>>, String> {
+    Ok(project_messages_indexed(messages)?.0)
+}
+
+/// Project messages, also reporting the raw index that produced each entry.
+///
+/// The delta path maps a count of already-delivered projected entries back to a
+/// raw message index. Deriving that mapping from the projection itself keeps a
+/// single definition of which messages survive projection.
+fn project_messages_indexed(
+    messages: &[Message],
+) -> Result<(Vec<ReplayMessage<'_>>, Vec<usize>), String> {
     let mut result = Vec::with_capacity(messages.len());
+    let mut starts = Vec::with_capacity(messages.len());
     let mut seen = HashSet::new();
     let mut pending: HashMap<&str, (&str, bool, &[ToolImage])> = HashMap::new();
-    for message in messages {
+    for (index, message) in messages.iter().enumerate() {
         if !pending.is_empty() && message.role != Role::User {
             return Err("tool calls must be followed by their results".into());
         }
@@ -611,10 +601,92 @@ fn project_messages(messages: &[Message]) -> Result<Vec<ReplayMessage<'_>>, Stri
                 Role::System => "system",
             };
             result.push(ReplayMessage { role, content });
+            starts.push(index);
         }
     }
     if !pending.is_empty() {
         return Err("tool calls are missing results".into());
     }
-    Ok(result)
+    Ok((result, starts))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::suffix_raw_start;
+    use mew_message::{
+        CompactionPart, Message, Part, PartBase, ReasoningPart, Role, TextPart, Time,
+    };
+    use ulid::Ulid;
+
+    fn base() -> PartBase {
+        PartBase {
+            id: Ulid::new(),
+            message_id: Ulid::new(),
+            session_id: Ulid::new(),
+        }
+    }
+    fn message(role: Role, parts: Vec<Part>) -> Message {
+        Message {
+            id: Ulid::new(),
+            session_id: Ulid::new(),
+            role,
+            parts,
+            time: Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        }
+    }
+    fn text(value: &str) -> Part {
+        Part::Text(TextPart {
+            base: base(),
+            text: value.into(),
+            synthetic: false,
+        })
+    }
+    fn reasoning() -> Part {
+        Part::Reasoning(ReasoningPart {
+            base: base(),
+            text: "private thought".into(),
+            signature: None,
+            encrypted_content: None,
+            provider_item_id: None,
+        })
+    }
+    fn empty_compaction() -> Part {
+        Part::Compaction(CompactionPart {
+            base: base(),
+            auto: true,
+            overflow: false,
+            tail_start_id: None,
+            summary: None,
+            removed_count: None,
+            preserved_context: vec![],
+        })
+    }
+
+    #[test]
+    fn suffix_raw_start_matches_the_projection_across_unprojected_messages() {
+        let messages = vec![
+            message(Role::User, vec![text("first")]),
+            message(Role::Assistant, vec![reasoning(), text("second")]),
+            message(Role::System, vec![text("system text is never projected")]),
+            message(Role::Assistant, vec![reasoning(), empty_compaction()]),
+            message(Role::User, vec![text("third")]),
+        ];
+        // Projected entries come from raw 0 ("first"), 1 ("second"), 4 ("third").
+        assert_eq!(suffix_raw_start(&messages, 0).unwrap(), 0);
+        assert_eq!(suffix_raw_start(&messages, 1).unwrap(), 1);
+        assert_eq!(suffix_raw_start(&messages, 2).unwrap(), 2);
+        assert_eq!(
+            suffix_raw_start(&messages, 3).unwrap(),
+            5,
+            "the undelivered suffix starts after the message that produced the last seen entry"
+        );
+        assert_eq!(
+            suffix_raw_start(&messages, 4),
+            Err("seen history exceeds request messages".into())
+        );
+    }
 }

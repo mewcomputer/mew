@@ -601,7 +601,125 @@ async fn quiesce_atomically_rejects_new_calls_and_reports_existing_calls() {
             .is_err()
     );
     server.resolve(&call.id, json!({"content":[]})).unwrap();
-    assert!(!server.quiesce(), "the HTTP request is still completing");
+    // Settlement is reported through `settled`, which cannot race with the
+    // completing request the way a fresh `quiesce()` poll would.
+    tokio::time::timeout(Duration::from_secs(3), server.settled())
+        .await
+        .expect("settles after the last call completes");
     assert!(waiting.await.unwrap().get("result").is_some());
     assert!(server.quiesce());
+}
+
+#[tokio::test]
+async fn re_initialization_replaces_an_idle_session() {
+    let (server, _calls, client) = setup().await;
+    let first = initialize(&server, &client).await;
+    // Nothing is in flight, so a CLI that opens a fresh MCP client session per
+    // prompt turn must be served rather than rejected.
+    let second = initialize(&server, &client).await;
+    assert_ne!(first, second);
+    let listed: Value = client
+        .post(server.url())
+        .header("mcp-session-id", &second)
+        .json(&json!({"jsonrpc":"2.0","id":7,"method":"tools/list"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed["result"]["tools"][0]["name"], "echo");
+    let unknown: Value = client
+        .post(server.url())
+        .header("mcp-session-id", &first)
+        .json(&json!({"jsonrpc":"2.0","id":8,"method":"tools/list"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        unknown.get("error").is_some(),
+        "the replaced session is gone"
+    );
+}
+
+#[tokio::test]
+async fn re_initialization_is_rejected_while_a_call_is_pending() {
+    let (server, mut calls, client) = setup().await;
+    let session = initialize(&server, &client).await;
+    let client2 = client.clone();
+    let url = server.url().to_owned();
+    let session2 = session.clone();
+    let waiting = tokio::spawn(async move {
+        client2
+            .post(url)
+            .header("mcp-session-id", session2)
+            .json(&json!({"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"echo","arguments":{"text":"one"}}}))
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()
+    });
+    let call = tokio::time::timeout(Duration::from_secs(3), calls.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    // Replacing the session now would strand the outstanding call.
+    let rejected: Value = client
+        .post(server.url())
+        .json(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(rejected["error"]["message"], "session already initialized");
+    server.resolve(&call.id, json!({"content":[]})).unwrap();
+    assert!(waiting.await.unwrap().get("result").is_some());
+    // Once settled, a new session is accepted.
+    let next = initialize(&server, &client).await;
+    assert_ne!(next, session);
+}
+
+#[tokio::test]
+async fn settlement_is_observable_without_polling() {
+    let (server, mut calls, client) = setup().await;
+    let session = initialize(&server, &client).await;
+    let client2 = client.clone();
+    let url = server.url().to_owned();
+    let session2 = session.clone();
+    let waiting = tokio::spawn(async move {
+        client2
+            .post(url)
+            .header("mcp-session-id", session2)
+            .json(&json!({"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"echo","arguments":{"text":"one"}}}))
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()
+    });
+    let call = tokio::time::timeout(Duration::from_secs(3), calls.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!server.is_settled());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), server.settled())
+            .await
+            .is_err(),
+        "settled must not resolve while a call is outstanding"
+    );
+    server.resolve(&call.id, json!({"content":[]})).unwrap();
+    tokio::time::timeout(Duration::from_secs(3), server.settled())
+        .await
+        .expect("settled resolves once the call completes");
+    assert!(server.is_settled());
+    assert!(waiting.await.unwrap().get("result").is_some());
 }

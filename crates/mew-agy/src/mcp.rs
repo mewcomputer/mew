@@ -2,9 +2,12 @@
 //!
 //! Supports initialization, initialized notifications, tool listing and calls.
 //! This is not a complete MCP server and does not provide OS isolation.
-//! Each server accepts one initialization for one AGY process. A lost
-//! initialization response or a reconnect requiring a new session cannot be
-//! resumed. Duplicate suppression does not survive a server/process restart.
+//! A server serves one AGY process for its whole lifetime, which spans every
+//! turn of a persistent session. The CLI may open a fresh MCP client session
+//! per turn, so a new `initialize` replaces an idle previous session once no
+//! tool call is in flight. A lost initialization response or a reconnect while
+//! calls are pending cannot be resumed. Duplicate suppression does not survive
+//! a server/process restart.
 
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
@@ -118,6 +121,9 @@ struct State {
     registry: Mutex<Registry>,
     calls: mpsc::Sender<ToolCall>,
     slots: Arc<Semaphore>,
+    /// Signalled when the last outstanding tool call settles, so a bounded
+    /// wait for settlement does not have to poll the registry.
+    settled: tokio::sync::Notify,
 }
 
 pub struct McpServer {
@@ -171,6 +177,7 @@ impl McpServer {
             registry: Mutex::new(Registry::default()),
             calls: tx,
             slots: Arc::new(Semaphore::new(max_pending)),
+            settled: tokio::sync::Notify::new(),
         });
         let owned = state.clone();
         let stop = CancellationToken::new();
@@ -237,6 +244,28 @@ impl McpServer {
         registry.requests.is_empty()
     }
 
+    /// Whether no tool call is outstanding.
+    pub fn is_settled(&self) -> bool {
+        self.state
+            .registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .requests
+            .is_empty()
+    }
+
+    /// Wait until no tool call is outstanding. Registering the notification
+    /// before the check keeps a call that settles in between from being missed.
+    pub async fn settled(&self) {
+        loop {
+            let notified = self.state.settled.notified();
+            if self.is_settled() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
     /// Re-enable admitting tool calls for a subsequent prompt turn on a persistent session.
     pub fn unquiesce(&self) {
         let mut registry = self
@@ -293,13 +322,19 @@ impl Drop for PendingGuard {
         if !self.completed {
             self.cancellation.cancel();
         }
-        let mut reg = self
-            .state
-            .registry
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        reg.pending.remove(&self.id);
-        reg.requests.remove(&self.request_key);
+        let settled = {
+            let mut reg = self
+                .state
+                .registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            reg.pending.remove(&self.id);
+            reg.requests.remove(&self.request_key);
+            reg.requests.is_empty() && reg.pending.is_empty()
+        };
+        if settled {
+            self.state.settled.notify_waiters();
+        }
     }
 }
 
@@ -380,7 +415,23 @@ async fn handle_inner(req: Request<Incoming>, state: Arc<State>) -> Response<Bod
         };
         let mut reg = state.registry.lock().unwrap_or_else(|e| e.into_inner());
         if !reg.sessions.is_empty() {
-            return rpc_error(id, -32000, "session already initialized");
+            // A persistent session lets the CLI open one MCP client session per
+            // prompt turn, so a finished session is replaceable. Replacing one
+            // that still has calls in flight would strand them, and replacing
+            // one that has not finished its handshake would let two racing
+            // initializations both succeed.
+            if !reg.pending.is_empty() || reg.sessions.values().any(|s| !s.initialized) {
+                tracing::warn!(
+                    outstanding = reg.pending.len(),
+                    "rejected AGY MCP re-initialization while tool calls were pending"
+                );
+                return rpc_error(id, -32000, "session already initialized");
+            }
+            tracing::debug!(
+                previous = reg.sessions.len(),
+                "AGY started a new MCP client session; replacing the idle one"
+            );
+            reg.sessions.clear();
         }
         reg.sessions.insert(
             sid.clone(),
@@ -483,6 +534,14 @@ async fn handle_inner(req: Request<Incoming>, state: Arc<State>) -> Response<Bod
     };
     if !tool.validator.is_valid(arguments) {
         return rpc_error(id, -32602, "invalid arguments");
+    }
+    {
+        // Report a quiesced server as quiesced even when capacity is exhausted,
+        // so an idle session's refusal is not mistaken for backpressure.
+        let reg = state.registry.lock().unwrap_or_else(|e| e.into_inner());
+        if reg.quiesced {
+            return rpc_error(id, -32000, "server is no longer accepting tool calls");
+        }
     }
     let Ok(permit) = state.slots.clone().try_acquire_owned() else {
         return rpc_error(id, -32000, "tool capacity exceeded");

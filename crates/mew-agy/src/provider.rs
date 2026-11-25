@@ -51,7 +51,9 @@ mod unix {
     struct Continuity {
         acp_session_id: String,
         session_contract: Value,
-        history: Vec<Value>,
+        /// The projected history the CLI has already been given. Shared behind
+        /// an `Arc` because it is the full transcript and every turn checks it.
+        history: Arc<Vec<Value>>,
         after_abandon: bool,
     }
     struct Pending {
@@ -215,18 +217,32 @@ mod unix {
             "supports_vision": contract["supports_vision"],
         })
     }
+    /// Why a live session cannot be continued with a delta.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Mismatch {
+        ContractChanged,
+        HistoryDidNotGrow,
+        HistoryPrefixChanged,
+        SuffixNotPureUserAppend,
+        SuffixHasCompaction,
+        SuffixDoesNotEndWithUser,
+    }
     fn match_continuity<'a>(
         continuity: &Continuity,
         session_contract: &Value,
         history: &'a [Value],
-    ) -> Option<&'a [Value]> {
-        if continuity.session_contract != *session_contract
-            || history.len() <= continuity.history.len()
-            || history[..continuity.history.len()] != continuity.history
-        {
-            return None;
+    ) -> Result<&'a [Value], Mismatch> {
+        let seen = continuity.history.as_slice();
+        if continuity.session_contract != *session_contract {
+            return Err(Mismatch::ContractChanged);
         }
-        let suffix = &history[continuity.history.len()..];
+        if history.len() <= seen.len() {
+            return Err(Mismatch::HistoryDidNotGrow);
+        }
+        if history[..seen.len()] != *seen {
+            return Err(Mismatch::HistoryPrefixChanged);
+        }
+        let suffix = &history[seen.len()..];
         if !continuity.after_abandon {
             let pure_user_append = suffix.iter().all(|message| {
                 message["role"] == "user"
@@ -237,7 +253,7 @@ mod unix {
                     })
             });
             if !pure_user_append {
-                return None;
+                return Err(Mismatch::SuffixNotPureUserAppend);
             }
         } else {
             let has_compaction = suffix.iter().any(|message| {
@@ -250,6 +266,9 @@ mod unix {
                     })
                 })
             });
+            if has_compaction {
+                return Err(Mismatch::SuffixHasCompaction);
+            }
             let ends_with_user = suffix.last().is_some_and(|message| {
                 message["role"] == "user"
                     && message["content"].as_array().is_some_and(|parts| {
@@ -258,11 +277,11 @@ mod unix {
                         })
                     })
             });
-            if has_compaction || !ends_with_user {
-                return None;
+            if !ends_with_user {
+                return Err(Mismatch::SuffixDoesNotEndWithUser);
             }
         }
-        Some(suffix)
+        Ok(suffix)
     }
     fn idle_timeout(lifetime: Duration) -> Duration {
         lifetime.min(Duration::from_secs(600))
@@ -388,7 +407,7 @@ mod unix {
                     guard.continuity = Some(Continuity {
                         acp_session_id,
                         session_contract: session_contract_of(&pending.contract),
-                        history: pending.history,
+                        history: Arc::new(pending.history),
                         after_abandon: true,
                     });
                 } else {
@@ -417,7 +436,7 @@ mod unix {
                 guard.continuity.as_ref().map(|c| {
                     (
                         c.session_contract.clone(),
-                        c.history.clone(),
+                        Arc::clone(&c.history),
                         c.after_abandon,
                     )
                 })
@@ -432,7 +451,7 @@ mod unix {
                         history: seen_history,
                         after_abandon,
                     };
-                    if let Some(suffix) =
+                    if let Ok(suffix) =
                         match_continuity(&temp, &session_contract_of(&contract), &history)
                     {
                         let req_for_size = request.clone();
@@ -575,14 +594,26 @@ mod unix {
                 let session_contract = session_contract_of(&contract);
                 let matched = if request.session_id.is_some() {
                     guard.continuity.as_ref().and_then(|continuity| {
-                        match_continuity(continuity, &session_contract, &history).map(|suffix| {
-                            (
+                        match match_continuity(continuity, &session_contract, &history) {
+                            Ok(suffix) => Some((
                                 continuity.acp_session_id.clone(),
                                 continuity.history.len(),
                                 suffix.to_vec(),
                                 continuity.after_abandon,
-                            )
-                        })
+                            )),
+                            Err(reason) => {
+                                // A silent fall back to a full replay costs a
+                                // whole replayed transcript per turn, so record
+                                // why the live session could not be reused.
+                                tracing::debug!(
+                                    ?reason,
+                                    seen = continuity.history.len(),
+                                    current = history.len(),
+                                    "AGY continuity not reused"
+                                );
+                                None
+                            }
+                        }
                     })
                 } else {
                     None
@@ -915,7 +946,7 @@ mod unix {
                             slot.continuity = Some(Continuity {
                                 acp_session_id,
                                 session_contract: session_contract_of(&contract),
-                                history: seen_history,
+                                history: Arc::new(seen_history),
                                 after_abandon: false,
                             });
                         } else {

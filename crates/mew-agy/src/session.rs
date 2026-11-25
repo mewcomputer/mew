@@ -31,6 +31,8 @@ mod unix {
     pub(crate) const MAX_INPUT: usize = 16 * 1_048_576;
     const EVENTS: usize = 16;
     const COMMANDS: usize = 8;
+    /// Bounded wait for in-flight MCP tool calls after the CLI ends its turn.
+    const SETTLE_GRACE_MS: u64 = 200;
 
     #[derive(Debug, Clone, Default)]
     pub struct SessionConfig {
@@ -1052,20 +1054,24 @@ mod unix {
                                                     }
                                                     _ => {}
                                                 }
+                                                // The CLI ended its turn, so any tool call still
+                                                // outstanding can never be delivered. Refuse new
+                                                // calls and give the last ones a bounded chance to
+                                                // settle before failing the turn.
+                                                let already_settled = server.quiesce();
                                                 if pending_call.is_some() {
-                                                    server.quiesce();
                                                     break 'actor Some("AGY finished with pending MCP calls");
                                                 }
-                                                let grace = (tokio::time::Instant::now() + Duration::from_millis(200)).min(deadline_at);
-                                                while !server.quiesce() {
-                                                    if tokio::time::Instant::now() >= grace {
-                                                        break 'actor Some("AGY finished with pending MCP calls");
-                                                    }
-                                                    tokio::select! {
+                                                if !already_settled {
+                                                    let grace = (tokio::time::Instant::now() + Duration::from_millis(SETTLE_GRACE_MS)).min(deadline_at);
+                                                    let settled = tokio::select! {
                                                         _ = shutdown.cancelled() => break 'actor Some("session closed"),
                                                         _ = active.as_ref().unwrap().turn_cancel.cancelled() => break 'actor Some("turn cancelled"),
                                                         _ = active.as_ref().unwrap().consumer_gone.cancelled() => break 'actor Some("consumer disconnected"),
-                                                        _ = tokio::time::sleep(Duration::from_millis(10)) => {},
+                                                        _ = tokio::time::timeout_at(grace, server.settled()) => server.is_settled(),
+                                                    };
+                                                    if !settled {
+                                                        break 'actor Some("AGY finished with pending MCP calls");
                                                     }
                                                 }
                                                 if !deferred.is_empty() {
