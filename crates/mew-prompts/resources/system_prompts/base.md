@@ -15,6 +15,7 @@ Treat the current prompt context as authoritative. If a tool call fails, report 
 {{ transclude("mew://system_prompts/_shell_file_edit_mandate") }}
 {{ transclude("mew://system_prompts/_shell_monitor_preference") }}
 {{ transclude("mew://system_prompts/_tool_library") }}
+{{ transclude("mew://system_prompts/_file_reference_guidance") }}
 
 ## Asynchronous Work
 

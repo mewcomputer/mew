@@ -104,6 +104,14 @@ mod tests {
             read_builtin("subagents/coder").is_some(),
             "resources/subagents/coder.md must be embedded"
         );
+        assert!(
+            read_builtin("compact/prompt").is_some(),
+            "resources/compact/prompt.md must be embedded"
+        );
+        assert!(
+            read_builtin("compact/summary_prefix").is_some(),
+            "resources/compact/summary_prefix.md must be embedded"
+        );
     }
 
     #[test]

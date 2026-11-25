@@ -72,6 +72,14 @@ impl Provider for Router {
         self.select(req).can_accept_guidance(req).await
     }
 
+    async fn abandon_pending(&self, session_id: mew_message::SessionId) {
+        self.deci.abandon_pending(session_id).await;
+        self.micro.abandon_pending(session_id).await;
+        if let Some(ref nano) = self.nano {
+            nano.abandon_pending(session_id).await;
+        }
+    }
+
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         let mut models = self.deci.list_models().await?;
         models.extend(self.micro.list_models().await?);
@@ -120,6 +128,10 @@ impl Provider for Routed {
     }
     async fn can_accept_guidance(&self, req: &Request) -> Result<bool, ProviderError> {
         self.inner.can_accept_guidance(req).await
+    }
+
+    async fn abandon_pending(&self, session_id: mew_message::SessionId) {
+        self.inner.abandon_pending(session_id).await;
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
@@ -373,5 +385,63 @@ mod tests {
         let req = empty_request(messages);
         let provider = router.select(&req);
         assert_eq!(provider.name(), "micro");
+    }
+
+    #[tokio::test]
+    async fn test_router_and_routed_forward_abandon_pending_to_all_tiers() {
+        struct RecordingProvider {
+            abandoned: Arc<std::sync::Mutex<Vec<mew_message::SessionId>>>,
+        }
+
+        #[async_trait]
+        impl Provider for RecordingProvider {
+            fn name(&self) -> &str {
+                "recording"
+            }
+
+            async fn stream(&self, _req: Request) -> Result<EventStream, ProviderError> {
+                Err(ProviderError::Message("unused".into()))
+            }
+
+            async fn abandon_pending(&self, session_id: mew_message::SessionId) {
+                self.abandoned.lock().unwrap().push(session_id);
+            }
+        }
+
+        let nano_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let micro_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let deci_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let router = Router::new(
+            Some(Arc::new(RecordingProvider {
+                abandoned: nano_calls.clone(),
+            })),
+            Arc::new(RecordingProvider {
+                abandoned: micro_calls.clone(),
+            }),
+            Arc::new(RecordingProvider {
+                abandoned: deci_calls.clone(),
+            }),
+        );
+        let first_session = ulid::Ulid::new();
+        router.abandon_pending(first_session).await;
+        assert_eq!(*nano_calls.lock().unwrap(), vec![first_session]);
+        assert_eq!(*micro_calls.lock().unwrap(), vec![first_session]);
+        assert_eq!(*deci_calls.lock().unwrap(), vec![first_session]);
+
+        let routed = Routed::new(router, "router".into(), "model".into());
+        let second_session = ulid::Ulid::new();
+        routed.abandon_pending(second_session).await;
+        assert_eq!(
+            *nano_calls.lock().unwrap(),
+            vec![first_session, second_session]
+        );
+        assert_eq!(
+            *micro_calls.lock().unwrap(),
+            vec![first_session, second_session]
+        );
+        assert_eq!(
+            *deci_calls.lock().unwrap(),
+            vec![first_session, second_session]
+        );
     }
 }

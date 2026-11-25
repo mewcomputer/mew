@@ -158,6 +158,12 @@ pub enum AgentEvent {
     },
     /// The flagged-files set changed (file flagged or unflagged).
     FlaggedFilesChanged { files: Vec<FlaggedFileInfo> },
+    /// Context compaction started (`active = true`) or finished (`active = false`).
+    Compacting {
+        active: bool,
+        removed: Option<usize>,
+        summary: Option<String>,
+    },
     /// The model called `propose_goal`: present the objective to the user
     /// for approval and block the tool until they respond. On `Accepted`
     /// the goal becomes active; on `Rejected` the tool returns an error.
@@ -324,6 +330,16 @@ impl std::fmt::Debug for AgentEvent {
                 .debug_struct("FlaggedFilesChanged")
                 .field("count", &files.len())
                 .finish(),
+            AgentEvent::Compacting {
+                active,
+                removed,
+                summary,
+            } => f
+                .debug_struct("Compacting")
+                .field("active", active)
+                .field("removed", removed)
+                .field("has_summary", &summary.is_some())
+                .finish(),
             AgentEvent::GoalProposed {
                 call_id, objective, ..
             } => f
@@ -337,8 +353,10 @@ impl std::fmt::Debug for AgentEvent {
 
 mod agent;
 mod child_guidance;
+mod compaction;
 mod events;
 pub mod manifest;
+pub mod mentions;
 mod prompt_cache;
 mod python;
 #[cfg(test)]

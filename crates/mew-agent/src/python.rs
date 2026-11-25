@@ -58,7 +58,21 @@ impl Tool for PythonTool {
     }
     fn schema(&self) -> &Value {
         static SCHEMA: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
-        SCHEMA.get_or_init(|| serde_json::json!({"type":"object","properties":{"source":{"type":"string"}},"required":["source"]}))
+        SCHEMA.get_or_init(|| {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "source": {
+                        "type": "string"
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Short (3-8 word) user-facing summary of what this script does."
+                    }
+                },
+                "required": ["source"]
+            })
+        })
     }
     fn sensitivity(&self) -> Sensitivity {
         if self.isolated {

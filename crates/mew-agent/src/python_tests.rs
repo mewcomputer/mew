@@ -1397,3 +1397,14 @@ async fn python_reports_nested_tool_calls_and_failures() {
         "{errors:?}"
     );
 }
+
+#[test]
+fn python_schema_includes_optional_description() {
+    use mew_tools::Tool;
+
+    let tool = crate::python::PythonTool { isolated: false };
+    let schema = tool.schema();
+    assert_eq!(schema["properties"]["description"]["type"], "string");
+    let required = schema["required"].as_array().unwrap();
+    assert_eq!(required, &vec![json!("source")]);
+}

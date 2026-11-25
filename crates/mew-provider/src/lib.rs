@@ -29,6 +29,9 @@ pub trait Provider: Send + Sync {
     async fn can_accept_guidance(&self, _req: &Request) -> Result<bool, ProviderError> {
         Ok(true)
     }
+    /// Release any open in-turn continuation state (for example a live
+    /// tool-handoff subprocess) when an agent turn ends without resuming it.
+    async fn abandon_pending(&self, _session_id: mew_message::SessionId) {}
     /// Run an internal, tool-free helper request. Temperature, max tokens and
     /// disabled reasoning are advisory here: a provider without those controls
     /// may use its defaults. Ordinary turns must use `stream` instead.

@@ -224,6 +224,7 @@ async fn automatic_plan_flag_is_ready_before_immediate_compaction() {
     );
     agent.plan_path = Some(plan);
     agent.keep_turns = 1;
+    agent.compaction_summarize_with_llm = false;
     agent
         .append_message(context_message(Role::User, "old".into()))
         .await;
@@ -978,6 +979,7 @@ async fn unknown_context_compacts_history_for_provider_replay_budget() {
     );
     agent.context_window = 0;
     agent.keep_turns = 8;
+    agent.compaction_summarize_with_llm = false;
     agent
         .load_messages(vec![
             context_message(Role::User, "old".into()),
@@ -1042,6 +1044,7 @@ async fn replay_budget_compaction_preserves_configured_recent_messages_when_they
     );
     agent.context_window = 0;
     agent.keep_turns = 3;
+    agent.compaction_summarize_with_llm = false;
     agent
         .load_messages(vec![
             context_message(Role::User, "old".into()),
@@ -1080,6 +1083,7 @@ async fn replay_budget_uses_smaller_tail_only_when_configured_tail_does_not_fit(
     );
     agent.context_window = 0;
     agent.keep_turns = 3;
+    agent.compaction_summarize_with_llm = false;
     agent
         .load_messages(vec![
             context_message(Role::User, "old".into()),
@@ -1101,6 +1105,161 @@ async fn replay_budget_uses_smaller_tail_only_when_configured_tail_does_not_fit(
         .parts
         .iter()
         .any(|part| matches!(part, Part::Text(text) if text.text.contains("recent text")))));
+}
+
+struct ScaleSwitchingReplayProvider {
+    captured: StdMutex<Vec<Request>>,
+    text_limit: usize,
+    frame_limit: usize,
+}
+
+#[async_trait]
+impl Provider for ScaleSwitchingReplayProvider {
+    fn name(&self) -> &str {
+        "scale-switching-replay-test"
+    }
+
+    async fn replay_budget(&self, req: &Request) -> Result<Option<(usize, usize)>, ProviderError> {
+        let mut text_bytes = 0usize;
+        let mut attachment_bytes = 0usize;
+        for message in &req.messages {
+            for part in &message.parts {
+                match part {
+                    Part::Text(text) => text_bytes += text.text.len(),
+                    Part::ToolCall(call) => {
+                        if let ToolState::Completed(completed) = &call.state {
+                            text_bytes += completed.output.len();
+                            for image in &completed.images {
+                                text_bytes += image.data.len();
+                            }
+                        }
+                    }
+                    Part::File(file) if message.role == Role::User => {
+                        attachment_bytes += file.url.len();
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let frame_bytes = text_bytes + attachment_bytes;
+        if (text_bytes as u128) * (self.frame_limit as u128)
+            >= (frame_bytes as u128) * (self.text_limit as u128)
+        {
+            Ok(Some((text_bytes, self.text_limit)))
+        } else {
+            Ok(Some((frame_bytes, self.frame_limit)))
+        }
+    }
+
+    async fn stream(&self, req: Request) -> Result<EventStream, ProviderError> {
+        self.captured.lock().unwrap().push(req);
+        Ok(Box::pin(futures::stream::iter(
+            FakeProvider::text_response("ok"),
+        )))
+    }
+}
+
+#[tokio::test]
+async fn replay_budget_compaction_accepts_ratio_improvement_across_limit_scales() {
+    let provider = Arc::new(ScaleSwitchingReplayProvider {
+        captured: StdMutex::new(vec![]),
+        text_limit: 2_000,
+        frame_limit: 100_000,
+    });
+    let mut agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    agent.context_window = 0;
+    agent.keep_turns = 1;
+    agent.compaction_summarize_with_llm = false;
+
+    let call_msg_id = mew_message::MessageId::new();
+    let result_msg_id = mew_message::MessageId::new();
+    let old_call = ToolCallPart {
+        base: PartBase {
+            id: ulid::Ulid::new(),
+            message_id: call_msg_id,
+            session_id: agent.session_id,
+        },
+        tool_name: "read".into(),
+        call_id: "c1".into(),
+        raw_input: String::new(),
+        state: ToolState::Completed(ToolStateCompleted {
+            input: serde_json::json!({}),
+            output: "ok".into(),
+            metadata: None,
+            diff: None,
+            images: vec![mew_message::ToolImage {
+                mime: "image/png".into(),
+                data: "A".repeat(3_000),
+            }],
+            time: ToolTime {
+                start: 0,
+                end: Some(1),
+            },
+        }),
+    };
+    agent
+        .load_messages(vec![
+            context_message(Role::User, "old".into()),
+            Message {
+                id: call_msg_id,
+                session_id: agent.session_id,
+                role: Role::Assistant,
+                parts: vec![Part::ToolCall(old_call)],
+                time: mew_message::Time {
+                    created: 0,
+                    completed: None,
+                },
+                assistant: None,
+            },
+            Message {
+                id: result_msg_id,
+                session_id: agent.session_id,
+                role: Role::User,
+                parts: vec![Part::ToolResult(ToolResultPart {
+                    base: PartBase {
+                        id: ulid::Ulid::new(),
+                        message_id: result_msg_id,
+                        session_id: agent.session_id,
+                    },
+                    call_id: "c1".into(),
+                })],
+                time: mew_message::Time {
+                    created: 0,
+                    completed: None,
+                },
+                assistant: None,
+            },
+        ])
+        .await;
+
+    let mut events = agent.run_with_parts(
+        "latest request".into(),
+        vec![Part::File(mew_message::FilePart {
+            base: PartBase {
+                id: ulid::Ulid::new(),
+                message_id: mew_message::MessageId::new(),
+                session_id: agent.session_id,
+            },
+            mime: "image/png".into(),
+            filename: Some("img.png".into()),
+            url: format!("data:image/png;base64,{}", "B".repeat(10_000)),
+        })],
+        None,
+    );
+    while events.recv().await.is_some() {}
+
+    let captured = provider.captured.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    assert!(captured[0].messages.iter().any(|message| message
+        .parts
+        .iter()
+        .any(|part| matches!(part, Part::Compaction(_)))));
 }
 
 #[tokio::test]
@@ -1364,6 +1523,9 @@ impl Provider for AgyFixtureProvider {
     }
     async fn can_accept_guidance(&self, req: &Request) -> Result<bool, ProviderError> {
         self.0.can_accept_guidance(req).await
+    }
+    async fn abandon_pending(&self, session_id: mew_message::SessionId) {
+        self.0.abandon_pending(session_id).await
     }
 }
 
@@ -2330,6 +2492,7 @@ async fn test_flagged_files_re_injected_after_compaction() {
     // Forced compaction leaves room for the current prompt and included plan.
     agent.context_window = 256;
     agent.keep_turns = 1;
+    agent.compaction_summarize_with_llm = false;
 
     // Pre-populate history so compaction has something to compact away.
     let old_msg = Message {
@@ -2396,6 +2559,7 @@ async fn test_compaction_keeps_tool_call_with_result() {
     );
     agent.context_window = 100;
     agent.keep_turns = 2;
+    agent.compaction_summarize_with_llm = false;
 
     let old_id = ulid::Ulid::new();
     let old = Message {
@@ -2563,6 +2727,7 @@ async fn compaction_carries_recent_user_constraints_without_retaining_large_hist
     agent.context_window = 1024;
     agent.default_max_output_tokens = 256;
     agent.keep_turns = 1;
+    agent.compaction_summarize_with_llm = false;
     let historical = context_message(Role::User, "old bulk paste ".repeat(400));
     let constraint = context_message(Role::User, "Keep the public API stable.".into());
     let assistant = context_message(Role::Assistant, "Understood.".into());
@@ -2612,6 +2777,7 @@ async fn test_compaction_marker_preserves_prefix_across_turns_and_resume() {
     );
     agent.context_window = 100;
     agent.keep_turns = 1;
+    agent.compaction_summarize_with_llm = false;
 
     let old_id = ulid::Ulid::new();
     agent
@@ -4603,6 +4769,7 @@ async fn system_prompt_refresh_waits_for_compaction_when_retention_is_unknown() 
         None,
     );
     agent.set_system("base prompt".into());
+    agent.compaction_summarize_with_llm = false;
 
     let skill_a = mew_skills::Skill {
         name: "skill-a".into(),
@@ -5697,6 +5864,38 @@ async fn fallback_code_mode_respects_persona_python_denial() {
     assert!(!requests[0]
         .system
         .contains("The only direct tool is `python`"));
+}
+
+#[tokio::test]
+async fn fallback_provider_respects_replay_budget_before_streaming() {
+    let fallback = Arc::new(ReplayBudgetProvider {
+        captured: StdMutex::new(vec![]),
+        max_bytes: 100,
+    });
+    let mut agent = Agent::new(
+        Arc::new(ErroringProvider),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    agent.fallback_models = Some(vec!["test/fallback".into()]);
+    let provider = fallback.clone();
+    agent.set_provider_builder(Box::new(move |_| Ok(provider.clone())));
+    let mut events = agent.run("x".repeat(500));
+    let mut error = None;
+    while let Some(event) = events.recv().await {
+        if let AgentEvent::Error(message) = event {
+            error = Some(message);
+        }
+    }
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|message| message.contains("replay limit")),
+        "expected replay limit error, got {error:?}"
+    );
+    assert!(fallback.captured.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -8007,5 +8206,837 @@ async fn cancelling_provider_token_in_real_child_preserves_sibling_session() {
     assert_eq!(
         std::fs::read_to_string(tmp.path().join("child.txt")).unwrap(),
         "approved"
+    );
+}
+
+#[tokio::test]
+async fn compaction_uses_llm_summary_with_focus_and_artifact_blocks_and_injects_into_next_turn() {
+    let provider = Arc::new(CapturingProvider::new(vec![
+        FakeProvider::text_response(
+            "## Goal & Constraints\nFix compaction\n\n## Progress\nUpdated core",
+        ),
+        FakeProvider::text_response("continued"),
+    ]));
+    let mut agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    agent.set_model_info("test-model", "test-provider");
+    agent.keep_turns = 1;
+
+    let write_call_id = ulid::Ulid::new().to_string();
+    agent
+        .append_message(context_message(Role::User, "Implement feature X".into()))
+        .await;
+    agent
+        .append_message(Message {
+            id: ulid::Ulid::new(),
+            session_id: agent.session_id,
+            role: Role::Assistant,
+            parts: vec![Part::ToolCall(mew_message::ToolCallPart {
+                base: PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: ulid::Ulid::new(),
+                    session_id: agent.session_id,
+                },
+                tool_name: "write".into(),
+                call_id: write_call_id,
+                state: mew_message::ToolState::Completed(mew_message::ToolStateCompleted {
+                    input: serde_json::json!({"path": "src/feature.rs"}),
+                    output: "written".into(),
+                    metadata: None,
+                    diff: None,
+                    images: Vec::new(),
+                    time: mew_message::ToolTime {
+                        start: 0,
+                        end: Some(1),
+                    },
+                }),
+                raw_input: String::new(),
+            })],
+            time: mew_message::Time {
+                created: 0,
+                completed: Some(1),
+            },
+            assistant: None,
+        })
+        .await;
+    agent
+        .append_message(context_message(Role::User, "recent question".into()))
+        .await;
+
+    let (removed, summary) = agent
+        .compact_context_with_instructions(Some("preserve parser notes"))
+        .await
+        .expect("compaction succeeds");
+    assert_eq!(removed, 2);
+    let summary = summary.expect("summary present");
+    assert!(summary.contains("## Goal & Constraints\nFix compaction"));
+    assert!(summary.contains("<modified-files>\n- src/feature.rs\n</modified-files>"));
+
+    let mut rx = agent.run("follow up".into());
+    while rx.recv().await.is_some() {}
+
+    let captured = provider.captured.lock().unwrap();
+    assert_eq!(captured.len(), 2);
+    assert!(captured[0].tools.is_empty());
+    let Part::Text(sum_prompt) = &captured[0].messages[0].parts[0] else {
+        panic!("expected text summarization prompt");
+    };
+    assert!(sum_prompt
+        .text
+        .contains("## Initial Task\nImplement feature X"));
+    assert!(sum_prompt
+        .text
+        .contains("## Focus Instructions\npreserve parser notes"));
+
+    assert!(captured[1].messages.iter().any(|msg| {
+        msg.role == Role::User
+            && msg.parts.iter().any(|part| match part {
+                Part::Text(tp) => {
+                    tp.synthetic
+                        && tp.text.contains(mew_prompts::compact::summary_prefix())
+                        && tp.text.contains("## Goal & Constraints\nFix compaction")
+                        && tp
+                            .text
+                            .contains("<modified-files>\n- src/feature.rs\n</modified-files>")
+                }
+                _ => false,
+            })
+    }));
+}
+
+#[tokio::test]
+async fn compaction_falls_back_to_carried_user_messages_and_artifacts_when_provider_returns_error()
+{
+    struct FailingProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for FailingProvider {
+        fn name(&self) -> &str {
+            "failing"
+        }
+
+        async fn stream(
+            &self,
+            _req: Request,
+        ) -> Result<mew_provider::EventStream, mew_provider::ProviderError> {
+            Err(mew_provider::ProviderError::Message("upstream down".into()))
+        }
+    }
+
+    let mut agent = Agent::new(
+        Arc::new(FailingProvider),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    agent.keep_turns = 1;
+    agent
+        .append_message(context_message(Role::User, "Earlier requirement".into()))
+        .await;
+    agent
+        .append_message(Message {
+            id: ulid::Ulid::new(),
+            session_id: agent.session_id,
+            role: Role::Assistant,
+            parts: vec![Part::ToolCall(mew_message::ToolCallPart {
+                base: PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: ulid::Ulid::new(),
+                    session_id: agent.session_id,
+                },
+                tool_name: "read".into(),
+                call_id: ulid::Ulid::new().to_string(),
+                state: mew_message::ToolState::Completed(mew_message::ToolStateCompleted {
+                    input: serde_json::json!({"path": "src/config.rs"}),
+                    output: "ok".into(),
+                    metadata: None,
+                    diff: None,
+                    images: Vec::new(),
+                    time: mew_message::ToolTime {
+                        start: 0,
+                        end: Some(1),
+                    },
+                }),
+                raw_input: String::new(),
+            })],
+            time: mew_message::Time {
+                created: 0,
+                completed: Some(1),
+            },
+            assistant: None,
+        })
+        .await;
+    agent
+        .append_message(context_message(Role::User, "latest".into()))
+        .await;
+
+    let (removed, summary) = agent
+        .compact_context_with_instructions(None)
+        .await
+        .expect("fallback compaction succeeds");
+    assert_eq!(removed, 2);
+    let summary = summary.expect("fallback summary present");
+    assert!(summary.contains("Earlier context was compacted."));
+    assert!(summary.contains("Earlier requirement"));
+    assert!(summary.contains("<read-files>\n- src/config.rs\n</read-files>"));
+}
+
+fn completed_tool_pair(
+    session_id: mew_message::SessionId,
+    tool_name: &str,
+    call_id: &str,
+    input: serde_json::Value,
+    output: String,
+) -> (Message, Message) {
+    let call_msg_id = ulid::Ulid::new();
+    let call_msg = Message {
+        id: call_msg_id,
+        session_id,
+        role: Role::Assistant,
+        parts: vec![Part::ToolCall(ToolCallPart {
+            base: PartBase {
+                id: ulid::Ulid::new(),
+                message_id: call_msg_id,
+                session_id,
+            },
+            tool_name: tool_name.into(),
+            call_id: call_id.into(),
+            state: ToolState::Completed(ToolStateCompleted {
+                input,
+                output,
+                metadata: None,
+                diff: None,
+                images: vec![],
+                time: ToolTime {
+                    start: 0,
+                    end: Some(1),
+                },
+            }),
+            raw_input: String::new(),
+        })],
+        time: Time {
+            created: 0,
+            completed: Some(1),
+        },
+        assistant: None,
+    };
+    let res_msg_id = ulid::Ulid::new();
+    let res_msg = Message {
+        id: res_msg_id,
+        session_id,
+        role: Role::User,
+        parts: vec![Part::ToolResult(ToolResultPart {
+            base: PartBase {
+                id: ulid::Ulid::new(),
+                message_id: res_msg_id,
+                session_id,
+            },
+            call_id: call_id.into(),
+        })],
+        time: Time {
+            created: 0,
+            completed: None,
+        },
+        assistant: None,
+    };
+    (call_msg, res_msg)
+}
+
+fn completed_tool_output<'a>(messages: &'a [Message], call_id: &str) -> Option<&'a str> {
+    messages.iter().find_map(|msg| {
+        msg.parts.iter().find_map(|part| match part {
+            Part::ToolCall(tc) if tc.call_id == call_id => match &tc.state {
+                ToolState::Completed(state) => Some(state.output.as_str()),
+                _ => None,
+            },
+            _ => None,
+        })
+    })
+}
+
+#[tokio::test]
+async fn test_warm_unknown_cache_does_not_prune_stale_tool_outputs() {
+    let provider = Arc::new(CapturingProvider::new(vec![
+        FakeProvider::text_response("ok 1"),
+        FakeProvider::text_response("ok 2"),
+    ]));
+    let mut agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    agent.context_window = 0;
+    agent.keep_turns = 2;
+
+    // Turn 1 warms the prompt cache with Unknown retention.
+    let mut rx = agent.run("warm turn".into());
+    while rx.recv().await.is_some() {}
+
+    let big_output = "stale line content\n".repeat(200);
+    let (call_msg, res_msg) = completed_tool_pair(
+        agent.session_id,
+        "read",
+        "call-warm-1",
+        serde_json::json!({"path": "src/main.rs"}),
+        big_output.clone(),
+    );
+    agent.append_message(call_msg).await;
+    agent.append_message(res_msg).await;
+    agent
+        .append_message(context_message(Role::User, "intermediate".into()))
+        .await;
+    agent
+        .append_message(context_message(Role::Assistant, "ack".into()))
+        .await;
+
+    // Turn 2 has a warm Unknown cache: stale tool outputs must remain unpruned.
+    let mut rx = agent.run("follow up".into());
+    while rx.recv().await.is_some() {}
+
+    let captured = provider.captured.lock().unwrap();
+    assert_eq!(captured.len(), 2);
+    assert_eq!(
+        completed_tool_output(&captured[1].messages, "call-warm-1"),
+        Some(big_output.as_str())
+    );
+}
+
+#[tokio::test]
+async fn test_expired_or_reset_cache_prunes_stale_tool_outputs_and_preserves_pairing() {
+    let provider = Arc::new(CapturingProvider::new(vec![
+        FakeProvider::text_response("ok 1"),
+        FakeProvider::text_response("ok 2"),
+        FakeProvider::text_response("ok 3"),
+        FakeProvider::text_response("ok 4"),
+    ]));
+    let mut agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    agent.context_window = 0;
+    agent.keep_turns = 5;
+
+    // Turn 1 warms the cache under Unknown retention.
+    let mut rx = agent.run("warm turn".into());
+    while rx.recv().await.is_some() {}
+
+    let stale_output = "old bulky line\n".repeat(250);
+    let recent_output = "recent bulky line\n".repeat(250);
+    let (stale_call, stale_res) = completed_tool_pair(
+        agent.session_id,
+        "read",
+        "call-stale-1",
+        serde_json::json!({"path": "src/lib.rs"}),
+        stale_output.clone(),
+    );
+    let (recent_call, recent_res) = completed_tool_pair(
+        agent.session_id,
+        "bash",
+        "call-recent-2",
+        serde_json::json!({"command": "cargo test"}),
+        recent_output.clone(),
+    );
+    agent.append_message(stale_call).await;
+    agent.append_message(stale_res).await;
+    agent.append_message(recent_call).await;
+    agent.append_message(recent_res).await;
+
+    // Turn 2: Unknown warm cache preserves unpruned output.
+    let mut rx = agent.run("still warm".into());
+    while rx.recv().await.is_some() {}
+
+    // Expire Known cache window so Turn 3 may safely prune older tool outputs.
+    agent.set_prompt_cache_retention(crate::PromptCacheRetention::Known(
+        std::time::Duration::ZERO,
+    ));
+    let mut rx = agent.run("after expiry".into());
+    while rx.recv().await.is_some() {}
+
+    // Re-warm cache retention on Turn 4 and verify the pruned prefix stays byte-stable.
+    agent.set_prompt_cache_retention(crate::PromptCacheRetention::from_secs(Some(3600)));
+    let mut rx = agent.run("stable subsequent turn".into());
+    while rx.recv().await.is_some() {}
+
+    let captured = provider.captured.lock().unwrap();
+    assert_eq!(captured.len(), 4);
+    assert_eq!(
+        completed_tool_output(&captured[1].messages, "call-stale-1"),
+        Some(stale_output.as_str())
+    );
+
+    let pruned_stub = completed_tool_output(&captured[2].messages, "call-stale-1")
+        .expect("stale tool call remains in request");
+    assert!(pruned_stub.starts_with("[Pruned tool result: read(src/lib.rs),"));
+    assert!(captured[2].messages.iter().any(|m| {
+        m.parts
+            .iter()
+            .any(|p| matches!(p, Part::ToolResult(tr) if tr.call_id == "call-stale-1"))
+    }));
+
+    // Recent tool output within keep_turns stays untouched.
+    assert_eq!(
+        completed_tool_output(&captured[2].messages, "call-recent-2"),
+        Some(recent_output.as_str())
+    );
+    // Warm subsequent turn preserves the synced pruned stub for prefix stability.
+    assert_eq!(
+        completed_tool_output(&captured[3].messages, "call-stale-1"),
+        Some(pruned_stub)
+    );
+}
+
+#[tokio::test]
+async fn test_threshold_pruning_averts_full_compaction_when_sufficient() {
+    let provider = Arc::new(CapturingProvider::new(vec![
+        FakeProvider::text_response("warm ok"),
+        FakeProvider::text_response("continued ok"),
+    ]));
+    let mut agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    agent.context_window = 2_000;
+    agent.compaction_threshold = 0.8;
+    agent.keep_turns = 2;
+
+    // Warm the cache first so pre-turn pruning does not run on Turn 2.
+    let mut rx = agent.run("warm task brief".into());
+    while rx.recv().await.is_some() {}
+
+    let bulky = "tokenword ".repeat(2_000);
+    let (heavy_call, heavy_res) = completed_tool_pair(
+        agent.session_id,
+        "read",
+        "call-heavy-1",
+        serde_json::json!({"path": "big.log"}),
+        bulky,
+    );
+    agent.append_message(heavy_call).await;
+    agent.append_message(heavy_res).await;
+    agent
+        .append_message(context_message(Role::User, "intermediate".into()))
+        .await;
+    agent
+        .append_message(context_message(Role::Assistant, "ack".into()))
+        .await;
+
+    let mut rx = agent.run("continue".into());
+    while rx.recv().await.is_some() {}
+
+    let captured = provider.captured.lock().unwrap();
+    // Only 2 provider calls total (no extra LLM compaction summary request).
+    assert_eq!(captured.len(), 2);
+    let msgs = &captured[1].messages;
+    assert!(
+        !msgs
+            .iter()
+            .any(|m| m.parts.iter().any(|p| matches!(p, Part::Compaction(_)))),
+        "threshold pruning should avert full compaction when pruned size fits under threshold"
+    );
+    assert!(
+        completed_tool_output(msgs, "call-heavy-1")
+            .is_some_and(|out| out.starts_with("[Pruned tool result: read(big.log),")),
+        "heavy stale tool call should be pruned to a stub"
+    );
+    assert!(msgs.iter().any(|m| {
+        m.parts
+            .iter()
+            .any(|p| matches!(p, Part::ToolResult(tr) if tr.call_id == "call-heavy-1"))
+    }));
+}
+
+#[tokio::test]
+async fn test_execute_tool_offloads_oversized_output_into_session_dir() {
+    struct BigTool {
+        payload: String,
+    }
+
+    #[async_trait]
+    impl Tool for BigTool {
+        fn name(&self) -> &str {
+            "big_tool"
+        }
+        fn description(&self) -> &str {
+            "returns oversized output"
+        }
+        fn schema(&self) -> &serde_json::Value {
+            static SCHEMA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+            SCHEMA.get_or_init(|| serde_json::json!({"type": "object", "properties": {}}))
+        }
+        fn sensitivity(&self) -> Sensitivity {
+            Sensitivity::ReadOnly
+        }
+        async fn execute(
+            &self,
+            _ctx: ToolCtx,
+            _input: serde_json::Value,
+        ) -> Result<ToolOutput, mew_tools::ToolError> {
+            Ok(ToolOutput {
+                output: self.payload.clone(),
+                error: String::new(),
+                diff: None,
+                images: vec![],
+                metadata: None,
+                file_delta: None,
+            })
+        }
+    }
+
+    let payload = "oversized line of output\n".repeat(2_500);
+    assert!(payload.len() > crate::compaction::OFFLOAD_TOOL_OUTPUT_BYTES);
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let writer = mew_session::Writer::open_at(tmp.path(), "offload-test-session")
+        .await
+        .expect("create session");
+    let expected_file = writer
+        .path()
+        .parent()
+        .expect("session dir")
+        .join("tool_outputs")
+        .join("call-big-1.txt");
+    let provider = Arc::new(CapturingProvider::new(vec![
+        FakeProvider::tool_call("big_tool", "call-big-1", serde_json::json!({})),
+        FakeProvider::text_response("done"),
+    ]));
+    let mut agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        Some(writer),
+        vec![Arc::new(BigTool {
+            payload: payload.clone(),
+        })],
+        None,
+    );
+    agent.context_window = 0;
+
+    let mut rx = agent.run("run big tool".into());
+    while rx.recv().await.is_some() {}
+
+    let captured = provider.captured.lock().unwrap();
+    assert_eq!(captured.len(), 2);
+    let stored = completed_tool_output(&captured[1].messages, "call-big-1")
+        .expect("tool output present in follow-up request");
+    assert!(stored.starts_with("[Output offloaded:"));
+    assert!(stored.contains(&expected_file.display().to_string()));
+    assert_eq!(
+        std::fs::read_to_string(&expected_file).expect("saved offloaded file"),
+        payload
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn max_turns_after_tool_handoff_abandons_pending_provider_state_for_next_turn() {
+    struct EchoTool {
+        schema: serde_json::Value,
+    }
+    #[async_trait]
+    impl Tool for EchoTool {
+        fn name(&self) -> &str {
+            "echo"
+        }
+        fn description(&self) -> &str {
+            "echo"
+        }
+        fn schema(&self) -> &serde_json::Value {
+            &self.schema
+        }
+        fn sensitivity(&self) -> Sensitivity {
+            Sensitivity::ReadOnly
+        }
+        async fn execute(
+            &self,
+            _ctx: ToolCtx,
+            input: serde_json::Value,
+        ) -> Result<ToolOutput, mew_tools::ToolError> {
+            Ok(ToolOutput {
+                output: input.to_string(),
+                error: String::new(),
+                diff: None,
+                images: vec![],
+                metadata: None,
+                file_delta: None,
+            })
+        }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let script = directory.path().join("agy-acp-fixture.py");
+    std::fs::write(
+        &script,
+        r#"import sys,json,urllib.request
+for i,r in [(1,{'protocolVersion':1}),(2,{}),(3,{'sessionId':'s1'}),(4,{})]:
+ json.loads(sys.stdin.readline())
+ print(json.dumps({'jsonrpc':'2.0','id':i,'result':r}),flush=True)
+prompt_msg=json.loads(sys.stdin.readline())
+prompt_text='\n'.join(b.get('text','') for b in prompt_msg['params']['prompt'] if isinstance(b,dict))
+if 'continue-after-limit' in prompt_text:
+ print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'s1','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'continued after max turns'}}}}),flush=True)
+ print(json.dumps({'jsonrpc':'2.0','id':5,'result':{'stopReason':'end_turn'}}),flush=True)
+else:
+ with open('.agents/mcp_config.json') as f: url=json.load(f)['mcpServers']['mew']['serverUrl']
+ def post(body,sid=None):
+  h={'Content-Type':'application/json'}
+  if sid: h['mcp-session-id']=sid
+  with urllib.request.urlopen(urllib.request.Request(url,data=json.dumps(body).encode(),headers=h)) as r: return r.headers, r.read()
+ h,_=post({'jsonrpc':'2.0','id':1,'method':'initialize','params':{'protocolVersion':'2025-11-25','capabilities':{},'clientInfo':{'name':'fake','version':'1'}}})
+ sid=h['mcp-session-id']
+ post({'jsonrpc':'2.0','method':'notifications/initialized'},sid)
+ post({'jsonrpc':'2.0','id':2,'method':'tools/call','params':{'name':'echo','arguments':{'text':'hello'}}},sid)
+"#,
+    )
+    .unwrap();
+    let provider = Arc::new(AgyFixtureProvider(mew_agy::provider::AgyProvider::new(
+        mew_agy::provider::Config {
+            executable: "/usr/bin/python3".into(),
+            workspace_parent: directory.path().into(),
+            environment: vec![],
+            lifetime: std::time::Duration::from_secs(20),
+        },
+        AgyFixtureBoundary(script),
+    )));
+    let mut agent = Agent::new(
+        provider,
+        Arc::new(NopDispatcher),
+        None,
+        vec![Arc::new(EchoTool {
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": { "text": { "type": "string" } },
+                "required": ["text"]
+            }),
+        })],
+        None,
+    );
+    agent.set_permission_engine(Arc::new(mew_config::permissions::PermissionEngine::new(
+        vec![],
+    )));
+    agent.max_turns = Some(1);
+
+    let turn1_cancel = tokio_util::sync::CancellationToken::new();
+    let mut events = agent.run_with_parts("start".into(), vec![], Some(turn1_cancel.clone()));
+    let mut turn1_errors = Vec::new();
+    while let Some(event) = events.recv().await {
+        if let AgentEvent::Error(message) = event {
+            turn1_errors.push(message);
+        }
+    }
+    assert!(
+        turn1_errors
+            .iter()
+            .any(|msg| msg.contains("max turns exceeded (1 turns)")),
+        "expected max turns exceeded error, got: {turn1_errors:?}"
+    );
+    assert!(!turn1_cancel.is_cancelled());
+
+    let turn2_cancel = tokio_util::sync::CancellationToken::new();
+    let mut events = agent.run_with_parts(
+        "continue-after-limit".into(),
+        vec![],
+        Some(turn2_cancel.clone()),
+    );
+    let mut turn2_errors = Vec::new();
+    let mut turn2_text = String::new();
+    while let Some(event) = events.recv().await {
+        match event {
+            AgentEvent::Error(message) => turn2_errors.push(message),
+            AgentEvent::Provider(ProviderEvent::PartDelta {
+                field: "text",
+                delta,
+                ..
+            }) => turn2_text.push_str(&delta),
+            _ => {}
+        }
+    }
+    assert!(
+        turn2_errors.is_empty(),
+        "next user turn must not fail after max turns: {turn2_errors:?}"
+    );
+    assert!(
+        turn2_text.contains("continued after max turns"),
+        "expected continuation reply, got: {turn2_text:?}"
+    );
+    assert!(!turn2_cancel.is_cancelled());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn multi_turn_agy_with_large_tool_outputs_skips_pruning_and_reuses_process() {
+    struct BigReadTool {
+        schema: serde_json::Value,
+        payload: String,
+    }
+    #[async_trait]
+    impl Tool for BigReadTool {
+        fn name(&self) -> &str {
+            "read"
+        }
+        fn description(&self) -> &str {
+            "read"
+        }
+        fn schema(&self) -> &serde_json::Value {
+            &self.schema
+        }
+        fn sensitivity(&self) -> Sensitivity {
+            Sensitivity::ReadOnly
+        }
+        async fn execute(
+            &self,
+            _ctx: ToolCtx,
+            _input: serde_json::Value,
+        ) -> Result<ToolOutput, mew_tools::ToolError> {
+            Ok(ToolOutput {
+                output: self.payload.clone(),
+                error: String::new(),
+                diff: None,
+                images: vec![],
+                metadata: None,
+                file_delta: None,
+            })
+        }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let spawns_path = directory.path().join("spawns.txt");
+    let prompts_path = directory.path().join("prompts.jsonl");
+    let script = directory.path().join("agy-persistent.py");
+    std::fs::write(
+        &script,
+        format!(
+            r#"import sys,json,urllib.request
+spawns_path={:?}
+prompts_path={:?}
+with open(spawns_path,'a') as f: f.write('1\n')
+def read_msg():
+ line=sys.stdin.readline()
+ if not line: sys.exit(0)
+ return json.loads(line)
+for i,r in [(1,{{'protocolVersion':1}}),(2,{{}}),(3,{{'sessionId':'s-agent'}}),(4,{{}})]:
+ m=read_msg()
+ print(json.dumps({{'jsonrpc':'2.0','id':m['id'],'result':r}}),flush=True)
+with open('.agents/mcp_config.json') as f: url=json.load(f)['mcpServers']['mew']['serverUrl']
+def post(body,sid=None):
+ h={{'Content-Type':'application/json'}}
+ if sid: h['mcp-session-id']=sid
+ with urllib.request.urlopen(urllib.request.Request(url,data=json.dumps(body).encode(),headers=h)) as r: return r.headers, r.read()
+# Turn 1: call read tool via MCP, then finish end_turn
+p1=read_msg()
+with open(prompts_path,'a') as f: f.write(json.dumps(p1['params']['prompt'])+'\n')
+h,_=post({{'jsonrpc':'2.0','id':1,'method':'initialize','params':{{'protocolVersion':'2025-11-25','capabilities':{{}},'clientInfo':{{'name':'fake','version':'1'}}}}}})
+sid=h['mcp-session-id']
+post({{'jsonrpc':'2.0','method':'notifications/initialized'}},sid)
+_,b=post({{'jsonrpc':'2.0','id':2,'method':'tools/call','params':{{'name':'read','arguments':{{'path':'src/lib.rs'}}}}}},sid)
+assert json.loads(b)['result'].get('isError') is not True, b
+print(json.dumps({{'jsonrpc':'2.0','method':'session/update','params':{{'sessionId':'s-agent','update':{{'sessionUpdate':'agent_message_chunk','content':{{'type':'text','text':'read completed'}}}}}}}}),flush=True)
+print(json.dumps({{'jsonrpc':'2.0','id':p1['id'],'result':{{'stopReason':'end_turn'}}}}),flush=True)
+# Turn 2: delta prompt on SAME process
+p2=read_msg()
+with open(prompts_path,'a') as f: f.write(json.dumps(p2['params']['prompt'])+'\n')
+print(json.dumps({{'jsonrpc':'2.0','method':'session/update','params':{{'sessionId':'s-agent','update':{{'sessionUpdate':'agent_message_chunk','content':{{'type':'text','text':'remembered everything'}}}}}}}}),flush=True)
+print(json.dumps({{'jsonrpc':'2.0','id':p2['id'],'result':{{'stopReason':'end_turn'}}}}),flush=True)
+read_msg()
+"#,
+            spawns_path, prompts_path
+        ),
+    )
+    .unwrap();
+    let large_payload = "fn item() {}\n".repeat(32_000);
+    let provider = Arc::new(AgyFixtureProvider(mew_agy::provider::AgyProvider::new(
+        mew_agy::provider::Config {
+            executable: "/usr/bin/python3".into(),
+            workspace_parent: directory.path().into(),
+            environment: vec![],
+            lifetime: std::time::Duration::from_secs(20),
+        },
+        AgyFixtureBoundary(script),
+    )));
+    let mut agent = Agent::new(
+        provider,
+        Arc::new(NopDispatcher),
+        None,
+        vec![Arc::new(BigReadTool {
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"]
+            }),
+            payload: large_payload.clone(),
+        })],
+        None,
+    );
+    agent.set_permission_engine(Arc::new(mew_config::permissions::PermissionEngine::new(
+        vec![],
+    )));
+
+    let mut rx = agent.run("inspect src/lib.rs".into());
+    while let Some(ev) = rx.recv().await {
+        match ev {
+            AgentEvent::PermissionRequest { tx, .. } => {
+                let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
+            }
+            AgentEvent::Error(msg) => panic!("unexpected turn 1 error: {msg}"),
+            _ => {}
+        }
+    }
+
+    let mut rx = agent.run("follow up question".into());
+    let mut turn2_text = String::new();
+    while let Some(ev) = rx.recv().await {
+        match ev {
+            AgentEvent::Error(msg) => panic!("unexpected turn 2 error: {msg}"),
+            AgentEvent::Provider(ProviderEvent::PartDelta {
+                field: "text",
+                delta,
+                ..
+            }) => turn2_text.push_str(&delta),
+            _ => {}
+        }
+    }
+    assert_eq!(turn2_text, "remembered everything");
+    assert_eq!(
+        std::fs::read_to_string(&spawns_path)
+            .unwrap()
+            .lines()
+            .count(),
+        1,
+        "Turn 2 must reuse the live AGY process"
+    );
+    let prompts: Vec<serde_json::Value> = std::fs::read_to_string(&prompts_path)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(prompts.len(), 2);
+    assert_eq!(prompts[1][0]["text"], "follow up question");
+
+    let messages = agent.messages.lock().await;
+    let stored_tool_output = messages.iter().find_map(|m| {
+        m.parts.iter().find_map(|p| match p {
+            Part::ToolCall(tc) if tc.tool_name == "read" => match &tc.state {
+                ToolState::Completed(done) => Some(done.output.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+    });
+    assert_eq!(
+        stored_tool_output.as_deref(),
+        Some(large_payload.as_str()),
+        "Turn 2 must not prune Turn 1's large tool output when reusing the live ACP session"
     );
 }

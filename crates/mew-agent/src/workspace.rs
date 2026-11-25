@@ -28,12 +28,19 @@ impl Agent {
     /// Check workspace containment for a tool path. If outside all roots
     /// and session allowances, request user approval. Returns `Err` with an
     /// error message if denied.
+    ///
+    /// Dangerous mode bypasses this tier. Its only possible outcome is a
+    /// prompt, and Dangerous means "never ask" — the permission engine's own
+    /// tiers short-circuit the same way. Every other mode (including
+    /// Permissive, which still honors the secret-file guard) asks.
     pub(crate) async fn ensure_workspace_path(
         &self,
         tool_path: &Path,
         ev_tx: &mpsc::Sender<AgentEvent>,
     ) -> Result<(), String> {
-        if self.is_within_workspace(tool_path) {
+        if self.permission_mode() == mew_hooks::PermissionMode::Dangerous
+            || self.is_within_workspace(tool_path)
+        {
             return Ok(());
         }
 

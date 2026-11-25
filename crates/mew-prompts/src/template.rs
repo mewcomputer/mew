@@ -699,6 +699,7 @@ mod tests {
                 "system_prompts/_shell_file_edit_mandate".to_string(),
                 "system_prompts/_shell_monitor_preference".to_string(),
                 "system_prompts/_tool_library".to_string(),
+                "system_prompts/_file_reference_guidance".to_string(),
             ]
         );
     }

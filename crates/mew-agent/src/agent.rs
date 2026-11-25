@@ -39,6 +39,8 @@ pub(crate) enum TurnInput {
         attachments: Vec<Part>,
     },
     Accepted(AcceptedPrompt),
+    /// Persisted visible message, with separate enriched text for the model.
+    AcceptedEnriched(AcceptedPrompt, String, Vec<mew_message::Part>),
 }
 
 /// Session-scoped classifier decision cache. Keyed by
@@ -231,6 +233,8 @@ pub struct Agent {
     pub context_window: u32,
     pub compaction_threshold: f64,
     pub keep_turns: usize,
+    /// When true, context compaction summarizes dropped turns with `provider`.
+    pub compaction_summarize_with_llm: bool,
     pub max_turns: Option<u32>,
     /// Maximum allowed nesting depth for subagent spawning. Top-level sessions
     /// are depth 0; a subagent of a depth-N session would be depth N+1. The
@@ -443,6 +447,7 @@ impl Agent {
             context_window: 0,
             compaction_threshold: 0.95,
             keep_turns: 4,
+            compaction_summarize_with_llm: true,
             max_turns: Some(
                 std::env::var("MEW_MAX_TURNS")
                     .ok()
@@ -1002,6 +1007,13 @@ impl Agent {
             .mark_request_sent(Instant::now());
     }
 
+    pub(crate) fn is_prefix_mutation_safe(&self) -> bool {
+        self.prompt_cache_state
+            .lock()
+            .expect("prompt cache state poisoned")
+            .is_prefix_mutation_safe(Instant::now())
+    }
+
     /// Activate a persona. Sets the persona prompt (prepended to `self.system`
     /// in the turn loop), filters the tool set (allowlist + denylist), gates
     /// the skills the model can see/load, and records the persona name for
@@ -1194,10 +1206,14 @@ impl Agent {
         self.token_count_cache.lock().unwrap().clear();
     }
 
-    pub(crate) async fn flagged_files_path(&self) -> Option<std::path::PathBuf> {
+    pub(crate) async fn session_dir(&self) -> Option<std::path::PathBuf> {
         let session = self.session.as_ref()?;
         let writer = session.lock().await;
-        Some(writer.path().parent()?.join("flagged-files.json"))
+        writer.path().parent().map(std::path::Path::to_path_buf)
+    }
+
+    pub(crate) async fn flagged_files_path(&self) -> Option<std::path::PathBuf> {
+        Some(self.session_dir().await?.join("flagged-files.json"))
     }
 
     pub async fn restore_flagged_files(&self) -> std::io::Result<()> {
@@ -1387,6 +1403,19 @@ impl Agent {
         cancel_token: CancellationToken,
     ) -> mpsc::Receiver<AgentEvent> {
         self.start_turn(TurnInput::Accepted(prompt), Some(cancel_token))
+    }
+
+    pub fn run_accepted_prompt_with_parts(
+        &self,
+        prompt: AcceptedPrompt,
+        text: String,
+        attachments: Vec<mew_message::Part>,
+        cancel_token: CancellationToken,
+    ) -> mpsc::Receiver<AgentEvent> {
+        self.start_turn(
+            TurnInput::AcceptedEnriched(prompt, text, attachments),
+            Some(cancel_token),
+        )
     }
 
     fn start_turn(

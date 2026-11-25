@@ -791,11 +791,23 @@ impl Agent {
                     }),
                 )
             } else {
+                let session_dir =
+                    if output.output.len() > crate::compaction::OFFLOAD_TOOL_OUTPUT_BYTES {
+                        self.session_dir().await
+                    } else {
+                        None
+                    };
+                let stored_output = crate::compaction::offload_large_tool_output(
+                    &call_id,
+                    &output.output,
+                    session_dir.as_deref(),
+                )
+                .await;
                 (
                     true,
                     ToolState::Completed(ToolStateCompleted {
                         input: input.clone(),
-                        output: output.output.clone(),
+                        output: stored_output,
                         metadata: output.metadata.clone(),
                         diff: output.diff.clone(),
                         images: output.images.clone(),

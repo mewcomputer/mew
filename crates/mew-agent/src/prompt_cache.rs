@@ -97,6 +97,10 @@ impl PromptCacheState {
         self.last_request_at = Some(now);
     }
 
+    pub(crate) fn is_prefix_mutation_safe(&self, now: Instant) -> bool {
+        self.refresh_is_safe(now)
+    }
+
     fn refresh_is_safe(&self, now: Instant) -> bool {
         let Some(last_request_at) = self.last_request_at else {
             return true;

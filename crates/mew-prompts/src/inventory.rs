@@ -80,6 +80,20 @@ pub fn inventory() -> Vec<PromptSource> {
             description: "Permission-decision prompt for Auto mode (small LLM).",
             preview: "You are a permission classifier ... allow | deny | escalate",
         },
+        PromptSource {
+            id: "compact_prompt",
+            location: "mew_prompts::vfs (compact/prompt)",
+            kind: PromptKind::System,
+            description: "Checkpoint compaction summarization prompt.",
+            preview: "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary...",
+        },
+        PromptSource {
+            id: "compact_summary_prefix",
+            location: "mew_prompts::vfs (compact/summary_prefix)",
+            kind: PromptKind::User,
+            description: "Handoff framing prefix prepended before an injected compaction summary.",
+            preview: "Another language model started to solve this problem and produced a summary...",
+        },
     ];
     for (name, body) in crate::subagent::builtin_bodies() {
         let preview = body.lines().next().unwrap_or("").trim();

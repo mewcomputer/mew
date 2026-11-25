@@ -11,6 +11,9 @@
 //!   plan-reviewer, coder, etc.).
 //! - [`classifier`] — permission-decision prompt for the future Auto mode
 //!   (classifier-driven approval).
+//! - [`compact`] — checkpoint compaction summarization prompt and handoff
+//!   summary prefix loaded from the VFS (`compact/prompt`,
+//!   `compact/summary_prefix`).
 //!
 //! Use [`inventory::inventory`] to enumerate every prompt this crate knows
 //! about — useful for docs, tests, and tools that audit what the system says
@@ -24,6 +27,7 @@
 //! persona template, plain string formatting for the classifier prompt).
 
 pub mod classifier;
+pub mod compact;
 pub mod inventory;
 pub mod persona;
 pub mod skills;

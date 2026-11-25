@@ -120,6 +120,18 @@ impl Agent {
             TurnInput::Accepted(AcceptedPrompt(message)) => {
                 self.messages.lock().await.push(*message);
             }
+            TurnInput::AcceptedEnriched(AcceptedPrompt(message), text, attachments) => {
+                let mut model_message = *message;
+                if let Some(Part::Text(text_part)) = model_message
+                    .parts
+                    .iter_mut()
+                    .find(|part| matches!(part, Part::Text(_)))
+                {
+                    text_part.text = text;
+                }
+                model_message.parts.extend(attachments);
+                self.messages.lock().await.push(model_message);
+            }
             TurnInput::New { text, attachments } => {
                 match self.build_prompt_message(text, attachments) {
                     Ok(message) => self.append_message(message).await,
@@ -131,7 +143,10 @@ impl Agent {
             }
         }
         self.inject_orphaned_subagent_tasks().await;
-        self.turn_loop(ev_tx).await
+        let result = self.turn_loop(ev_tx.clone()).await;
+        self.provider.abandon_pending(self.session_id).await;
+        drop(ev_tx);
+        result
     }
 
     /// On the first turn of a resumed session, surface any subagent tasks the
@@ -365,8 +380,19 @@ impl Agent {
                 }
             }
 
-            let mut manifest = match self.fit_request_context(&mut req, force).await {
-                Ok((manifest, _)) => manifest,
+            if !force
+                && self.is_prefix_mutation_safe()
+                && crate::compaction::prune_stale_tool_outputs(&mut req.messages, self.keep_turns)
+                    > 0
+            {
+                self.sync_pruned_tool_outputs(&req.messages).await;
+            }
+
+            let mut manifest = match self
+                .fit_request_context_with_events(&mut req, force, None, Some(&ev_tx))
+                .await
+            {
+                Ok((manifest, _, _)) => manifest,
                 Err(message) => {
                     if continuing_for_guidance {
                         if let Some((admission, _)) =
@@ -392,6 +418,7 @@ impl Agent {
                 continuing_for_user_guidance = false;
             }
             render_compaction_summary(&mut req.messages);
+            resolve_blob_attachments(&mut req.messages);
             match self.provider.replay_budget(&req).await {
                 Ok(Some((size, limit))) if size > limit => {
                     let _ = ev_tx.send(AgentEvent::Error("The request exceeds its provider's replay limit. Shorten the latest message or attachments.".into())).await;
@@ -455,14 +482,28 @@ impl Agent {
                         direct_tool_defs.clone()
                     };
                     match (builder.0)(model) {
-                        Ok(provider) => match provider.stream(fallback_request).await {
-                            Ok(stream) => {
-                                self.provider = provider;
-                                self.set_model_info(model_id, provider_id);
-                                return Ok(stream);
+                        Ok(provider) => {
+                            match provider.replay_budget(&fallback_request).await {
+                                Ok(Some((size, limit))) if size > limit => {
+                                    last_error = "The request exceeds its provider's replay limit. Shorten the latest message or attachments.".into();
+                                    continue;
+                                }
+                                Err(error) => {
+                                    last_error = error.to_string();
+                                    continue;
+                                }
+                                _ => {}
                             }
-                            Err(error) => last_error = error.to_string(),
-                        },
+                            match provider.stream(fallback_request).await {
+                                Ok(stream) => {
+                                    let previous = std::mem::replace(&mut self.provider, provider);
+                                    previous.abandon_pending(self.session_id).await;
+                                    self.set_model_info(model_id, provider_id);
+                                    return Ok(stream);
+                                }
+                                Err(error) => last_error = error.to_string(),
+                            }
+                        }
                         Err(error) => last_error = error,
                     }
                 }
@@ -1034,25 +1075,93 @@ impl Agent {
         messages
     }
 
-    async fn fit_request_context(
+    async fn sync_pruned_tool_outputs(&self, pruned_messages: &[Message]) {
+        let mut stored = self.messages.lock().await;
+        for pruned_msg in pruned_messages {
+            let Some(target_msg) = stored.iter_mut().find(|m| m.id == pruned_msg.id) else {
+                continue;
+            };
+            for pruned_part in &pruned_msg.parts {
+                let Part::ToolCall(pruned_tc) = pruned_part else {
+                    continue;
+                };
+                let ToolState::Completed(pruned_completed) = &pruned_tc.state else {
+                    continue;
+                };
+                if !crate::compaction::is_pruned_tool_output(&pruned_completed.output) {
+                    continue;
+                }
+                for target_part in &mut target_msg.parts {
+                    if let Part::ToolCall(target_tc) = target_part {
+                        if target_tc.call_id == pruned_tc.call_id {
+                            if let ToolState::Completed(target_completed) = &mut target_tc.state {
+                                target_completed.output = pruned_completed.output.clone();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn fit_request_context_with_instructions(
         &mut self,
         request: &mut Request,
         force: bool,
-    ) -> Result<(mew_message::TurnManifest, usize), String> {
-        let manifest = self.request_manifest(request);
-        let estimated = estimated_request_tokens(request, &manifest);
+        focus: Option<&str>,
+    ) -> Result<(mew_message::TurnManifest, usize, Option<String>), String> {
+        self.fit_request_context_with_events(request, force, focus, None)
+            .await
+    }
+
+    async fn fit_request_context_with_events(
+        &mut self,
+        request: &mut Request,
+        force: bool,
+        focus: Option<&str>,
+        events: Option<&mpsc::Sender<AgentEvent>>,
+    ) -> Result<(mew_message::TurnManifest, usize, Option<String>), String> {
+        let mut manifest = self.request_manifest(request);
+        let mut estimated = estimated_request_tokens(request, &manifest);
         let threshold = ((self.context_window as f64 * self.compaction_threshold) as u32)
             .min(self.context_window);
         let over_budget = |estimated| self.context_window > 0 && estimated > self.context_window;
-        let replay = self
+        let mut replay = self
             .provider
             .replay_budget(request)
             .await
             .map_err(|error| format!("Could not measure provider replay: {error}"))?;
-        let replay_over = replay.is_some_and(|(size, limit)| size > limit);
-        let replay_near = replay.is_some_and(|(size, limit)| size > limit - limit / 10);
+        let mut replay_over = replay.is_some_and(|(size, limit)| size > limit);
+        let mut replay_near = replay.is_some_and(|(size, limit)| size > limit - limit / 10);
         if !force && !replay_near && (self.context_window == 0 || estimated <= threshold) {
-            return Ok((manifest, 0));
+            return Ok((manifest, 0, None));
+        }
+
+        if !force
+            && crate::compaction::prune_stale_tool_outputs(&mut request.messages, self.keep_turns)
+                > 0
+        {
+            manifest = self.request_manifest(request);
+            estimated = estimated_request_tokens(request, &manifest);
+            replay = self
+                .provider
+                .replay_budget(request)
+                .await
+                .map_err(|error| format!("Could not measure provider replay: {error}"))?;
+            replay_over = replay.is_some_and(|(size, limit)| size > limit);
+            replay_near = replay.is_some_and(|(size, limit)| size > limit - limit / 10);
+            if !replay_near
+                && !over_budget(estimated)
+                && (self.context_window == 0 || estimated <= threshold)
+            {
+                self.sync_pruned_tool_outputs(&request.messages).await;
+                tracing::info!(
+                    estimated,
+                    threshold,
+                    "pruned stale tool outputs below compaction threshold"
+                );
+                return Ok((manifest, 0, None));
+            }
         }
 
         let before = &request.messages;
@@ -1107,22 +1216,74 @@ impl Agent {
             } else if over_budget(estimated) {
                 Err(context_window_error(self.context_window))
             } else {
-                Ok((manifest, 0))
+                Ok((manifest, 0, None))
             };
         }
 
+        if let Some(tx) = events {
+            let _ = tx
+                .send(AgentEvent::Compacting {
+                    active: true,
+                    removed: None,
+                    summary: None,
+                })
+                .await;
+        }
+        let result = self
+            .finish_fit_compaction(
+                request,
+                force,
+                estimated,
+                &manifest,
+                replay,
+                replay_over,
+                start,
+                fallback_start,
+                latest_user,
+                focus,
+            )
+            .await;
+        if let Some(tx) = events {
+            let _ = tx
+                .send(AgentEvent::Compacting {
+                    active: false,
+                    removed: result.as_ref().ok().map(|&(_, d, _)| d),
+                    summary: result.as_ref().ok().and_then(|(_, _, s)| s.clone()),
+                })
+                .await;
+        }
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn finish_fit_compaction(
+        &mut self,
+        request: &mut Request,
+        force: bool,
+        estimated: u32,
+        manifest: &mew_message::TurnManifest,
+        replay: Option<(usize, usize)>,
+        replay_over: bool,
+        mut start: usize,
+        fallback_start: usize,
+        latest_user: Option<usize>,
+        focus: Option<&str>,
+    ) -> Result<(mew_message::TurnManifest, usize, Option<String>), String> {
+        let over_budget = |estimated| self.context_window > 0 && estimated > self.context_window;
         let state_path = self.flagged_files_path().await;
         let shared_flags = self.flagged_files.clone();
         let flags = shared_flags.lock().await.clone();
-        let (previous, mut candidate, compacted_estimate, compacted_replay, dropped) = loop {
+        let (previous, mut candidate, compacted_estimate, compacted_replay, dropped, summary) = loop {
             let before = &request.messages;
             let dropped = before[..start]
                 .iter()
                 .filter(|message| !is_compaction_message(message))
                 .count();
-            let summary = self.compaction_summary(&before[..start], latest_user);
+            let summary = self
+                .generate_compaction_summary(&before[..start], latest_user, focus)
+                .await;
             let compacted = self
-                .compacted_messages(&before[start..], force, dropped, summary, &flags)
+                .compacted_messages(&before[start..], force, dropped, summary.clone(), &flags)
                 .await?;
             let previous = std::mem::replace(&mut request.messages, compacted);
             let candidate = self.request_manifest(request);
@@ -1148,10 +1309,18 @@ impl Agent {
                 compacted_estimate,
                 compacted_replay,
                 dropped,
+                summary,
             );
         };
         let compacted_replay_over = compacted_replay.is_some_and(|(size, limit)| size > limit);
-        let replay_improved = matches!((replay, compacted_replay), (Some((before, _)), Some((after, _))) if after < before);
+        let replay_improved = matches!(
+            (replay, compacted_replay),
+            (Some((before, before_limit)), Some((after, after_limit)))
+                if before_limit > 0
+                    && after_limit > 0
+                    && (after as u128) * (before_limit as u128)
+                        < (before as u128) * (after_limit as u128)
+        );
         if compacted_replay_over
             || over_budget(compacted_estimate)
             || (!force && compacted_estimate >= estimated && !replay_improved)
@@ -1162,7 +1331,7 @@ impl Agent {
             } else if over_budget(estimated) {
                 Err(context_window_error(self.context_window))
             } else {
-                Ok((manifest, 0))
+                Ok((manifest.clone(), 0, None))
             };
         }
 
@@ -1199,7 +1368,107 @@ impl Agent {
         drop(current_flags);
         self.dispatcher.on_post_compaction(&request.messages).await;
         tracing::info!(dropped, estimated, "compacted older context");
-        Ok((candidate, dropped))
+        Ok((candidate, dropped, Some(summary)))
+    }
+
+    async fn generate_compaction_summary(
+        &self,
+        dropped: &[Message],
+        latest_user: Option<usize>,
+        focus: Option<&str>,
+    ) -> String {
+        let trail = crate::compaction::extract_artifact_trail(dropped);
+        let artifacts = trail.format_blocks();
+        let narrative = if self.compaction_summarize_with_llm {
+            let previous = crate::compaction::extract_previous_summary(dropped);
+            let opening = crate::compaction::extract_opening_task(dropped);
+            let req = crate::compaction::build_summarization_request(
+                dropped,
+                previous.as_deref(),
+                opening.as_deref(),
+                focus,
+                &self.model_id,
+            );
+            self.summarize_with_provider(req).await
+        } else {
+            None
+        }
+        .unwrap_or_else(|| self.compaction_summary(dropped, latest_user));
+
+        if artifacts.is_empty() {
+            narrative
+        } else if narrative.trim().is_empty() {
+            artifacts
+        } else {
+            format!("{}\n\n{artifacts}", narrative.trim_end())
+        }
+    }
+
+    async fn summarize_with_provider(&self, req: Request) -> Option<String> {
+        let stream = match tokio::time::timeout(
+            std::time::Duration::from_secs(45),
+            self.provider.stream_auxiliary(req),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(error)) => {
+                tracing::warn!(error = %error, "compaction summarization failed; using fallback");
+                return None;
+            }
+            Err(_) => {
+                tracing::warn!("compaction summarization timed out; using fallback");
+                return None;
+            }
+        };
+
+        let collect = async move {
+            let mut stream = stream;
+            let mut active_text_part: Option<mew_message::PartId> = None;
+            let mut text = String::new();
+            while let Some(event) = futures::StreamExt::next(&mut stream).await {
+                match event {
+                    ProviderEvent::PartStart {
+                        part: Part::Text(part),
+                    } => {
+                        active_text_part = Some(part.base.id);
+                        text.push_str(&part.text);
+                    }
+                    ProviderEvent::PartDelta {
+                        part_id,
+                        field: "text",
+                        delta,
+                    } if active_text_part == Some(part_id) => {
+                        text.push_str(&delta);
+                    }
+                    ProviderEvent::PartEnd { part_id } if active_text_part == Some(part_id) => {
+                        active_text_part = None;
+                    }
+                    ProviderEvent::Error(error) => {
+                        tracing::warn!(
+                            error = %error.message,
+                            "compaction stream error; using fallback"
+                        );
+                        return None;
+                    }
+                    _ => {}
+                }
+            }
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        };
+
+        match tokio::time::timeout(std::time::Duration::from_secs(45), collect).await {
+            Ok(summary) => summary,
+            Err(_) => {
+                tracing::warn!("compaction summary stream timed out; using fallback");
+                None
+            }
+        }
     }
 
     fn request_manifest(&self, request: &Request) -> mew_message::TurnManifest {
@@ -1400,6 +1669,17 @@ impl Agent {
     /// Compact the context immediately, regardless of token threshold.
     /// Returns the number of messages removed.
     pub async fn compact_context(&mut self) -> Result<usize, String> {
+        self.compact_context_with_instructions(None)
+            .await
+            .map(|(removed, _)| removed)
+    }
+
+    /// Compact the context immediately with optional user focus instructions.
+    /// Returns the number of messages removed and the generated summary.
+    pub async fn compact_context_with_instructions(
+        &mut self,
+        instructions: Option<&str>,
+    ) -> Result<(usize, Option<String>), String> {
         let mut request = Request {
             session_id: Some(self.session_id),
             messages: self.prepare_messages().await,
@@ -1408,11 +1688,11 @@ impl Agent {
         };
         let start = compaction_start(&request.messages, self.keep_turns);
         if request.messages[..start].iter().all(is_compaction_message) {
-            return Ok(0);
+            return Ok((0, None));
         }
-        self.fit_request_context(&mut request, true)
+        self.fit_request_context_with_instructions(&mut request, true, instructions)
             .await
-            .map(|(_, removed)| removed)
+            .map(|(_, removed, summary)| (removed, summary))
     }
 }
 
@@ -1450,10 +1730,15 @@ fn render_compaction_summary(messages: &mut [Message]) {
             Part::Compaction(part) => part
                 .summary
                 .as_ref()
-                .filter(|summary| summary.starts_with(CARRIED_USER_MESSAGES)),
+                .filter(|summary| !summary.trim().is_empty()),
             _ => None,
         }) else {
             continue;
+        };
+        let rendered = if summary.starts_with(CARRIED_USER_MESSAGES) {
+            summary.clone()
+        } else {
+            format!("{}\n\n{summary}", mew_prompts::compact::summary_prefix())
         };
         // User excerpts keep their original instruction priority. The
         // transcript stores only the marker, so resumed requests render the
@@ -1465,7 +1750,7 @@ fn render_compaction_summary(messages: &mut [Message]) {
                 message_id: message.id,
                 session_id: message.session_id,
             },
-            text: summary.clone(),
+            text: rendered,
             synthetic: true,
         }));
     }
@@ -1734,6 +2019,26 @@ pub(crate) fn context_from_history(mut history: Vec<Message>) -> Vec<Message> {
 
     context.extend(history[marker_index + 1..].iter().cloned());
     context
+}
+
+fn resolve_blob_attachments(messages: &mut [Message]) {
+    let store = mew_session::BlobStore::default_store();
+    for message in messages {
+        for part in &mut message.parts {
+            if let Part::File(file) = part {
+                if let Some(id) = mew_session::parse_blob_id(&file.url) {
+                    if let Ok(bytes) = store.get(id) {
+                        let mime = if file.mime.is_empty() {
+                            "application/octet-stream"
+                        } else {
+                            file.mime.as_str()
+                        };
+                        file.url = mew_session::encode_data_url(mime, &bytes);
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
