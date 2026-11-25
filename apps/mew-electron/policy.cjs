@@ -82,6 +82,13 @@ function guestRequestAllowed(value, protectedPorts) {
   } catch { return false; }
 }
 
+// `<webview src>` is a reflected URL attribute, so Electron serializes it before
+// handing it to `will-attach-webview`: "https://a.com" arrives as "https://a.com/".
+// Pages are stored in that same serialization so the guest can match its permit.
+function canonicalUrl(value) {
+  return new URL(value).href;
+}
+
 function debugEndpoint(contents) {
   const [value, path] = contents.trim().split('\n');
   const port = Number(value);
@@ -91,4 +98,4 @@ function debugEndpoint(contents) {
   return `http://127.0.0.1:${port}`;
 }
 
-module.exports = { parseRequest, isAppUrl, guestRequestAllowed, browserProtection, navigationUrl, debugEndpoint };
+module.exports = { parseRequest, isAppUrl, guestRequestAllowed, browserProtection, navigationUrl, canonicalUrl, debugEndpoint };

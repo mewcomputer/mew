@@ -524,11 +524,6 @@ impl DesktopShell {
         self.awaiting_model_switch = None;
     }
 
-    pub(super) fn yield_control(&mut self, cx: &mut Context<Self>) {
-        self.send_command(ClientMessage::YieldControl {});
-        cx.notify();
-    }
-
     #[allow(dead_code)]
     pub(super) fn create_group(&mut self, cx: &mut Context<Self>) {
         let next_number = self.model.ui.groups.len() + 1;

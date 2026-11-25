@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { parseRequest, isAppUrl, guestRequestAllowed, browserProtection, debugEndpoint } = require('./policy.cjs');
+const { parseRequest, isAppUrl, guestRequestAllowed, browserProtection, debugEndpoint, canonicalUrl } = require('./policy.cjs');
 
 test('host requests reject malformed, oversized and ambiguous input', () => {
   for (const value of [null, '{}', 'null', '{', JSON.stringify({ type: 'bootstrap', extra: true }), ' '.repeat(16385)]) {
@@ -81,4 +81,10 @@ test('the private relay port is protected alongside the underlying daemon', () =
   assert.equal(unavailable, null);
   assert.equal(guestRequestAllowed('ws://127.0.0.1:41004/', ports), false);
   assert.equal(guestRequestAllowed('ws://daemon.example:41002/', ports), false);
+});
+
+test('page urls use the serialization a webview src sends back', () => {
+  assert.equal(canonicalUrl('https://example.com'), 'https://example.com/');
+  assert.equal(canonicalUrl('https://example.com/a?b=1#c'), 'https://example.com/a?b=1#c');
+  assert.equal(canonicalUrl('about:blank'), 'about:blank');
 });

@@ -673,7 +673,11 @@ impl DesktopShell {
         {
             return;
         }
-        self.send_command(ClientMessage::ListDir { session_id, path });
+        self.send_command(ClientMessage::ListDir {
+            session_id,
+            path,
+            scoped_errors: false,
+        });
     }
 
     pub(super) fn toggle_file_tree_dir(&mut self, path: String, cx: &mut Context<Self>) {

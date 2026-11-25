@@ -121,7 +121,18 @@ async function start() {
       { label: 'Search chats', accelerator: 'CmdOrCtrl+K', click: menuAction('search') },
       { label: 'Toggle sidebar', accelerator: 'CmdOrCtrl+B', click: menuAction('toggle-sidebar') },
       { label: 'Toggle workbench', accelerator: 'CmdOrCtrl+Shift+B', click: menuAction('toggle-workbench') },
-      { type: 'separator' }, { role: 'togglefullscreen' },
+      { type: 'separator' },
+      // Debugging the shell needs the real inspector, and a packaged build has
+      // no other way in. Packaged apps get it on request instead of by default.
+      ...(app.isPackaged && process.env.MEW_DESKTOP_DEVTOOLS !== '1' ? [] : [
+        { label: 'Toggle Developer Tools', accelerator: 'CmdOrCtrl+Alt+I', click: () => {
+          if (contents.isDestroyed()) return;
+          if (contents.isDevToolsOpened()) contents.closeDevTools();
+          else contents.openDevTools({ mode: 'detach' });
+        } },
+        { type: 'separator' },
+      ]),
+      { role: 'togglefullscreen' },
     ] },
     { role: 'windowMenu' },
   ]));

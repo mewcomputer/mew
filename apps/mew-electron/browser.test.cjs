@@ -4,8 +4,17 @@ const { spawn, execFile } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
 const path = require('node:path');
 const { promisify } = require('node:util');
+const { isAbort } = require('./browser.cjs');
 
 const execute = promisify(execFile);
+
+test('a superseded navigation is not reported as a browser error', () => {
+  const aborted = Object.assign(new Error("ERR_ABORTED (-3) loading 'https://www.google.com/'"), { code: 'ERR_ABORTED', errno: -3 });
+  assert.equal(isAbort(aborted), true);
+  assert.equal(isAbort(Object.assign(new Error("(-3) loading 'https://www.google.com/'"), { errno: -3 })), true);
+  assert.equal(isAbort(new Error('ERR_CONNECTION_REFUSED')), false);
+  assert.equal(isAbort(undefined), false);
+});
 
 async function runFixture(t, mode) {
   const cli = process.env.MEW_BROWSER_TEST_CLI || 'agent-browser';
@@ -58,7 +67,7 @@ const securityResult = {
   guests: 2, distinctTargets: true, retained: true, isolated: true,
   controlBlocked: true, sharedStorage: true, ownerChecks: true,
   permitReuseBlocked: true, generationChanged: true, pendingNavigationKeptPermit: true, hiddenCleanupKeptNavigation: true,
-  focusEndpointGuards: true, staleFocusRevoked: true,
+  rootUrlAttached: true, focusEndpointGuards: true, staleFocusRevoked: true,
   allowedHttp: 1, allowedWs: 1, controlHttp: 0, controlWs: 0, blockedCdp: true, blockedFocus: true,
 };
 

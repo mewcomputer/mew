@@ -192,17 +192,41 @@ desktop-build: build-js
     {{justfile_directory()}}/scripts/package-desktop-native.sh
 
 # Run the opt-in Electron client with the shared embedded UI and Rust host.
-desktop-electron-dev *args: build-js
+desktop-electron-dev *args: theme-codegen build-js
     pnpm --filter mew-web-ui build
-    cargo build -p mew
+    cargo build -p mew --features iroh
     MEW_DESKTOP_PROFILE=debug node "{{justfile_directory()}}/apps/mew-electron/package.cjs"
     "{{justfile_directory()}}/target/debug/bundle/macos/mew-electron.app/Contents/MacOS/mew-electron" "$@"
 
 # Build the opt-in Electron app with the shared embedded UI and Rust host.
-desktop-electron-build: build-js
+desktop-electron-build: theme-codegen build-js
     pnpm --filter mew-web-ui build
-    cargo build --release -p mew
+    cargo build --release -p mew --features iroh
     MEW_DESKTOP_PROFILE=release node "{{justfile_directory()}}/apps/mew-electron/package.cjs"
+
+# Build and install the Electron app into /Applications.
+desktop-electron-install: desktop-electron-build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    destination="/Applications/mew.app"
+    if ps -axo command= | awk -v prefix="$destination/Contents/" 'index($0, prefix) == 1 { found = 1 } END { exit !found }'; then
+        echo "close $destination before installing" >&2
+        exit 1
+    fi
+    app="{{justfile_directory()}}/target/release/bundle/macos/mew-electron.app"
+    stage=$(mktemp -d /Applications/.mew-install.XXXXXX)
+    trap 'rm -rf "$stage"' EXIT
+    ditto "$app" "$stage/mew.app"
+    if [ -e "$destination" ]; then
+        mv "$destination" "$stage/previous.app"
+    fi
+    if ! mv "$stage/mew.app" "$destination"; then
+        if [ -e "$stage/previous.app" ]; then
+            mv "$stage/previous.app" "$destination" || { trap - EXIT; echo "previous app retained at $stage/previous.app" >&2; }
+        fi
+        exit 1
+    fi
+    echo "✓ installed $destination"
 
 # Build macOS desktop release assets; CLI/TUI use the independent workflow.
 desktop-package: desktop-build

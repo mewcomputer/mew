@@ -92,7 +92,7 @@ async function packageApp(options = {}) {
   const electron = path.join(source, 'node_modules/electron');
   const installed = JSON.parse(await fs.readFile(path.join(electron, 'package.json'), 'utf8'));
   const distribution = (await fs.readFile(path.join(electron, 'dist/version'), 'utf8')).trim();
-  if (pinned !== '45.0.0' || installed.version !== pinned || distribution !== pinned) throw new Error('Packaging requires the pinned Electron 45.0.0 runtime; install the app dependencies again.');
+  if (pinned !== '45.4.1' || installed.version !== pinned || distribution !== pinned) throw new Error('Packaging requires the pinned Electron 45.4.1 runtime; install the app dependencies again.');
   for (const name of modules) await fs.access(path.join(source, name)).catch(() => { throw new Error(`Required app source is missing: ${name}`); });
   const runtime = path.join(electron, 'dist/Electron.app');
   const mew = path.resolve(options.mewBinary || path.join(repoRoot, 'target', profile, 'mew'));

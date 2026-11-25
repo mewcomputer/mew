@@ -16,9 +16,9 @@ async function fixture(t) {
   const mewBinary = path.join(root, 'mew');
   const agentBrowser = path.join(root, 'agent-browser');
   await fs.mkdir(path.join(runtime, 'dist/Electron.app/Contents/MacOS'), { recursive: true });
-  await fs.writeFile(path.join(sourceDirectory, 'package.json'), JSON.stringify({ name: '@mew/electron', main: 'main.cjs', devDependencies: { electron: '45.0.0' } }));
-  await fs.writeFile(path.join(runtime, 'package.json'), JSON.stringify({ version: '45.0.0' }));
-  await fs.writeFile(path.join(runtime, 'dist/version'), '45.0.0');
+  await fs.writeFile(path.join(sourceDirectory, 'package.json'), JSON.stringify({ name: '@mew/electron', main: 'main.cjs', devDependencies: { electron: '45.4.1' } }));
+  await fs.writeFile(path.join(runtime, 'package.json'), JSON.stringify({ version: '45.4.1' }));
+  await fs.writeFile(path.join(runtime, 'dist/version'), '45.4.1');
   for (const name of ['main', 'preload', 'policy', 'browser', 'support']) await fs.writeFile(path.join(sourceDirectory, `${name}.cjs`), '');
   // These fixtures exercise input rejection, never execute or sign this header.
   for (const filename of [mewBinary, agentBrowser, path.join(runtime, 'dist/Electron.app/Contents/MacOS/Electron')]) {
@@ -51,7 +51,7 @@ test('a custom destination and its contents are never overwritten', async (t) =>
 test('runtime must match the exact pinned Electron package and distribution', async (t) => {
   const options = await fixture(t);
   await fs.writeFile(path.join(options.runtime, 'dist/version'), '44.0.0');
-  await assert.rejects(packageApp(options), /Electron 45\.0\.0/);
+  await assert.rejects(packageApp(options), /Electron 45\.4\.1/);
   await assert.rejects(fs.access(options.output));
 });
 

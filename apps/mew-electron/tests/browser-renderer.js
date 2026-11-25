@@ -98,6 +98,15 @@ async function run() {
     await query({ type: 'browser_close', ...owner });
     crossedViews[index].remove();
   }
+  // A typed domain serializes with a trailing slash, so the guest's src never
+  // matches the request verbatim.
+  const rootOwner = { sessionId: 'session', tabId: 'root-url' };
+  const rootUrl = new URL(guestUrl).origin;
+  const rootPermit = await query({ type: 'browser_update', ...rootOwner, url: rootUrl, visible: true, rect: { x: 0, y: 0, width: 400, height: 400 } });
+  const rootView = await attachWithoutBinding(rootPermit, rootUrl);
+  const rootUrlAttached = await rootView.executeJavaScript('location.pathname') === '/';
+  await query({ type: 'browser_close', ...rootOwner });
+  rootView.remove();
   const views = [];
   const permits = [];
   for (const tabId of ['first', 'second']) {
@@ -193,6 +202,6 @@ async function run() {
   window.reportTest({ guests: initialPages.length, distinctTargets: initialPages[0].targetId !== initialPages[1].targetId,
     retained, isolated: isolated.node === 'undefined' && isolated.bridge === 'undefined', controlBlocked, sharedStorage,
     agentPinned, ownerChecks, permitReuseBlocked, generationChanged, pendingNavigationKeptPermit, hiddenCleanupKeptNavigation,
-    focusEndpointGuards, staleFocusRevoked, focusUrl });
+    focusEndpointGuards, staleFocusRevoked, rootUrlAttached, focusUrl });
 }
 run().catch((error) => window.reportTest({ error: error.stack }));

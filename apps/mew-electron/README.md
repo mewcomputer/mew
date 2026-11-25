@@ -20,6 +20,10 @@ and runs `target/debug/bundle/macos/mew-electron.app`. No Vite server is needed.
 `target/release/bundle/macos/mew-electron.app`. Local bundles are ad hoc signed;
 release distribution and notarization are outside this milestone.
 
+`just desktop-electron-install` builds the release bundle and installs it as
+`/Applications/mew.app`, replacing the app at that path. Close the installed
+app before running the command so its daemon restarts with the new binary.
+
 Packaging requires the pinned Electron dependency and a standalone macOS
 `agent-browser` executable, version 0.34.0 or newer, on PATH. The default output
 can replace an inactive bundle created by this packager. Close it before

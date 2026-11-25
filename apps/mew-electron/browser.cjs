@@ -1,6 +1,12 @@
 const { randomUUID } = require('node:crypto');
 const http = require('node:http');
-const { guestRequestAllowed } = require('./policy.cjs');
+const { guestRequestAllowed, canonicalUrl } = require('./policy.cjs');
+
+// Electron rejects a loadURL superseded by the next navigation with ERR_ABORTED.
+// The new load is the one the user asked for, so this is not a browser error.
+function isAbort(error) {
+  return error?.code === 'ERR_ABORTED' || error?.errno === -3;
+}
 
 // DOM guests share browser storage, but never the privileged renderer's Session.
 class BrowserHost {
@@ -18,6 +24,8 @@ class BrowserHost {
     guestSession.webRequest.onBeforeRequest((details, callback) => callback({ cancel: !guestRequestAllowed(details.url, this.ports) }));
     parent.on('will-attach-webview', (event, preferences, params) => {
       const page = this.pages.values().find((entry) => entry.partition === params.partition);
+      // `params.src` is Electron's serialization of the requested URL, so the
+      // permit has to have stored the same form or every typed domain fails.
       if (!page || page.consumed || !Number.isSafeInteger(params.instanceId) || params.instanceId <= 0
         || this.pages.values().some((entry) => entry.consumed && entry.viewInstanceId === params.instanceId)
         || params.src !== page.initialUrl || !guestRequestAllowed(params.src, this.ports)) {
@@ -131,23 +139,23 @@ class BrowserHost {
   update(request) {
     if (this.unavailable && request.visible) throw new Error(this.unavailable);
     const key = this.key(request);
+    const url = canonicalUrl(request.url);
     let page = this.pages.get(key);
     if (!page) {
       if (!request.visible) return {};
       if (!guestRequestAllowed(request.url, this.ports)) throw new Error('Browser navigation to a host control endpoint is blocked.');
       page = {
-        sessionId: request.sessionId, tabId: request.tabId, url: request.url,
-        initialUrl: request.url,
+        sessionId: request.sessionId, tabId: request.tabId, url, initialUrl: url,
         focusPath: `/${randomUUID()}`,
         partition: `mew-attach-${randomUUID()}`, pageInstance: randomUUID(), consumed: false,
       };
       this.pages.set(key, page);
-    } else if (request.visible && page.url !== request.url) {
+    } else if (request.visible && page.url !== url) {
       if (!guestRequestAllowed(request.url, this.ports)) throw new Error('Browser navigation to a host control endpoint is blocked.');
-      page.url = request.url;
+      page.url = url;
       if (page.contents && !page.contents.isDestroyed()) {
         void page.contents.loadURL(page.url).catch((error) => {
-          if (this.pages.get(key) === page && error.code !== 'ERR_ABORTED') this.emit(page, 'error', { message: error.message });
+          if (this.pages.get(key) === page && !isAbort(error)) this.emit(page, 'error', { message: error.message });
         });
       }
     }
@@ -195,7 +203,7 @@ class BrowserHost {
       }
       if (current()) this.emit(page, 'ready', { cdpEndpoint: this.endpoint, targetId: targetInfo.targetId, focusUrl: `${this.focusOrigin}${page.focusPath}` });
     } catch (error) {
-      if (current()) this.emit(page, 'error', { message: error.message });
+      if (current() && !isAbort(error)) this.emit(page, 'error', { message: error.message });
     } finally {
       if (!contents.isDestroyed() && contents.debugger.isAttached()) contents.debugger.detach();
     }
@@ -225,4 +233,4 @@ class BrowserHost {
   }
 }
 
-module.exports = { BrowserHost };
+module.exports = { BrowserHost, isAbort };

@@ -1851,7 +1851,6 @@ impl DesktopShell {
         .into();
         let usage_label = self.model.ui.usage.and_then(usage_summary_label);
         let presence_count = self.model.ui.presence.len();
-        let control_yielded = self.model.ui.control_yielded_by.is_some();
 
         let composer_is_empty = self.model.ui.composer.is_empty();
         let composer_value = self.model.ui.composer.clone();
@@ -2766,34 +2765,7 @@ impl DesktopShell {
                                                     if presence_count == 1 { "" } else { "s" }
                                                 ))),
                                         )
-                                    })
-                                    .when(control_yielded || presence_count > 0, |element| element.child(if control_yielded {
-                                        div()
-                                            .id("control-yielded")
-                                            .debug_selector(|| "control-yielded".into())
-                                            .text_color(theme_rgb(&self.theme, "text.warning"))
-                                            .child("control yielded")
-                                            .into_any_element()
-                                    } else {
-                                        div()
-                                            .id("yield-control")
-                                            .debug_selector(|| "yield-control".into())
-                                            .px(px(6.))
-                                            .py(px(3.))
-                                            .rounded(px(6.))
-                                            .cursor_pointer()
-                                            .role(Role::Button)
-                                            .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                                            .aria_label("Yield control to another client")
-                                            .hover(|element| {
-                                                element.bg(theme_rgb(&self.theme, "muted"))
-                                            })
-                                            .on_click(cx.listener(|shell, _, _, cx| {
-                                                shell.yield_control(cx);
-                                            }))
-                                            .child("Yield")
-                                            .into_any_element()
-                                    })),
+                                    }),
                             ),
                     ),
             );

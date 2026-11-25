@@ -2685,10 +2685,6 @@ mod tests {
             cx.notify();
         });
         cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("yield-control").is_none(),
-            "solo chats should not offer yielding"
-        );
         shell.update(cx, |shell, cx| {
             shell.model.ui.presence = vec![mew_client_core::PresenceEntry {
                 client_id: 9,
@@ -2703,7 +2699,6 @@ mod tests {
             cx.notify();
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("yield-control").is_some());
         let path = cx.debug_bounds("checkout-path").unwrap();
         let status = cx.debug_bounds("session-status").unwrap();
         let footer = cx.debug_bounds("checkout-context").unwrap();
@@ -2713,14 +2708,6 @@ mod tests {
         );
         assert!(!path.intersects(&status));
         assert!(status.left() >= footer.left() && status.right() <= footer.right());
-        shell.update(cx, |shell, cx| {
-            shell.model.ui.presence.clear();
-            shell.model.ui.control_yielded_by = Some(9);
-            cx.notify();
-        });
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("yield-control").is_none());
-        assert!(cx.debug_bounds("control-yielded").is_some());
         shell.update(cx, |shell, _| shell.quitting = true);
     }
 
