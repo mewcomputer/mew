@@ -275,9 +275,11 @@ block for model pinning, tool/skill allowlists, denied tools, templates,
 fallback models, and an accent color. Persona bodies are injected
 into a freshly rebuilt system prompt each turn.
 
-Subagent definitions can pin a fully qualified `provider/model` or a router tier
-(`nano`, `micro`, `deci`), restrict tools, and set `max_turns` or
-`max_duration_secs`. They can also opt into nested spawning with
+Subagent definitions can pin a fully qualified `provider/model`, a router tier
+(`nano`, `micro`, `deci`), or `model: inherit` to keep the parent session's
+model, restrict tools, and set `max_turns` or `max_duration_secs`. `exit_tool`
+is part of the subagent contract and stays available even when `tools`
+restricts everything else. They can also opt into nested spawning with
 `can_spawn: true` (subject to `orchestration.max_subagent_depth`) and require a
 typed final output with `output_schema` (YAML map or `@path` JSON file; the
 runner validates the child's final output as JSON and grants one corrective

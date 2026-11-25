@@ -15,6 +15,10 @@ use mew_tools::Tool;
 
 use crate::child_guidance::ChildGuidance;
 
+/// The tool a subagent uses to hand its result to the parent. Part of the
+/// always-rendered subagent contract, not a capability a def can drop.
+const EXIT_TOOL: &str = "exit_tool";
+
 /// If the given tool state has completed successfully, return the output
 /// string. Used by the runner to pull the final answer out of an `exit_tool`
 /// call's completed state.
@@ -285,13 +289,22 @@ impl SimpleRunner {
         if !self.child_can_spawn(def, parent_depth) {
             tools.retain(|t| t.name() != "subagent_start" && t.name() != "subagent_wait");
         }
+        // The subagent contract renders for every def and tells the child to
+        // report through `exit_tool`, so an allowlist must not remove it:
+        // otherwise the child is instructed to call a tool it does not have.
+        if !tools.iter().any(|tool| tool.name() == EXIT_TOOL) {
+            if let Some(exit) = self.tools.get(EXIT_TOOL) {
+                tools.push(exit.clone());
+            }
+        }
         tools
     }
 
     /// Resolve which provider to use for this subagent invocation. A
     /// call-time `model` override beats the def's `model`; either beats the
     /// default provider. A literal value of `"micro"`, `"deci"`, or `"nano"`
-    /// is resolved by the `ModelResolver` against the active router's tiers.
+    /// is resolved by the `ModelResolver` against the active router's tiers,
+    /// and `"inherit"` keeps the parent's provider and model untouched.
     async fn resolve_provider(
         &self,
         def: &SubagentDef,
@@ -305,6 +318,9 @@ impl SimpleRunner {
             )
         };
         let model = model.or(def.model.as_deref());
+        // `inherit` names the parent's model rather than a model in its own
+        // right, so it must never reach the resolver as a model id.
+        let model = model.filter(|value| !value.trim().eq_ignore_ascii_case("inherit"));
 
         let Some(model) = model else {
             return default();
@@ -2967,5 +2983,213 @@ mod tests {
             validate_against_schema(&serde_json::json!({"type": "nonsense"}), "{}"),
             InvalidSchema(_)
         ));
+    }
+
+    /// A resolver that records what it was asked for and hands back a distinct
+    /// provider so a test can tell whether it was consulted at all.
+    struct RecordingResolver {
+        requested: StdMutex<Vec<String>>,
+        provider: Arc<dyn Provider>,
+    }
+
+    #[async_trait]
+    impl mew_subagents::ModelResolver for RecordingResolver {
+        async fn resolve(&self, model: &str) -> Result<Arc<dyn Provider>, String> {
+            self.requested.lock().unwrap().push(model.to_owned());
+            Ok(self.provider.clone())
+        }
+
+        fn resolved_model(&self, model: &str) -> String {
+            format!("resolved/{model}")
+        }
+    }
+
+    #[tokio::test]
+    async fn subagent_model_inherit_keeps_the_parent_model_and_skips_the_resolver() {
+        let parent_provider: Arc<dyn Provider> = Arc::new(ScriptedProvider::new(vec![]));
+        let override_provider: Arc<dyn Provider> = Arc::new(ScriptedProvider::new(vec![]));
+        let resolver = Arc::new(RecordingResolver {
+            requested: StdMutex::new(Vec::new()),
+            provider: override_provider,
+        });
+        let mut parent = crate::Agent::new(
+            parent_provider.clone(),
+            Arc::new(mew_hooks::NopDispatcher),
+            None,
+            vec![exit_tool()],
+            None,
+        );
+        parent.set_model_info("parent-model", "parent-provider");
+        let mut runner = SimpleRunner::new(
+            parent_provider.clone(),
+            vec![exit_tool()],
+            Arc::new(mew_hooks::NopDispatcher),
+        )
+        .with_agent_registry(&mut parent)
+        .with_model_resolver(resolver.clone());
+
+        let mut def = make_def(Some(5), Some(60));
+        def.model = Some("inherit".into());
+        let (provider, provider_id, model_id) = runner.resolve_provider(&def, None).await;
+        assert!(Arc::ptr_eq(&provider, &parent_provider));
+        assert_eq!(provider_id, "parent-provider");
+        assert_eq!(model_id, "parent-model");
+        assert!(
+            resolver.requested.lock().unwrap().is_empty(),
+            "inherit must never be resolved as a model id"
+        );
+
+        // A real override still goes through the resolver.
+        def.model = Some("micro".into());
+        let (provider, provider_id, model_id) = runner.resolve_provider(&def, None).await;
+        assert!(!Arc::ptr_eq(&provider, &parent_provider));
+        assert_eq!(provider_id, "resolved");
+        assert_eq!(model_id, "micro");
+        assert_eq!(resolver.requested.lock().unwrap().as_slice(), ["micro"]);
+
+        // A call-time override wins over the def and is resolved too.
+        let (_, _, model_id) = runner.resolve_provider(&def, Some("inherit")).await;
+        assert_eq!(model_id, "parent-model");
+        let (_, _, model_id) = runner.resolve_provider(&def, Some("deci")).await;
+        assert_eq!(model_id, "deci");
+    }
+
+    /// Minimal named tool so an allowlist can be exercised without pulling in
+    /// a real tool's schema or permissions.
+    struct NamedTool(&'static str);
+
+    #[async_trait]
+    impl mew_tools::Tool for NamedTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn description(&self) -> &str {
+            "test tool"
+        }
+        fn schema(&self) -> &serde_json::Value {
+            static SCHEMA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+            SCHEMA.get_or_init(|| serde_json::json!({"type":"object","properties":{}}))
+        }
+        fn sensitivity(&self) -> mew_tools::Sensitivity {
+            mew_tools::Sensitivity::ReadOnly
+        }
+        async fn execute(
+            &self,
+            _ctx: mew_tools::ToolCtx,
+            input: serde_json::Value,
+        ) -> Result<mew_hooks::ToolOutput, mew_tools::ToolError> {
+            Ok(mew_hooks::ToolOutput {
+                output: input.to_string(),
+                error: String::new(),
+                diff: None,
+                images: vec![],
+                metadata: None,
+                file_delta: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn subagent_tool_allowlist_keeps_the_exit_tool() {
+        let provider = Arc::new(ScriptedProvider::new(vec![]));
+        let mut parent = crate::Agent::new(
+            provider.clone(),
+            Arc::new(mew_hooks::NopDispatcher),
+            None,
+            vec![exit_tool()],
+            None,
+        );
+        parent.set_model_info("m", "p");
+        let echo_name = "echo";
+        let echo: Arc<dyn mew_tools::Tool> = Arc::new(NamedTool(echo_name));
+        let runner = SimpleRunner::new(
+            provider,
+            vec![exit_tool(), echo],
+            Arc::new(mew_hooks::NopDispatcher),
+        )
+        .with_agent_registry(&mut parent);
+
+        let mut def = make_def(Some(5), Some(60));
+        // The contract renders for this def and tells it to report through
+        // exit_tool, so restricting tools must not remove it.
+        def.tools = Some(vec![echo_name.to_string()]);
+        let names: Vec<String> = runner
+            .child_tools(&def, 0)
+            .iter()
+            .map(|tool| tool.name().to_string())
+            .collect();
+        assert!(names.contains(&"exit_tool".to_string()), "got {names:?}");
+        assert!(names.contains(&echo_name.to_string()), "got {names:?}");
+        assert_eq!(names.len(), 2, "got {names:?}");
+
+        // Everything else still follows the allowlist.
+        def.tools = Some(vec![]);
+        let names: Vec<String> = runner
+            .child_tools(&def, 0)
+            .iter()
+            .map(|tool| tool.name().to_string())
+            .collect();
+        assert_eq!(names, vec!["exit_tool".to_string()]);
+    }
+    #[tokio::test]
+    async fn subagent_model_inherit_reaches_the_provider_as_the_parent_model() {
+        let provider = Arc::new(ScriptedProvider::new(vec![(
+            Duration::from_millis(0),
+            turn("done"),
+        )]));
+        let override_provider: Arc<dyn Provider> = Arc::new(ScriptedProvider::new(vec![]));
+        let resolver = Arc::new(RecordingResolver {
+            requested: StdMutex::new(Vec::new()),
+            provider: override_provider,
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let mut parent = crate::Agent::new(
+            provider.clone(),
+            Arc::new(mew_hooks::NopDispatcher),
+            None,
+            vec![exit_tool()],
+            None,
+        );
+        parent.set_model_info("parent-model", "parent-provider");
+        let runner = SimpleRunner::new(
+            provider.clone(),
+            vec![exit_tool()],
+            Arc::new(mew_hooks::NopDispatcher),
+        )
+        .with_agent_registry(&mut parent)
+        .with_model_resolver(resolver.clone())
+        .with_session_root(directory.path().to_path_buf());
+
+        let mut def = make_def(Some(5), Some(60));
+        def.model = Some("inherit".into());
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        let result = runner
+            .run(SubagentRunOptions {
+                def: &def,
+                prompt: "prompt".into(),
+                parent_call_id: "parent".into(),
+                parent_session_id: SessionId::new(),
+                event_tx: tx,
+                cancel: tokio_util::sync::CancellationToken::new(),
+                model: None,
+                parent_depth: 0,
+            })
+            .await
+            .unwrap();
+        drain.abort();
+        assert!(
+            matches!(result, SubagentResult::Complete { .. }),
+            "{result:?}"
+        );
+
+        // The child ran against the parent provider instance: a model-bound
+        // provider is how a real setup carries the model id, so exactly one
+        // request must have landed on the parent.
+        assert_eq!(provider.requests.lock().unwrap().len(), 1);
+        assert!(
+            resolver.requested.lock().unwrap().is_empty(),
+            "inherit must never be resolved as a model id"
+        );
     }
 }
