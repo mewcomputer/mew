@@ -387,6 +387,11 @@ export class MewClient {
     loadSessionHistory(session_id, before, limit) {
         this.send({ type: "load_session_history", session_id, before, limit });
     }
+    /** Request the whole-session turn index for the attached session. The
+     *  daemon replies with a `session-index` event. */
+    loadSessionIndex(session_id) {
+        this.send({ type: "load_session_index", session_id });
+    }
     /** Read the next bounded UTF-8 chunk from a session-owned job. */
     readJobOutput(session_id, job_id, request_id, offset) {
         this.send({ type: "read_job_output", session_id, job_id, request_id, offset });
@@ -501,6 +506,12 @@ export class MewClient {
     setAutoTitle(enabled) {
         this.send({ type: "set_auto_title", enabled });
     }
+    readAutomationSettings() {
+        this.send({ type: "read_automation_settings" });
+    }
+    migrateAutomationSettings(title, summary) {
+        this.send({ type: "migrate_automation_settings", auto_title_enabled: title, auto_summary_enabled: summary });
+    }
     readDaemonSettings(requestId) {
         this.send({ type: "read_daemon_settings", request_id: requestId });
     }
@@ -512,6 +523,17 @@ export class MewClient {
     }
     revokeDevice(deviceId, requestId) {
         this.send({ type: "revoke_device", device_id: deviceId, request_id: requestId });
+    }
+    setRemoteAccess(enabled, requestId) {
+        this.send({ type: "set_remote_access", enabled, request_id: requestId });
+    }
+    createPairingInvite(requestId, options) {
+        this.send({
+            type: "create_pairing_invite",
+            request_id: requestId,
+            ...(options?.scope !== undefined ? { scope: options.scope } : {}),
+            ...(options?.ttlSecs !== undefined ? { ttl_secs: options.ttlSecs } : {}),
+        });
     }
     setAutoSummary(enabled) {
         this.send({ type: "set_auto_summary", enabled });
@@ -525,6 +547,17 @@ export class MewClient {
             };
             this.on("model-list", onList);
             this.send({ type: "list_models" });
+        });
+    }
+    /** List skill and subagent definitions for the inline @ picker. */
+    listMentionCandidates() {
+        return new Promise((resolve) => {
+            const onList = (data) => {
+                this.off("mention-candidates", onList);
+                resolve(data);
+            };
+            this.on("mention-candidates", onList);
+            this.send({ type: "list_mention_candidates" });
         });
     }
     /** Switch the active session to a different model. Resolves when the
@@ -592,10 +625,6 @@ export class MewClient {
             this.send({ type: "set_permission_mode", mode });
         });
     }
-    /** Yield control of the session. Advisory — other clients can become active. */
-    yieldControl() {
-        this.send({ type: "yield_control" });
-    }
     // -- Phase 2: groups & archive --
     createGroup(name, color) {
         this.send({ type: "create_group", name, color });
@@ -627,16 +656,19 @@ export class MewClient {
     }
     // -- Phase 3: file service --
     listDir(sessionId, path) {
-        this.send({ type: "list_dir", session_id: sessionId, path });
+        this.send({ type: "list_dir", session_id: sessionId, path, scoped_errors: true });
     }
     listFilesystemDir(path) {
         this.send({ type: "list_filesystem_dir", ...(path ? { path } : {}) });
     }
     readFilePreview(sessionId, path, maxBytes) {
-        this.send({ type: "read_file_preview", session_id: sessionId, path, max_bytes: maxBytes });
+        this.send({ type: "read_file_preview", session_id: sessionId, path, max_bytes: maxBytes, scoped_errors: true });
     }
     gitStatus(sessionId) {
-        this.send({ type: "git_status", session_id: sessionId });
+        this.send({ type: "git_status", session_id: sessionId, scoped_errors: true });
+    }
+    readSessionDiff(sessionId, requestId, path) {
+        this.send({ type: "read_session_file_diff", session_id: sessionId, request_id: requestId, path });
     }
     watchWorkspace(sessionId, enabled) {
         this.send({ type: "watch_workspace", session_id: sessionId, enabled });
@@ -672,6 +704,96 @@ export class MewClient {
                 fail(error);
             }
         });
+    }
+    /** Upload an attachment blob to the daemon's content-addressed store. */
+    uploadAttachment(dataBase64, mime, filename) {
+        const requestId = `att-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        return new Promise((resolve, reject) => {
+            const signal = this.connectionLifetime?.signal;
+            const cleanup = () => {
+                clearTimeout(timeout);
+                this.off("attachment-uploaded", onUploaded);
+                signal?.removeEventListener("abort", onDisconnect);
+            };
+            const onUploaded = (data) => {
+                if (data.request_id !== requestId)
+                    return;
+                cleanup();
+                resolve({ id: data.id, url: data.url, mime: data.mime, size: data.size });
+            };
+            const fail = (error) => { cleanup(); reject(error); };
+            const onDisconnect = () => fail(signal?.reason);
+            const timeout = setTimeout(() => fail(new Error("Attachment upload timed out.")), 15000);
+            signal?.addEventListener("abort", onDisconnect, { once: true });
+            this.on("attachment-uploaded", onUploaded);
+            try {
+                this.send({
+                    type: "upload_attachment",
+                    request_id: requestId,
+                    mime,
+                    ...(filename ? { filename } : {}),
+                    data_base64: dataBase64,
+                });
+            }
+            catch (error) {
+                fail(error);
+            }
+        });
+    }
+    /** Fetch an attachment blob by content ID from the daemon's blob store. */
+    getAttachment(id) {
+        const requestId = `att-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        return new Promise((resolve, reject) => {
+            const signal = this.connectionLifetime?.signal;
+            const cleanup = () => {
+                clearTimeout(timeout);
+                this.off("attachment-data", onData);
+                signal?.removeEventListener("abort", onDisconnect);
+            };
+            const onData = (data) => {
+                if (data.request_id !== requestId)
+                    return;
+                cleanup();
+                resolve({ id: data.id, data_base64: data.data_base64, size: data.size });
+            };
+            const fail = (error) => { cleanup(); reject(error); };
+            const onDisconnect = () => fail(signal?.reason);
+            const timeout = setTimeout(() => fail(new Error("Attachment fetch timed out.")), 15000);
+            signal?.addEventListener("abort", onDisconnect, { once: true });
+            this.on("attachment-data", onData);
+            try {
+                this.send({ type: "get_attachment", request_id: requestId, id });
+            }
+            catch (error) {
+                fail(error);
+            }
+        });
+    }
+    /** Enqueue a follow-up or steer interruption message on a session. */
+    enqueueMessage(sessionId, text, mode = "follow_up", attachments = []) {
+        const requestId = `q-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        this.send({
+            type: "enqueue_message",
+            session_id: sessionId,
+            request_id: requestId,
+            text,
+            attachments,
+            mode,
+        });
+    }
+    /** Update text or promote mode on a queued message. */
+    updateQueuedMessage(sessionId, id, patch) {
+        this.send({
+            type: "update_queued_message",
+            session_id: sessionId,
+            id,
+            ...(patch.text !== undefined ? { text: patch.text } : {}),
+            ...(patch.mode !== undefined ? { mode: patch.mode } : {}),
+        });
+    }
+    /** Remove a pending queued message before it runs. */
+    removeQueuedMessage(sessionId, id) {
+        this.send({ type: "remove_queued_message", session_id: sessionId, id });
     }
     /** List known projects (recent session cwds). */
     listProjects() {
@@ -794,7 +916,27 @@ export class MewClient {
     dispatch(msg) {
         switch (msg.type) {
             case "daemon_settings":
-                this.emit("daemon-settings", { request_id: msg.request_id, defaults: msg.defaults, devices: msg.devices });
+                this.emit("daemon-settings", {
+                    request_id: msg.request_id,
+                    defaults: msg.defaults,
+                    devices: msg.devices,
+                    ...(msg.automation !== undefined ? { automation: msg.automation } : {}),
+                    ...(msg.remote !== undefined ? { remote: msg.remote } : {}),
+                });
+                break;
+            case "pairing_invite":
+                this.emit("pairing-invite", {
+                    request_id: msg.request_id,
+                    node_id: msg.node_id,
+                    payload: msg.payload,
+                    expires_at: msg.expires_at,
+                });
+                break;
+            case "automation_settings":
+                this.emit("automation-settings", { auto_title_enabled: msg.auto_title_enabled, auto_summary_enabled: msg.auto_summary_enabled, ...(msg.initialized === undefined ? {} : { initialized: msg.initialized }) });
+                break;
+            case "auto_summary_changed":
+                this.emit("auto-summary-changed", { enabled: msg.enabled });
                 break;
             case "daemon_settings_failed":
                 this.emit("daemon-settings-failed", { request_id: msg.request_id, message: msg.message });
@@ -833,7 +975,7 @@ export class MewClient {
                 this.emit("provider", msg.event);
                 break;
             case "user_message":
-                this.emit("user-message", { text: msg.text });
+                this.emit("user-message", { text: msg.text, ...(msg.steered ? { steered: true } : {}) });
                 break;
             case "tool_start":
                 this.emit("tool-start", { call_id: msg.call_id });
@@ -959,6 +1101,11 @@ export class MewClient {
                     this.emit("session-history-page", { session_id: this.sessionId, messages: msg.messages, replace: true });
                 }
                 break;
+            case "session_index":
+                if (this.isSessionAttached(msg.session_id)) {
+                    this.emit("session-index", { session_id: msg.session_id, turns: msg.turns });
+                }
+                break;
             case "job_output":
                 this.emit("job-output", { session_id: msg.session_id, job_id: msg.job_id, request_id: msg.request_id, offset: msg.offset, next_offset: msg.next_offset, output: msg.output, done: msg.done, incomplete: msg.incomplete });
                 break;
@@ -985,6 +1132,9 @@ export class MewClient {
             }
             case "model_list":
                 this.emit("model-list", { models: msg.models });
+                break;
+            case "mention_candidates":
+                this.emit("mention-candidates", { skills: msg.skills, subagents: msg.subagents });
                 break;
             case "model_switched":
                 this.emit("model-switched", {
@@ -1015,9 +1165,6 @@ export class MewClient {
             case "client_detached":
                 this.emit("client-detached", { client_id: msg.client_id });
                 break;
-            case "control_yielded":
-                this.emit("control-yielded", { client_id: msg.client_id });
-                break;
             case "session_title_changed":
                 this.emit("session-title-changed", {
                     session_id: msg.session_id,
@@ -1034,6 +1181,7 @@ export class MewClient {
                 this.emit("session-activity-changed", {
                     session_id: msg.session_id,
                     activity: msg.activity,
+                    ...(msg.cancelled ? { cancelled: true } : {}),
                 });
                 break;
             case "session_stats_changed":
@@ -1051,24 +1199,40 @@ export class MewClient {
                 this.emit("groups-changed", { groups: msg.groups });
                 break;
             case "dir_listing":
-                this.emit("dir-listing", { path: msg.path, entries: msg.entries });
+                this.emit("dir-listing", { session_id: msg.session_id, path: msg.path, entries: msg.entries });
+                break;
+            case "dir_listing_error":
+                this.emit("dir-listing", { session_id: msg.session_id, path: msg.path, entries: [], error: msg.error });
                 break;
             case "filesystem_dir_listing":
                 this.emit("filesystem-dir-listing", { path: msg.path, entries: msg.entries });
                 break;
             case "file_preview":
                 this.emit("file-preview", {
+                    session_id: msg.session_id,
                     path: msg.path,
                     content: msg.content,
                     truncated: msg.truncated,
                     language: msg.language,
                 });
                 break;
+            case "file_preview_error":
+                this.emit("file-preview", { session_id: msg.session_id, path: msg.path, content: "", truncated: false, error: msg.error });
+                break;
+            case "git_status_error":
+                this.emit("git-status-result", { session_id: msg.session_id, entries: [], error: msg.error });
+                break;
             case "git_status_result":
-                this.emit("git-status-result", { entries: msg.entries });
+                this.emit("git-status-result", { session_id: msg.session_id, entries: msg.entries });
+                break;
+            case "session_diff":
+                this.emit("session-diff", { session_id: msg.session_id, request_id: msg.request_id, files: msg.files });
+                break;
+            case "session_diff_error":
+                this.emit("session-diff-error", { session_id: msg.session_id, request_id: msg.request_id, message: msg.message });
                 break;
             case "fs_changed":
-                this.emit("fs-changed", { paths: msg.paths });
+                this.emit("fs-changed", { session_id: msg.session_id, paths: msg.paths });
                 break;
             case "session_usage_changed":
                 this.emit("session-usage-changed", {
@@ -1152,6 +1316,37 @@ export class MewClient {
             case "browser_error":
                 this.emit("browser-error", { message: msg.message, tabId: msg.tab_id });
                 break;
+            case "attachment_uploaded":
+                this.emit("attachment-uploaded", {
+                    request_id: msg.request_id,
+                    id: msg.id,
+                    url: msg.url,
+                    mime: msg.mime,
+                    size: msg.size,
+                });
+                break;
+            case "attachment_data":
+                this.emit("attachment-data", {
+                    request_id: msg.request_id,
+                    id: msg.id,
+                    data_base64: msg.data_base64,
+                    size: msg.size,
+                });
+                break;
+            case "session_queue_changed":
+                this.emit("session-queue-changed", {
+                    session_id: msg.session_id,
+                    items: msg.items,
+                });
+                break;
+            case "session_compacting":
+                this.emit("session-compacting", {
+                    session_id: msg.session_id,
+                    active: msg.active,
+                    ...(msg.removed !== undefined ? { removed: msg.removed } : {}),
+                    ...(msg.summary !== undefined ? { summary: msg.summary } : {}),
+                });
+                break;
             default: {
                 // Exhaustiveness check: adding a new ServerMessage variant
                 // without handling it here becomes a TypeScript error.
@@ -1163,7 +1358,7 @@ export class MewClient {
     send(msg) {
         if (this.pendingSessionCommands > 0 && [
             "prompt", "cancel", "guide", "slash_command", "switch_model", "switch_persona",
-            "set_thinking_variant", "set_permission_mode", "yield_control", "set_auto_title", "set_auto_summary",
+            "set_thinking_variant", "set_permission_mode", "set_auto_title", "set_auto_summary", "migrate_automation_settings",
         ].includes(msg.type)) {
             throw new Error("Wait until switching conversations finishes.");
         }

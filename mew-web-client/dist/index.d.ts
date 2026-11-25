@@ -17,10 +17,27 @@ export interface PairedDevice {
     scope: "observe" | "collaborate" | "control" | null;
     paired_at: number | null;
 }
+export interface AutomationSettingsInfo {
+    auto_title_enabled: boolean;
+    auto_summary_enabled: boolean;
+}
+export interface RemoteAccessInfo {
+    supported: boolean;
+    enabled: boolean;
+    node_id?: string | null;
+}
+export interface PairingInvite {
+    request_id: string;
+    node_id: string;
+    payload: string;
+    expires_at: number;
+}
 export interface DaemonSettings {
     request_id: string | null;
     defaults: NewChatDefaults | null;
     devices: PairedDevice[] | null;
+    automation?: AutomationSettingsInfo | null;
+    remote?: RemoteAccessInfo | null;
 }
 export type ClientMessage = {
     type: "remote_hello";
@@ -39,6 +56,9 @@ export type ClientMessage = {
     session_id: string;
     before: number;
     limit?: number;
+} | {
+    type: "load_session_index";
+    session_id: string;
 } | {
     type: "read_job_output";
     session_id: string;
@@ -78,6 +98,12 @@ export type ClientMessage = {
     type: "set_auto_title";
     enabled: boolean;
 } | {
+    type: "read_automation_settings";
+} | {
+    type: "migrate_automation_settings";
+    auto_title_enabled: boolean | null;
+    auto_summary_enabled: boolean | null;
+} | {
     type: "read_daemon_settings";
     request_id: string;
 } | {
@@ -91,6 +117,15 @@ export type ClientMessage = {
     type: "revoke_device";
     device_id: string;
     request_id: string;
+} | {
+    type: "set_remote_access";
+    enabled: boolean;
+    request_id: string;
+} | {
+    type: "create_pairing_invite";
+    request_id: string;
+    scope?: "observe" | "collaborate" | "control";
+    ttl_secs?: number;
 } | {
     type: "set_auto_summary";
     enabled: boolean;
@@ -132,6 +167,8 @@ export type ClientMessage = {
 } | {
     type: "list_models";
 } | {
+    type: "list_mention_candidates";
+} | {
     type: "switch_model";
     provider: string;
     model: string;
@@ -146,8 +183,6 @@ export type ClientMessage = {
 } | {
     type: "set_permission_mode";
     mode: string;
-} | {
-    type: "yield_control";
 } | {
     type: "create_group";
     name: string;
@@ -181,11 +216,13 @@ export type ClientMessage = {
     type: "list_dir";
     session_id: string;
     path?: string;
+    scoped_errors?: boolean;
 } | {
     type: "read_file_preview";
     session_id: string;
     path: string;
     max_bytes?: number;
+    scoped_errors?: boolean;
 } | ({
     type: "update_todo";
     session_id: string;
@@ -193,6 +230,12 @@ export type ClientMessage = {
 } & TodoEdit) | {
     type: "git_status";
     session_id: string;
+    scoped_errors?: boolean;
+} | {
+    type: "read_session_file_diff";
+    session_id: string;
+    request_id: string;
+    path: string;
 } | {
     type: "watch_workspace";
     session_id: string;
@@ -250,7 +293,42 @@ export type ClientMessage = {
 } | {
     type: "browser_close";
     tab_id?: string;
+} | {
+    type: "upload_attachment";
+    request_id: string;
+    mime: string;
+    filename?: string;
+    data_base64: string;
+} | {
+    type: "get_attachment";
+    request_id: string;
+    id: string;
+} | {
+    type: "enqueue_message";
+    session_id: string;
+    request_id: string;
+    text: string;
+    attachments: Attachment[];
+    mode: QueueMode;
+} | {
+    type: "update_queued_message";
+    session_id: string;
+    id: string;
+    text?: string;
+    mode?: QueueMode;
+} | {
+    type: "remove_queued_message";
+    session_id: string;
+    id: string;
 };
+export type QueueMode = "follow_up" | "steer";
+export interface QueuedMessageWire {
+    id: string;
+    text: string;
+    attachments?: Attachment[];
+    mode: QueueMode;
+    created_at: number;
+}
 export type ProviderEventWire = {
     type: "part_start";
     part: Part;
@@ -424,6 +502,11 @@ export type SubagentOutcome = {
     type: "failed";
     reason: string;
 };
+/** A skill or subagent definition offered by the inline @ picker. */
+export interface MentionCandidate {
+    name: string;
+    description: string;
+}
 /** Info about a single available model, returned by `list_models`. */
 export interface ModelInfo {
     /** Fully-qualified ID: "provider/model" (e.g. "deepseek/deepseek-v4-flash"). */
@@ -516,6 +599,9 @@ export interface SessionInfo {
     provider?: string;
     created_at: number;
     last_message_at?: number;
+    /** Persisted title (generated from the first prompt or renamed by the user).
+     *  This is the title slot; `summary` is a longer recap, not a substitute. */
+    title?: string;
     summary?: string;
     client_count: number;
     cwd?: string;
@@ -531,6 +617,8 @@ export interface SessionInfo {
     pending_questions?: number;
     /** First user message text (truncated), used as a display title fallback. */
     first_message?: string;
+    /** Latest non-empty user or assistant message text (truncated), used as a preview fallback when no summary exists. */
+    last_message?: string;
 }
 /** A session group. */
 export interface GroupInfo {
@@ -548,6 +636,29 @@ export interface DirEntry {
 /** Git file status. */
 export type GitFileStatus = "added" | "modified" | "deleted" | "renamed" | "untracked";
 /** One entry in a git status result. */
+export interface WorkspaceDiffLine {
+    kind: "Context" | "Addition" | "Deletion";
+    old_line: number | null;
+    new_line: number | null;
+    text: string;
+    ending?: "Lf" | "CrLf" | "None";
+}
+export interface WorkspaceFileDiff {
+    path: string;
+    old_path: string | null;
+    layer?: "Staged" | "Unstaged";
+    patch?: string;
+    status: "Added" | "Modified" | "Deleted" | "Renamed" | "Unchanged" | "Binary";
+    hunks: {
+        old_start: number;
+        old_count: number;
+        new_start: number;
+        new_count: number;
+        lines: WorkspaceDiffLine[];
+    }[];
+    added: number;
+    removed: number;
+}
 export interface GitEntry {
     path: string;
     status: GitFileStatus;
@@ -649,9 +760,32 @@ export interface SessionHistoryPage {
     next_cursor?: number;
     replace: boolean;
 }
-export type ServerMessage = ({
+/** One turn's summary for the conversation minimap, sent in `session_index`. */
+export interface TurnSummary {
+    /** First message id of the turn — the stable key for ticks and bookmarks. */
+    id: string;
+    /** Zero-based ordinal of the turn within the session. */
+    index: number;
+    /** Messages in the turn, for proportional tick spacing. */
+    message_count: number;
+    /** First 300 characters of the user prompt. */
+    prompt: string;
+    /** First 300 characters of the assistant reply. */
+    reply: string;
+}
+export type ServerMessage = {
+    type: "automation_settings";
+    auto_title_enabled: boolean;
+    auto_summary_enabled: boolean;
+    initialized?: boolean;
+} | {
+    type: "auto_summary_changed";
+    enabled: boolean;
+} | ({
     type: "daemon_settings";
-} & DaemonSettings) | {
+} & DaemonSettings) | ({
+    type: "pairing_invite";
+} & PairingInvite) | {
     type: "daemon_settings_failed";
     request_id: string;
     message: string;
@@ -675,6 +809,7 @@ export type ServerMessage = ({
     type: "user_message";
     text: string;
     request_id?: string;
+    steered?: boolean;
 } | {
     type: "tool_start";
     call_id: string;
@@ -783,6 +918,10 @@ export type ServerMessage = ({
 } | {
     type: "session_history";
     messages: Message[];
+} | {
+    type: "session_index";
+    session_id: string;
+    turns: TurnSummary[];
 } | ({
     type: "job_output";
 } & JobOutput) | ({
@@ -799,6 +938,10 @@ export type ServerMessage = ({
 } & SessionHistoryPage) | {
     type: "model_list";
     models: ModelInfo[];
+} | {
+    type: "mention_candidates";
+    skills: MentionCandidate[];
+    subagents: MentionCandidate[];
 } | {
     type: "model_switched";
     provider: string;
@@ -823,9 +966,6 @@ export type ServerMessage = ({
     type: "client_detached";
     client_id: number;
 } | {
-    type: "control_yielded";
-    client_id: number;
-} | {
     type: "session_title_changed";
     session_id: string;
     title: string;
@@ -837,6 +977,7 @@ export type ServerMessage = ({
     type: "session_activity_changed";
     session_id: string;
     activity: SessionState;
+    cancelled?: boolean;
 } | {
     type: "session_stats_changed";
     session_id: string;
@@ -851,21 +992,48 @@ export type ServerMessage = ({
     groups: GroupInfo[];
 } | {
     type: "dir_listing";
+    session_id?: string;
     path: string;
     entries: DirEntry[];
+} | {
+    type: "dir_listing_error";
+    session_id: string;
+    path: string;
+    error: string;
 } | {
     type: "filesystem_dir_listing";
     path: string;
     entries: DirEntry[];
 } | {
     type: "file_preview";
+    session_id?: string;
     path: string;
     content: string;
     truncated: boolean;
     language?: string;
 } | {
+    type: "file_preview_error";
+    session_id: string;
+    path: string;
+    error: string;
+} | {
     type: "git_status_result";
+    session_id?: string;
     entries: GitEntry[];
+} | {
+    type: "git_status_error";
+    session_id: string;
+    error: string;
+} | {
+    type: "session_diff";
+    session_id: string;
+    request_id: string;
+    files: WorkspaceFileDiff[];
+} | {
+    type: "session_diff_error";
+    session_id: string;
+    request_id: string;
+    message: string;
 } | {
     type: "fs_changed";
     session_id?: string;
@@ -931,6 +1099,29 @@ export type ServerMessage = ({
     type: "browser_error";
     message: string;
     tab_id?: string;
+} | {
+    type: "attachment_uploaded";
+    request_id: string;
+    id: string;
+    url: string;
+    mime: string;
+    size: number;
+} | {
+    type: "attachment_data";
+    request_id: string;
+    id: string;
+    data_base64: string;
+    size: number;
+} | {
+    type: "session_queue_changed";
+    session_id: string;
+    items: QueuedMessageWire[];
+} | {
+    type: "session_compacting";
+    session_id: string;
+    active: boolean;
+    removed?: number;
+    summary?: string;
 };
 export interface MewWebSocket {
     send(data: string): void;
@@ -948,7 +1139,16 @@ export interface MewWebSocket {
 }
 export type SocketFactory = (url: string) => MewWebSocket;
 export interface MewClientEvents {
+    "automation-settings": (data: {
+        auto_title_enabled: boolean;
+        auto_summary_enabled: boolean;
+        initialized?: boolean;
+    }) => void;
+    "auto-summary-changed": (data: {
+        enabled: boolean;
+    }) => void;
     "daemon-settings": (data: DaemonSettings) => void;
+    "pairing-invite": (data: PairingInvite) => void;
     "daemon-settings-failed": (data: {
         request_id: string;
         message: string;
@@ -970,6 +1170,7 @@ export interface MewClientEvents {
     provider: (ev: ProviderEventWire) => void;
     "user-message": (data: {
         text: string;
+        steered?: boolean;
     }) => void;
     "tool-start": (data: {
         call_id: string;
@@ -1069,6 +1270,10 @@ export interface MewClientEvents {
         messages: Message[];
     }) => void;
     "session-history-page": (page: SessionHistoryPage) => void;
+    "session-index": (data: {
+        session_id: string;
+        turns: TurnSummary[];
+    }) => void;
     "job-output": (data: JobOutput) => void;
     "job-output-error": (data: JobOutputError) => void;
     "subagent-history": (data: {
@@ -1081,6 +1286,10 @@ export interface MewClientEvents {
     "subagent-message-receipt": (receipt: SubagentMessageReceipt) => void;
     "model-list": (data: {
         models: ModelInfo[];
+    }) => void;
+    "mention-candidates": (data: {
+        skills: MentionCandidate[];
+        subagents: MentionCandidate[];
     }) => void;
     "model-switched": (data: {
         provider: string;
@@ -1105,9 +1314,6 @@ export interface MewClientEvents {
     "client-detached": (data: {
         client_id: number;
     }) => void;
-    "control-yielded": (data: {
-        client_id: number;
-    }) => void;
     "session-title-changed": (data: {
         session_id: string;
         title: string;
@@ -1119,6 +1325,7 @@ export interface MewClientEvents {
     "session-activity-changed": (data: {
         session_id: string;
         activity: SessionState;
+        cancelled?: boolean;
     }) => void;
     "session-stats-changed": (data: {
         session_id: string;
@@ -1133,23 +1340,40 @@ export interface MewClientEvents {
         groups: GroupInfo[];
     }) => void;
     "dir-listing": (data: {
+        session_id?: string;
         path: string;
         entries: DirEntry[];
+        error?: string;
     }) => void;
     "filesystem-dir-listing": (data: {
         path: string;
         entries: DirEntry[];
     }) => void;
     "file-preview": (data: {
+        session_id?: string;
         path: string;
         content: string;
         truncated: boolean;
         language?: string;
+        error?: string;
+    }) => void;
+    "session-diff": (data: {
+        session_id: string;
+        request_id: string;
+        files: WorkspaceFileDiff[];
+    }) => void;
+    "session-diff-error": (data: {
+        session_id: string;
+        request_id: string;
+        message: string;
     }) => void;
     "git-status-result": (data: {
+        session_id?: string;
         entries: GitEntry[];
+        error?: string;
     }) => void;
     "fs-changed": (data: {
+        session_id?: string;
         paths: string[];
     }) => void;
     "session-usage-changed": (data: {
@@ -1217,6 +1441,29 @@ export interface MewClientEvents {
     "browser-error": (data: {
         message: string;
         tabId?: string;
+    }) => void;
+    "attachment-uploaded": (data: {
+        request_id: string;
+        id: string;
+        url: string;
+        mime: string;
+        size: number;
+    }) => void;
+    "attachment-data": (data: {
+        request_id: string;
+        id: string;
+        data_base64: string;
+        size: number;
+    }) => void;
+    "session-queue-changed": (data: {
+        session_id: string;
+        items: QueuedMessageWire[];
+    }) => void;
+    "session-compacting": (data: {
+        session_id: string;
+        active: boolean;
+        removed?: number;
+        summary?: string;
     }) => void;
     "remote-ready": (data: {
         scope: "observe" | "collaborate" | "control";
@@ -1310,6 +1557,9 @@ export declare class MewClient {
     /** Request older messages for the attached session using the cursor from a
      *  previous history page. */
     loadSessionHistory(session_id: string, before: number, limit?: number): void;
+    /** Request the whole-session turn index for the attached session. The
+     *  daemon replies with a `session-index` event. */
+    loadSessionIndex(session_id: string): void;
     /** Read the next bounded UTF-8 chunk from a session-owned job. */
     readJobOutput(session_id: string, job_id: string, request_id: string, offset: number): void;
     /** Request a recorded child transcript without changing the attached session. */
@@ -1330,13 +1580,25 @@ export declare class MewClient {
     renameSession(session_id: string, title: string): void;
     /** Enable or disable auto-generated session titles. */
     setAutoTitle(enabled: boolean): void;
+    readAutomationSettings(): void;
+    migrateAutomationSettings(title: boolean | null, summary: boolean | null): void;
     readDaemonSettings(requestId: string): void;
     saveSessionDefaults(sessionId: string, requestId: string): void;
     resetSessionDefaults(requestId: string): void;
     revokeDevice(deviceId: string, requestId: string): void;
+    setRemoteAccess(enabled: boolean, requestId: string): void;
+    createPairingInvite(requestId: string, options?: {
+        scope?: "observe" | "collaborate" | "control";
+        ttlSecs?: number;
+    }): void;
     setAutoSummary(enabled: boolean): void;
     /** List available models from all configured providers. */
     listModels(): Promise<ModelInfo[]>;
+    /** List skill and subagent definitions for the inline @ picker. */
+    listMentionCandidates(): Promise<{
+        skills: MentionCandidate[];
+        subagents: MentionCandidate[];
+    }>;
     /** Switch the active session to a different model. Resolves when the
      *  daemon confirms via `model-switched`. */
     switchModel(provider: string, model: string): Promise<{
@@ -1365,8 +1627,6 @@ export declare class MewClient {
      *  "standard", "permissive", "auto", "auto_plus", "dangerous".
      *  Resolves when the daemon confirms via `permission-mode-changed`. */
     setPermissionMode(mode: string): Promise<string | null>;
-    /** Yield control of the session. Advisory — other clients can become active. */
-    yieldControl(): void;
     createGroup(name: string, color?: string): void;
     updateGroup(groupId: string, opts: {
         name?: string;
@@ -1384,11 +1644,34 @@ export declare class MewClient {
     listFilesystemDir(path?: string): void;
     readFilePreview(sessionId: string, path: string, maxBytes?: number): void;
     gitStatus(sessionId: string): void;
+    readSessionDiff(sessionId: string, requestId: string, path: string): void;
     watchWorkspace(sessionId: string, enabled: boolean): void;
     openPath(sessionId: string, path: string): void;
     unflagFile(sessionId: string, path: string): void;
     /** Ping the daemon; resolves with the daemon version once a pong arrives. */
     ping(): Promise<string>;
+    /** Upload an attachment blob to the daemon's content-addressed store. */
+    uploadAttachment(dataBase64: string, mime: string, filename?: string): Promise<{
+        id: string;
+        url: string;
+        mime: string;
+        size: number;
+    }>;
+    /** Fetch an attachment blob by content ID from the daemon's blob store. */
+    getAttachment(id: string): Promise<{
+        id: string;
+        data_base64: string;
+        size: number;
+    }>;
+    /** Enqueue a follow-up or steer interruption message on a session. */
+    enqueueMessage(sessionId: string, text: string, mode?: QueueMode, attachments?: Attachment[]): void;
+    /** Update text or promote mode on a queued message. */
+    updateQueuedMessage(sessionId: string, id: string, patch: {
+        text?: string;
+        mode?: QueueMode;
+    }): void;
+    /** Remove a pending queued message before it runs. */
+    removeQueuedMessage(sessionId: string, id: string): void;
     /** List known projects (recent session cwds). */
     listProjects(): void;
     registerBrowserPage(sessionId: string, pageInstance: string, cdpEndpoint: string, targetId: string, focusUrl?: string): Promise<void>;

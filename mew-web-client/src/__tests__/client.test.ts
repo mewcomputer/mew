@@ -81,6 +81,36 @@ function makeFactory(): {
   };
 }
 
+test("selected diff requests preserve file, session, and request identity", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connected = client.connect();
+  latest().open();
+  await connected;
+  const replies: unknown[] = [];
+  client.on("session-diff", (data) => replies.push(data));
+  client.readSessionDiff("chat-a", "request-a", "src/main.ts");
+  assert.deepEqual(latest().sent.at(-1), { type: "read_session_file_diff", session_id: "chat-a", request_id: "request-a", path: "src/main.ts" });
+  latest().peerSend({ type: "session_diff", session_id: "chat-a", request_id: "request-a", files: [] });
+  assert.deepEqual(replies, [{ session_id: "chat-a", request_id: "request-a", files: [] }]);
+});
+
+test("automation settings can be read and follow daemon updates", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connected = client.connect();
+  latest().open();
+  await connected;
+  const settings: unknown[] = [];
+  client.on("automation-settings", (data) => settings.push(data));
+  client.on("auto-summary-changed", (data) => settings.push(data));
+  client.readAutomationSettings();
+  assert.deepEqual(latest().sent.at(-1), { type: "read_automation_settings" });
+  latest().peerSend({ type: "automation_settings", auto_title_enabled: false, auto_summary_enabled: true });
+  latest().peerSend({ type: "auto_summary_changed", enabled: false });
+  assert.deepEqual(settings, [{ auto_title_enabled: false, auto_summary_enabled: true }, { enabled: false }]);
+});
+
 test("daemon settings retain request identity and unavailable device management", async () => {
   const { factory, latest } = makeFactory();
   const client = new MewClient("ws://test/", { socketFactory: factory });
@@ -95,15 +125,49 @@ test("daemon settings retain request identity and unavailable device management"
   client.saveSessionDefaults("chat", "save");
   client.resetSessionDefaults("reset");
   client.revokeDevice("phone", "revoke");
+  client.setRemoteAccess(true, "remote-on");
+  client.createPairingInvite("pair", { scope: "control", ttlSecs: 120 });
   assert.deepEqual(latest().sent, [
     { type: "read_daemon_settings", request_id: "read" },
     { type: "save_session_defaults", session_id: "chat", request_id: "save" },
     { type: "reset_session_defaults", request_id: "reset" },
     { type: "revoke_device", device_id: "phone", request_id: "revoke" },
+    { type: "set_remote_access", enabled: true, request_id: "remote-on" },
+    { type: "create_pairing_invite", request_id: "pair", scope: "control", ttl_secs: 120 },
   ]);
-  latest().peerSend({ type: "daemon_settings", request_id: "read", defaults: null, devices: null });
+  const invites: unknown[] = [];
+  client.on("pairing-invite", (data) => invites.push(data));
+  latest().peerSend({
+    type: "daemon_settings",
+    request_id: "read",
+    defaults: null,
+    devices: null,
+    remote: { supported: true, enabled: true, node_id: "node-1" },
+  });
+  latest().peerSend({
+    type: "pairing_invite",
+    request_id: "pair",
+    node_id: "node-1",
+    payload: "computer.mew.mew://node-1?token=tok",
+    expires_at: 1234,
+  });
   latest().peerSend({ type: "daemon_settings_failed", request_id: "save", message: "read only" });
-  assert.deepEqual(settings, [{ request_id: "read", defaults: null, devices: null }]);
+  assert.deepEqual(settings, [
+    {
+      request_id: "read",
+      defaults: null,
+      devices: null,
+      remote: { supported: true, enabled: true, node_id: "node-1" },
+    },
+  ]);
+  assert.deepEqual(invites, [
+    {
+      request_id: "pair",
+      node_id: "node-1",
+      payload: "computer.mew.mew://node-1?token=tok",
+      expires_at: 1234,
+    },
+  ]);
   assert.deepEqual(failures, [{ request_id: "save", message: "read only" }]);
   client.disconnect();
 });
@@ -491,6 +555,26 @@ test("history pages prepend older messages and can be requested by cursor", asyn
     before: 1,
     limit: 24,
   }]);
+});
+
+test("session index emits turn summaries for the attached session only", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connectP = client.connect();
+  setImmediate(() => latest().open());
+  await connectP;
+
+  const indexes: { session_id: string; turns: { id: string; index: number; message_count: number; prompt: string; reply: string }[] }[] = [];
+  client.on("session-index", (data) => indexes.push(data));
+  const turn = { id: "user-1", index: 0, message_count: 2, prompt: "hello", reply: "hi" };
+
+  latest().peerSend({ type: "session_ready", session_id: "sess_1" });
+  latest().peerSend({ type: "session_index", session_id: "other", turns: [turn] });
+  latest().peerSend({ type: "session_index", session_id: "sess_1", turns: [turn] });
+  client.loadSessionIndex("sess_1");
+
+  assert.deepEqual(indexes, [{ session_id: "sess_1", turns: [turn] }]);
+  assert.deepEqual(latest().sent, [{ type: "load_session_index", session_id: "sess_1" }]);
 });
 
 test("history from a previously attached session cannot replace the current session", async () => {
@@ -1377,5 +1461,93 @@ test("a failed socket loses its session confirmations before a replacement opens
   latest().open();
   await reconnected;
   assert.equal(client.hasConfirmedSession("chat"), false);
+  client.disconnect();
+});
+
+test("queue helpers send wire messages and dispatch session-queue-changed events", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connected = client.connect();
+  latest().open();
+  await connected;
+
+  const updates: unknown[] = [];
+  client.on("session-queue-changed", (data) => updates.push(data));
+
+  client.enqueueMessage("chat-1", "follow up", "follow_up", []);
+  client.enqueueMessage("chat-1", "steer now", "steer", []);
+  client.updateQueuedMessage("chat-1", "q-1", { mode: "steer" });
+  client.removeQueuedMessage("chat-1", "q-1");
+
+  const recent = latest().sent.slice(-4);
+  assert.equal(typeof (recent[0] as { request_id?: string }).request_id, "string");
+  assert.equal(typeof (recent[1] as { request_id?: string }).request_id, "string");
+  assert.deepEqual(recent, [
+    {
+      type: "enqueue_message",
+      session_id: "chat-1",
+      request_id: (recent[0] as { request_id: string }).request_id,
+      text: "follow up",
+      attachments: [],
+      mode: "follow_up",
+    },
+    {
+      type: "enqueue_message",
+      session_id: "chat-1",
+      request_id: (recent[1] as { request_id: string }).request_id,
+      text: "steer now",
+      attachments: [],
+      mode: "steer",
+    },
+    {
+      type: "update_queued_message",
+      session_id: "chat-1",
+      id: "q-1",
+      mode: "steer",
+    },
+    {
+      type: "remove_queued_message",
+      session_id: "chat-1",
+      id: "q-1",
+    },
+  ]);
+
+  const item = { id: "q-1", text: "follow up", mode: "follow_up" as const, created_at: 42 };
+  latest().peerSend({ type: "session_queue_changed", session_id: "chat-1", items: [item] });
+  assert.deepEqual(updates, [{ session_id: "chat-1", items: [item] }]);
+  client.disconnect();
+});
+
+test("compacting, steered user messages, and cancelled idle activity dispatch expected payloads", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connected = client.connect();
+  latest().open();
+  await connected;
+
+  const compacting: unknown[] = [];
+  const userMessages: unknown[] = [];
+  const activity: unknown[] = [];
+  client.on("session-compacting", (d) => compacting.push(d));
+  client.on("user-message", (d) => userMessages.push(d));
+  client.on("session-activity-changed", (d) => activity.push(d));
+
+  latest().peerSend({ type: "session_compacting", session_id: "chat-1", active: true });
+  latest().peerSend({
+    type: "session_compacting",
+    session_id: "chat-1",
+    active: false,
+    removed: 14,
+    summary: "## Goal & Constraints\nShip summary",
+  });
+  latest().peerSend({ type: "user_message", text: "change course", steered: true });
+  latest().peerSend({ type: "session_activity_changed", session_id: "chat-1", activity: "idle", cancelled: true });
+
+  assert.deepEqual(compacting, [
+    { session_id: "chat-1", active: true },
+    { session_id: "chat-1", active: false, removed: 14, summary: "## Goal & Constraints\nShip summary" },
+  ]);
+  assert.deepEqual(userMessages, [{ text: "change course", steered: true }]);
+  assert.deepEqual(activity, [{ session_id: "chat-1", activity: "idle", cancelled: true }]);
   client.disconnect();
 });
