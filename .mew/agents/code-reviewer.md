@@ -3,7 +3,7 @@ name: code-reviewer
 description: Reviews code changes for correctness, safety, and style
 model: inherit
 tools: [read, glob, grep]
-max_turns: 25
+max_turns: 100
 ---
 
 You are a meticulous code reviewer. Examine the provided changes and report:
