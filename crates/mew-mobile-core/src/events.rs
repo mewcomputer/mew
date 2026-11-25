@@ -169,6 +169,26 @@ pub enum CoreEvent {
         daemon: String,
         session_id: String,
         running: bool,
+        cancelled: bool,
+    },
+
+    /// Context compaction started or finished for a session.
+    SessionCompacting {
+        daemon: String,
+        session_id: String,
+        active: bool,
+        removed: Option<u32>,
+        summary: Option<String>,
+    },
+
+    /// Provider retry wait state during a running turn.
+    RetryWait {
+        daemon: String,
+        session_id: String,
+        attempt: u32,
+        max_attempts: u32,
+        delay_secs: u64,
+        reason: String,
     },
 
     /// One provider message ended; tools or further messages may still follow.
@@ -300,6 +320,20 @@ pub enum CoreEvent {
         daemon: String,
         name: String,
     },
+
+    /// Server-side queued follow-up / steer messages changed for a session.
+    QueueChanged {
+        daemon: String,
+        session_id: String,
+        items: Vec<MobileQueuedMessage>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct MobileQueuedMessage {
+    pub id: String,
+    pub text: String,
+    pub steer: bool,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]

@@ -6,17 +6,17 @@ final class ConversationActivityTests: XCTestCase {
     private func tool(_ id: String, _ name: String, input: String = "{}", state: String? = "completed") -> MessagePart {
         MessagePart(id: id, kind: .toolCall, text: nil, toolName: name, toolState: state,
             toolInput: input, toolOutput: "done", toolError: state == "error" ? "failed" : nil,
-            toolCallId: id, toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil)
+            toolCallId: id, toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: nil)
     }
 
     private func text(_ id: String, _ value: String, kind: PartKind = .text) -> MessagePart {
         MessagePart(id: id, kind: kind, text: value, toolName: nil, toolState: nil,
             toolInput: nil, toolOutput: nil, toolError: nil, toolCallId: nil,
-            toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil)
+            toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: nil)
     }
 
-    private func message(_ id: String, _ parts: [MessagePart], role: String = "assistant") -> ChatMessage {
-        ChatMessage(id: id, role: role, parts: parts, assistantMeta: nil)
+    private func message(_ id: String, _ parts: [MessagePart], role: String = "assistant", steered: Bool = false, cancelled: Bool = false) -> ChatMessage {
+        ChatMessage(id: id, role: role, parts: parts, assistantMeta: nil, steered: steered, cancelled: cancelled)
     }
 
     func testConsecutiveToolsGroupAcrossMessagesAndKeepSurroundingText() {
@@ -114,5 +114,22 @@ final class ConversationActivityTests: XCTestCase {
         XCTAssertEqual(ToolActivity.title(running, cache: cache), "Editing second.rs")
         let command = tool("same", "bash", input: "{\"command\":\"cargo test\"}")
         XCTAssertEqual(ToolActivity.title(command, cache: cache), "Ran cargo test")
+    }
+
+    func testCompactionPartsAndCancelledEmptyAssistantMessagesSurviveGrouping() {
+        let compaction = MessagePart(
+            id: "cmp-1", kind: .compaction, text: "Summary", toolName: nil, toolState: nil,
+            toolInput: nil, toolOutput: nil, toolError: nil, toolCallId: nil,
+            toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: 6
+        )
+        let items = ConversationItem.grouped(messages: [
+            message("u-1", [text("u1", "hi")], role: "user", steered: true),
+            message("sys-1", [compaction], role: "system"),
+            message("a-1", [], role: "assistant", cancelled: true)
+        ])
+        XCTAssertEqual(items.count, 3)
+        XCTAssertTrue(items[0].message.steered)
+        XCTAssertEqual(items[1].message.parts[0].kind, .compaction)
+        XCTAssertTrue(items[2].message.cancelled)
     }
 }

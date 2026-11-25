@@ -30,7 +30,7 @@ pub mod registry;
 pub mod state;
 
 pub use codec::decode_server_message_lenient;
-pub use events::{CoreEvent, CoreListener, DaemonStatus, Decision, TodoItem};
+pub use events::{CoreEvent, CoreListener, DaemonStatus, Decision, MobileQueuedMessage, TodoItem};
 pub use registry::{DaemonEntry, DaemonId, DaemonRegistry};
 pub use state::{AutomationSettings, DaemonSnapshot, SessionState};
 
@@ -405,6 +405,9 @@ impl DaemonConnection {
                 | ClientMessage::ReadSubagentHistory { .. }
                 | ClientMessage::ReadJobOutput { .. }
                 | ClientMessage::SaveSessionDefaults { .. }
+                | ClientMessage::EnqueueMessage { .. }
+                | ClientMessage::UpdateQueuedMessage { .. }
+                | ClientMessage::RemoveQueuedMessage { .. }
         );
         let (session_id, generation) = if session_scoped {
             let client = self.state.client_state.lock().unwrap();
@@ -419,6 +422,9 @@ impl DaemonConnection {
                     | ClientMessage::ReadSubagentHistory { session_id: requested, .. }
                     | ClientMessage::ReadJobOutput { session_id: requested, .. }
                     | ClientMessage::SaveSessionDefaults { session_id: requested, .. }
+                    | ClientMessage::EnqueueMessage { session_id: requested, .. }
+                    | ClientMessage::UpdateQueuedMessage { session_id: requested, .. }
+                    | ClientMessage::RemoveQueuedMessage { session_id: requested, .. }
                     if session_id.as_ref() != Some(requested))
             {
                 return false;
@@ -758,6 +764,64 @@ impl MobileCore {
         }
     }
 
+    /// Queue a follow-up or steer interruption message on the daemon.
+    pub fn enqueue_message(
+        &self,
+        id: DaemonId,
+        session_id: String,
+        text: String,
+        steer: bool,
+    ) -> bool {
+        let conns = self.connections.lock().unwrap();
+        conns.get(&id.node_id).is_some_and(|conn| {
+            conn.send(ClientMessage::EnqueueMessage {
+                session_id,
+                request_id: ulid::Ulid::new().to_string(),
+                text,
+                attachments: vec![],
+                mode: if steer {
+                    mew_protocol::QueueMode::Steer
+                } else {
+                    mew_protocol::QueueMode::FollowUp
+                },
+            })
+        })
+    }
+
+    /// Promote a queued message to steer the running turn.
+    pub fn promote_queued_message(
+        &self,
+        id: DaemonId,
+        session_id: String,
+        message_id: String,
+    ) -> bool {
+        let conns = self.connections.lock().unwrap();
+        conns.get(&id.node_id).is_some_and(|conn| {
+            conn.send(ClientMessage::UpdateQueuedMessage {
+                session_id,
+                id: message_id,
+                text: None,
+                mode: Some(mew_protocol::QueueMode::Steer),
+            })
+        })
+    }
+
+    /// Remove a pending queued message before it runs.
+    pub fn remove_queued_message(
+        &self,
+        id: DaemonId,
+        session_id: String,
+        message_id: String,
+    ) -> bool {
+        let conns = self.connections.lock().unwrap();
+        conns.get(&id.node_id).is_some_and(|conn| {
+            conn.send(ClientMessage::RemoveQueuedMessage {
+                session_id,
+                id: message_id,
+            })
+        })
+    }
+
     /// Respond to a permission request.
     pub fn respond_permission(&self, id: DaemonId, request_id: String, decision: Decision) {
         let conns = self.connections.lock().unwrap();
@@ -858,7 +922,11 @@ impl MobileCore {
     pub fn list_dir(&self, id: DaemonId, session_id: String, path: Option<String>) {
         let conns = self.connections.lock().unwrap();
         if let Some(conn) = conns.get(&id.node_id) {
-            let _ = conn.send(ClientMessage::ListDir { session_id, path });
+            let _ = conn.send(ClientMessage::ListDir {
+                session_id,
+                path,
+                scoped_errors: false,
+            });
         }
     }
 
@@ -1692,6 +1760,7 @@ fn translate_message(
         ServerMessage::SessionActivityChanged {
             session_id,
             activity: mew_protocol::SessionState::Running,
+            ..
         }
         | ServerMessage::SessionAlert {
             session_id,
@@ -1798,7 +1867,11 @@ fn translate_message(
                 .iter()
                 .map(|s| events::SessionSummary {
                     session_id: s.session_id.clone(),
-                    title: s.summary.clone().unwrap_or_else(|| s.session_id.clone()),
+                    title: s
+                        .title
+                        .clone()
+                        .or_else(|| s.first_message.clone())
+                        .unwrap_or_else(|| s.session_id.clone()),
                     state: format!("{:?}", s.state).to_lowercase(),
                     archived: s.archived,
                     pinned: s.pinned,
@@ -1862,12 +1935,13 @@ fn translate_message(
         }
 
         ServerMessage::SessionHistory { .. } => {
-            let session_id = conn_state
-                .session_state
-                .lock()
-                .unwrap()
-                .as_ref()
-                .map(|s| s.session_id.clone());
+            let mut ss_lock = conn_state.session_state.lock().unwrap();
+            let session_id = ss_lock.as_mut().map(|s| {
+                s.steered_message_ids.clear();
+                s.cancelled_message_ids.clear();
+                s.live_compactions.clear();
+                s.session_id.clone()
+            });
             if let Some(session_id) = session_id {
                 events.push(CoreEvent::SessionReloaded {
                     daemon: d,
@@ -1888,6 +1962,14 @@ fn translate_message(
                 .attached_session
                 .clone();
             if attached.as_deref() == Some(session_id) {
+                if *replace {
+                    let mut ss_lock = conn_state.session_state.lock().unwrap();
+                    if let Some(ss) = ss_lock.as_mut().filter(|s| s.session_id == *session_id) {
+                        ss.steered_message_ids.clear();
+                        ss.cancelled_message_ids.clear();
+                        ss.live_compactions.clear();
+                    }
+                }
                 events.push(if *replace {
                     CoreEvent::SessionReloaded {
                         daemon: d,
@@ -1905,11 +1987,42 @@ fn translate_message(
         ServerMessage::SessionActivityChanged {
             session_id,
             activity,
+            cancelled,
         } => {
+            if *activity != mew_protocol::SessionState::Running && *cancelled {
+                let target_id = {
+                    let client = conn_state.client_state.lock().unwrap();
+                    client.session(session_id).and_then(|session| {
+                        let turn_start = session
+                            .messages
+                            .iter()
+                            .rposition(|msg| {
+                                msg.role == mew_message::Role::User
+                                    && msg.parts.iter().any(|part| match part {
+                                        mew_message::Part::Text(t) => !t.text.trim().is_empty(),
+                                        _ => false,
+                                    })
+                            })
+                            .map_or(0, |idx| idx + 1);
+                        session.messages[turn_start..]
+                            .iter()
+                            .rev()
+                            .find(|msg| msg.role == mew_message::Role::Assistant)
+                            .map(|msg| msg.id.to_string())
+                    })
+                };
+                if let Some(msg_id) = target_id {
+                    let mut ss_lock = conn_state.session_state.lock().unwrap();
+                    if let Some(ss) = ss_lock.as_mut().filter(|s| s.session_id == *session_id) {
+                        ss.cancelled_message_ids.insert(msg_id);
+                    }
+                }
+            }
             events.push(CoreEvent::SessionActivityChanged {
                 daemon: d,
                 session_id: session_id.clone(),
                 running: *activity == mew_protocol::SessionState::Running,
+                cancelled: *cancelled,
             });
         }
 
@@ -1960,6 +2073,21 @@ fn translate_message(
                             cost: *cost,
                             failed,
                             manifest,
+                        });
+                    }
+                    ProviderEventWire::RetryWait {
+                        attempt,
+                        max_attempts,
+                        delay_secs,
+                        reason,
+                    } => {
+                        events.push(CoreEvent::RetryWait {
+                            daemon: d,
+                            session_id: ss.session_id.clone(),
+                            attempt: *attempt,
+                            max_attempts: *max_attempts,
+                            delay_secs: *delay_secs,
+                            reason: reason.clone(),
                         });
                     }
                     _ => {}
@@ -2017,11 +2145,35 @@ fn translate_message(
             }
         }
 
-        ServerMessage::UserMessage { text, .. } => {
+        ServerMessage::UserMessage { text, steered, .. } => {
+            if *steered {
+                let steered_id = {
+                    let client = conn_state.client_state.lock().unwrap();
+                    client
+                        .attached_session
+                        .as_deref()
+                        .and_then(|sid| client.session(sid))
+                        .and_then(|session| {
+                            session
+                                .messages
+                                .iter()
+                                .rev()
+                                .find(|msg| msg.role == mew_message::Role::User)
+                                .map(|msg| msg.id.to_string())
+                        })
+                };
+                if let Some(msg_id) = steered_id {
+                    let mut ss_lock = conn_state.session_state.lock().unwrap();
+                    if let Some(ss) = ss_lock.as_mut() {
+                        ss.steered_message_ids.insert(msg_id);
+                    }
+                }
+            }
             // Dedup: daemon echoes our prompt back (spec note #9).
             if let Some(ref last) = last_sent_prompt {
                 if last == text {
                     *last_sent_prompt = None;
+                    sync_mobile_session_from_client_state(conn_state);
                     return events; // Drop the echo.
                 }
             }
@@ -2043,8 +2195,11 @@ fn translate_message(
                         tool_time_start: None,
                         tool_time_end: None,
                         tool_sensitivity: None,
+                        compaction_removed: None,
                     }],
                     assistant_meta: None,
+                    steered: *steered,
+                    cancelled: false,
                 });
             }
         }
@@ -2152,6 +2307,7 @@ fn translate_message(
         ServerMessage::AutomationSettings {
             auto_title_enabled,
             auto_summary_enabled,
+            ..
         } => {
             let settings = AutomationSettings {
                 auto_title_enabled: *auto_title_enabled,
@@ -2177,6 +2333,7 @@ fn translate_message(
             request_id,
             defaults,
             devices,
+            ..
         } => {
             events.push(CoreEvent::DaemonManagementSettings {
                 daemon: d,
@@ -2221,6 +2378,7 @@ fn translate_message(
                 message: message.clone(),
             });
         }
+        ServerMessage::PairingInvite { .. } => {}
 
         ServerMessage::ModelList { models } => {
             let summaries = models
@@ -2270,6 +2428,9 @@ fn translate_message(
             let mut ss_lock = conn_state.session_state.lock().unwrap();
             if let Some(ss) = ss_lock.as_mut() {
                 ss.messages.clear();
+                ss.steered_message_ids.clear();
+                ss.cancelled_message_ids.clear();
+                ss.live_compactions.clear();
             }
         }
 
@@ -2615,20 +2776,23 @@ fn translate_message(
         | ServerMessage::SessionActivitySnapshot { .. }
         | ServerMessage::ClientAttached { .. }
         | ServerMessage::ClientDetached { .. }
-        | ServerMessage::ControlYielded { .. }
         | ServerMessage::SessionSummaryChanged { .. }
         | ServerMessage::SessionStatsChanged { .. }
         | ServerMessage::SessionUsageChanged { .. }
         | ServerMessage::GroupList { .. }
         | ServerMessage::GroupsChanged { .. }
         | ServerMessage::FilePreview { .. }
+        | ServerMessage::FilePreviewError { .. }
+        | ServerMessage::DirListingError { .. }
         | ServerMessage::FilesystemDirListing { .. }
         | ServerMessage::GitStatusResult { .. }
+        | ServerMessage::GitStatusError { .. }
         | ServerMessage::TodoUpdated { .. }
         | ServerMessage::TodoUpdateError { .. }
         | ServerMessage::BrowserPageRegistration { .. }
         | ServerMessage::FsChanged { .. }
         | ServerMessage::SessionMetaChanged { .. }
+        | ServerMessage::SessionIndex { .. }
         | ServerMessage::FlaggedFilesChanged { .. }
         | ServerMessage::RemoteReady { .. }
         | ServerMessage::BrowserSnapshot { .. }
@@ -2639,7 +2803,68 @@ fn translate_message(
         | ServerMessage::TerminalOutput { .. }
         | ServerMessage::TerminalExited { .. }
         | ServerMessage::TerminalError { .. }
-        | ServerMessage::PromptReceipt { .. } => {}
+        | ServerMessage::AttachmentUploaded { .. }
+        | ServerMessage::AttachmentData { .. }
+        | ServerMessage::PromptReceipt { .. }
+        | ServerMessage::MentionCandidates { .. } => {}
+        ServerMessage::SessionCompacting {
+            session_id,
+            active,
+            removed,
+            summary,
+        } => {
+            let removed_u32 = removed.map(|n| n as u32);
+            if !*active && removed_u32.is_some_and(|n| n > 0) {
+                let mut ss_lock = conn_state.session_state.lock().unwrap();
+                if let Some(ss) = ss_lock.as_mut().filter(|s| s.session_id == *session_id) {
+                    let after_id = ss.shared.messages.last().map(|msg| msg.id.to_string());
+                    let compaction = state::ChatMessage {
+                        id: ulid::Ulid::new().to_string(),
+                        role: "system".into(),
+                        parts: vec![state::MessagePart {
+                            id: ulid::Ulid::new().to_string(),
+                            kind: state::PartKind::Compaction,
+                            text: summary.clone(),
+                            tool_name: None,
+                            tool_state: None,
+                            tool_input: None,
+                            tool_output: None,
+                            tool_error: None,
+                            tool_call_id: None,
+                            tool_time_start: None,
+                            tool_time_end: None,
+                            tool_sensitivity: None,
+                            compaction_removed: removed_u32,
+                        }],
+                        assistant_meta: None,
+                        steered: false,
+                        cancelled: false,
+                    };
+                    ss.live_compactions.push((after_id, compaction));
+                }
+            }
+            events.push(CoreEvent::SessionCompacting {
+                daemon: d,
+                session_id: session_id.clone(),
+                active: *active,
+                removed: removed_u32,
+                summary: summary.clone(),
+            });
+        }
+        ServerMessage::SessionQueueChanged { session_id, items } => {
+            events.push(CoreEvent::QueueChanged {
+                daemon: daemon_id.into(),
+                session_id: session_id.clone(),
+                items: items
+                    .iter()
+                    .map(|item| MobileQueuedMessage {
+                        id: item.id.clone(),
+                        text: item.text.clone(),
+                        steer: item.mode == mew_protocol::QueueMode::Steer,
+                    })
+                    .collect(),
+            });
+        }
     }
 
     if !matches!(msg, ServerMessage::Provider { .. }) {
@@ -2924,6 +3149,8 @@ mod tests {
                 request_id: Some("read".into()),
                 defaults: None,
                 devices: None,
+                automation: None,
+                remote: None,
             },
             &state,
             &mut None,
@@ -2997,6 +3224,7 @@ mod tests {
             &ServerMessage::AutomationSettings {
                 auto_title_enabled: false,
                 auto_summary_enabled: true,
+                initialized: true,
             },
             &state,
             &mut None,
@@ -3350,6 +3578,7 @@ mod tests {
             &ServerMessage::SessionActivityChanged {
                 session_id: "confirmed".into(),
                 activity: mew_protocol::SessionState::Running,
+                cancelled: false,
             },
             &state,
             &mut None,
@@ -4226,6 +4455,7 @@ mod tests {
             &ServerMessage::SessionActivityChanged {
                 session_id: "confirmed".into(),
                 activity: mew_protocol::SessionState::Running,
+                cancelled: false,
             },
             &state,
             &mut None,
@@ -4284,6 +4514,7 @@ mod tests {
             &ServerMessage::UserMessage {
                 text: "first".into(),
                 request_id: None,
+                steered: false,
             },
             &state,
             &mut echoed,
@@ -4294,6 +4525,7 @@ mod tests {
             &ServerMessage::SessionActivityChanged {
                 session_id: "other".into(),
                 activity: mew_protocol::SessionState::Running,
+                cancelled: false,
             },
             &state,
             &mut None,
@@ -4304,6 +4536,7 @@ mod tests {
             &ServerMessage::SessionActivityChanged {
                 session_id: "confirmed".into(),
                 activity: mew_protocol::SessionState::Running,
+                cancelled: false,
             },
             &state,
             &mut None,
@@ -4314,6 +4547,7 @@ mod tests {
             &ServerMessage::SessionActivityChanged {
                 session_id: "confirmed".into(),
                 activity: mew_protocol::SessionState::Idle,
+                cancelled: false,
             },
             &state,
             &mut None,
@@ -4622,6 +4856,7 @@ mod tests {
             &ServerMessage::SessionActivityChanged {
                 session_id: id.into(),
                 activity: mew_protocol::SessionState::Running,
+                cancelled: false,
             },
             &conn,
             &mut prompt,
@@ -4646,6 +4881,7 @@ mod tests {
             &ServerMessage::SessionActivityChanged {
                 session_id: "background".into(),
                 activity: mew_protocol::SessionState::Active,
+                cancelled: false,
             },
             &conn,
             &mut prompt,
@@ -4656,6 +4892,7 @@ mod tests {
             &ServerMessage::SessionActivityChanged {
                 session_id: id.into(),
                 activity: mew_protocol::SessionState::Active,
+                cancelled: false,
             },
             &conn,
             &mut prompt,
@@ -5038,5 +5275,205 @@ mod tests {
             conn.current_persona.lock().unwrap().as_deref(),
             Some("explainer")
         );
+    }
+
+    #[test]
+    fn test_translate_session_queue_changed() {
+        let conn = Arc::new(ConnState::new());
+        let daemon_id = "node-abc".to_string();
+        let mut last_prompt: Option<String> = None;
+
+        let msg = ServerMessage::SessionQueueChanged {
+            session_id: "sess-1".into(),
+            items: vec![
+                mew_protocol::QueuedMessageWire {
+                    id: "q-1".into(),
+                    text: "follow up".into(),
+                    attachments: vec![],
+                    mode: mew_protocol::QueueMode::FollowUp,
+                    created_at: 1,
+                },
+                mew_protocol::QueuedMessageWire {
+                    id: "q-2".into(),
+                    text: "steer".into(),
+                    attachments: vec![],
+                    mode: mew_protocol::QueueMode::Steer,
+                    created_at: 2,
+                },
+            ],
+        };
+
+        let events = translate_message(&msg, &conn, &mut last_prompt, &daemon_id);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            CoreEvent::QueueChanged {
+                daemon,
+                session_id,
+                items,
+            } => {
+                assert_eq!(daemon, &daemon_id);
+                assert_eq!(session_id, "sess-1");
+                assert_eq!(
+                    items,
+                    &vec![
+                        MobileQueuedMessage {
+                            id: "q-1".into(),
+                            text: "follow up".into(),
+                            steer: false,
+                        },
+                        MobileQueuedMessage {
+                            id: "q-2".into(),
+                            text: "steer".into(),
+                            steer: true,
+                        },
+                    ]
+                );
+            }
+            other => panic!("expected QueueChanged, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_translate_compacting_retry_steered_and_cancelled() {
+        let conn = Arc::new(ConnState::new());
+        let daemon = "node-abc".to_string();
+        let mut last_prompt: Option<String> = None;
+
+        translate_message(
+            &ServerMessage::SessionReady {
+                session_id: "confirmed".into(),
+                cwd: None,
+                model: None,
+                provider: None,
+                permission_mode: None,
+            },
+            &conn,
+            &mut last_prompt,
+            &daemon,
+        );
+
+        // 1. SessionCompacting start and finish with removed messages.
+        let start_events = translate_message(
+            &ServerMessage::SessionCompacting {
+                session_id: "confirmed".into(),
+                active: true,
+                removed: None,
+                summary: None,
+            },
+            &conn,
+            &mut last_prompt,
+            &daemon,
+        );
+        assert!(matches!(
+            start_events.as_slice(),
+            [CoreEvent::SessionCompacting { session_id, active: true, removed: None, summary: None, .. }]
+                if session_id == "confirmed"
+        ));
+
+        let end_events = translate_message(
+            &ServerMessage::SessionCompacting {
+                session_id: "confirmed".into(),
+                active: false,
+                removed: Some(9),
+                summary: Some("## Goal & Constraints\nKeep tests green".into()),
+            },
+            &conn,
+            &mut last_prompt,
+            &daemon,
+        );
+        assert!(matches!(
+            end_events.as_slice(),
+            [CoreEvent::SessionCompacting { session_id, active: false, removed: Some(9), summary: Some(summary), .. }]
+                if session_id == "confirmed" && summary.contains("## Goal & Constraints")
+        ));
+        {
+            let ss_lock = conn.session_state.lock().unwrap();
+            let ss = ss_lock.as_ref().unwrap();
+            assert_eq!(ss.messages.len(), 1);
+            assert_eq!(ss.messages[0].role, "system");
+            assert_eq!(ss.messages[0].parts[0].kind, state::PartKind::Compaction);
+            assert_eq!(ss.messages[0].parts[0].compaction_removed, Some(9));
+            assert_eq!(
+                ss.messages[0].parts[0].text.as_deref(),
+                Some("## Goal & Constraints\nKeep tests green")
+            );
+        }
+
+        // 2. Steered user message survives subsequent canonical syncs.
+        translate_message(
+            &ServerMessage::UserMessage {
+                text: "focus on tests".into(),
+                request_id: None,
+                steered: true,
+            },
+            &conn,
+            &mut last_prompt,
+            &daemon,
+        );
+        {
+            let ss_lock = conn.session_state.lock().unwrap();
+            let ss = ss_lock.as_ref().unwrap();
+            assert_eq!(ss.messages.len(), 2);
+            assert!(ss.messages[1].steered);
+        }
+
+        // 3. RetryWait emits CoreEvent::RetryWait.
+        let retry_events = translate_message(
+            &ServerMessage::Provider {
+                event: ProviderEventWire::RetryWait {
+                    attempt: 1,
+                    max_attempts: 3,
+                    delay_secs: 5,
+                    reason: "overloaded".into(),
+                },
+            },
+            &conn,
+            &mut last_prompt,
+            &daemon,
+        );
+        assert!(matches!(
+            retry_events.as_slice(),
+            [CoreEvent::RetryWait { session_id, attempt: 1, max_attempts: 3, delay_secs: 5, reason, .. }]
+                if session_id == "confirmed" && reason == "overloaded"
+        ));
+
+        // 4. Assistant message then cancelled idle marks assistant cancelled and emits cancelled: true.
+        translate_message(
+            &ServerMessage::Provider {
+                event: ProviderEventWire::PartStart {
+                    part: Part::Text(mew_message::TextPart {
+                        base: mew_message::PartBase {
+                            id: ulid::Ulid::new(),
+                            message_id: ulid::Ulid::new(),
+                            session_id: ulid::Ulid::new(),
+                        },
+                        text: "partial".into(),
+                        synthetic: false,
+                    }),
+                },
+            },
+            &conn,
+            &mut last_prompt,
+            &daemon,
+        );
+        let idle_events = translate_message(
+            &ServerMessage::SessionActivityChanged {
+                session_id: "confirmed".into(),
+                activity: mew_protocol::SessionState::Idle,
+                cancelled: true,
+            },
+            &conn,
+            &mut last_prompt,
+            &daemon,
+        );
+        assert!(matches!(
+            idle_events.as_slice(),
+            [CoreEvent::SessionActivityChanged { session_id, running: false, cancelled: true, .. }]
+                if session_id == "confirmed"
+        ));
+        let ss_lock = conn.session_state.lock().unwrap();
+        let last_msg = ss_lock.as_ref().unwrap().messages.last().unwrap();
+        assert_eq!(last_msg.role, "assistant");
+        assert!(last_msg.cancelled);
     }
 }

@@ -52,8 +52,14 @@ struct ChatView: View {
             // liquid-glass chatbar; the inset doubles as the bottom scroll padding.
             .safeAreaInset(edge: .bottom) {
                 VStack(spacing: 0) {
+                    if let status = liveStatusText {
+                        liveStatusBanner(status)
+                    }
                     if showsRetryBanner {
                         retryBanner
+                    }
+                    if ownsSelection, let queued = store.queuedMessages[sessionId], !queued.isEmpty {
+                        queuedMessagesBanner(queued)
                     }
                     composer
                 }
@@ -169,7 +175,7 @@ struct ChatView: View {
                 NavigationLink("Connection details", value: NavigationRoute.daemonDetails(daemonNodeId: daemonNodeId))
                     .frame(minHeight: 44)
             }
-        } else if store.conversationItems.isEmpty && store.historyBefore == nil && !store.isStreaming && store.streamingText.isEmpty {
+        } else if store.conversationItems.isEmpty && store.historyBefore == nil && !store.isStreaming && store.streamingText.isEmpty && !store.isCompacting {
             if store.isLoadingSession {
                 ProgressView("Loading session…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -305,6 +311,59 @@ struct ChatView: View {
         store.isStreaming || !store.streamingText.isEmpty
     }
 
+    private var liveStatusText: String? {
+        guard ownsSelection else { return nil }
+        if store.isCompacting {
+            return "Compacting context…"
+        }
+        if let retry = store.retryWait {
+            return "Retrying (\(retry.attempt)/\(retry.maxAttempts)) in \(retry.delaySecs)s — \(retry.reason)"
+        }
+        if store.pendingPermissions.contains(where: { $0.daemon == daemonNodeId && $0.sessionId == sessionId }) {
+            return "Waiting for approval"
+        }
+        if store.pendingAskUser.contains(where: { $0.daemon == daemonNodeId && $0.sessionId == sessionId }) {
+            return "Waiting for answer"
+        }
+        let runningWorkers = store.subagents.filter { $0.status == "running" }
+        if runningWorkers.count == 1, let single = runningWorkers.first {
+            if let tool = single.toolName, !tool.isEmpty {
+                let name = single.displayName ?? single.name
+                return "\(name): \(tool)"
+            }
+            return "Waiting on 1 subagent"
+        }
+        if !runningWorkers.isEmpty {
+            return "Waiting on \(runningWorkers.count) subagents"
+        }
+        if store.isStreaming && store.streamingText.isEmpty {
+            return "Working…"
+        }
+        return nil
+    }
+
+    @ViewBuilder
+    private func liveStatusBanner(_ status: String) -> some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+            Text(status)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(.ultraThinMaterial)
+        )
+        .padding(.horizontal, 12)
+        .padding(.bottom, 6)
+    }
+
     /// Whether the retry banner should appear: only when the latest turn for
     /// this session failed, the agent isn't currently streaming, and there's
     /// message content to show below.
@@ -376,6 +435,69 @@ struct ChatView: View {
         }
     }
 
+    @ViewBuilder
+    private func queuedMessagesBanner(_ queued: [MobileQueuedMessage]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Queued (\(queued.count))")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 4)
+
+            ForEach(queued, id: \.id) { item in
+                HStack(spacing: 8) {
+                    Text(item.steer ? "Steer" : "Queued")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(item.steer ? Color.orange : Color.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            Capsule().fill(
+                                item.steer ? Color.orange.opacity(0.16) : Color(.tertiarySystemFill)
+                            )
+                        )
+
+                    Text(item.text)
+                        .font(.caption)
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    if !item.steer {
+                        Button("Steer") {
+                            store.promoteQueuedMessage(id: item.id)
+                        }
+                        .font(.caption2.weight(.semibold))
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+                    }
+
+                    Button {
+                        store.removeQueuedMessage(id: item.id)
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 16))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Remove queued message")
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color(.secondarySystemBackground))
+                )
+            }
+        }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(.clear)
+                .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        )
+        .padding(.horizontal, 12)
+        .padding(.bottom, 6)
+    }
+
     // MARK: Composer (liquid glass chatbar)
 
     @ViewBuilder
@@ -387,8 +509,12 @@ struct ChatView: View {
             model: currentModel,
             availableModels: store.modelsByDaemon[daemonNodeId] ?? [],
             isStreaming: store.isStreaming,
+            isBusy: store.isStreaming || store.hasPendingSubmission,
             canSend: canSend,
+            canEnqueue: canEnqueue,
             onSubmit: send,
+            onSteer: steer,
+            onCancel: { store.cancelTurn() },
             onPickModel: { model in
                 store.switchModel(provider: model.provider, model: model.model)
             },
@@ -450,15 +576,31 @@ struct ChatView: View {
         ownsSelection && !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && store.canSendPrompt
     }
 
+    private var canEnqueue: Bool {
+        ownsSelection && !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && store.canEnqueuePrompt
+    }
+
     private func send() {
         let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, store.canSendPrompt else { return }
+        guard !trimmed.isEmpty else { return }
+        if store.isStreaming || store.hasPendingSubmission {
+            guard store.enqueueMessage(trimmed, steer: false) else { return }
+            inputText = ""
+            return
+        }
+        guard store.canSendPrompt else { return }
         if trimmed.hasPrefix("/") {
             // Slash commands go to the daemon's slash handler, not the LLM.
             guard store.sendSlashCommand(trimmed) else { return }
         } else {
             guard store.sendPrompt(trimmed) else { return }
         }
+        inputText = ""
+    }
+
+    private func steer() {
+        let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, store.enqueueMessage(trimmed, steer: true) else { return }
         inputText = ""
     }
 
@@ -624,9 +766,21 @@ private struct AskUserSheet: View {
         NavigationStack {
             Form {
                 Section {
-                    Text(ask.subagent.map { "\($0.displayName ?? $0.name) (\($0.name)) needs your input." } ?? "The agent needs a few answers to continue.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                    if let subagent = ask.subagent {
+                        HStack(spacing: 8) {
+                            SubagentIdenticonView(
+                                seed: subagent.childSessionId.isEmpty ? (subagent.displayName ?? subagent.name) : subagent.childSessionId,
+                                size: 18
+                            )
+                            Text("\(subagent.displayName ?? subagent.name) (\(subagent.name)) needs your input.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        Text("The agent needs a few answers to continue.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 ForEach(Array(ask.questions.enumerated()), id: \.offset) { index, question in
                     Section {
@@ -694,8 +848,12 @@ struct ChatBar: View {
     let model: ModelSummary?
     let availableModels: [ModelSummary]
     let isStreaming: Bool
+    let isBusy: Bool
     let canSend: Bool
+    let canEnqueue: Bool
     let onSubmit: () -> Void
+    let onSteer: () -> Void
+    let onCancel: () -> Void
     let onPickModel: (ModelSummary) -> Void
     let onRefreshModels: () -> Void
     let onAttachments: () -> Void
@@ -752,7 +910,7 @@ struct ChatBar: View {
 
     @ViewBuilder
     private var textField: some View {
-        TextField("Message mew…", text: $text, axis: .vertical)
+        TextField(isBusy ? "Queue follow-up…" : "Message mew…", text: $text, axis: .vertical)
             .lineLimit(1...6)
             .focused($localFocus)
             .submitLabel(.send)
@@ -962,16 +1120,46 @@ struct ChatBar: View {
 
     @ViewBuilder
     private var sendOrCancelButton: some View {
-        if isStreaming {
-            Button {
-                onSubmit()
-            } label: {
-                Image(systemName: "stop.circle.fill")
-                    .font(.system(size: 28))
-                    .foregroundStyle(.red)
+        if isBusy {
+            HStack(spacing: 6) {
+                if canEnqueue {
+                    Button {
+                        onSteer()
+                    } label: {
+                        Text("Steer")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.orange)
+                            .padding(.horizontal, 10)
+                            .frame(height: Theme.Layout.compactControlSize)
+                            .background(
+                                Capsule().fill(.clear).glassEffect(.regular, in: Capsule())
+                            )
+                    }
+                    .accessibilityLabel("Steer current turn")
+                    .buttonStyle(MewPressButtonStyle())
+
+                    Button {
+                        onSubmit()
+                    } label: {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.system(size: 28))
+                            .foregroundStyle(.accentColor)
+                    }
+                    .accessibilityLabel("Queue follow-up")
+                    .buttonStyle(MewPressButtonStyle())
+                }
+                if isStreaming {
+                    Button {
+                        onCancel()
+                    } label: {
+                        Image(systemName: "stop.circle.fill")
+                            .font(.system(size: 28))
+                            .foregroundStyle(.red)
+                    }
+                    .accessibilityLabel("Stop generating")
+                    .buttonStyle(MewPressButtonStyle())
+                }
             }
-            .accessibilityLabel("Stop generating")
-            .buttonStyle(MewPressButtonStyle())
         } else {
             Button {
                 onSubmit()

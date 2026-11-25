@@ -58,6 +58,8 @@ pub struct ChatMessage {
     pub role: String,
     pub parts: Vec<MessagePart>,
     pub assistant_meta: Option<MobileAssistantMeta>,
+    pub steered: bool,
+    pub cancelled: bool,
 }
 
 /// A part of a message.
@@ -77,6 +79,8 @@ pub struct MessagePart {
     /// Sensitivity tier ("ReadOnly", "Mutating", "Dangerous") stamped by the
     /// agent from the tool registry. None for non-tool parts or old sessions.
     pub tool_sensitivity: Option<String>,
+    /// Number of dropped messages for `PartKind::Compaction`, when known.
+    pub compaction_removed: Option<u32>,
 }
 
 /// What kind of part this is.
@@ -85,6 +89,7 @@ pub enum PartKind {
     Text,
     Reasoning,
     ToolCall,
+    Compaction,
     Error,
 }
 
@@ -253,6 +258,12 @@ pub struct SessionState {
     /// Last turn manifest extracted from MessageEnd. Used by lib.rs
     /// to populate CoreEvent::ProviderMessageEnded.
     pub last_manifest: Option<MobileTurnManifest>,
+    /// Message IDs marked as steered interrupts across shared-state syncs.
+    pub steered_message_ids: std::collections::HashSet<String>,
+    /// Assistant message IDs marked as cancelled across shared-state syncs.
+    pub cancelled_message_ids: std::collections::HashSet<String>,
+    /// Live compaction cards inserted between shared history reloads, anchored after message ID.
+    pub live_compactions: Vec<(Option<String>, ChatMessage)>,
 }
 
 impl SessionState {
@@ -277,6 +288,9 @@ impl SessionState {
             current_persona: None,
             available_personas: Vec::new(),
             last_manifest: None,
+            steered_message_ids: std::collections::HashSet::new(),
+            cancelled_message_ids: std::collections::HashSet::new(),
+            live_compactions: Vec::new(),
         }
     }
 
@@ -314,6 +328,7 @@ impl SessionState {
                                 tool_time_start: None,
                                 tool_time_end: None,
                                 tool_sensitivity: None,
+                                compaction_removed: None,
                             },
                         )
                     }
@@ -332,6 +347,7 @@ impl SessionState {
                             tool_time_start: None,
                             tool_time_end: None,
                             tool_sensitivity: None,
+                            compaction_removed: None,
                         },
                     ),
                     Part::ToolCall(tcp) => {
@@ -352,6 +368,7 @@ impl SessionState {
                                 tool_time_start: time_start,
                                 tool_time_end: time_end,
                                 tool_sensitivity: None,
+                                compaction_removed: None,
                             },
                         )
                     }
@@ -367,6 +384,8 @@ impl SessionState {
                         role: "assistant".into(),
                         parts: vec![],
                         assistant_meta: None,
+                        steered: false,
+                        cancelled: false,
                     });
                 }
                 self.messages.last_mut().unwrap().parts.push(msg_part);
@@ -437,7 +456,32 @@ impl SessionState {
             .messages
             .iter()
             .filter_map(to_mobile_message)
+            .map(|mut msg| {
+                if self.steered_message_ids.contains(&msg.id) {
+                    msg.steered = true;
+                }
+                if self.cancelled_message_ids.contains(&msg.id) {
+                    msg.cancelled = true;
+                }
+                msg
+            })
             .collect();
+        let mut fallback_front = 0usize;
+        for (after_id, compaction) in &self.live_compactions {
+            let idx = after_id
+                .as_deref()
+                .and_then(|id| self.messages.iter().rposition(|msg| msg.id == id))
+                .map_or_else(
+                    || {
+                        let idx = fallback_front;
+                        fallback_front += 1;
+                        idx
+                    },
+                    |pos| pos + 1,
+                )
+                .min(self.messages.len());
+            self.messages.insert(idx, compaction.clone());
+        }
         self.running = self.shared.running;
         self.usage_cost = self.shared.usage.cost;
         self.input_tokens = self.shared.usage.input_tokens;
@@ -483,6 +527,8 @@ pub(crate) fn to_mobile_message(message: &mew_message::Message) -> Option<ChatMe
         role: role.into(),
         parts,
         assistant_meta,
+        steered: false,
+        cancelled: false,
     })
 }
 
@@ -502,6 +548,7 @@ fn to_mobile_part(part: &mew_message::Part) -> Option<MessagePart> {
                 tool_time_start: None,
                 tool_time_end: None,
                 tool_sensitivity: None,
+                compaction_removed: None,
             });
         }
         mew_message::Part::Reasoning(part) => {
@@ -518,6 +565,24 @@ fn to_mobile_part(part: &mew_message::Part) -> Option<MessagePart> {
                 tool_time_start: None,
                 tool_time_end: None,
                 tool_sensitivity: None,
+                compaction_removed: None,
+            });
+        }
+        mew_message::Part::Compaction(part) => {
+            return Some(MessagePart {
+                id: part.base.id.to_string(),
+                kind: PartKind::Compaction,
+                text: part.summary.clone(),
+                tool_name: None,
+                tool_state: None,
+                tool_input: None,
+                tool_output: None,
+                tool_error: None,
+                tool_call_id: None,
+                tool_time_start: None,
+                tool_time_end: None,
+                tool_sensitivity: None,
+                compaction_removed: part.removed_count,
             });
         }
         mew_message::Part::ToolCall(part) => part,
@@ -538,6 +603,7 @@ fn to_mobile_part(part: &mew_message::Part) -> Option<MessagePart> {
         tool_time_start,
         tool_time_end,
         tool_sensitivity: None,
+        compaction_removed: None,
     })
 }
 
@@ -864,6 +930,8 @@ mod tests {
                 cost: 0.01,
                 manifest: None,
             }),
+            steered: false,
+            cancelled: false,
         };
         assert!(msg.assistant_meta.is_some());
         assert_eq!(msg.assistant_meta.as_ref().unwrap().model_id, "gpt-4o");
@@ -873,6 +941,8 @@ mod tests {
             role: "user".into(),
             parts: vec![],
             assistant_meta: None,
+            steered: false,
+            cancelled: false,
         };
         assert!(msg2.assistant_meta.is_none());
     }
@@ -890,5 +960,41 @@ mod tests {
 
         // No manifest → last_manifest stays None.
         assert!(state.last_manifest.is_none());
+    }
+
+    #[test]
+    fn test_to_mobile_message_preserves_system_compaction_part() {
+        let msg_id = Ulid::new();
+        let sess_id = Ulid::new();
+        let message = mew_message::Message {
+            id: msg_id,
+            session_id: sess_id,
+            role: mew_message::Role::System,
+            parts: vec![mew_message::Part::Compaction(mew_message::CompactionPart {
+                base: PartBase {
+                    id: Ulid::new(),
+                    message_id: msg_id,
+                    session_id: sess_id,
+                },
+                auto: true,
+                overflow: false,
+                summary: Some("Compacted recap".into()),
+                removed_count: Some(14),
+                tail_start_id: None,
+                preserved_context: Vec::new(),
+            })],
+            time: mew_message::Time {
+                created: 100,
+                completed: Some(100),
+            },
+            assistant: None,
+        };
+
+        let mobile = to_mobile_message(&message).expect("system compaction should convert");
+        assert_eq!(mobile.role, "system");
+        assert_eq!(mobile.parts.len(), 1);
+        assert_eq!(mobile.parts[0].kind, PartKind::Compaction);
+        assert_eq!(mobile.parts[0].text.as_deref(), Some("Compacted recap"));
+        assert_eq!(mobile.parts[0].compaction_removed, Some(14));
     }
 }

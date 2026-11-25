@@ -166,6 +166,8 @@ final class AppStore: ObservableObject {
     @Published var streamingText: String = ""
     @Published var streamingPartId: String?
     @Published var isStreaming: Bool = false
+    @Published var isCompacting: Bool = false
+    @Published var retryWait: RetryWaitInfo? = nil
 
     // Pending requests
     @Published var pendingPermissions: [PendingPermission] = []
@@ -201,6 +203,9 @@ final class AppStore: ObservableObject {
 
     // Todos (per sessionId)
     @Published var todos: [String: [TodoItem]] = [:]
+
+    // Queued follow-up / steer messages (per sessionId)
+    @Published var queuedMessages: [String: [MobileQueuedMessage]] = [:]
 
     // Alerts
     @Published var alerts: [AlertItem] = []
@@ -400,6 +405,8 @@ final class AppStore: ObservableObject {
         streamingText = ""
         streamingPartId = nil
         isStreaming = false
+        isCompacting = false
+        retryWait = nil
         isLoadingSession = false
         sessionLoadError = nil
         subagents = []
@@ -439,10 +446,14 @@ final class AppStore: ObservableObject {
     func selectSession(_ sessionId: String, daemonNodeId: String? = nil) {
         guard let nodeId = daemonNodeId ?? selectedDaemonId?.nodeId else { return }
         let daemonId = DaemonId(nodeId: nodeId)
-        let changed = selectedDaemonId?.nodeId != nodeId || selectedSessionId != sessionId
+        let daemonChanged = selectedDaemonId?.nodeId != nodeId
+        let changed = daemonChanged || selectedSessionId != sessionId
         if changed {
             clearChat()
             isLoadingSession = true
+        }
+        if daemonChanged {
+            queuedMessages.removeAll()
         }
         selectedDaemonId = daemonId
         selectedSessionId = sessionId
@@ -580,6 +591,19 @@ final class AppStore: ObservableObject {
         return snapshot.attachedSession == sessionId && pendingSubmissions[daemonId.nodeId]?.contains(sessionId) != true
     }
 
+    var canEnqueuePrompt: Bool {
+        guard sessionLoadError == nil, !isLoadingSession, let daemonId = selectedDaemonId,
+              let sessionId = selectedSessionId,
+              case .connected? = daemonStatuses[daemonId.nodeId],
+              let snapshot = core?.snapshot(id: daemonId) else { return false }
+        return snapshot.attachedSession == sessionId
+    }
+
+    var hasPendingSubmission: Bool {
+        guard let daemonId = selectedDaemonId, let sessionId = selectedSessionId else { return false }
+        return pendingSubmissions[daemonId.nodeId]?.contains(sessionId) == true
+    }
+
     @discardableResult
     func sendPrompt(_ text: String) -> Bool {
         guard canSendPrompt, let daemonId = selectedDaemonId, let core,
@@ -590,6 +614,30 @@ final class AppStore: ObservableObject {
         }
         emitFeedback(.sent)
         return true
+    }
+
+    @discardableResult
+    func enqueueMessage(_ text: String, steer: Bool = false) -> Bool {
+        guard canEnqueuePrompt, let daemonId = selectedDaemonId, let sessionId = selectedSessionId,
+              let core, core.enqueueMessage(id: daemonId, sessionId: sessionId, text: text, steer: steer) else {
+            return false
+        }
+        emitFeedback(.sent)
+        return true
+    }
+
+    @discardableResult
+    func promoteQueuedMessage(id messageId: String) -> Bool {
+        guard canEnqueuePrompt, let daemonId = selectedDaemonId, let sessionId = selectedSessionId,
+              let core else { return false }
+        return core.promoteQueuedMessage(id: daemonId, sessionId: sessionId, messageId: messageId)
+    }
+
+    @discardableResult
+    func removeQueuedMessage(id messageId: String) -> Bool {
+        guard canEnqueuePrompt, let daemonId = selectedDaemonId, let sessionId = selectedSessionId,
+              let core else { return false }
+        return core.removeQueuedMessage(id: daemonId, sessionId: sessionId, messageId: messageId)
     }
 
     /// Re-send the last prompt for the selected session (retry after a failed
@@ -922,6 +970,8 @@ final class AppStore: ObservableObject {
                 historyBefore = nil
                 isLoadingOlderHistory = false
                 historyError = nil
+                isCompacting = false
+                retryWait = nil
             }
 
         case .historyExtended(let daemon, let sessionId):
@@ -954,6 +1004,7 @@ final class AppStore: ObservableObject {
             listPersonas()
         case .textDelta(let daemon, let sessionId, let partId, let delta):
             guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
+            retryWait = nil
             if streamingPartId == partId {
                 streamingText += delta
             } else {
@@ -963,6 +1014,7 @@ final class AppStore: ObservableObject {
 
         case .partUpdated(let daemon, let sessionId, let partId, _, let state):
             guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
+            retryWait = nil
             if state == "completed", streamingPartId == partId {
                 streamingPartId = nil
                 streamingText = ""
@@ -970,17 +1022,64 @@ final class AppStore: ObservableObject {
             // Update the message part in place
             updatePartInMessages(partId: partId)
 
-        case .sessionActivityChanged(let daemon, let sessionId, let running):
+        case .sessionActivityChanged(let daemon, let sessionId, let running, let cancelled):
             if running { pendingSubmissions[daemon]?.remove(sessionId) }
             guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
             isStreaming = running
             if !running {
                 streamingPartId = nil
                 streamingText = ""
+                isCompacting = false
+                retryWait = nil
+                if cancelled {
+                    markCurrentTurnCancelled()
+                }
             }
+
+        case .sessionCompacting(let daemon, let sessionId, let active, let removed, let summary):
+            guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
+            isCompacting = active
+            guard !active, let removed, removed > 0 else { return }
+            let compactionMsg = ChatMessage(
+                id: UUID().uuidString,
+                role: "system",
+                parts: [MessagePart(
+                    id: UUID().uuidString,
+                    kind: .compaction,
+                    text: summary,
+                    toolName: nil,
+                    toolState: nil,
+                    toolInput: nil,
+                    toolOutput: nil,
+                    toolError: nil,
+                    toolCallId: nil,
+                    toolTimeStart: nil,
+                    toolTimeEnd: nil,
+                    toolSensitivity: nil,
+                    compactionRemoved: removed
+                )],
+                assistantMeta: nil,
+                steered: false,
+                cancelled: false
+            )
+            if let last = messages.last, isSlashCompactTextMessage(last) {
+                messages[messages.count - 1] = compactionMsg
+            } else {
+                messages.append(compactionMsg)
+            }
+
+        case .retryWait(let daemon, let sessionId, let attempt, let maxAttempts, let delaySecs, let reason):
+            guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
+            retryWait = RetryWaitInfo(
+                attempt: attempt,
+                maxAttempts: maxAttempts,
+                delaySecs: delaySecs,
+                reason: reason
+            )
 
         case .providerMessageEnded(let daemon, let sessionId, let inputTokens, let outputTokens, let cost, let failed, _):
             guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
+            retryWait = nil
             streamingPartId = nil
             streamingText = ""
             if let sessionId = selectedSessionId {
@@ -1122,8 +1221,18 @@ final class AppStore: ObservableObject {
         case .autoSummaryChanged(let daemon, let enabled):
             daemonSettings[daemon]?.autoSummaryEnabled = enabled
 
+        case .queueChanged(let daemon, let sessionId, let items):
+            if daemon == selectedDaemonId?.nodeId {
+                queuedMessages[sessionId] = items
+            }
+
         case .slashResult(let daemon, let sessionId, let text):
             guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
+            if isCompactSlashResultText(text),
+               let last = messages.last,
+               last.parts.contains(where: { $0.kind == .compaction }) {
+                return
+            }
             // Append the slash result as a synthetic assistant message so it
             // appears inline in the chat transcript.
             messages.append(ChatMessage(
@@ -1141,9 +1250,12 @@ final class AppStore: ObservableObject {
                     toolCallId: nil,
                     toolTimeStart: nil,
                     toolTimeEnd: nil,
-                    toolSensitivity: nil
+                    toolSensitivity: nil,
+                    compactionRemoved: nil
                 )],
-                assistantMeta: nil
+                assistantMeta: nil,
+                steered: false,
+                cancelled: false
             ))
 
         case .permissionModeChanged(let daemon, let mode):
@@ -1262,6 +1374,51 @@ final class AppStore: ObservableObject {
         // The Rust core already updated its internal state; pull a fresh snapshot
         refreshMessages()
     }
+
+    private func isCompactSlashResultText(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.range(of: #"^compacted \d+ messages\b"#, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    private func isSlashCompactTextMessage(_ message: ChatMessage) -> Bool {
+        message.role == "assistant"
+            && message.parts.count == 1
+            && message.parts[0].kind == .text
+            && message.parts[0].text.map(isCompactSlashResultText) == true
+    }
+
+    private func markCurrentTurnCancelled() {
+        var turnStart = 0
+        for index in messages.indices.reversed() {
+            let message = messages[index]
+            if message.role == "user",
+               message.parts.contains(where: { $0.kind == .text && $0.text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false }) {
+                turnStart = index + 1
+                break
+            }
+        }
+        for index in (turnStart..<messages.count).reversed() {
+            if messages[index].role == "assistant" {
+                messages[index].cancelled = true
+                return
+            }
+        }
+        messages.append(ChatMessage(
+            id: UUID().uuidString,
+            role: "assistant",
+            parts: [],
+            assistantMeta: nil,
+            steered: false,
+            cancelled: true
+        ))
+    }
+}
+
+struct RetryWaitInfo: Equatable {
+    let attempt: UInt32
+    let maxAttempts: UInt32
+    let delaySecs: UInt64
+    let reason: String
 }
 
 // MARK: - Directory listing

@@ -14,6 +14,7 @@ struct ConversationItem: Identifiable, Equatable {
                 items.append(ConversationItem(message: message, sourceMessageIds: [message.id]))
                 continue
             }
+            let startCount = items.count
             for part in message.parts {
                 if part.id == hidingPartId { continue }
                 if part.kind == .text, part.text?.isEmpty != false { continue }
@@ -27,16 +28,36 @@ struct ConversationItem: Identifiable, Equatable {
                         items[index].sourceMessageIds.append(message.id)
                     }
                 } else {
-                    items.append(ConversationItem(message: ChatMessage(id: "part:\(part.id)", role: message.role,
-                        parts: [part], assistantMeta: message.assistantMeta), sourceMessageIds: [message.id]))
+                    items.append(ConversationItem(
+                        message: ChatMessage(
+                            id: "part:\(part.id)",
+                            role: message.role,
+                            parts: [part],
+                            assistantMeta: message.assistantMeta,
+                            steered: message.steered,
+                            cancelled: false
+                        ),
+                        sourceMessageIds: [message.id]
+                    ))
+                }
+            }
+            if message.cancelled {
+                if items.count > startCount {
+                    items[items.count - 1].message.cancelled = true
+                } else {
+                    items.append(ConversationItem(message: message, sourceMessageIds: [message.id]))
                 }
             }
         }
         items.removeAll { item in
-            !item.message.parts.contains { part in
+            if item.message.role == "assistant" && item.message.cancelled {
+                return false
+            }
+            return !item.message.parts.contains { part in
                 switch part.kind {
                 case .text, .reasoning, .error: return part.text?.isEmpty == false
                 case .toolCall: return part.toolName != nil
+                case .compaction: return true
                 }
             }
         }

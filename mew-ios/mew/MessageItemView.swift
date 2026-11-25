@@ -20,15 +20,22 @@ struct MessageItemView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var isUser: Bool { message.role == "user" }
+    private var isSystem: Bool { message.role == "system" }
 
     var body: some View {
-        HStack {
-            if isUser {
-                Spacer(minLength: 0)
-                userBubble
+        Group {
+            if isSystem {
+                systemContent
             } else {
-                assistantContent
-                Spacer(minLength: 0)
+                HStack {
+                    if isUser {
+                        Spacer(minLength: 0)
+                        userBubble
+                    } else {
+                        assistantContent
+                        Spacer(minLength: 0)
+                    }
+                }
             }
         }
         .padding(.horizontal, 16)
@@ -39,24 +46,46 @@ struct MessageItemView: View {
 
     @ViewBuilder
     private var userBubble: some View {
-        VStack(alignment: .trailing, spacing: 6) {
-            ForEach(message.parts, id: \.id) { part in
-                if part.kind == .text, let text = part.text, !text.isEmpty {
-                    Text(markdown(text))
-                        .font(fontChoice.swiftUIFont(UIFont.systemFontSize))
-                        .foregroundStyle(.primary)
-                        .textSelection(.enabled)
-                } else if part.kind == .error, let text = part.text {
-                    Text(text)
-                        .font(.body)
-                        .foregroundStyle(.red)
+        VStack(alignment: .trailing, spacing: 4) {
+            if message.steered {
+                Text("Steered")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 2)
+                    .background(Color(.tertiarySystemFill), in: Capsule())
+            }
+            VStack(alignment: .trailing, spacing: 6) {
+                ForEach(message.parts, id: \.id) { part in
+                    if part.kind == .text, let text = part.text, !text.isEmpty {
+                        Text(markdown(text))
+                            .font(fontChoice.swiftUIFont(UIFont.systemFontSize))
+                            .foregroundStyle(.primary)
+                            .textSelection(.enabled)
+                    } else if part.kind == .error, let text = part.text {
+                        Text(text)
+                            .font(.body)
+                            .foregroundStyle(.red)
+                    }
                 }
             }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: Theme.Layout.panelRadius, style: .continuous))
+            .frame(maxWidth: 320, alignment: .trailing)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: Theme.Layout.panelRadius, style: .continuous))
-        .frame(maxWidth: 320, alignment: .trailing)
+    }
+
+    // MARK: System
+
+    @ViewBuilder
+    private var systemContent: some View {
+        VStack(spacing: 6) {
+            ForEach(message.parts, id: \.id) { part in
+                partView(part)
+            }
+        }
+        .frame(maxWidth: .infinity)
     }
 
     // MARK: Assistant
@@ -71,9 +100,15 @@ struct MessageItemView: View {
                     partView(part)
                 }
             }
+            if message.cancelled {
+                Label("Cancelled", systemImage: "stop.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 2)
+            }
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, message.parts.allSatisfy { $0.kind == .toolCall } ? 0 : 10)
+        .padding(.vertical, (!message.parts.isEmpty && message.parts.allSatisfy { $0.kind == .toolCall }) ? 0 : 10)
         .frame(maxWidth: 360, alignment: .leading)
         // Assistant messages render with no background — the chat surface
         // shows through and user bubbles provide the only visual separation.
@@ -90,6 +125,8 @@ struct MessageItemView: View {
             reasoningView(part)
         case .toolCall:
             toolCallView(part)
+        case .compaction:
+            CompactionDividerView(part: part, fontChoice: fontChoice)
         case .error:
             if let text = part.text, !text.isEmpty {
                 Label(text, systemImage: "exclamationmark.triangle.fill")
@@ -475,5 +512,62 @@ private struct TypingDot: View {
                 value: animate
             )
             .onAppear { if !reduceMotion { animate = true } }
+    }
+}
+
+private struct CompactionDividerView: View {
+    let part: MessagePart
+    var fontChoice: MewFontChoice = .miSans
+    @State private var expanded = false
+
+    private var labelText: String {
+        if let removed = part.compactionRemoved, removed > 0 {
+            let unit = removed == 1 ? "message" : "messages"
+            return "Context compacted · \(removed) \(unit)"
+        }
+        return "Context compacted"
+    }
+
+    private var summary: String {
+        (part.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var headerRow: some View {
+        HStack(spacing: 8) {
+            Rectangle()
+                .fill(Color.secondary.opacity(0.25))
+                .frame(height: 1)
+            Text(labelText)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 3)
+                .background(Color(.tertiarySystemFill), in: Capsule())
+            Rectangle()
+                .fill(Color.secondary.opacity(0.25))
+                .frame(height: 1)
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 8) {
+            if summary.isEmpty {
+                headerRow
+            } else {
+                DisclosureGroup(isExpanded: $expanded) {
+                    MarkdownView(text: summary, config: .mewReasoning(fontChoice: fontChoice))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                        .background(
+                            Color(.secondarySystemBackground),
+                            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        )
+                } label: {
+                    headerRow
+                }
+                .tint(.secondary)
+            }
+        }
+        .padding(.vertical, 4)
     }
 }

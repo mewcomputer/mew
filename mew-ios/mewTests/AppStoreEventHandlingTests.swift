@@ -200,8 +200,8 @@ final class AppStoreEventHandlingTests: XCTestCase {
     func testToolOnlyMessagesStayCompactInConversation() {
         let part = MessagePart(id: "tool", kind: .toolCall, text: nil, toolName: "read", toolState: "completed",
             toolInput: "{}", toolOutput: "file contents", toolError: nil, toolCallId: "call",
-            toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil)
-        let message = ChatMessage(id: "assistant", role: "assistant", parts: [part], assistantMeta: nil)
+            toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: nil)
+        let message = ChatMessage(id: "assistant", role: "assistant", parts: [part], assistantMeta: nil, steered: false, cancelled: false)
         let controller = UIHostingController(rootView: MessageItemView(message: message, fontChoice: .system, disclosures: .constant(ToolDisclosures()))
             .environment(\.dynamicTypeSize, .large))
         let size = controller.sizeThatFits(in: CGSize(width: 393, height: 1_000))
@@ -214,9 +214,9 @@ final class AppStoreEventHandlingTests: XCTestCase {
             MessagePart(id: "tool-\(index)", kind: .toolCall, text: nil, toolName: name, toolState: "completed",
                 toolInput: name == "write" ? "{\"path\":\"main.rs\"}" : "{\"command\":\"cargo test\"}",
                 toolOutput: "done", toolError: nil, toolCallId: "call-\(index)",
-                toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil)
+                toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: nil)
         }
-        let message = ChatMessage(id: "assistant", role: "assistant", parts: parts, assistantMeta: nil)
+        let message = ChatMessage(id: "assistant", role: "assistant", parts: parts, assistantMeta: nil, steered: false, cancelled: false)
         let controller = UIHostingController(rootView: MessageItemView(message: message, fontChoice: .system, disclosures: .constant(ToolDisclosures()))
             .environment(\.dynamicTypeSize, .large))
         XCTAssertLessThanOrEqual(controller.sizeThatFits(in: CGSize(width: 393, height: 1_000)).height, 50)
@@ -225,12 +225,12 @@ final class AppStoreEventHandlingTests: XCTestCase {
     func testInvisibleUserTurnsStillSeparateToolActivity() {
         let part = MessagePart(id: "one", kind: .toolCall, text: nil, toolName: "bash", toolState: "completed",
             toolInput: "{}", toolOutput: nil, toolError: nil, toolCallId: "one",
-            toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil)
+            toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: nil)
         var second = part
         second.id = "two"
-        store.messages = [ChatMessage(id: "first", role: "assistant", parts: [part], assistantMeta: nil),
-            ChatMessage(id: "attachment-only", role: "user", parts: [], assistantMeta: nil),
-            ChatMessage(id: "second", role: "assistant", parts: [second], assistantMeta: nil)]
+        store.messages = [ChatMessage(id: "first", role: "assistant", parts: [part], assistantMeta: nil, steered: false, cancelled: false),
+            ChatMessage(id: "attachment-only", role: "user", parts: [], assistantMeta: nil, steered: false, cancelled: false),
+            ChatMessage(id: "second", role: "assistant", parts: [second], assistantMeta: nil, steered: false, cancelled: false)]
         let items = store.conversationItems
         XCTAssertEqual(items.count, 2, "Hidden user messages must still separate turns")
         XCTAssertEqual(items.flatMap { $0.message.parts }.map(\.id), ["one", "two"])
@@ -240,13 +240,13 @@ final class AppStoreEventHandlingTests: XCTestCase {
         let parts = (0..<3).map { index in
             MessagePart(id: "tool-\(index)", kind: .toolCall, text: nil, toolName: "bash", toolState: "completed",
                 toolInput: "{\"command\":\"cargo test\"}", toolOutput: "tests passed", toolError: nil,
-                toolCallId: "call-\(index)", toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil)
+                toolCallId: "call-\(index)", toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: nil)
         }
         var disclosures = ToolDisclosures()
         disclosures.setGroupExpanded(true, parts: Array(parts.suffix(2)))
         disclosures.expandedCalls.insert("tool-2")
         XCTAssertTrue(disclosures.isGroupExpanded(parts))
-        let message = ChatMessage(id: "older-group", role: "assistant", parts: parts, assistantMeta: nil)
+        let message = ChatMessage(id: "older-group", role: "assistant", parts: parts, assistantMeta: nil, steered: false, cancelled: false)
         let controller = UIHostingController(rootView: MessageItemView(message: message, fontChoice: .system,
             disclosures: .constant(disclosures)).environment(\.dynamicTypeSize, .large))
         XCTAssertGreaterThan(controller.sizeThatFits(in: CGSize(width: 393, height: 2_000)).height, 250,
@@ -349,7 +349,8 @@ final class AppStoreEventHandlingTests: XCTestCase {
         let messages = texts.map { text in
             ChatMessage(id: text, role: "user", parts: [MessagePart(id: text, kind: .text, text: text,
                 toolName: nil, toolState: nil, toolInput: nil, toolOutput: nil, toolError: nil,
-                toolCallId: nil, toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil)], assistantMeta: nil)
+                toolCallId: nil, toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: nil)],
+                assistantMeta: nil, steered: false, cancelled: false)
         }
         return DaemonSnapshot(sessions: [SessionInfo(sessionId: "sess-1", title: "History", messages: messages,
             running: running, usageCost: 0, pendingPermissions: 0, pendingQuestions: 0,
@@ -408,9 +409,9 @@ final class AppStoreEventHandlingTests: XCTestCase {
         let parts = [("completed", "earlier answer"), ("active", "current")].map { id, text in
             MessagePart(id: id, kind: .text, text: text, toolName: nil, toolState: nil,
                 toolInput: nil, toolOutput: nil, toolError: nil, toolCallId: nil,
-                toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil)
+                toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: nil)
         }
-        snapshot.sessions[0].messages.append(ChatMessage(id: "assistant", role: "assistant", parts: parts, assistantMeta: nil))
+        snapshot.sessions[0].messages.append(ChatMessage(id: "assistant", role: "assistant", parts: parts, assistantMeta: nil, steered: false, cancelled: false))
         mock.snapshotResult = snapshot
 
         store.handleEvent(.historyExtended(daemon: "daemon-1", sessionId: "sess-1"))
@@ -601,11 +602,11 @@ final class AppStoreEventHandlingTests: XCTestCase {
         XCTAssertEqual(mock.promptCalls.count, 1)
         store.handleEvent(.alert(daemon: "daemon-2", sessionId: "sess-1", kind: "error", title: "Other daemon", detail: nil))
         XCTAssertFalse(store.canSendPrompt)
-        store.handleEvent(.sessionActivityChanged(daemon: "daemon-2", sessionId: "sess-1", running: true))
+        store.handleEvent(.sessionActivityChanged(daemon: "daemon-2", sessionId: "sess-1", running: true, cancelled: false))
         XCTAssertFalse(store.canSendPrompt)
-        store.handleEvent(.sessionActivityChanged(daemon: "daemon-1", sessionId: "sess-1", running: true))
+        store.handleEvent(.sessionActivityChanged(daemon: "daemon-1", sessionId: "sess-1", running: true, cancelled: false))
         XCTAssertTrue(store.isStreaming)
-        store.handleEvent(.sessionActivityChanged(daemon: "daemon-1", sessionId: "sess-1", running: false))
+        store.handleEvent(.sessionActivityChanged(daemon: "daemon-1", sessionId: "sess-1", running: false, cancelled: false))
         XCTAssertTrue(store.sendPrompt("next"))
         store.handleEvent(.alert(daemon: "daemon-1", sessionId: "sess-1", kind: "error", title: "Rejected", detail: nil))
         XCTAssertTrue(store.canSendPrompt)
@@ -631,20 +632,20 @@ final class AppStoreEventHandlingTests: XCTestCase {
     }
 
     func testProviderCompletionKeepsRunBusyUntilDaemonActivityEnds() {
-        store.handleEvent(.sessionActivityChanged(daemon: "daemon-1", sessionId: "sess-1", running: true))
+        store.handleEvent(.sessionActivityChanged(daemon: "daemon-1", sessionId: "sess-1", running: true, cancelled: false))
         store.handleEvent(.providerMessageEnded(daemon: "daemon-1", sessionId: "sess-1",
             inputTokens: 7, outputTokens: 2, cost: 0.01, failed: false, manifest: nil))
         XCTAssertTrue(store.isStreaming)
         store.streamingText = "last provider response"
-        store.handleEvent(.sessionActivityChanged(daemon: "daemon-1", sessionId: "sess-1", running: false))
+        store.handleEvent(.sessionActivityChanged(daemon: "daemon-1", sessionId: "sess-1", running: false, cancelled: false))
         XCTAssertFalse(store.isStreaming)
         XCTAssertTrue(store.streamingText.isEmpty)
     }
 
     func testOtherSessionsAndDaemonsCannotEndTheSelectedRun() {
-        store.handleEvent(.sessionActivityChanged(daemon: "daemon-1", sessionId: "sess-1", running: true))
-        store.handleEvent(.sessionActivityChanged(daemon: "daemon-2", sessionId: "sess-1", running: false))
-        store.handleEvent(.sessionActivityChanged(daemon: "daemon-1", sessionId: "sess-2", running: false))
+        store.handleEvent(.sessionActivityChanged(daemon: "daemon-1", sessionId: "sess-1", running: true, cancelled: false))
+        store.handleEvent(.sessionActivityChanged(daemon: "daemon-2", sessionId: "sess-1", running: false, cancelled: false))
+        store.handleEvent(.sessionActivityChanged(daemon: "daemon-1", sessionId: "sess-2", running: false, cancelled: false))
         store.handleEvent(.providerMessageEnded(daemon: "daemon-2", sessionId: "sess-1",
             inputTokens: 7, outputTokens: 2, cost: 0.01, failed: true, manifest: nil))
         XCTAssertTrue(store.isStreaming)
@@ -654,8 +655,8 @@ final class AppStoreEventHandlingTests: XCTestCase {
     func testPromptWaitsForAuthoritativeActivityAndLateTextCannotRestartRun() {
         store.sendPrompt("hello")
         XCTAssertFalse(store.isStreaming)
-        store.handleEvent(.sessionActivityChanged(daemon: "daemon-1", sessionId: "sess-1", running: true))
-        store.handleEvent(.sessionActivityChanged(daemon: "daemon-1", sessionId: "sess-1", running: false))
+        store.handleEvent(.sessionActivityChanged(daemon: "daemon-1", sessionId: "sess-1", running: true, cancelled: false))
+        store.handleEvent(.sessionActivityChanged(daemon: "daemon-1", sessionId: "sess-1", running: false, cancelled: false))
         store.handleEvent(.textDelta(daemon: "daemon-1", sessionId: "sess-1", partId: "late", delta: "late text"))
         XCTAssertFalse(store.isStreaming)
     }
@@ -1210,5 +1211,120 @@ final class AppStoreEventHandlingTests: XCTestCase {
         XCTAssertEqual(store.currentModel["daemon-1"], "gpt-4")
         XCTAssertEqual(store.currentProvider["daemon-1"], "openai")
         XCTAssertEqual(store.thinkingVariant["daemon-1"], "high")
+    }
+
+    func testQueuedMessagesTrackServerUpdatesAndForwardActions() {
+        mock.snapshotResult = DaemonSnapshot(
+            sessions: [], attachedSession: "sess-1", pendingPermissions: [],
+            pendingAskUser: [], models: [], daemonVersion: nil, permissionMode: nil,
+            currentModel: nil, currentProvider: nil, thinkingVariant: nil,
+            currentPersona: nil, availablePersonas: [], automationSettings: nil
+        )
+        store.daemonStatuses["daemon-1"] = .connected
+
+        store.handleEvent(.sessionActivityChanged(daemon: "daemon-1", sessionId: "sess-1", running: true, cancelled: false))
+        XCTAssertFalse(store.canSendPrompt)
+        XCTAssertTrue(store.canEnqueuePrompt)
+
+        XCTAssertTrue(store.enqueueMessage("follow up", steer: false))
+        XCTAssertTrue(store.enqueueMessage("redirect now", steer: true))
+        XCTAssertEqual(mock.enqueueCalls.count, 2)
+        XCTAssertEqual(mock.enqueueCalls[0].text, "follow up")
+        XCTAssertFalse(mock.enqueueCalls[0].steer)
+        XCTAssertEqual(mock.enqueueCalls[1].text, "redirect now")
+        XCTAssertTrue(mock.enqueueCalls[1].steer)
+
+        let item = MobileQueuedMessage(id: "q-1", text: "follow up", steer: false)
+        store.handleEvent(.queueChanged(daemon: "daemon-1", sessionId: "sess-1", items: [item]))
+        store.handleEvent(.queueChanged(daemon: "daemon-2", sessionId: "sess-1", items: [
+            MobileQueuedMessage(id: "q-other", text: "wrong daemon", steer: true)
+        ]))
+        XCTAssertEqual(store.queuedMessages["sess-1"], [item])
+
+        XCTAssertTrue(store.promoteQueuedMessage(id: "q-1"))
+        XCTAssertTrue(store.removeQueuedMessage(id: "q-1"))
+        XCTAssertEqual(mock.promoteQueueCalls.count, 1)
+        XCTAssertEqual(mock.promoteQueueCalls[0].messageId, "q-1")
+        XCTAssertEqual(mock.removeQueueCalls.count, 1)
+        XCTAssertEqual(mock.removeQueueCalls[0].messageId, "q-1")
+
+        store.handleEvent(.queueChanged(daemon: "daemon-1", sessionId: "sess-1", items: []))
+        XCTAssertEqual(store.queuedMessages["sess-1"], [])
+    }
+
+    func testSessionCompactingDeduplicatesSlashResultAndTracksActiveState() {
+        store.handleEvent(.sessionCompacting(daemon: "daemon-2", sessionId: "sess-1", active: true, removed: nil, summary: nil))
+        XCTAssertFalse(store.isCompacting)
+
+        store.handleEvent(.sessionCompacting(daemon: "daemon-1", sessionId: "sess-1", active: true, removed: nil, summary: nil))
+        XCTAssertTrue(store.isCompacting)
+
+        store.handleEvent(.sessionCompacting(daemon: "daemon-1", sessionId: "sess-1", active: false, removed: 12, summary: "## Goal & Constraints\nLive recap"))
+        XCTAssertFalse(store.isCompacting)
+        XCTAssertEqual(store.messages.count, 1)
+        XCTAssertEqual(store.messages[0].role, "system")
+        XCTAssertEqual(store.messages[0].parts[0].kind, .compaction)
+        XCTAssertEqual(store.messages[0].parts[0].compactionRemoved, 12)
+        XCTAssertEqual(store.messages[0].parts[0].text, "## Goal & Constraints\nLive recap")
+
+        store.handleEvent(.slashResult(daemon: "daemon-1", sessionId: "sess-1", text: "compacted 12 messages"))
+        XCTAssertEqual(store.messages.count, 1)
+
+        // Reverse order: slashResult first, then sessionCompacting replaces the text bubble.
+        store.messages = []
+        store.handleEvent(.slashResult(daemon: "daemon-1", sessionId: "sess-1", text: "compacted 5 messages"))
+        XCTAssertEqual(store.messages.count, 1)
+        store.handleEvent(.sessionCompacting(daemon: "daemon-1", sessionId: "sess-1", active: false, removed: 5, summary: nil))
+        XCTAssertEqual(store.messages.count, 1)
+        XCTAssertEqual(store.messages[0].role, "system")
+        XCTAssertEqual(store.messages[0].parts[0].kind, .compaction)
+        XCTAssertEqual(store.messages[0].parts[0].compactionRemoved, 5)
+    }
+
+    func testRetryWaitAndCancelledActivityState() {
+        store.handleEvent(.retryWait(daemon: "daemon-1", sessionId: "sess-1", attempt: 1, maxAttempts: 3, delaySecs: 4, reason: "overloaded"))
+        XCTAssertEqual(store.retryWait, RetryWaitInfo(attempt: 1, maxAttempts: 3, delaySecs: 4, reason: "overloaded"))
+
+        store.handleEvent(.textDelta(daemon: "daemon-1", sessionId: "sess-1", partId: "p-1", delta: "hi"))
+        XCTAssertNil(store.retryWait)
+
+        store.handleEvent(.retryWait(daemon: "daemon-1", sessionId: "sess-1", attempt: 2, maxAttempts: 3, delaySecs: 8, reason: "timeout"))
+        XCTAssertEqual(store.retryWait?.attempt, 2)
+
+        store.messages = [
+            ChatMessage(
+                id: "u-1", role: "user",
+                parts: [MessagePart(id: "up-1", kind: .text, text: "hello", toolName: nil, toolState: nil,
+                    toolInput: nil, toolOutput: nil, toolError: nil, toolCallId: nil,
+                    toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: nil)],
+                assistantMeta: nil, steered: false, cancelled: false
+            )
+        ]
+        store.handleEvent(.sessionActivityChanged(daemon: "daemon-1", sessionId: "sess-1", running: false, cancelled: true))
+        XCTAssertNil(store.retryWait)
+        XCTAssertEqual(store.messages.count, 2)
+        XCTAssertEqual(store.messages[1].role, "assistant")
+        XCTAssertTrue(store.messages[1].cancelled)
+    }
+
+    func testSubagentIdenticonDeterminismAndHorizontalSymmetry() {
+        for seed in ["child-session-1", "researcher", "coder-alpha", ""] {
+            let cellsA = identiconCells(seed: seed)
+            let cellsB = identiconCells(seed: seed)
+            XCTAssertEqual(cellsA, cellsB)
+            XCTAssertEqual(identiconColorHex(seed: seed), identiconColorHex(seed: seed))
+            XCTAssertTrue(subagentIdenticonPaletteHex.contains(identiconColorHex(seed: seed)))
+            XCTAssertEqual(cellsA.count, 5)
+            var anyFilled = false
+            for row in cellsA {
+                XCTAssertEqual(row.count, 5)
+                for col in 0..<5 {
+                    XCTAssertEqual(row[col], row[4 - col])
+                    if row[col] { anyFilled = true }
+                }
+            }
+            XCTAssertTrue(anyFilled)
+        }
+        XCTAssertNotEqual(hashSeedFnv1a("agent-a"), hashSeedFnv1a("agent-b"))
     }
 }

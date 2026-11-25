@@ -161,8 +161,8 @@ for per-machine settings:
 
 - **Nickname**: update the display label saved on this phone.
 - **Connection**: trigger **Retry connection** or **Pair again**.
-- **Auto-title and auto-summary**: toggle session title generation (current
-  connection) and summaries (daemon-wide).
+- **Auto-title and auto-summary**: toggle automatic session titles and idle
+  summaries for all clients connected to the daemon.
 - **New chat defaults**: read and update the daemon's default provider, model,
   persona, thinking variant, and permission policy for future chats across
   clients.

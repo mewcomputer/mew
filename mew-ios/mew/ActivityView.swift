@@ -69,11 +69,17 @@ struct ActivityView: View {
     }
 
     private func workerLabel(_ worker: WorkerInfo, name: String) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(name.isEmpty ? "Worker" : name).font(.headline)
-            Text(worker.status).font(.subheadline).foregroundStyle(.secondary)
-            if let tool = worker.toolName {
-                Label(tool, systemImage: "wrench.and.screwdriver").font(.caption).foregroundStyle(.secondary)
+        HStack(alignment: .center, spacing: 10) {
+            SubagentIdenticonView(
+                seed: worker.childSessionId ?? worker.displayName ?? worker.taskId,
+                size: 20
+            )
+            VStack(alignment: .leading, spacing: 5) {
+                Text(name.isEmpty ? "Worker" : name).font(.headline)
+                Text(worker.status).font(.subheadline).foregroundStyle(.secondary)
+                if let tool = worker.toolName {
+                    Label(tool, systemImage: "wrench.and.screwdriver").font(.caption).foregroundStyle(.secondary)
+                }
             }
         }
         .padding(.vertical, 4)
@@ -129,6 +135,17 @@ private struct WorkerHistoryView: View {
         .navigationTitle(name.isEmpty ? "Worker history" : name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .principal) {
+                HStack(spacing: 6) {
+                    SubagentIdenticonView(
+                        seed: childSessionId.isEmpty ? (name.isEmpty ? "Worker" : name) : childSessionId,
+                        size: 18
+                    )
+                    Text(name.isEmpty ? "Worker history" : name)
+                        .font(.headline)
+                        .lineLimit(1)
+                }
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Button("Refresh", systemImage: "arrow.clockwise", action: refresh)
                     .disabled(store.workerHistory?.isLoading == true)

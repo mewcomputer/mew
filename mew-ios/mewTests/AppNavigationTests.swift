@@ -397,8 +397,8 @@ final class AppNavigationTests: XCTestCase {
     private func snapshot(_ id: String, text: String) -> DaemonSnapshot {
         let part = MessagePart(id: "\(id)-text", kind: .text, text: text, toolName: nil, toolState: nil,
             toolInput: nil, toolOutput: nil, toolError: nil, toolCallId: nil,
-            toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil)
-        let message = ChatMessage(id: "\(id)-message", role: "assistant", parts: [part], assistantMeta: nil)
+            toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: nil)
+        let message = ChatMessage(id: "\(id)-message", role: "assistant", parts: [part], assistantMeta: nil, steered: false, cancelled: false)
         let session = SessionInfo(sessionId: id, title: id, messages: [message], running: false,
             usageCost: 0, pendingPermissions: 0, pendingQuestions: 0,
             inputTokens: 0, outputTokens: 0, turns: 0, todos: [], historyBefore: nil, subagents: [], jobs: [])

@@ -13,6 +13,9 @@ final class MockMobileCore: @preconcurrency MobileCoreProtocol {
     var askUserResponseCalls: [(nodeId: String, requestId: String, answers: [String])] = []
     var promptAccepted = true
     var promptCalls: [(nodeId: String, text: String)] = []
+    var enqueueCalls: [(nodeId: String, sessionId: String, text: String, steer: Bool)] = []
+    var promoteQueueCalls: [(nodeId: String, sessionId: String, messageId: String)] = []
+    var removeQueueCalls: [(nodeId: String, sessionId: String, messageId: String)] = []
     var slashCommandCalls: [(nodeId: String, command: String)] = []
     var setPermissionModeCalls: [(nodeId: String, mode: String)] = []
     var setThinkingVariantCalls: [(nodeId: String, variant: String)] = []
@@ -102,6 +105,21 @@ final class MockMobileCore: @preconcurrency MobileCoreProtocol {
     }
 
     func cancel(id: DaemonId) { cancelCalls.append(id.nodeId) }
+
+    func enqueueMessage(id: DaemonId, sessionId: String, text: String, steer: Bool) -> Bool {
+        enqueueCalls.append((id.nodeId, sessionId, text, steer))
+        return promptAccepted
+    }
+
+    func promoteQueuedMessage(id: DaemonId, sessionId: String, messageId: String) -> Bool {
+        promoteQueueCalls.append((id.nodeId, sessionId, messageId))
+        return promptAccepted
+    }
+
+    func removeQueuedMessage(id: DaemonId, sessionId: String, messageId: String) -> Bool {
+        removeQueueCalls.append((id.nodeId, sessionId, messageId))
+        return promptAccepted
+    }
 
     func respondPermission(id: DaemonId, requestId: String, decision: Decision) {
         permissionResponseCalls.append((id.nodeId, requestId, decision))
