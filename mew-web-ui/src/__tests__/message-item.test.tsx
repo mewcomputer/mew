@@ -1,9 +1,11 @@
-import type { ProviderEventWire } from "@mew/web-client";
+import type { Message, ProviderEventWire } from "@mew/web-client";
 import type { ReactNode } from "react";
 import { act, cleanup, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MessageItem } from "../components/message-item";
-import { useSessionStore } from "../stores/session";
+import { setClient } from "../lib/client-ref";
+import { useSessionStore, wireMessageToChatMessage } from "../stores/session";
 
 const markdownRenderCount = vi.hoisted(() => ({ value: 0 }));
 
@@ -78,7 +80,8 @@ describe("MessageItem streaming subscriptions", () => {
     expect(screen.getByTestId("markdown").textContent).toContain("already complete");
   });
 
-  it.each(["handoff_plan", "switch_persona"])("renders historical %s as an ordinary completed tool", (toolName) => {
+  it.each(["handoff_plan", "switch_persona"])("renders historical %s as an ordinary completed tool", async (toolName) => {
+    const user = userEvent.setup();
     render(<MessageItem message={{
       id: "historical-message",
       role: "assistant",
@@ -93,10 +96,29 @@ describe("MessageItem streaming subscriptions", () => {
       }],
     }} />);
 
-    expect(screen.getByText(toolName).textContent).toBe(toolName);
+    const row = screen.getByRole("button", { name: `Show ${toolName} details` });
+    expect(row.textContent).toContain(toolName);
     expect(screen.getByText("completed").textContent).toBe("completed");
-    expect(screen.getByText("historical result").textContent).toBe("historical result");
+    expect(screen.queryByText("historical result")).toBeNull();
     expect(screen.queryByRole("button", { name: /approve|request changes/i })).toBeNull();
+    await user.click(row);
+    expect(screen.getByText("historical result").textContent).toBe("historical result");
+  });
+
+  it("renders consecutive tool calls as separate rows instead of a nested fold", () => {
+    render(<MessageItem message={{
+      id: "tool-run",
+      role: "assistant",
+      timestamp: 1,
+      parts: [
+        { type: "tool-call", toolName: "read", callId: "c1", input: { path: "/repo/AGENTS.md" }, state: "completed" },
+        { type: "tool-call", toolName: "bash", callId: "c2", input: { command: "cargo test" }, state: "completed" },
+      ],
+    }} />);
+
+    expect(screen.getByRole("button", { name: "Show read details" }).textContent).toContain("Read");
+    expect(screen.getByRole("button", { name: "Show bash details" }).textContent).toContain("Ran");
+    expect(screen.queryByText(/tool calls/)).toBeNull();
   });
 
   it("still updates the active streaming message", () => {
@@ -158,5 +180,64 @@ describe("MessageItem streaming subscriptions", () => {
     });
 
     expect(screen.getByTestId("markdown").textContent).toContain("live response");
+  });
+});
+describe("file parts", () => {
+  afterEach(() => { cleanup(); });
+
+  it("shows a raster attachment as an image instead of its base64 url", () => {
+    const url = `data:image/png;base64,${"iVBORw0KGgoAAAANSUhEUg==".repeat(20)}`;
+    render(<MessageItem message={{
+      id: "with-image", role: "user", timestamp: 1,
+      parts: [{ type: "file", mime: "image/png", filename: "shot.png", url }],
+    }} />);
+    expect(screen.getByRole("img", { name: "shot.png" }).getAttribute("src")).toBe(url);
+    expect(document.body.textContent).not.toContain("base64");
+  });
+
+  it("labels other attachments without printing their url", () => {
+    render(<MessageItem message={{
+      id: "with-file", role: "assistant", timestamp: 1,
+      parts: [{ type: "file", mime: "application/pdf", filename: "report.pdf", url: "file:///tmp/report.pdf" }],
+    }} />);
+    expect(screen.getByText("report.pdf")).toBeTruthy();
+    expect(document.body.textContent).not.toContain("file:///tmp");
+  });
+
+  it("keeps file parts from session history structured", () => {
+    const url = "data:image/png;base64,iVBORw0KGgo=";
+    const message: Message = {
+      id: "history", session_id: "session", role: "user", time: { created: 1 },
+      parts: [{ type: "file", id: "part", message_id: "history", session_id: "session", mime: "image/png", filename: "shot.png", url }],
+    };
+    expect(wireMessageToChatMessage(message).parts).toEqual([{ type: "file", mime: "image/png", filename: "shot.png", url }]);
+  });
+
+  it("fetches mew-blob images over the wire on demand and opens lightbox preview", async () => {
+    const user = userEvent.setup();
+    const id = "a".repeat(64);
+    const getAttachment = vi.fn().mockResolvedValue({ id, data_base64: "iVBORw0KGgo=", size: 8 });
+    setClient({ getAttachment } as never);
+    const originalCreateObjectUrl = URL.createObjectURL;
+    URL.createObjectURL = vi.fn(() => "blob:http://localhost/cat-shot");
+
+    try {
+      render(<MessageItem message={{
+        id: "with-blob-image",
+        role: "user",
+        timestamp: 1,
+        parts: [{ type: "file", mime: "image/png", filename: "cat.png", url: `mew-blob://${id}` }],
+      }} />);
+
+      const img = await screen.findByRole("img", { name: "cat.png" });
+      expect(img.getAttribute("src")).toBe("blob:http://localhost/cat-shot");
+      expect(getAttachment).toHaveBeenCalledWith(id);
+
+      await user.click(screen.getByRole("button", { name: "Preview cat.png" }));
+      expect(screen.getByRole("dialog")).toBeTruthy();
+    } finally {
+      URL.createObjectURL = originalCreateObjectUrl;
+      setClient(null);
+    }
   });
 });

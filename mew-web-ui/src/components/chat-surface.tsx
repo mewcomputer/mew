@@ -1,13 +1,17 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { useRouter } from "@tanstack/react-router";
-import { useSessionStore } from "../stores/session";
-import { MessageItem } from "./message-item";
+import { selectSessionRunning, useSessionStore } from "../stores/session";
+import { CompactingIndicator, TurnItem } from "./turn-item";
+import { buildTurns } from "../lib/turns";
+import { useFollowScroll } from "../lib/use-follow-scroll";
+import { useComposerHeight } from "../lib/composer-height";
 import { ErrorBoundary } from "./error-boundary";
 import { ConversationMinimap } from "./conversation-minimap";
 import { ChevronDown, Folder, FolderPlus, MessageSquare } from "lucide-react";
 import { formatRelativeAge } from "../lib/format";
 import { SESSION_ID_KEY } from "../lib/client";
 import { getClient } from "../lib/client-ref";
+import { createAndOpenSession } from "../lib/session-actions";
 import { ProjectPickerModal } from "./session-rail";
 
 export function WorkspaceSelectorPill({
@@ -64,16 +68,10 @@ export function WorkspaceSelectorPill({
     if (cwd === effectiveCwd) return;
     const client = getClient();
     if (!client || connectionState !== "connected") return;
-    try {
-      useSessionStore.getState().reset();
-      const newId = await client.newSession(cwd);
-      localStorage.setItem(SESSION_ID_KEY, newId);
-      void router.navigate({ to: "/session/$sessionId", params: { sessionId: newId } });
-    } catch (error) {
-      useSessionStore.getState().onError(
-        error instanceof Error ? error.message : "Could not open workspace.",
-      );
-    }
+    await createAndOpenSession(client, router, {
+      cwd,
+      errorMessage: "Could not open workspace.",
+    });
   };
 
   return (
@@ -173,11 +171,11 @@ function EmptyChatSurface() {
                   router.navigate({ to: "/session/$sessionId", params: { sessionId: s.session_id } });
                 }}
                 className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left transition-colors hover:bg-accent"
-                aria-label={"Open session " + (titles.get(s.session_id) ?? s.summary ?? s.first_message ?? s.session_id)}
+                aria-label={"Open session " + (titles.get(s.session_id) ?? s.title ?? s.first_message ?? s.session_id)}
               >
                 <MessageSquare className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                 <span className="flex-1 truncate text-xs text-foreground">
-                  {titles.get(s.session_id) ?? s.summary ?? s.first_message ?? s.model ?? "Untitled session"}
+                  {titles.get(s.session_id) ?? s.title ?? s.first_message ?? s.model ?? "Untitled session"}
                 </span>
                 <span className="text-[10px] text-muted-foreground">
                   {formatRelativeAge(s.last_message_at ?? s.created_at)}
@@ -193,31 +191,28 @@ function EmptyChatSurface() {
 
 export function ChatSurface() {
   const messages = useSessionStore((s) => s.messages);
+  const turns = useMemo(() => buildTurns(messages), [messages]);
   const sessionId = useSessionStore((s) => s.sessionId);
+  const sessionIndex = useSessionStore((s) => s.sessionIndex);
   const streamingText = useSessionStore((s) => s.streamingText);
   const streamingReasoningText = useSessionStore(
     (s) => s.streamingReasoningText,
   );
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const autoScroll = useRef(true);
-
-  // Track whether the user is scrolled to the bottom
-  const handleScroll = () => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
-    autoScroll.current = atBottom;
-  };
-
-  // Auto-scroll to bottom when new content arrives (if user was at bottom)
-  useEffect(() => {
-    if (autoScroll.current && scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [messages, streamingText, streamingReasoningText]);
+  const compacting = useSessionStore((s) => s.compacting);
+  const compactingStartedAt = useSessionStore((s) => s.compactingStartedAt);
+  const sessionRunning = useSessionStore(selectSessionRunning);
+  const composerHeight = useComposerHeight();
+  const scroll = useFollowScroll<HTMLDivElement>([
+    turns.length,
+    messages,
+    streamingText,
+    streamingReasoningText,
+    compacting,
+    composerHeight,
+  ]);
 
   const handleSelectMessageIndex = (index: number) => {
-    const el = scrollRef.current?.querySelector<HTMLElement>(`[data-index="${index}"]`);
+    const el = scroll.ref.current?.querySelector<HTMLElement>(`[data-message-index="${index}"]`);
     if (el && typeof el.scrollIntoView === "function") {
       el.scrollIntoView({ block: "start", behavior: "smooth" });
     }
@@ -232,32 +227,31 @@ export function ChatSurface() {
           streamingText={streamingText}
           activeMessageIndex={Math.max(0, messages.length - 1)}
           onSelectMessageIndex={handleSelectMessageIndex}
+          sessionIndex={sessionIndex}
         />
       )}
       <div
-        ref={scrollRef}
-        onScroll={handleScroll}
-        className="chat-scroll-container min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-4 pb-6 pt-6 sm:pl-9 sm:pr-6"
+        ref={scroll.setRef}
+        className="chat-scroll-container mew-conversation-gutters min-w-0 flex-1 overflow-x-hidden overflow-y-auto pt-6 pb-[calc(var(--composer-height,0px)_+_3rem)]"
       >
         <div className="mew-conversation-width mx-auto min-w-0 space-y-6">
           {messages.length === 0 && <EmptyChatSurface />}
-          {messages.map((msg, idx) =>
-            msg.role === "system" ? null : (
-              <div key={msg.id} data-index={idx}>
-                <ErrorBoundary
-                  title="Message failed to render"
-                  fallback={
-                    <div className="max-w-[85%] rounded-lg border border-destructive/50 bg-destructive/10 px-4 py-2.5 text-sm text-destructive">
-                      A message in this conversation failed to render.
-                    </div>
-                  }
-                >
-                  <MessageItem
-                    message={msg}
-                  />
-                </ErrorBoundary>
-              </div>
-            ),
+          {turns.map((turn, i) => (
+            <div key={turn.key} data-message-index={turn.messageIndex}>
+              <ErrorBoundary
+                title="Message failed to render"
+                fallback={
+                  <div className="max-w-[85%] rounded-lg border border-destructive/50 bg-destructive/10 px-4 py-2.5 text-sm text-destructive">
+                    A message in this conversation failed to render.
+                  </div>
+                }
+              >
+                <TurnItem turn={turn} isLast={i === turns.length - 1} />
+              </ErrorBoundary>
+            </div>
+          ))}
+          {compacting && !sessionRunning && (
+            <CompactingIndicator startedAt={compactingStartedAt} />
           )}
         </div>
       </div>

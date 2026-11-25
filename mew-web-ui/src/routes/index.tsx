@@ -54,7 +54,6 @@ function HomeComponent() {
     const client = getClient();
     const location = router.state.location;
     if (newChatId.current === null) {
-      useSessionStore.getState().reset();
       newChatId.current = await client.newSession(selectedCwd ?? undefined);
     }
     const newId = newChatId.current;

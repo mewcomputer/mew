@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
-import { ChevronRight, ChevronDown, Clock3, CheckCircle2, XCircle, Loader2, Copy, FileEdit, FilePlus } from "lucide-react";
+import { ChevronRight, Clock3, CheckCircle2, XCircle, Loader2, Copy, FilePlus } from "lucide-react";
 import { useSessionStore, type MessagePart } from "../stores/session";
 import { cn } from "../lib/utils";
 import { CodeBlock } from "./code-block";
 import { formatPythonForDisplay, MAX_PYTHON_DISPLAY_LENGTH } from "../lib/python-display";
+import { describePythonCalls, parsePythonCalls } from "../lib/python-calls";
 
 type Sensitivity = "readonly" | "mutating" | "dangerous";
+type ToolPart = Extract<MessagePart, { type: "tool-call" }>;
 
 function inferSensitivity(toolName: string): Sensitivity {
   const t = toolName.toLowerCase();
@@ -29,23 +31,78 @@ function sensitivityMeta(s: Sensitivity) {
   }
 }
 
-/** Extract a human-readable summary of the tool input for the collapsed view. */
-function inputSummary(input: unknown): string {
-  if (!input || input === null) return "";
-  if (typeof input === "object") {
-    const obj = input as Record<string, unknown>;
-    const path = obj.path as string | undefined;
-    const command = obj.command as string | undefined;
-    const pattern = obj.pattern as string | undefined;
-    const text = obj.text as string | undefined;
-    const oldStr = obj.old_string as string | undefined;
-    if (command) return command;
-    if (path) return path;
-    if (pattern) return pattern;
-    if (text) return text;
-    if (oldStr) return "old: " + oldStr;
+function asRecord(input: unknown): Record<string, unknown> {
+  return input && typeof input === "object" ? (input as Record<string, unknown>) : {};
+}
+
+function stringField(input: unknown, ...keys: string[]): string {
+  const record = asRecord(input);
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return value;
   }
   return "";
+}
+
+/** Drop the workspace prefix so long paths stay scannable in a one-line row.
+ *  Paths outside the workspace keep their last two segments; the full path is
+ *  still on the row's title. */
+function relativePath(path: string, cwd: string | null): string {
+  if (!path) return path;
+  if (cwd) {
+    const root = cwd.endsWith("/") ? cwd : `${cwd}/`;
+    if (path.startsWith(root)) return path.slice(root.length);
+  }
+  const segments = path.split("/").filter(Boolean);
+  if (segments.length <= 3) return path;
+  return `…/${segments.slice(-2).join("/")}`;
+}
+
+function patchPath(patch: string): string {
+  const match = patch.match(/^\[([^#\]\n]+)#/m);
+  return match ? match[1]!.trim() : "";
+}
+
+/** The target path for tools that carry one, including hash-anchored patches. */
+function inputPath(input: unknown): string {
+  return stringField(input, "path", "file_path", "file") || patchPath(stringField(input, "patch"));
+}
+
+/** The collapsed row states what the call did ("Edited src/app.tsx") instead of
+ *  echoing the tool id and its JSON payload. */
+function describeCall(part: ToolPart, cwd: string | null): { verb: string; detail: string; title: string } {
+  const name = part.toolName;
+  const path = inputPath(part.input);
+  const shown = relativePath(path, cwd);
+  if (name === "read") return { verb: "Read", detail: shown, title: path };
+  if (name.startsWith("edit")) return { verb: "Edited", detail: shown, title: path };
+  if (name.startsWith("write")) return { verb: "Wrote", detail: shown, title: path };
+  if (name === "grep") {
+    const pattern = stringField(part.input, "pattern");
+    return { verb: "Searched", detail: pattern ? `"${pattern}"` : "", title: pattern };
+  }
+  if (name === "glob") {
+    const pattern = stringField(part.input, "pattern");
+    return { verb: "Listed", detail: pattern, title: pattern };
+  }
+  if (name === "bash") {
+    const command = stringField(part.input, "command");
+    return { verb: "Ran", detail: command, title: command };
+  }
+  if (name === "web_fetch") {
+    const url = stringField(part.input, "url");
+    return { verb: "Fetched", detail: url, title: url };
+  }
+  if (name === "python") {
+    // After the run the nested calls are known; before it, read them off the
+    // source so the row still says what the cell is about to do.
+    const nested = [...new Set((part.nestedCalls ?? []).map((call) => call.tool_name))];
+    const detail = nested.length
+      ? nested.join(", ")
+      : describePythonCalls(parsePythonCalls(stringField(part.input, "source")));
+    return { verb: "Python", detail, title: detail };
+  }
+  return { verb: name, detail: "", title: "" };
 }
 
 function useElapsed(startMs: number | undefined, endMs: number | null | undefined, running: boolean) {
@@ -63,25 +120,34 @@ function useElapsed(startMs: number | undefined, endMs: number | null | undefine
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
-export function ToolCallCard({ part }: { part: Extract<MessagePart, { type: "tool-call" }> }) {
+/** One line per tool call, with detail folded away.
+ *
+ *  All tool calls stay collapsed by default until the user manually opens
+ *  them so live turns and settled transcripts stay scannable. */
+export function ToolCallCard({ part }: { part: ToolPart }) {
   const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState(false);
   const toolState = useSessionStore((s) => s.toolStates.get(part.callId));
   const toolOutput = useSessionStore((s) => s.toolOutputs.get(part.callId)) ?? part.output;
+  const cwd = useSessionStore((s) => s.sessionCwd);
 
   const state = toolState ?? part.state ?? "pending";
-  const hasOutput = toolOutput && toolOutput.length > 0;
-  const summary = inputSummary(part.input);
-  const sensitivity = inferSensitivity(part.toolName);
-  const source = part.toolName === "python" && part.input && typeof part.input === "object"
-    ? (part.input as Record<string, unknown>).source : undefined;
-  const label = part.toolName === "python" && part.nestedCalls?.length
-    ? [...new Set(part.nestedCalls.map((call) => call.tool_name))].join(", ")
-    : part.toolName;
-  const displaySource = useMemo(() => typeof source === "string" ? formatPythonForDisplay(source) : null, [source]);
-  const sens = sensitivityMeta(sensitivity);
+  const hasOutput = Boolean(toolOutput);
+  const { verb, detail, title } = describeCall(part, cwd);
+  const callDescription = stringField(part.input, "description", "reason");
+  const source = part.toolName === "python" ? stringField(part.input, "source") : "";
+  const displaySource = useMemo(() => (source ? formatPythonForDisplay(source) : null), [source]);
+  const nested = part.nestedCalls ?? [];
+  const delta = useMemo(
+    () => countDiffLines(part.input),
+    [part.input],
+  );
+  // Historic calls record a start but no end, so a computed duration would keep
+  // growing. Only show a duration the tool actually reported, or a live one.
   const elapsed = useElapsed(part.time?.start, part.time?.end, state === "running");
+  const duration = part.time?.end != null || state === "running" ? elapsed : null;
+  const sens = sensitivityMeta(inferSensitivity(part.toolName));
 
   const handleCopy = async () => {
     if (!toolOutput) return;
@@ -97,183 +163,157 @@ export function ToolCallCard({ part }: { part: Extract<MessagePart, { type: "too
   };
 
   return (
-    <div
-      className={cn(
-        "min-w-0 w-full max-w-full rounded-lg border bg-card",
-        state === "error" && "border-destructive",
-        state !== "error" && "border-border",
-      )}
-    >
+    <div className="group/tool w-full min-w-0 max-w-full">
       <button
         type="button"
         onClick={() => setExpanded(!expanded)}
-        aria-label={`${expanded ? "Hide" : "Show"} ${label} details`}
+        aria-label={`${expanded ? "Hide" : "Show"} ${part.toolName} details`}
         aria-expanded={expanded}
-        className="motion-pressable flex min-w-0 w-full items-start gap-2 rounded-lg px-3 py-2 text-left hover:bg-muted/40"
+        className="motion-pressable -ml-1 flex w-full min-w-0 items-center gap-2 rounded-md py-1 pl-1 pr-2 text-left text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground"
       >
-        <span className="mt-0.5 shrink-0" aria-hidden="true"><StateIcon state={state} /></span>
-        <span className="min-w-0 flex-1">
-          <span className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-            <span className="min-w-0 break-words font-mono text-xs leading-5 [overflow-wrap:anywhere]">{label}</span>
-            <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] leading-4 text-muted-foreground">
-              <span className={cn("capitalize", state === "error" && "text-destructive", state === "completed" && "text-text-success", state === "running" && "text-text-accent")}>{state}</span>
-              {elapsed && <span className="tabular-nums">{elapsed}</span>}
-              {part.toolName !== "python" && <span className={sens.className}>{sens.label}</span>}
-            </span>
-          </span>
-          {summary && <span className="block truncate text-[11px] leading-4 text-muted-foreground" title={summary}>{summary}</span>}
+        <StateIcon state={state} />
+        <span className={cn("min-w-0 flex-1 truncate", state === "error" && "text-destructive")}>
+          {callDescription ? (
+            <span title={title || detail || undefined}>{callDescription}</span>
+          ) : (
+            <>
+              <span>{verb}</span>
+              {detail && <span title={title || undefined} className="pl-1.5 font-mono text-[11px] text-muted-foreground">{detail}</span>}
+            </>
+          )}
         </span>
-        {expanded ? (
-          <ChevronDown className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
-        ) : (
-          <ChevronRight className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+        {delta && (delta.added > 0 || delta.removed > 0) && (
+          <span className="shrink-0 font-mono text-[10px] tabular-nums">
+            <span className="text-text-success">+{delta.added}</span>{" "}
+            <span className="text-destructive">-{delta.removed}</span>
+          </span>
         )}
+        {duration && <span className="shrink-0 text-[10px] tabular-nums">{duration}</span>}
+        <ChevronRight
+          className={cn("h-3 w-3 shrink-0 transition-transform", expanded && "rotate-90")}
+          aria-hidden="true"
+        />
+        <span className="sr-only">{state}</span>
       </button>
 
-      {displaySource !== null && (
-        <div className="max-h-40 overflow-auto border-t border-border px-3 py-2 text-[11px] leading-relaxed" aria-label="Python code">
-          {displaySource.length > MAX_PYTHON_DISPLAY_LENGTH
-            ? <pre>{displaySource}</pre>
-            : <CodeBlock key={displaySource} code={displaySource} lang="python" showHeader={false} flush />}
-        </div>
-      )}
-      {part.nestedCalls && part.nestedCalls.length > 0 && (
-        <div className="space-y-2 border-t border-border px-3 py-2 text-xs" aria-label="Nested tools">
-          {part.nestedCalls.map((call) => (
-            <div key={call.call_id}>
-              <div className="flex flex-wrap items-center gap-x-2">
-                <span className="font-medium">{call.tool_name}</span>
-                <span className={cn("text-muted-foreground", call.status === "error" && "text-destructive", call.status === "completed" && "text-text-success")}>{call.status}</span>
-                {inputSummary(call.input) && <span className="min-w-0 break-all text-muted-foreground">{inputSummary(call.input)}</span>}
-                {call.output_bytes != null && <span className="text-muted-foreground">{call.output_bytes} B</span>}
-              </div>
-              {call.error && <div className="mt-1 whitespace-pre-wrap text-destructive">{call.error}</div>}
-              {expanded && <pre className="mt-1 max-h-40 overflow-auto rounded bg-muted p-2 text-[11px]">{JSON.stringify(call.input, null, 2)}</pre>}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {hasOutput && !expanded && (
-        <div className="min-w-0 border-t border-border">
-          <div className="group relative min-w-0">
-            <button
-              type="button"
-              onClick={handleCopy}
-              aria-label="Copy output"
-              className="motion-pressable absolute right-2 top-2 rounded border border-border bg-background p-1 text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
-              title="Copy output"
-            >
-              {copied ? <CheckCircle2 className="h-3 w-3 text-text-success" /> : <Copy className="h-3 w-3" />}
-            </button>
-            <pre className="max-h-32 min-w-0 max-w-full overflow-auto py-2 pl-3 pr-10 text-[11px] leading-relaxed text-muted-foreground">
-              {toolOutput}
-            </pre>
-          </div>
-        </div>
-      )}
-
       {expanded && (
-        <div className="min-w-0 border-t border-border px-3 py-2">
-          {typeof source === "string" && displaySource !== source && <div><span>Original Python</span><pre className="max-h-40 overflow-auto">{source}</pre></div>}
-          {part.input != null && typeof source !== "string" && (
-            <div className="mb-2">
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-medium text-muted-foreground">
-                  Input
-                </span>
-                {(part.toolName === "edit" || part.toolName === "write") && (
-                  <span className="flex items-center gap-1 text-[10px] text-muted-foreground">
-                    <FileEdit className="h-3 w-3" />
-                    diff view
-                  </span>
-                )}
-              </div>
-              {(part.toolName === "edit" || part.toolName === "write") && part.input && typeof part.input === "object" ? (
-                <ToolInputDiff toolName={part.toolName} input={part.input as Record<string, unknown>} />
-              ) : (
-                <pre className="mt-1 max-h-64 min-w-0 max-w-full overflow-auto rounded bg-muted p-2 text-[11px] leading-relaxed">
-                  {JSON.stringify(part.input, null, 2)}
-                </pre>
+        <div
+          className={cn(
+            "motion-enter mb-1 mt-0.5 min-w-0 space-y-2 border-l pl-3",
+            state === "error" ? "border-destructive/40" : "border-border",
+          )}
+        >
+          {displaySource !== null && (
+            <div className="max-h-40 overflow-auto text-[11px] leading-relaxed" aria-label="Python code">
+              {displaySource.length > MAX_PYTHON_DISPLAY_LENGTH
+                ? <pre>{displaySource}</pre>
+                : <CodeBlock key={displaySource} code={displaySource} lang="python" showHeader={false} flush />}
+            </div>
+          )}
+
+          {nested.length > 0 && (
+            <div className="space-y-1 text-[11px]" aria-label="Nested tools">
+              {nested.map((call) => {
+                const target = stringField(call.input, "path", "pattern", "command");
+                return (
+                  <div key={call.call_id} className="flex min-w-0 flex-wrap items-baseline gap-x-2">
+                    <span className="font-mono text-muted-foreground">{call.tool_name}</span>
+                    <span className={cn("text-muted-foreground", call.status === "error" && "text-destructive", call.status === "completed" && "text-text-success")}>{call.status}</span>
+                    {target && <span className="min-w-0 truncate text-muted-foreground">{target}</span>}
+                    {call.error && <span className="min-w-0 basis-full whitespace-pre-wrap text-destructive">{call.error}</span>}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <>
+              {displaySource !== null && displaySource !== source && (
+                <div>
+                  <div className="text-[10px] text-muted-foreground">Original Python</div>
+                  <pre className="max-h-40 overflow-auto text-[11px]">{source}</pre>
+                </div>
               )}
-            </div>
-          )}
-          {hasOutput && (
-            <div>
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-medium text-muted-foreground">
-                  Output
-                </span>
-                <button
-                  type="button"
-                  onClick={handleCopy}
-                  aria-label="Copy output"
-                  className="motion-pressable flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
-                >
-                  {copied ? <CheckCircle2 className="h-3 w-3 text-text-success" /> : <Copy className="h-3 w-3" />}
-                  {copied ? "Copied" : "Copy"}
-                </button>
-              </div>
-              <pre className="mt-1 max-h-64 min-w-0 max-w-full overflow-auto rounded bg-muted p-2 text-[11px] leading-relaxed">
-                {toolOutput}
-              </pre>
-            </div>
-          )}
+              {part.input != null && !source && (
+                <div>
+                  <div className="text-[10px] text-muted-foreground">
+                    Input <span className={sens.className}>· {sens.label}</span>
+                  </div>
+                  {isStringEdit(part.input) || typeof asRecord(part.input).text === "string"
+                    ? <ToolInputDetail input={asRecord(part.input)} />
+                    : <pre className="mt-1 max-h-64 min-w-0 max-w-full overflow-auto rounded bg-muted/60 p-2 text-[11px] leading-relaxed">
+                        {JSON.stringify(part.input, null, 2)}
+                      </pre>}
+                </div>
+              )}
+              {hasOutput && (
+                <div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-muted-foreground">Output</span>
+                    <button
+                      type="button"
+                      onClick={handleCopy}
+                      aria-label="Copy output"
+                      className="motion-pressable flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
+                    >
+                      {copied ? <CheckCircle2 className="h-3 w-3 text-text-success" /> : <Copy className="h-3 w-3" />}
+                      {copied ? "Copied" : "Copy"}
+                    </button>
+                  </div>
+                  <pre className="mt-1 max-h-64 min-w-0 max-w-full overflow-auto whitespace-pre-wrap bg-transparent p-0 font-mono text-[11px] leading-relaxed text-muted-foreground">
+                    {toolOutput}
+                  </pre>
+                </div>
+              )}
+          </>
         </div>
       )}
       {copied && <span role="status" className="sr-only">Output copied</span>}
-      {copyError && <p role="alert" className="px-3 pb-2 text-[11px] text-destructive">Could not copy output. Try again.</p>}
+      {copyError && <p role="alert" className="pl-1 text-[11px] text-destructive">Could not copy output. Try again.</p>}
     </div>
   );
 }
 
-function StateIcon({ state }: { state: Extract<MessagePart, { type: "tool-call" }>["state"] }) {
+function StateIcon({ state }: { state: ToolPart["state"] }) {
   switch (state) {
     case "pending":
-      return <Clock3 className="h-3.5 w-3.5 text-muted-foreground" />;
+      return <Clock3 className="h-3 w-3 shrink-0 text-muted-foreground" aria-hidden="true" />;
     case "running":
-      return <Loader2 className="h-3.5 w-3.5 animate-spin text-text-accent" />;
+      return <Loader2 className="h-3 w-3 shrink-0 animate-spin text-text-accent" aria-hidden="true" />;
     case "completed":
-      return <CheckCircle2 className="h-3.5 w-3.5 text-text-success" />;
+      return <CheckCircle2 className="h-3 w-3 shrink-0 text-text-success/70" aria-hidden="true" />;
     case "error":
-      return <XCircle className="h-3.5 w-3.5 text-destructive" />;
+      return <XCircle className="h-3 w-3 shrink-0 text-destructive" aria-hidden="true" />;
     default:
       return null;
   }
 }
 
-function ToolInputDiff({ toolName, input }: { toolName: string; input: Record<string, unknown> }) {
-  if (toolName === "edit") {
-    const oldStr = String(input.old_string ?? "");
-    const newStr = String(input.new_string ?? "");
-    const path = String(input.path ?? "");
+/** Pick the input view from the payload shape, not the tool name: write-shaped
+ *  input gets a diff or file preview, everything else falls back to raw JSON. */
+function ToolInputDetail({ input }: { input: Record<string, unknown> }) {
+  // The expanded detail is where the exact path matters; the row compacts it.
+  const path = inputPath(input);
+
+  if (isStringEdit(input)) {
     return (
-      <div className="mt-1 space-y-1 rounded border border-border bg-muted/50 p-2 text-xs">
-        {path && <div className="break-all font-mono text-muted-foreground">{path}</div>}
-        <Diff oldStr={oldStr} newStr={newStr} />
+      <div className="mt-1 space-y-1">
+        {path && <div className="break-all font-mono text-[10px] text-muted-foreground">{path}</div>}
+        <Diff oldStr={String(input.old_string)} newStr={String(input.new_string)} />
       </div>
     );
   }
 
-  if (toolName === "write") {
-    const text = String(input.text ?? "");
-    const path = String(input.path ?? "");
-    return (
-      <div className="mt-1 space-y-1 rounded border border-border bg-muted/50 p-2 text-xs">
-        {path && <div className="break-all font-mono text-muted-foreground">{path}</div>}
-        <div className="flex items-center gap-2 text-muted-foreground">
-          <FilePlus className="h-3.5 w-3.5" />
-          <span>Write {text.length} characters</span>
-        </div>
-        <pre className="max-h-40 max-w-full overflow-auto rounded bg-muted p-2 text-[10px]">{text}</pre>
-      </div>
-    );
-  }
-
+  const text = String(input.text);
   return (
-    <pre className="mt-1 max-w-full overflow-x-auto rounded bg-muted p-2 text-xs">
-      {JSON.stringify(input, null, 2)}
-    </pre>
+    <div className="mt-1 space-y-1">
+      {path && <div className="break-all font-mono text-[10px] text-muted-foreground">{path}</div>}
+      <div className="flex items-center gap-2 text-muted-foreground">
+        <FilePlus className="h-3 w-3" aria-hidden="true" />
+        <span>Write {text.length} characters</span>
+      </div>
+      <pre className="max-h-40 max-w-full overflow-auto rounded bg-muted/60 p-2 text-[10px]">{text}</pre>
+    </div>
   );
 }
 
@@ -305,8 +345,26 @@ function Diff({ oldStr, newStr }: { oldStr: string; newStr: string }) {
   );
 }
 
-function computeLineDiff(oldStr: string, newStr: string): { kind: "old" | "new" | "same"; text: string }[] {
-  const oldLines = oldStr.split("\n");
+function isStringEdit(input: unknown): boolean {
+  const record = asRecord(input);
+  return typeof record.old_string === "string" && typeof record.new_string === "string";
+}
+
+/** Added and removed line counts for an edit, matching what the diff view shows. */
+function countDiffLines(input: unknown): { added: number; removed: number } | null {
+  if (!isStringEdit(input)) return null;
+  const record = asRecord(input);
+  const lines = computeLineDiff(String(record.old_string), String(record.new_string));
+  let added = 0;
+  let removed = 0;
+  for (const line of lines) {
+    if (line.kind === "new") added++;
+    else if (line.kind === "old") removed++;
+  }
+  return { added, removed };
+}
+
+function computeLineDiff(oldStr: string, newStr: string): { kind: "old" | "new" | "same"; text: string }[] {  const oldLines = oldStr.split("\n");
   const newLines = newStr.split("\n");
   const result: { kind: "old" | "new" | "same"; text: string }[] = [];
   let oi = 0;

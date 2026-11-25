@@ -3,6 +3,7 @@ import { useState, useEffect } from "react";
 import { CommandPalette } from "@/components/command-palette";
 import { Toaster } from "@/components/ui/sonner";
 import { getClient } from "@/lib/client";
+import { createAndOpenSession } from "@/lib/session-actions";
 import { routerRef } from "@/lib/router-ref";
 import { useSessionStore } from "@/stores/session";
 import { useMewConnection } from "@/lib/hooks";
@@ -42,15 +43,7 @@ function RootComponent() {
         store.setConnectionError("Connect to the daemon before creating a chat.");
         return;
       }
-      const location = router.state.location;
-      store.reset();
-      void client.newSession().then((newId) => {
-        if (router.state.location !== location) return;
-        localStorage.setItem("mew.sessionId", newId);
-        router.navigate({ to: "/session/$sessionId", params: { sessionId: newId } });
-      }).catch((error: unknown) => {
-        useSessionStore.getState().onError(error instanceof Error ? error.message : "Could not create a chat.");
-      });
+      void createAndOpenSession(client, router, { errorMessage: "Could not create a chat." });
     };
     const keyboard = (event: KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey)) return;

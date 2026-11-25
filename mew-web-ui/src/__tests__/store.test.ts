@@ -1,6 +1,14 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { askUserResponders, bridgeClientToStore, permissionResponders, useSessionStore } from "../stores/session";
+import {
+  askUserResponders,
+  bridgeClientToStore,
+  permissionResponders,
+  selectSessionRunning,
+  useSessionStore,
+  wireMessageToChatMessage,
+} from "../stores/session";
 import type { MewClient } from "@mew/web-client";
+import { setClient } from "../lib/client-ref";
 
 // Helper to get fresh store state.
 function store() {
@@ -19,7 +27,105 @@ describe("pending input recovery", () => {
       on: (event: string, handler: (...args: any[]) => void) => handlers.set(event, handler),
       listModels: () => Promise.resolve([]),
       listPersonas: () => Promise.resolve([]),
+      loadSessionIndex: vi.fn(),
     } as unknown as MewClient);
+  });
+
+  it("ignores file previews belonging to another conversation", () => {
+    useSessionStore.setState({ sessionId: "chat-b", filePreview: null });
+    handlers.get("file-preview")?.({ session_id: "chat-a", path: "README.md", content: "wrong workspace", truncated: false });
+    expect(store().filePreview).toBeNull();
+    handlers.get("file-preview")?.({ session_id: "chat-b", path: "README.md", content: "right workspace", truncated: false });
+    expect(store().filePreview?.content).toBe("right workspace");
+  });
+
+  it("clears late file data when the next conversation attaches", () => {
+    useSessionStore.setState({ sessionId: "chat-a", filePreview: null });
+    store().reset();
+    handlers.get("file-preview")?.({ session_id: "chat-a", path: "README.md", content: "old", truncated: false });
+    handlers.get("dir-listing")?.({ session_id: "chat-a", path: "", entries: [{ name: "old", is_dir: false }] });
+    handlers.get("git-status-result")?.({ session_id: "chat-a", entries: [{ path: "old.md", status: "modified" }] });
+    handlers.get("session-ready")?.({ session_id: "chat-b" });
+    expect(store().filePreview).toBeNull();
+    expect(store().dirListing).toBeNull();
+    expect(store().gitStatus).toEqual([]);
+    handlers.get("dir-listing")?.({ session_id: "chat-a", path: "", entries: [{ name: "old", is_dir: false }] });
+    expect(store().dirListing).toBeNull();
+    handlers.get("git-status-result")?.({ session_id: "chat-a", entries: [{ path: "old.md", status: "modified" }] });
+    expect(store().gitStatus).toEqual([]);
+    handlers.get("dir-listing")?.({ session_id: "chat-b", path: "", entries: [{ name: "new", is_dir: false }] });
+    expect(store().dirListing?.[0]?.name).toBe("new");
+  });
+
+  it("explains why an older daemon's unscoped preview cannot be displayed", () => {
+    useSessionStore.setState({ sessionId: "chat-b", filePreview: null });
+    handlers.get("file-preview")?.({ path: "README.md", content: "unscoped", truncated: false });
+    expect(store().filePreview?.content).toBe("");
+    expect(store().filePreview?.error).toContain("update the daemon");
+  });
+
+  it("reports unavailable status from an older daemon instead of showing a clean tree", () => {
+    useSessionStore.setState({ sessionId: "chat-b", gitStatus: [], gitStatusError: null });
+    handlers.get("git-status-result")?.({ entries: [{ path: "changed.md", status: "modified" }] });
+    expect(store().gitStatus).toEqual([]);
+    expect(store().gitStatusError).toContain("update the daemon");
+    handlers.get("git-status-result")?.({ session_id: "chat-b", entries: [] });
+    expect(store().gitStatusError).toBeNull();
+  });
+
+  it("shows only status failures for the active conversation", () => {
+    useSessionStore.setState({ sessionId: "chat-b", gitStatus: [], gitStatusError: null });
+    handlers.get("git-status-result")?.({ session_id: "chat-a", entries: [], error: "old error" });
+    expect(store().gitStatusError).toBeNull();
+    handlers.get("git-status-result")?.({ session_id: "chat-b", entries: [], error: "not a git repository" });
+    expect(store().gitStatusError).toContain("not a git repository");
+  });
+
+  it("explains when an older daemon returns an unscoped directory listing", () => {
+    useSessionStore.setState({ sessionId: "chat-b", dirListing: null, dirListingError: null });
+    handlers.get("dir-listing")?.({ path: "", entries: [{ name: "unscoped", is_dir: false }] });
+    expect(store().dirListing).toBeNull();
+    expect(store().dirListingError).toContain("update the daemon");
+  });
+
+  it("coalesces filesystem bursts without refreshing a different session", () => {
+    vi.useFakeTimers();
+    const listDir = vi.fn();
+    const gitStatus = vi.fn();
+    setClient({ listDir, gitStatus } as unknown as MewClient);
+    useSessionStore.setState({ sessionId: "chat-a", connectionState: "connected", dirListingPath: "src" });
+    store().onFsChanged([]);
+    store().onFsChanged([]);
+    store().onFsChanged([]);
+    vi.advanceTimersByTime(200);
+    expect(listDir).toHaveBeenCalledTimes(1);
+    expect(gitStatus).toHaveBeenCalledTimes(1);
+    store().onFsChanged([]);
+    useSessionStore.setState({ sessionId: "chat-b" });
+    vi.advanceTimersByTime(200);
+    expect(gitStatus).toHaveBeenCalledTimes(1);
+    setClient(null);
+    vi.useRealTimers();
+  });
+
+  it("does not refresh a disconnected client after a filesystem event", () => {
+    vi.useFakeTimers();
+    const listDir = vi.fn(() => { throw new Error("closed"); });
+    setClient({ listDir, gitStatus: vi.fn() } as unknown as MewClient);
+    useSessionStore.setState({ sessionId: "chat-a", connectionState: "connected" });
+    store().onFsChanged([]);
+    useSessionStore.setState({ connectionState: "disconnected" });
+    expect(() => vi.advanceTimersByTime(200)).not.toThrow();
+    expect(listDir).not.toHaveBeenCalled();
+    setClient(null);
+    vi.useRealTimers();
+  });
+
+  it("keeps the changes tree stable for identical status responses", () => {
+    const entries = [{ path: "a.txt", status: "modified" as const }];
+    store().onGitStatus(entries);
+    store().onGitStatus([{ path: "a.txt", status: "modified" }]);
+    expect(store().gitStatus).toBe(entries);
   });
 
   it("shows consecutive identical prompts broadcast by the daemon", () => {
@@ -134,6 +240,7 @@ describe("session-ready bridge", () => {
       off: vi.fn(),
       listModels: vi.fn(() => Promise.resolve([])),
       listPersonas: vi.fn(() => Promise.resolve([])),
+      loadSessionIndex: vi.fn(),
     } as unknown as MewClient;
     bridgeClientToStore(client);
     handlers.get("session-ready")?.({ session_id: "chat" });
@@ -141,6 +248,64 @@ describe("session-ready bridge", () => {
     handlers.get("close")?.(1006);
     expect(store().confirmedSessionId).toBeNull();
     expect(store().sessionId).toBe("chat");
+  });
+
+  it("resets previous session messages only when session-ready switches to a different session", () => {
+    const handlers = new Map<string, (data: any) => void>();
+    const client = {
+      on: (event: string, handler: (data: any) => void) => handlers.set(event, handler),
+      off: vi.fn(),
+      listModels: vi.fn(() => Promise.resolve([])),
+      listPersonas: vi.fn(() => Promise.resolve([])),
+      loadSessionIndex: vi.fn(),
+    } as unknown as MewClient;
+    bridgeClientToStore(client);
+
+    useSessionStore.setState({
+      sessionId: "chat-a",
+      messages: [],
+      projects: [{ path: "/tmp/proj", display_name: "proj", session_count: 1, last_used_at: 1 }],
+    });
+    store().addUserMessage("existing prompt");
+
+    const seenTransitions: Array<{ sessionId: string | null; msgCount: number }> = [];
+    const unsubscribe = useSessionStore.subscribe((state) => {
+      seenTransitions.push({ sessionId: state.sessionId, msgCount: state.messages.length });
+    });
+    try {
+      // Reconnecting to the same session preserves messages before replay.
+      handlers.get("session-ready")?.({ session_id: "chat-a" });
+      expect(store().sessionId).toBe("chat-a");
+      expect(store().messages).toHaveLength(1);
+
+      // Switching to another session resets the old conversation state atomically
+      // without emitting an intermediate blank state under the old sessionId
+      // or wiping daemon-global projects.
+      seenTransitions.length = 0;
+      handlers.get("session-ready")?.({
+        session_id: "chat-b",
+        provider: "antigravity",
+        model: "gemini-4-hydrogen",
+        permission_mode: "permissive",
+      });
+      expect(seenTransitions).toEqual([{ sessionId: "chat-b", msgCount: 0 }]);
+      expect(store().sessionId).toBe("chat-b");
+      expect(store().messages).toHaveLength(0);
+      expect(store().currentProvider).toBe("antigravity");
+      expect(store().currentModel).toBe("gemini-4-hydrogen");
+      expect(store().permissionMode).toBe("permissive");
+      expect(store().projects).toHaveLength(1);
+
+      // Explicit session deletion clears sessionId + messages atomically while keeping projects.
+      store().addUserMessage("temp");
+      store().clearSession();
+      expect(store().sessionId).toBeNull();
+      expect(store().confirmedSessionId).toBeNull();
+      expect(store().messages).toHaveLength(0);
+      expect(store().projects).toHaveLength(1);
+    } finally {
+      unsubscribe();
+    }
   });
 
   it("adds each authoritative user message even when consecutive prompts have identical text", () => {
@@ -211,9 +376,11 @@ describe("session-ready bridge", () => {
       off: vi.fn(),
       listModels: vi.fn(() => Promise.resolve([])),
       listPersonas: vi.fn(() => Promise.resolve([])),
+      loadSessionIndex: vi.fn(),
     } as unknown as MewClient & {
       listModels: ReturnType<typeof vi.fn>;
       listPersonas: ReturnType<typeof vi.fn>;
+      loadSessionIndex: ReturnType<typeof vi.fn>;
     };
 
     useSessionStore.setState({ sessionId: null, sessionCwd: null, messages: [] });
@@ -232,6 +399,7 @@ describe("session-ready bridge", () => {
 
     expect(client.listModels).toHaveBeenCalledOnce();
     expect(client.listPersonas).toHaveBeenCalledOnce();
+    expect(client.loadSessionIndex).toHaveBeenCalledWith("sess-ready");
     expect(useSessionStore.getState().sessionId).toBe("sess-ready");
     expect(useSessionStore.getState().sessionCwd).toBe("/projects/mew");
   });
@@ -381,6 +549,43 @@ describe("session activity + usage", () => {
     expect(useSessionStore.getState().availableSessions[0]!.state).toBe("running");
   });
 
+  it("tracks active session running state directly even before listSessions resolves or when a stale list arrives", () => {
+    const handlers = new Map<string, (data: any) => void>();
+    const client = {
+      on: (event: string, handler: (data: any) => void) => handlers.set(event, handler),
+      off: vi.fn(),
+      listModels: vi.fn(() => Promise.resolve([])),
+      listPersonas: vi.fn(() => Promise.resolve([])),
+      loadSessionIndex: vi.fn(),
+    } as unknown as MewClient;
+    bridgeClientToStore(client);
+
+    useSessionStore.setState({ availableSessions: [], sessionId: null, confirmedSessionId: null });
+    handlers.get("session-ready")?.({ session_id: "new-sess" });
+    expect(selectSessionRunning(useSessionStore.getState())).toBe(false);
+
+    // session_activity_changed arrives before listSessions populates availableSessions.
+    handlers.get("session-activity-changed")?.({ session_id: "new-sess", activity: "running" });
+    expect(selectSessionRunning(useSessionStore.getState())).toBe(true);
+
+    // An in-flight listSessions reply saying "idle" must not overwrite live "running".
+    store().setAvailableSessions([
+      { session_id: "new-sess", state: "idle", created_at: 1, client_count: 1 },
+    ]);
+    expect(selectSessionRunning(useSessionStore.getState())).toBe(true);
+    expect(useSessionStore.getState().availableSessions[0]!.state).toBe("running");
+
+    // Switching sessions clears sessionActivity so running state does not leak.
+    handlers.get("session-ready")?.({ session_id: "other-sess" });
+    expect(selectSessionRunning(useSessionStore.getState())).toBe(false);
+
+    // Re-attaching and idling clears running state back to false.
+    handlers.get("session-activity-changed")?.({ session_id: "other-sess", activity: "running" });
+    expect(selectSessionRunning(useSessionStore.getState())).toBe(true);
+    handlers.get("session-activity-changed")?.({ session_id: "other-sess", activity: "idle" });
+    expect(selectSessionRunning(useSessionStore.getState())).toBe(false);
+  });
+
   it("onSessionUsageChanged updates usage on session", () => {
     useSessionStore.setState({
       sessionId: "s1",
@@ -429,6 +634,16 @@ describe("session activity + usage", () => {
     store().setAvailableSessions([{ ...info, context_tokens: 4200 }]);
     expect(useSessionStore.getState().contextTokensKnown).toBe(true);
     expect(useSessionStore.getState().contextTokens).toBe(4200);
+  });
+
+  it("seeds session titles from the session list", () => {
+    useSessionStore.setState({ sessionTitles: new Map() });
+    store().setAvailableSessions([
+      { session_id: "s1", state: "idle", created_at: 0, client_count: 0, title: "Fix the flaky test" },
+      { session_id: "s2", state: "idle", created_at: 0, client_count: 0 },
+    ]);
+    expect(useSessionStore.getState().sessionTitles.get("s1")).toBe("Fix the flaky test");
+    expect(useSessionStore.getState().sessionTitles.has("s2")).toBe(false);
   });
 });
 
@@ -752,5 +967,311 @@ describe("nested Python tools", () => {
     const part = store().messages[0]!.parts[0]!;
     expect(part.type === "tool-call" && part.nestedCalls).toEqual([child]);
     expect(part.type === "tool-call" && { state: part.state, output: part.output }).toEqual({ state: "completed", output: "done" });
+  });
+});
+
+describe("queued messages state", () => {
+  let handlers: Map<string, (...args: any[]) => void>;
+  beforeEach(() => {
+    store().reset();
+    handlers = new Map();
+    bridgeClientToStore({
+      on: (event: string, handler: (...args: any[]) => void) => handlers.set(event, handler),
+      listModels: () => Promise.resolve([]),
+      listPersonas: () => Promise.resolve([]),
+      loadSessionIndex: vi.fn(),
+    } as unknown as MewClient);
+  });
+
+  it("applies session-queue-changed only for the active session and clears on reset", () => {
+    useSessionStore.setState({ sessionId: "chat-1" });
+    const item = { id: "q-1", text: "after this turn", mode: "follow_up" as const, created_at: 100 };
+    handlers.get("session-queue-changed")?.({ session_id: "chat-2", items: [item] });
+    expect(store().queuedMessages).toEqual([]);
+
+    handlers.get("session-queue-changed")?.({ session_id: "chat-1", items: [item] });
+    expect(store().queuedMessages).toEqual([item]);
+
+    store().onSessionCleared();
+    expect(store().queuedMessages).toEqual([]);
+  });
+});
+
+describe("turn completion finalization on error, slash result, and idle", () => {
+  beforeEach(() => store().reset());
+
+  it("finalizes open assistant messages and clears streaming fields on onError", () => {
+    useSessionStore.setState({
+      streamingPartId: "p-1",
+      streamingText: "partial",
+      streamingReasoningId: "r-1",
+      streamingReasoningText: "thinking",
+      messages: [
+        {
+          id: "m-open",
+          role: "assistant",
+          timestamp: 1000,
+          parts: [{ type: "text", text: "partial", streaming: true }],
+        },
+      ],
+    });
+
+    store().onError("SSE stream ended before the response was complete");
+
+    const msgs = store().messages;
+    expect(msgs).toHaveLength(2);
+    expect(msgs[0]!.completedAt).toBeTypeOf("number");
+    expect(msgs[0]!.parts[0]).toEqual({ type: "text", text: "partial", streaming: false });
+    expect(msgs[1]!.completedAt).toBeTypeOf("number");
+    expect(msgs[1]!.parts[0]).toEqual({
+      type: "error",
+      message: "SSE stream ended before the response was complete",
+    });
+    expect(store().streamingPartId).toBeNull();
+    expect(store().streamingText).toBe("");
+    expect(store().streamingReasoningId).toBeNull();
+    expect(store().streamingReasoningText).toBe("");
+  });
+
+  it("stamps completedAt on synthetic slash result messages", () => {
+    store().onSlashResult("compacted 1925 messages");
+    const msg = store().messages[0]!;
+    expect(msg.completedAt).toBeTypeOf("number");
+    expect(msg.parts[0]).toEqual({ type: "text", text: "compacted 1925 messages" });
+  });
+
+  it("finalizes open assistant messages and clears streaming state when active session becomes idle", () => {
+    useSessionStore.setState({
+      sessionId: "sess-1",
+      availableSessions: [{ session_id: "sess-1", state: "running" } as never],
+      streamingPartId: "p-1",
+      streamingText: "half",
+      messages: [
+        {
+          id: "m-open",
+          role: "assistant",
+          timestamp: 1000,
+          parts: [{ type: "reasoning", text: "half", streaming: true }],
+        },
+      ],
+    });
+
+    store().onSessionActivityChanged("sess-1", "idle");
+
+    expect(store().messages[0]!.completedAt).toBeTypeOf("number");
+    expect(store().messages[0]!.parts[0]).toEqual({
+      type: "reasoning",
+      text: "half",
+      streaming: false,
+    });
+    expect(store().streamingPartId).toBeNull();
+    expect(store().streamingText).toBe("");
+  });
+});
+
+describe("compacting, retry_wait, steered, and cancelled lifecycle", () => {
+  let handlers: Map<string, (...args: any[]) => void>;
+
+  beforeEach(() => {
+    store().reset();
+    handlers = new Map();
+    bridgeClientToStore({
+      on: (event: string, handler: (...args: any[]) => void) => handlers.set(event, handler),
+      listModels: () => Promise.resolve([]),
+      listPersonas: () => Promise.resolve([]),
+      loadSessionIndex: vi.fn(),
+    } as unknown as MewClient);
+    useSessionStore.setState({
+      sessionId: "sess-1",
+      confirmedSessionId: "sess-1",
+      availableSessions: [{ session_id: "sess-1", state: "running" } as never],
+    });
+  });
+
+  it("tracks session-compacting state and deduplicates /compact slash output", () => {
+    handlers.get("session-compacting")?.({ session_id: "other", active: true });
+    expect(store().compacting).toBe(false);
+    expect(store().compactingStartedAt).toBeNull();
+
+    handlers.get("session-compacting")?.({ session_id: "sess-1", active: true });
+    expect(store().compacting).toBe(true);
+    expect(store().compactingStartedAt).toBeTypeOf("number");
+
+    handlers.get("session-compacting")?.({
+      session_id: "sess-1",
+      active: false,
+      removed: 12,
+      summary: "## Goal & Constraints\nLive summary",
+    });
+    expect(store().compacting).toBe(false);
+    expect(store().compactingStartedAt).toBeNull();
+    expect(store().messages).toHaveLength(1);
+    expect(store().messages[0]!.role).toBe("system");
+    expect(store().messages[0]!.parts[0]).toEqual({
+      type: "compaction",
+      summary: "## Goal & Constraints\nLive summary",
+      removed: 12,
+    });
+
+    // /compact slash output arriving right after should not add a duplicate text card.
+    handlers.get("slash-result")?.({ text: "compacted 12 messages" });
+    expect(store().messages).toHaveLength(1);
+
+    // Reverse ordering: slash-result before session-compacting replaces the plain text bubble.
+    store().reset();
+    useSessionStore.setState({ sessionId: "sess-1" });
+    handlers.get("slash-result")?.({ text: "compacted 5 messages" });
+    expect(store().messages).toHaveLength(1);
+    handlers.get("session-compacting")?.({ session_id: "sess-1", active: false, removed: 5 });
+    expect(store().messages).toHaveLength(1);
+    expect(store().messages[0]!.parts[0]).toEqual({ type: "compaction", summary: "", removed: 5 });
+  });
+
+  it("tracks retry_wait state and clears it on next token, error, or idle", () => {
+    handlers.get("provider")?.({
+      type: "retry_wait",
+      attempt: 1,
+      max_attempts: 3,
+      delay_secs: 4,
+      reason: "overloaded",
+    });
+    expect(store().retryWait).toEqual({
+      attempt: 1,
+      maxAttempts: 3,
+      delaySecs: 4,
+      reason: "overloaded",
+    });
+
+    handlers.get("provider")?.({
+      type: "part_start",
+      part: { id: "p-1", message_id: "m-1", session_id: "sess-1", type: "text", text: "" },
+    });
+    expect(store().retryWait).toBeNull();
+
+    handlers.get("provider")?.({
+      type: "retry_wait",
+      attempt: 2,
+      max_attempts: 3,
+      delay_secs: 8,
+      reason: "timeout",
+    });
+    expect(store().retryWait?.attempt).toBe(2);
+
+    handlers.get("provider")?.({ type: "error", error: { message: "boom" } });
+    expect(store().retryWait).toBeNull();
+  });
+
+  it("marks steered user messages and cancelled turns", () => {
+    handlers.get("user-message")?.({ text: "normal prompt", steered: false });
+    handlers.get("session-activity-changed")?.({
+      session_id: "sess-1",
+      activity: "idle",
+      cancelled: true,
+    });
+    expect(store().messages).toHaveLength(2);
+    expect(store().messages[0]!.steered).toBeUndefined();
+    expect(store().messages[1]!.role).toBe("assistant");
+    expect(store().messages[1]!.cancelled).toBe(true);
+
+    handlers.get("user-message")?.({ text: "course correct", steered: true });
+    expect(store().messages[2]!.steered).toBe(true);
+    handlers.get("provider")?.({
+      type: "part_start",
+      part: { id: "p-2", message_id: "m-2", session_id: "sess-1", type: "text", text: "" },
+    });
+    handlers.get("session-activity-changed")?.({
+      session_id: "sess-1",
+      activity: "idle",
+      cancelled: true,
+    });
+    expect(store().messages[3]!.cancelled).toBe(true);
+  });
+
+  it("maps wire compaction parts from session_history", () => {
+    store().onSessionHistory([
+      {
+        id: "comp-1",
+        session_id: "sess-1",
+        role: "system",
+        time: { created: 1000, completed: 1000 },
+        parts: [
+          {
+            id: "cp-1",
+            message_id: "comp-1",
+            session_id: "sess-1",
+            type: "compaction",
+            auto: true,
+            overflow: false,
+            summary: "Summary of dropped turns",
+            removed_count: 8,
+          },
+        ],
+      },
+    ]);
+    expect(store().messages).toHaveLength(1);
+    expect(store().messages[0]!.parts[0]).toEqual({
+      type: "compaction",
+      summary: "Summary of dropped turns",
+      removed: 8,
+    });
+  });
+
+  it("hides synthetic flagged-file preservation messages while keeping normal user text", () => {
+    const preservedMsg = {
+      id: "flag-1",
+      session_id: "sess-1",
+      role: "user" as const,
+      time: { created: 1000 },
+      parts: [
+        {
+          id: "p-1",
+          message_id: "flag-1",
+          session_id: "sess-1",
+          type: "text" as const,
+          text: "Flagged file (preserved across compaction) — /Users/natalie/code/mew/PLAN.md:\n\n# Plan",
+          synthetic: true,
+        },
+      ],
+    };
+    expect(wireMessageToChatMessage(preservedMsg).parts).toEqual([]);
+
+    const referencedMsg = {
+      id: "flag-2",
+      session_id: "sess-1",
+      role: "user" as const,
+      time: { created: 1001 },
+      parts: [
+        {
+          id: "p-2",
+          message_id: "flag-2",
+          session_id: "sess-1",
+          type: "text" as const,
+          text: "Flagged file (referenced — re-read with the read tool when needed): /Users/natalie/code/mew/PLAN.md",
+          synthetic: true,
+        },
+      ],
+    };
+    expect(wireMessageToChatMessage(referencedMsg).parts).toEqual([]);
+
+    const userTypedMsg = {
+      id: "user-1",
+      session_id: "sess-1",
+      role: "user" as const,
+      time: { created: 1002 },
+      parts: [
+        {
+          id: "p-3",
+          message_id: "user-1",
+          session_id: "sess-1",
+          type: "text" as const,
+          text: "Flagged file (preserved across compaction) shouldn't be hidden when typed by a user",
+          synthetic: false,
+        },
+      ],
+    };
+    expect(wireMessageToChatMessage(userTypedMsg).parts).toHaveLength(1);
+
+    store().onSessionHistory([preservedMsg, referencedMsg, userTypedMsg]);
+    expect(store().messages.map((m) => m.id)).toEqual(["user-1"]);
   });
 });

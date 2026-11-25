@@ -7,7 +7,6 @@ import { useComposerFocusShortcut, useSessionAttach } from "@/lib/hooks";
 import { ConversationLayout } from "@/components/conversation-layout";
 import { VirtualChatSurface } from "@/components/virtual-chat-surface";
 import { InputArea } from "@/components/input-area";
-import { StatusFooter } from "@/components/status-footer";
 import { PermissionToast } from "@/components/permission-toast";
 import { AskUserCard } from "@/components/ask-user-card";
 import { GoalCard } from "@/components/goal-card";
@@ -25,6 +24,12 @@ function SessionRouteComponent() {
 
   const handleSend = (text: string, attachments: Attachment[] = []) =>
     getClient().submitPrompt(sessionId, text, attachments);
+
+  const handleEnqueue = (text: string, attachments: Attachment[] = []) =>
+    getClient().enqueueMessage(sessionId, text, "follow_up", attachments);
+
+  const handleSteer = (text: string, attachments: Attachment[] = []) =>
+    getClient().enqueueMessage(sessionId, text, "steer", attachments);
 
   const handleSlash = async (command: string) => {
     const result = await getClient().slashCommand(command);
@@ -51,15 +56,24 @@ function SessionRouteComponent() {
   };
 
   return (
-    <ConversationLayout>
+    <ConversationLayout
+      footer={<>
+        {ready && <><AskUserCard /><GoalCard /></>}
+        <InputArea
+          ref={inputRef}
+          onSend={handleSend}
+          onEnqueue={handleEnqueue}
+          onSteer={handleSteer}
+          onSlash={handleSlash}
+          onCancel={handleCancel}
+          connected={ready}
+          draftId={sessionId}
+        />
+      </>}
+    >
       <div className="relative flex min-h-0 flex-1 flex-col">
         {current && <VirtualChatSurface />}
         {attachError && <p role="alert" className="px-4 py-2 text-sm text-destructive">{attachError}</p>}
-      </div>
-      <div className="shrink-0">
-        {ready && <><AskUserCard /><GoalCard /></>}
-        <InputArea ref={inputRef} onSend={handleSend} onSlash={handleSlash} onCancel={handleCancel} connected={ready} draftId={sessionId} />
-        <StatusFooter />
       </div>
       {ready && <PermissionToast onResolve={handlePermission} />}
     </ConversationLayout>

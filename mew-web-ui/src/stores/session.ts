@@ -1,5 +1,4 @@
 import { create } from "zustand";
-import { toast } from "sonner";
 import { navigateToSession } from "../lib/router-ref";
 import { getClient } from "../lib/client-ref";
 import type {
@@ -8,9 +7,11 @@ import type {
   Part,
   PermissionDecision,
   ModelInfo,
+  MentionCandidate,
   SessionInfo,
   SessionHistoryPage,
   Message,
+  TurnSummary,
   Question,
   SubagentQuestionSource,
   SubagentOutcome,
@@ -26,6 +27,7 @@ import type {
   ProjectInfo,
   PersonaInfo,
   AssistantMeta,
+  QueuedMessageWire,
   NestedToolCall,
 } from "@mew/web-client";
 
@@ -38,7 +40,18 @@ export interface ChatMessage {
   role: "user" | "assistant" | "system";
   parts: MessagePart[];
   timestamp: number;
+  /** When the provider finished this message. Missing while it is still running. */
+  completedAt?: number;
   assistantMeta?: AssistantMeta;
+  steered?: boolean;
+  cancelled?: boolean;
+}
+
+export interface RetryWaitState {
+  attempt: number;
+  maxAttempts: number;
+  delaySecs: number;
+  reason: string;
 }
 
 export type MessagePart =
@@ -55,6 +68,8 @@ export type MessagePart =
       nestedCalls?: NestedToolCall[];
       time?: { start: number; end: number | null };
     }
+  | { type: "file"; mime: string; filename?: string; url: string }
+  | { type: "compaction"; summary: string; removed?: number }
   | { type: "error"; message: string };
 
 export type ToolDisplayState = "pending" | "running" | "completed" | "error";
@@ -75,14 +90,62 @@ function matchToolState(type: string): ToolDisplayState {
   }
 }
 
+function finalizeOpenAssistantMessages(messages: ChatMessage[], now: number): ChatMessage[] {
+  let changed = false;
+  const next = messages.map((msg) => {
+    if (msg.role !== "assistant") return msg;
+    const hasStreamingPart = msg.parts.some(
+      (part) => (part.type === "text" || part.type === "reasoning") && part.streaming,
+    );
+    if (msg.completedAt != null && !hasStreamingPart) return msg;
+    changed = true;
+    return {
+      ...msg,
+      completedAt: msg.completedAt ?? now,
+      parts: hasStreamingPart
+        ? msg.parts.map((part) =>
+            (part.type === "text" || part.type === "reasoning") && part.streaming
+              ? { ...part, streaming: false }
+              : part,
+          )
+        : msg.parts,
+    };
+  });
+  return changed ? next : messages;
+}
+
+function withAppendedError(state: SessionState, message: string) {
+  const now = Date.now();
+  return {
+    messages: [
+      ...finalizeOpenAssistantMessages(state.messages, now),
+      {
+        id: crypto.randomUUID(),
+        role: "assistant" as const,
+        parts: [{ type: "error" as const, message }],
+        timestamp: now,
+        completedAt: now,
+      },
+    ],
+    streamingPartId: null,
+    streamingText: "",
+    streamingReasoningId: null,
+    streamingReasoningText: "",
+    retryWait: null,
+  };
+}
+
 /** Convert a wire Part (from session_history) into the store's MessagePart
  *  shape, or null if the part should be skipped (e.g. tool_result parts
  *  are absorbed into the preceding tool_call). Wire parts are discriminated
  *  by snake_case `type`; we map each to the display representation. */
-function wirePartToMessagePart(part: Part): MessagePart | null {
+function wirePartToMessagePart(part: Part, role?: Message["role"]): MessagePart | null {
   switch (part.type) {
     case "text":
       if (!part.text || part.text.trim() === "") return null;
+      if (role === "user" && part.synthetic && part.text.trimStart().startsWith("Flagged file (")) {
+        return null;
+      }
       return { type: "text", text: part.text };
     case "reasoning":
       return { type: "reasoning", text: part.text };
@@ -110,9 +173,13 @@ function wirePartToMessagePart(part: Part): MessagePart | null {
       // state; the tool_call part already carries the output. Skip.
       return null;
     case "file":
-      return { type: "text", text: `[file: ${part.url}]` };
+      return { type: "file", mime: part.mime, filename: part.filename, url: part.url };
     case "compaction":
-      return { type: "text", text: "[context compacted]" };
+      return {
+        type: "compaction",
+        summary: part.summary ?? "",
+        ...(part.removed_count != null ? { removed: part.removed_count } : {}),
+      };
   }
 }
 
@@ -121,12 +188,16 @@ export function wireMessageToChatMessage(message: Message): ChatMessage {
   return {
     id: message.id,
     role: message.role,
-    parts: message.parts.map(wirePartToMessagePart).filter((part): part is MessagePart => part !== null).map((part) => {
+    parts: message.parts
+      .map((part) => wirePartToMessagePart(part, message.role))
+      .filter((part): part is MessagePart => part !== null)
+      .map((part) => {
       if (part.type !== "tool-call") return part;
       const calls = nested.filter((call) => call.parent_call_id === part.callId);
       return calls.length ? { ...part, nestedCalls: calls } : part;
     }),
     timestamp: message.time.created,
+    completedAt: message.time.completed,
     assistantMeta: message.assistant ?? undefined,
   };
 }
@@ -219,6 +290,16 @@ export interface JobInfo {
 
 export type ConnectionState = "disconnected" | "connecting" | "connected" | "reconnecting";
 
+export function selectSessionRunning(
+  state: Pick<SessionState, "confirmedSessionId" | "sessionActivity" | "availableSessions">,
+): boolean {
+  if (state.confirmedSessionId == null) return false;
+  if (state.sessionActivity !== null) return state.sessionActivity === "running";
+  return state.availableSessions.some(
+    (sess) => sess.session_id === state.confirmedSessionId && sess.state === "running",
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
@@ -230,10 +311,12 @@ interface SessionState {
   connectionRetryToken: number;
   sessionId: string | null;
   confirmedSessionId: string | null;
+  sessionActivity: SessionInfo["state"] | null;
   sessionCwd: string | null;
 
   // Messages
   messages: ChatMessage[];
+  sessionIndex: TurnSummary[];
   historyCursor: number | null;
   streamingPartId: string | null;
   streamingText: string;
@@ -246,6 +329,10 @@ interface SessionState {
 
   // Permissions
   pendingPermissions: PendingPermission[];
+  queuedMessages: QueuedMessageWire[];
+  compacting: boolean;
+  compactingStartedAt: number | null;
+  retryWait: RetryWaitState | null;
 
   // Cost tracking (accumulated from MessageEnd events)
   totalInputTokens: number;
@@ -260,6 +347,8 @@ interface SessionState {
 
   // Model management
   availableModels: ModelInfo[];
+  mentionSkills: MentionCandidate[];
+  mentionSubagents: MentionCandidate[];
   currentModel: string | null;
   currentProvider: string | null;
   currentThinkingVariant: string | null;
@@ -274,9 +363,6 @@ interface SessionState {
   // Client presence
   attachedClients: { id: number; kind: string }[];
 
-  // Control yielded
-  yieldedByClient: number | null;
-
   // Session list
   availableSessions: SessionInfo[];
   sessionsLoading: boolean;
@@ -289,9 +375,13 @@ interface SessionState {
 
   // File tree state
   dirListing: DirEntry[] | null;
+  dirResults: Map<string, { entries: DirEntry[] | null; error: string | null }>;
+  dirListingError: string | null;
   dirListingPath: string | null;
-  filePreview: { path: string; content: string; truncated: boolean; language?: string } | null;
+  filePreview: { path: string; content: string; truncated: boolean; language?: string; error?: string } | null;
   gitStatus: GitEntry[];
+  gitStatusError: string | null;
+  gitStatusLoaded: boolean;
 
   // Per-session usage map (session_id → usage)
   sessionUsage: Map<string, SessionUsageWire>;
@@ -333,7 +423,7 @@ interface SessionState {
   retryConnection: () => void;
   setSessionId: (id: string | null) => void;
 
-  addUserMessage: (text: string) => void;
+  addUserMessage: (text: string, steered?: boolean) => void;
 
   // Event handlers (called by the mew-web-client bridge)
   onProviderEvent: (ev: ProviderEventWire) => void;
@@ -349,6 +439,7 @@ interface SessionState {
   onSlashResult: (text: string) => void;
 
   setAvailableModels: (models: ModelInfo[]) => void;
+  setMentionCandidates: (skills: MentionCandidate[], subagents: MentionCandidate[]) => void;
   setCurrentModel: (provider: string, model: string) => void;
   setCurrentThinkingVariant: (variant: string | null) => void;
   setCurrentPersona: (name: string | null) => void;
@@ -357,19 +448,20 @@ interface SessionState {
   setPermissionMode: (mode: string) => void;
   onClientAttached: (clientId: number, clientKind: string) => void;
   onClientDetached: (clientId: number) => void;
-  onControlYielded: (clientId: number) => void;
-  clearYieldedControl: () => void;
   onSessionTitleChanged: (sessionId: string, title: string) => void;
   sessionSummaries: Map<string, string>;
   onSessionSummaryChanged: (sessionId: string, summary: string) => void;
 
   // Phase 1-3 + misc new actions
-  onSessionActivityChanged: (sessionId: string, activity: string) => void;
+  onSessionActivityChanged: (sessionId: string, activity: string, cancelled?: boolean) => void;
+  onSessionCompacting: (sessionId: string, active: boolean, removed?: number | null, summary?: string | null) => void;
+  setQueuedMessages: (sessionId: string, items: QueuedMessageWire[]) => void;
   onSessionStatsChanged: (sessionId: string, added: number, removed: number, filesChanged: number) => void;
   setGroups: (groups: GroupInfo[]) => void;
   onGroupsChanged: (groups: GroupInfo[]) => void;
   onDirListing: (path: string, entries: DirEntry[]) => void;
-  onFilePreview: (path: string, content: string, truncated: boolean, language?: string) => void;
+  onDirError: (path: string, error: string) => void;
+  onFilePreview: (path: string, content: string, truncated: boolean, language?: string, error?: string) => void;
   onGitStatus: (entries: GitEntry[]) => void;
   onFsChanged: (paths: string[]) => void;
   onSessionUsageChanged: (sessionId: string, usage: SessionUsageWire, contextTokens?: number | null) => void;
@@ -384,6 +476,7 @@ interface SessionState {
   setAvailableSessions: (sessions: SessionInfo[]) => void;
   setSessionsLoading: (loading: boolean) => void;
   onSessionHistory: (messages: Message[], page?: SessionHistoryPage) => void;
+  onSessionIndex: (sessionId: string, turns: TurnSummary[]) => void;
   onSessionCleared: () => void;
 
   // Subagent actions
@@ -416,7 +509,58 @@ interface SessionState {
   pushPromptHistory: (text: string) => void;
 
   reset: () => void;
+  clearSession: () => void;
 }
+
+function transientSessionState() {
+  return {
+    sessionIndex: [],
+    filePreview: null,
+    dirListing: null,
+    dirResults: new Map(),
+    dirListingError: null,
+    dirListingPath: null,
+    gitStatus: [],
+    gitStatusError: null,
+    gitStatusLoaded: false,
+    pendingPermissions: [],
+    queuedMessages: [],
+    compacting: false,
+    compactingStartedAt: null,
+    retryWait: null,
+    pendingAskUser: [],
+    pendingGoals: [],
+  };
+}
+
+function resetSessionState() {
+  return {
+    ...transientSessionState(),
+    messages: [],
+    historyCursor: null,
+    streamingPartId: null,
+    streamingText: "",
+    streamingReasoningId: null,
+    streamingReasoningText: "",
+    toolStates: new Map(),
+    toolOutputs: new Map(),
+    subagents: new Map(),
+    todos: [],
+    jobs: new Map(),
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
+    totalCost: 0,
+    contextTokens: 0,
+    contextTokensKnown: true,
+    contextWindow: 0,
+    sessionCwd: null,
+    sessionActivity: null,
+    flaggedFiles: [],
+    attachedClients: [],
+  };
+}
+
+let workspaceRefresh: { sessionId: string; timer: ReturnType<typeof setTimeout> } | undefined;
 
 export const useSessionStore = create<SessionState>((set, get) => ({
   connectionState: "disconnected",
@@ -424,8 +568,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   connectionRetryToken: 0,
   sessionId: null,
   confirmedSessionId: null,
+  sessionActivity: null,
   sessionCwd: null,
   messages: [],
+  sessionIndex: [],
   historyCursor: null,
   streamingPartId: null,
   streamingText: "",
@@ -434,6 +580,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   toolStates: new Map(),
   toolOutputs: new Map(),
   pendingPermissions: [],
+  queuedMessages: [],
+  compacting: false,
+  compactingStartedAt: null,
+  retryWait: null,
   totalInputTokens: 0,
   totalOutputTokens: 0,
   totalCost: 0,
@@ -441,6 +591,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   contextTokensKnown: true,
   contextWindow: 0,
   availableModels: [],
+  mentionSkills: [],
+  mentionSubagents: [],
   currentModel: null,
   currentProvider: null,
   currentThinkingVariant: null,
@@ -448,16 +600,19 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   availablePersonas: [],
   permissionMode: "standard",
   attachedClients: [],
-  yieldedByClient: null,
   availableSessions: [],
   sessionsLoading: false,
   sessionTitles: new Map(),
   sessionSummaries: new Map(),
   groups: [],
   dirListing: null,
+  dirResults: new Map(),
+  dirListingError: null,
   dirListingPath: null,
   filePreview: null,
   gitStatus: [],
+  gitStatusError: null,
+  gitStatusLoaded: false,
   sessionUsage: new Map(),
   alerts: [],
   flaggedFiles: [],
@@ -482,7 +637,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     })),
   setSessionId: (id) => set({ sessionId: id }),
 
-  addUserMessage: (text) =>
+  addUserMessage: (text, steered) =>
     set((state) => ({
       messages: [
         ...state.messages,
@@ -491,6 +646,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           role: "user" as const,
           parts: [{ type: "text" as const, text }],
           timestamp: Date.now(),
+          ...(steered ? { steered: true } : {}),
         },
       ],
     })),
@@ -505,6 +661,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           set({
             streamingPartId: partId,
             streamingText: "",
+            retryWait: null,
           });
           set((s) => {
             const msgs = [...s.messages];
@@ -553,6 +710,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           set({
             streamingReasoningId: partId,
             streamingReasoningText: ev.part.text || "",
+            retryWait: null,
           });
           // Add a reasoning part to the current assistant message,
           // creating a new one if the last message isn't a streaming
@@ -631,20 +789,21 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             }
             const newToolStates = new Map(s.toolStates);
             newToolStates.set(tc.call_id, "pending");
-            return { messages: msgs, toolStates: newToolStates };
+            return { messages: msgs, toolStates: newToolStates, retryWait: null };
           });
         }
         break;
       }
       case "part_delta": {
         if (ev.field === "text" && state.streamingPartId === ev.part_id) {
-          set((s) => ({ streamingText: s.streamingText + ev.delta }));
+          set((s) => ({ streamingText: s.streamingText + ev.delta, retryWait: null }));
         } else if (
           ev.field === "text" &&
           state.streamingReasoningId === ev.part_id
         ) {
           set((s) => ({
             streamingReasoningText: s.streamingReasoningText + ev.delta,
+            retryWait: null,
           }));
         }
         break;
@@ -721,6 +880,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
               contextTokens,
               contextTokensKnown: ev.usage.input > 0 || s.contextTokensKnown,
               contextWindow,
+              retryWait: null,
             };
           }
           const idx = s.messages.length - 1 - lastAssistantIdx;
@@ -732,10 +892,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             contextTokens,
             contextTokensKnown: ev.usage.input > 0 || s.contextTokensKnown,
             contextWindow,
+            retryWait: null,
             messages: s.messages.map((m, i) =>
               i === idx
                 ? {
                     ...m,
+                    completedAt: Date.now(),
                     assistantMeta: {
                       provider_id: "",
                       model_id: ev.manifest?.model ?? "",
@@ -749,26 +911,28 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             ),
           };
         });
+        const { sessionId, confirmedSessionId } = get();
+        if (sessionId && confirmedSessionId === sessionId) {
+          const client = getClient();
+          if (client?.isSessionAttached(sessionId)) {
+            client.loadSessionIndex(sessionId);
+          }
+        }
         break;
       }
       case "retry_wait": {
-        toast(
-          `Provider retry ${ev.attempt}/${ev.max_attempts} — waiting ${ev.delay_secs}s (${ev.reason})`,
-        );
+        set({
+          retryWait: {
+            attempt: ev.attempt,
+            maxAttempts: ev.max_attempts,
+            delaySecs: ev.delay_secs,
+            reason: ev.reason,
+          },
+        });
         break;
       }
       case "error": {
-        set((s) => ({
-          messages: [
-            ...s.messages,
-            {
-              id: crypto.randomUUID(),
-              role: "assistant" as const,
-              parts: [{ type: "error", message: ev.error.message }],
-              timestamp: Date.now(),
-            },
-          ],
-        }));
+        set((s) => withAppendedError(s, ev.error.message));
         break;
       }
     }
@@ -877,33 +1041,34 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       pendingPermissions: s.pendingPermissions.filter((p) => p.requestId !== requestId),
     })),
 
-  onError: (message) =>
-    set((s) => ({
-      messages: [
-        ...s.messages,
-        {
-          id: crypto.randomUUID(),
-          role: "assistant" as const,
-          parts: [{ type: "error", message }],
-          timestamp: Date.now(),
-        },
-      ],
-    })),
+  onError: (message) => set((s) => withAppendedError(s, message)),
 
   onSlashResult: (text) =>
-    set((s) => ({
-      messages: [
-        ...s.messages,
-        {
-          id: crypto.randomUUID(),
-          role: "assistant" as const,
-          parts: [{ type: "text", text }],
-          timestamp: Date.now(),
-        },
-      ],
-    })),
+    set((s) => {
+      const last = s.messages[s.messages.length - 1];
+      if (
+        /^compacted \d+ messages\b/i.test(text.trim()) &&
+        last?.parts.some((part) => part.type === "compaction")
+      ) {
+        return {};
+      }
+      const now = Date.now();
+      return {
+        messages: [
+          ...s.messages,
+          {
+            id: crypto.randomUUID(),
+            role: "assistant" as const,
+            parts: [{ type: "text", text }],
+            timestamp: now,
+            completedAt: now,
+          },
+        ],
+      };
+    }),
 
   setAvailableModels: (models) => set({ availableModels: models }),
+  setMentionCandidates: (skills, subagents) => set({ mentionSkills: skills, mentionSubagents: subagents }),
 
   setCurrentModel: (provider, model) =>
     set({ currentProvider: provider, currentModel: model }),
@@ -933,10 +1098,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       attachedClients: s.attachedClients.filter((c) => c.id !== clientId),
     })),
 
-  onControlYielded: (clientId) => set({ yieldedByClient: clientId }),
-
-  clearYieldedControl: () => set({ yieldedByClient: null }),
-
   onSessionTitleChanged: (sessionId, title) =>
     set((state) => {
       const sessionTitles = new Map(state.sessionTitles);
@@ -952,14 +1113,103 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }),
 
   // Phase 1-3 + misc new actions
-  onSessionActivityChanged: (sessionId, activity) =>
-    set((state) => ({
-      availableSessions: state.availableSessions.map((s) =>
+  onSessionActivityChanged: (sessionId, activity, cancelled) =>
+    set((state) => {
+      const availableSessions = state.availableSessions.map((s) =>
         s.session_id === sessionId
           ? { ...s, state: activity as SessionInfo["state"] }
           : s,
-      ),
-    })),
+      );
+      const isCurrent =
+        sessionId === state.sessionId || sessionId === state.confirmedSessionId;
+      const nextActivity = isCurrent
+        ? (activity as SessionInfo["state"])
+        : state.sessionActivity;
+      if (sessionId === state.sessionId && activity === "idle") {
+        const now = Date.now();
+        let messages = finalizeOpenAssistantMessages(state.messages, now);
+        if (cancelled) {
+          let turnStart = 0;
+          for (let i = messages.length - 1; i >= 0; i--) {
+            const msg = messages[i]!;
+            if (msg.role === "user" && msg.parts.some((part) => part.type === "text" && part.text.trim())) {
+              turnStart = i + 1;
+              break;
+            }
+          }
+          let marked = false;
+          for (let i = messages.length - 1; i >= turnStart; i--) {
+            if (messages[i]!.role === "assistant") {
+              messages = messages.map((msg, idx) => (idx === i ? { ...msg, cancelled: true } : msg));
+              marked = true;
+              break;
+            }
+          }
+          if (!marked) {
+            messages = [
+              ...messages,
+              {
+                id: crypto.randomUUID(),
+                role: "assistant" as const,
+                parts: [],
+                timestamp: now,
+                completedAt: now,
+                cancelled: true,
+              },
+            ];
+          }
+        }
+        return {
+          availableSessions,
+          sessionActivity: nextActivity,
+          messages,
+          streamingPartId: null,
+          streamingText: "",
+          streamingReasoningId: null,
+          streamingReasoningText: "",
+          compacting: false,
+          compactingStartedAt: null,
+          retryWait: null,
+        };
+      }
+      return isCurrent
+        ? { availableSessions, sessionActivity: nextActivity }
+        : { availableSessions };
+    }),
+
+  onSessionCompacting: (sessionId, active, removed, summary) =>
+    set((state) => {
+      if (sessionId !== state.sessionId) return state;
+      if (active || removed == null || removed <= 0) {
+        return {
+          compacting: active,
+          compactingStartedAt: active ? (state.compactingStartedAt ?? Date.now()) : null,
+        };
+      }
+      const now = Date.now();
+      const compactionMsg: ChatMessage = {
+        id: crypto.randomUUID(),
+        role: "system",
+        parts: [{ type: "compaction", summary: summary ?? "", removed }],
+        timestamp: now,
+        completedAt: now,
+      };
+      // If /compact's slash-result arrived first, replace that text bubble with the divider.
+      const last = state.messages[state.messages.length - 1];
+      const lastPart = last?.parts[0];
+      const isSlashCompactText =
+        last?.role === "assistant" &&
+        last.parts.length === 1 &&
+        lastPart?.type === "text" &&
+        /^compacted \d+ messages\b/i.test(lastPart.text.trim());
+      const messages = isSlashCompactText
+        ? [...state.messages.slice(0, -1), compactionMsg]
+        : [...state.messages, compactionMsg];
+      return { compacting: false, compactingStartedAt: null, messages };
+    }),
+
+  setQueuedMessages: (sessionId, items) =>
+    set((state) => (state.sessionId === sessionId ? { queuedMessages: items } : state)),
 
   onSessionStatsChanged: (sessionId, added, removed, filesChanged) =>
     set((state) => ({
@@ -982,22 +1232,38 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   onGroupsChanged: (groups) => set({ groups }),
 
   onDirListing: (path, entries) =>
-    set({ dirListing: entries, dirListingPath: path }),
+    set((state) => ({ dirListing: entries, dirListingPath: path, dirListingError: null, dirResults: new Map(state.dirResults).set(path, { entries, error: null }) })),
 
-  onFilePreview: (path, content, truncated, language) =>
-    set({ filePreview: { path, content, truncated, language } }),
+  onDirError: (path, error) => set((state) => ({ dirListing: null, dirListingPath: path, dirListingError: error, dirResults: new Map(state.dirResults).set(path, { entries: null, error }) })),
 
-  onGitStatus: (entries) => set({ gitStatus: entries }),
+  onFilePreview: (path, content, truncated, language, error) =>
+    set({ filePreview: { path, content, truncated, language, error } }),
+
+  onGitStatus: (entries) => set((state) => ({
+    gitStatus: entries.length === state.gitStatus.length && entries.every((entry, index) => entry.path === state.gitStatus[index]?.path && entry.status === state.gitStatus[index]?.status) ? state.gitStatus : entries,
+    gitStatusError: null,
+    gitStatusLoaded: true,
+  })),
 
   // When the filesystem changes (watchWorkspace), re-fetch the current dir
   // listing and git status so the Files/Changes tabs stay live. The client
   // is reached through the module-level ref set in App.tsx.
   onFsChanged: () => {
-    const client = getClient();
     const sid = get().sessionId;
-    if (!client || !sid) return;
-    client.listDir(sid, get().dirListingPath ?? undefined);
-    client.gitStatus(sid);
+    if (!sid || workspaceRefresh?.sessionId === sid) return;
+    if (workspaceRefresh) clearTimeout(workspaceRefresh.timer);
+    const timer = setTimeout(() => {
+      workspaceRefresh = undefined;
+      const client = getClient();
+      if (!client || get().sessionId !== sid || get().connectionState !== "connected") return;
+      try {
+        client.listDir(sid, get().dirListingPath ?? undefined);
+        client.gitStatus(sid);
+      } catch {
+        // The connection can close between checking it and sending.
+      }
+    }, 150);
+    workspaceRefresh = { sessionId: sid, timer };
   },
 
   onSessionUsageChanged: (sessionId, usage, contextTokens) =>
@@ -1075,9 +1341,24 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     })),
 
   setAvailableSessions: (sessions) => set((state) => {
-    const active = sessions.find((session) => session.session_id === state.confirmedSessionId);
+    const preservedSessions =
+      state.confirmedSessionId != null && state.sessionActivity !== null
+        ? sessions.map((session) =>
+            session.session_id === state.confirmedSessionId
+              ? { ...session, state: state.sessionActivity! }
+              : session,
+          )
+        : sessions;
+    const active = preservedSessions.find((session) => session.session_id === state.confirmedSessionId);
+    // Titles otherwise only arrive as change broadcasts. Seeding them from the
+    // list keeps a reloaded client showing the persisted title.
+    const sessionTitles = new Map(state.sessionTitles);
+    for (const session of preservedSessions) {
+      if (session.title) sessionTitles.set(session.session_id, session.title);
+    }
     return {
-      availableSessions: sessions,
+      availableSessions: preservedSessions,
+      sessionTitles,
       ...(active && active.state !== "running" ? {
         contextTokensKnown: active.context_tokens !== undefined,
         contextTokens: active.context_tokens ?? 0,
@@ -1110,9 +1391,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       };
     }),
 
+  onSessionIndex: (sessionId, turns) =>
+    set((state) => (state.sessionId === sessionId ? { sessionIndex: turns } : state)),
+
   onSessionCleared: () =>
     set({
       messages: [],
+      sessionIndex: [],
       historyCursor: null,
       streamingPartId: null,
       streamingText: "",
@@ -1121,6 +1406,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       toolStates: new Map(),
       toolOutputs: new Map(),
       pendingPermissions: [],
+      queuedMessages: [],
+      compacting: false,
+      compactingStartedAt: null,
+      retryWait: null,
       pendingAskUser: [],
       pendingGoals: [],
       subagents: new Map(),
@@ -1277,42 +1566,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       return { promptHistory: [...hist, text] };
     }),
 
-  reset: () =>
+  reset: () => set(resetSessionState()),
+  clearSession: () =>
     set({
-      messages: [],
-      historyCursor: null,
-      streamingPartId: null,
-      streamingText: "",
-      streamingReasoningId: null,
-      streamingReasoningText: "",
-      toolStates: new Map(),
-      toolOutputs: new Map(),
-      pendingPermissions: [],
-      pendingAskUser: [],
-      pendingGoals: [],
-      subagents: new Map(),
-      todos: [],
-      jobs: new Map(),
-      totalInputTokens: 0,
-      totalOutputTokens: 0,
-      totalCost: 0,
-      contextTokens: 0,
-      contextTokensKnown: true,
-      contextWindow: 0,
-      // Clear per-session state that shouldn't leak across sessions.
-      sessionCwd: null,
-      flaggedFiles: [],
-      dirListing: null,
-      dirListingPath: null,
-      filePreview: null,
-      gitStatus: [],
-      // Keep global caches and per-session model info; they are repopulated
-      // by wire events (model-list, session-list, session-ready).
-      // currentModel is intentionally preserved to avoid model picker/footer blanks.
-      attachedClients: [],
-      yieldedByClient: null,
-      projects: [],
-      projectsLoading: false,
+      ...resetSessionState(),
+      sessionId: null,
+      confirmedSessionId: null,
     }),
 }));
 
@@ -1383,44 +1642,52 @@ export async function sendSubagentGuidance(client: MewClient, parentId: string, 
 export function bridgeClientToStore(client: MewClient) {
   const store = useSessionStore;
 
-  client.on("close", () => store.setState({ connectionState: "disconnected", confirmedSessionId: null }));
+  client.on("close", () =>
+    store.setState({
+      connectionState: "disconnected",
+      confirmedSessionId: null,
+      sessionActivity: null,
+    }),
+  );
   client.on("subagent-message-receipt", (receipt) => {
     if (receipt.status !== "unknown") applySubagentReceipt(receipt);
   });
 
   client.on("session-ready", (data) => {
-    const active = store.getState().availableSessions.find((session) => session.session_id === data.session_id);
+    const state = store.getState();
+    const switching = state.sessionId !== data.session_id;
+    const active = state.availableSessions.find((session) => session.session_id === data.session_id);
     useSessionStore.setState({
+      ...(switching ? resetSessionState() : transientSessionState()),
       sessionId: data.session_id,
       confirmedSessionId: data.session_id,
       sessionCwd: data.cwd ?? null,
       contextTokensKnown: active?.context_tokens !== undefined,
       contextTokens: active?.context_tokens ?? 0,
-      pendingPermissions: [],
-      pendingAskUser: [],
-      pendingGoals: [],
+      ...(data.model && data.provider
+        ? { currentProvider: data.provider, currentModel: data.model }
+        : {}),
+      ...(data.permission_mode ? { permissionMode: data.permission_mode } : {}),
     });
+    // The whole-session tape should be available immediately on attach, before
+    // the reader has scrolled back through every history page.
+    client.loadSessionIndex(data.session_id);
     for (const [key, draft] of store.getState().subagentDrafts) {
       if (draft.submission?.parentId === data.session_id) checkSubagentReceipt(client, key);
     }
     permissionResponders.clear();
     askUserResponders.clear();
-    if (data.model && data.provider) {
-      store.getState().setCurrentModel(data.provider, data.model);
-    }
-    if (data.permission_mode) {
-      store.getState().setPermissionMode(data.permission_mode);
-    }
     // Model and persona discovery is session-scoped. Waiting until the
     // daemon confirms a session prevents startup errors from being rendered
     // as chat messages on the home screen.
     void client.listModels();
     void client.listPersonas();
+    void client.listMentionCandidates?.();
   });
 
   client.on("provider", (ev) => store.getState().onProviderEvent(ev));
 
-  client.on("user-message", ({ text }) => store.getState().addUserMessage(text));
+  client.on("user-message", ({ text, steered }) => store.getState().addUserMessage(text, steered));
 
   client.on("tool-start", (data) => store.getState().onToolStart(data.call_id));
   client.on("tool-end", (data) => store.getState().onToolEnd(data.call_id, data.success));
@@ -1475,6 +1742,7 @@ export function bridgeClientToStore(client: MewClient) {
   client.on("project-list", (data) => store.getState().onProjectList(data.projects));
 
   client.on("model-list", (data) => store.getState().setAvailableModels(data.models));
+  client.on("mention-candidates", (data) => store.getState().setMentionCandidates(data.skills, data.subagents));
   client.on("model-switched", (data) =>
     store.getState().setCurrentModel(data.provider, data.model),
   );
@@ -1489,9 +1757,6 @@ export function bridgeClientToStore(client: MewClient) {
   );
   client.on("client-detached", (data) =>
     store.getState().onClientDetached(data.client_id),
-  );
-  client.on("control-yielded", (data) =>
-    store.getState().onControlYielded(data.client_id),
   );
   client.on("persona-list", (data) =>
     store.getState().setAvailablePersonas(data.personas),
@@ -1508,7 +1773,15 @@ export function bridgeClientToStore(client: MewClient) {
   );
 
   client.on("session-activity-changed", (data) =>
-    store.getState().onSessionActivityChanged(data.session_id, data.activity),
+    store.getState().onSessionActivityChanged(data.session_id, data.activity, data.cancelled),
+  );
+
+  client.on("session-compacting", (data) =>
+    store.getState().onSessionCompacting(data.session_id, data.active, data.removed, data.summary),
+  );
+
+  client.on("session-queue-changed", (data) =>
+    store.getState().setQueuedMessages(data.session_id, data.items),
   );
 
   client.on("session-stats-changed", (data) =>
@@ -1522,12 +1795,39 @@ export function bridgeClientToStore(client: MewClient) {
 
   client.on("group-list", (data) => store.getState().setGroups(data.groups));
   client.on("groups-changed", (data) => store.getState().onGroupsChanged(data.groups));
-  client.on("dir-listing", (data) => store.getState().onDirListing(data.path, data.entries));
-  client.on("file-preview", (data) =>
-    store.getState().onFilePreview(data.path, data.content, data.truncated, data.language),
-  );
-  client.on("git-status-result", (data) => store.getState().onGitStatus(data.entries));
-  client.on("fs-changed", (data) => store.getState().onFsChanged(data.paths));
+  client.on("dir-listing", (data) => {
+    if (!data.session_id) {
+      store.getState().onDirError("", "Please update the daemon to view files safely.");
+      return;
+    }
+    if (data.session_id !== store.getState().sessionId) return;
+    if (data.error) store.getState().onDirError(data.path, data.error);
+    else store.getState().onDirListing(data.path, data.entries);
+  });
+  client.on("file-preview", (data) => {
+    if (!data.session_id) {
+      store.getState().onFilePreview(data.path, "", false, undefined, "Please update the daemon to view file previews safely.");
+      return;
+    }
+    if (data.session_id !== store.getState().sessionId) return;
+    store.getState().onFilePreview(data.path, data.content, data.truncated, data.language, data.error);
+  });
+  client.on("git-status-result", (data) => {
+    if (!data.session_id) {
+      store.setState({ gitStatus: [], gitStatusError: "Please update the daemon to view changes safely.", gitStatusLoaded: true });
+      return;
+    }
+    if (data.session_id !== store.getState().sessionId) return;
+    if (data.error) {
+      store.setState({ gitStatus: [], gitStatusError: data.error, gitStatusLoaded: true });
+      return;
+    }
+    store.getState().onGitStatus(data.entries);
+  });
+  client.on("fs-changed", (data) => {
+    if (data.session_id && data.session_id !== store.getState().sessionId) return;
+    store.getState().onFsChanged(data.paths);
+  });
 
   client.on("flagged-files-changed", (data) => {
     if (data.session_id !== store.getState().sessionId) return;
@@ -1586,6 +1886,7 @@ export function bridgeClientToStore(client: MewClient) {
     store.getState().setSessionsLoading(false);
   });
   client.on("session-history-page", (page) => store.getState().onSessionHistory(page.messages, page));
+  client.on("session-index", (data) => store.getState().onSessionIndex(data.session_id, data.turns));
   client.on("session-cleared", () => store.getState().onSessionCleared());
   client.on("request-resolved", (data) => {
     store.getState().resolvePermission(data.request_id);

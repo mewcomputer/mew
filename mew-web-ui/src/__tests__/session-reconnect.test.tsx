@@ -318,3 +318,52 @@ it("reconciles guidance after reattachment without overwriting edits and reuses 
     setClient(null);
   }
 });
+
+it("preserves a stable session transcript when switching to another session fails to attach", async () => {
+  const socket = new SocketFixture();
+  client = new MewClient("ws://localhost/", { socketFactory: () => socket as unknown as MewWebSocket });
+  bridgeClientToStore(client);
+  const connected = client.connect();
+  socket.open();
+  await connected;
+  socket.reply({ type: "pong", version: "test", protocol_version: 3, scoped_session_failures: true });
+
+  useSessionStore.setState({ connectionState: "connected", sessionId: null, confirmedSessionId: null, messages: [] });
+  const { result, rerender, unmount } = renderHook(
+    ({ sessionId }: { sessionId: string }) => useSessionAttach(sessionId),
+    { initialProps: { sessionId: "sess_a" } },
+  );
+  try {
+    await act(async () => {});
+    const attachA = socket.sent.find((message) => message.type === "attach_session");
+    expect(attachA?.session_id).toBe("sess_a");
+    await act(async () => socket.reply({ type: "session_ready", session_id: "sess_a" }));
+    await act(async () => {
+      useSessionStore.getState().addUserMessage("keep me");
+    });
+    expect(result.current.ready).toBe(true);
+    expect(useSessionStore.getState().messages).toHaveLength(1);
+
+    rerender({ sessionId: "sess_b" });
+    await act(async () => {});
+    await act(async () =>
+      socket.reply({
+        type: "session_operation_failed",
+        operation: "attach",
+        session_id: "sess_b",
+        message: "session not found",
+      }),
+    );
+    expect(result.current.error).toContain("session not found");
+    expect(useSessionStore.getState().sessionId).toBe("sess_a");
+    expect(useSessionStore.getState().messages).toHaveLength(1);
+
+    rerender({ sessionId: "sess_a" });
+    expect(result.current.ready).toBe(true);
+    expect(useSessionStore.getState().messages).toHaveLength(1);
+    expect(useSessionStore.getState().messages[0]?.parts).toEqual([{ type: "text", text: "keep me" }]);
+  } finally {
+    unmount();
+    client.disconnect();
+  }
+});

@@ -4,6 +4,7 @@
     "name": "Jianghu dark",
     "description": "Lantern-lit ink and jade garden",
     "category": "mew",
+    "mode": "dark",
     "baseText": "#e9e6df",
     "preview": [
       "#0e1213",
@@ -18,6 +19,7 @@
     "name": "Jianghu light",
     "description": "Warm parchment, ink, and jade",
     "category": "mew",
+    "mode": "light",
     "baseText": "#1a1f20",
     "preview": [
       "#f3f0e8",
@@ -32,6 +34,7 @@
     "name": "Argenteus dark",
     "description": "Neutral charcoal workspace",
     "category": "mew",
+    "mode": "dark",
     "baseText": "#eeeeee",
     "preview": [
       "#181818",
@@ -46,6 +49,7 @@
     "name": "Argenteus light",
     "description": "Neutral light workspace",
     "category": "mew",
+    "mode": "light",
     "baseText": "#202020",
     "preview": [
       "#ffffff",
@@ -60,6 +64,7 @@
     "name": "Latte",
     "description": "Warm light flavour",
     "category": "Catppuccin",
+    "mode": "light",
     "baseText": "#4c4f69",
     "preview": ["#eff1f5", "#dc8a78", "#40a02b", "#d20f39", "#1e66f5"]
   },
@@ -68,6 +73,7 @@
     "name": "Frappé",
     "description": "Cool medium-dark flavour",
     "category": "Catppuccin",
+    "mode": "dark",
     "baseText": "#c6d0f5",
     "preview": ["#303446", "#e78284", "#a6d189", "#e78284", "#8caaee"]
   },
@@ -76,6 +82,7 @@
     "name": "Macchiato",
     "description": "Warm medium-dark flavour",
     "category": "Catppuccin",
+    "mode": "dark",
     "baseText": "#cad3f5",
     "preview": ["#24273a", "#ed8796", "#a6da95", "#ed8796", "#8aadf4"]
   },
@@ -84,6 +91,7 @@
     "name": "Mocha",
     "description": "Darkest flavour",
     "category": "Catppuccin",
+    "mode": "dark",
     "baseText": "#cdd6f4",
     "preview": ["#1e1e2e", "#f38ba8", "#a6e3a1", "#f38ba8", "#89b4fa"]
   },
@@ -92,6 +100,7 @@
     "name": "Fall",
     "description": "Dark with warm amber tones",
     "category": "Evergarden",
+    "mode": "dark",
     "baseText": "#f8f9e8",
     "preview": ["#232a2e", "#f57f82", "#cbe3b3", "#f5d098", "#b2caed"]
   },
@@ -100,6 +109,7 @@
     "name": "Spring",
     "description": "Dark with cool green tones",
     "category": "Evergarden",
+    "mode": "dark",
     "baseText": "#f8f9e8",
     "preview": ["#2b3438", "#f57f82", "#cbe3b3", "#f5d098", "#b2caed"]
   },
@@ -108,6 +118,7 @@
     "name": "Summer",
     "description": "Light with muted natural tones",
     "category": "Evergarden",
+    "mode": "light",
     "baseText": "#171c1f",
     "preview": ["#d7e1eb", "#c0696b", "#91ac75", "#bc9c6b", "#8ca0bb"]
   },
@@ -116,6 +127,7 @@
     "name": "Winter",
     "description": "Darkest, coldest flavour",
     "category": "Evergarden",
+    "mode": "dark",
     "baseText": "#f8f9e8",
     "preview": ["#1e2528", "#f57f82", "#cbe3b3", "#f5d098", "#b2caed"]
   },
@@ -124,6 +136,7 @@
     "name": "Rosé Pine",
     "description": "Soho vibes, dark",
     "category": "Rosé Pine",
+    "mode": "dark",
     "baseText": "#e0def4",
     "preview": ["#191724", "#eb6f92", "#31748f", "#f6c177", "#9ccfd8"]
   },
@@ -132,6 +145,7 @@
     "name": "Moon",
     "description": "Softer dark variant",
     "category": "Rosé Pine",
+    "mode": "dark",
     "baseText": "#e0def4",
     "preview": ["#232136", "#eb6f92", "#3e8fb0", "#f6c177", "#9ccfd8"]
   },
@@ -140,6 +154,7 @@
     "name": "Dawn",
     "description": "Light variant",
     "category": "Rosé Pine",
+    "mode": "light",
     "baseText": "#575279",
     "preview": ["#faf4ed", "#b4637a", "#286983", "#ea9d34", "#56949f"]
   },
@@ -148,6 +163,7 @@
     "name": "Night",
     "description": "Downtown Tokyo at night",
     "category": "Tokyo Night",
+    "mode": "dark",
     "baseText": "#c0caf5",
     "preview": ["#1a1b26", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7"]
   },
@@ -156,6 +172,7 @@
     "name": "Storm",
     "description": "Slightly lighter night variant",
     "category": "Tokyo Night",
+    "mode": "dark",
     "baseText": "#c0caf5",
     "preview": ["#24283b", "#f7768e", "#9ece6a", "#e0af68", "#bb9af7"]
   },
@@ -164,6 +181,7 @@
     "name": "Light",
     "description": "Soft light variant",
     "category": "Tokyo Night",
+    "mode": "light",
     "baseText": "#343b58",
     "preview": ["#e6e7ed", "#8c4351", "#33635c", "#8f5e15", "#2959aa"]
   },
@@ -172,6 +190,7 @@
     "name": "Dark",
     "description": "Deep dark with warm accents",
     "category": "Ayu",
+    "mode": "dark",
     "baseText": "#bfbdb6",
     "preview": ["#0d1017", "#f07178", "#aad94c", "#e6b450", "#39bae6"]
   },
@@ -180,6 +199,7 @@
     "name": "Mirage",
     "description": "Softer dark with golden accents",
     "category": "Ayu",
+    "mode": "dark",
     "baseText": "#cbccc6",
     "preview": ["#1f2430", "#f28779", "#bae67e", "#ffcc66", "#5ccfe6"]
   },
@@ -188,6 +208,7 @@
     "name": "Light",
     "description": "Clean light variant",
     "category": "Ayu",
+    "mode": "light",
     "baseText": "#5c6166",
     "preview": ["#fcfcfc", "#f07178", "#86b300", "#f29718", "#36a3d9"]
   },
@@ -196,6 +217,7 @@
     "name": "Nord",
     "description": "Arctic, north-bluish palette",
     "category": "Other",
+    "mode": "dark",
     "baseText": "#eceff4",
     "preview": ["#2e3440", "#bf616a", "#a3be8c", "#ebcb8b", "#81a1c1"]
   },
@@ -204,6 +226,7 @@
     "name": "Gruvbox Dark",
     "description": "Retro groove dark scheme",
     "category": "Other",
+    "mode": "dark",
     "baseText": "#ebdbb2",
     "preview": ["#282828", "#fb4934", "#b8bb26", "#fabd2f", "#83a598"]
   },
@@ -212,6 +235,7 @@
     "name": "GitHub Dark",
     "description": "GitHub's dark theme",
     "category": "Other",
+    "mode": "dark",
     "baseText": "#e6edf3",
     "preview": ["#0d1117", "#f85149", "#3fb950", "#d29922", "#58a6ff"]
   },
@@ -220,7 +244,152 @@
     "name": "Dracula",
     "description": "The most famous dark theme",
     "category": "Other",
+    "mode": "dark",
     "baseText": "#f8f8f2",
     "preview": ["#282a36", "#ff5555", "#50fa7b", "#f1fa8c", "#bd93f9"]
+  },
+  {
+    "id": "gruvbox-light",
+    "name": "Gruvbox Light",
+    "description": "Warm retro cream and burnt umber",
+    "category": "Other",
+    "mode": "light",
+    "baseText": "#3c3836",
+    "preview": ["#fbf1c7", "#d65d0e", "#79740e", "#b57614", "#076678"]
+  },
+  {
+    "id": "github-light",
+    "name": "GitHub Light",
+    "description": "Crisp studio white and cobalt",
+    "category": "Other",
+    "mode": "light",
+    "baseText": "#1f2328",
+    "preview": ["#ffffff", "#0969da", "#1a7f37", "#cf222e", "#8250df"]
+  },
+  {
+    "id": "solarized-light",
+    "name": "Solarized Light",
+    "description": "Sunlit parchment and balanced cyan",
+    "category": "Solarized",
+    "mode": "light",
+    "baseText": "#586e75",
+    "preview": ["#fdf6e3", "#268bd2", "#2aa198", "#859900", "#b58900"]
+  },
+  {
+    "id": "solarized-dark",
+    "name": "Solarized Dark",
+    "description": "Deep ocean teal and warm mist",
+    "category": "Solarized",
+    "mode": "dark",
+    "baseText": "#93a1a1",
+    "preview": ["#002b36", "#2aa198", "#268bd2", "#859900", "#b58900"]
+  },
+  {
+    "id": "nord-light",
+    "name": "Nord Snow",
+    "description": "Crisp arctic snow and glacier blue",
+    "category": "Other",
+    "mode": "light",
+    "baseText": "#2e3440",
+    "preview": ["#eceff4", "#5e81ac", "#5f8756", "#bf616a", "#88c0d0"]
+  },
+  {
+    "id": "everforest-light",
+    "name": "Everforest Light",
+    "description": "Soft sage cream and forest ink",
+    "category": "Everforest",
+    "mode": "light",
+    "baseText": "#5c6a72",
+    "preview": ["#fdf6e3", "#8da101", "#35a77c", "#3a94c5", "#f85552"]
+  },
+  {
+    "id": "everforest-dark",
+    "name": "Everforest Dark",
+    "description": "Warm mossy slate and sage green",
+    "category": "Everforest",
+    "mode": "dark",
+    "baseText": "#d3c6aa",
+    "preview": ["#2d353b", "#a7c080", "#7fbbb3", "#dbbc7f", "#e67e80"]
+  },
+  {
+    "id": "alabaster",
+    "name": "Alabaster",
+    "description": "Minimalist studio white and cobalt",
+    "category": "Other",
+    "mode": "light",
+    "baseText": "#222222",
+    "preview": ["#f7f7f7", "#325cc0", "#448c27", "#cb9000", "#7a3e9d"]
+  },
+  {
+    "id": "paperback",
+    "name": "Paperback",
+    "description": "Editorial alabaster, ink, and terracotta",
+    "category": "mew",
+    "mode": "light",
+    "baseText": "#252320",
+    "preview": ["#f7f4ed", "#b84a32", "#3b6e52", "#a66d1b", "#3a5a78"]
+  },
+  {
+    "id": "sakura",
+    "name": "Sakura",
+    "description": "Blossom paper, plum ink, and rosewood",
+    "category": "mew",
+    "mode": "light",
+    "baseText": "#3b2a31",
+    "preview": ["#fbf5f6", "#b84363", "#4d7c66", "#5b6496", "#b07232"]
+  },
+  {
+    "id": "vespers",
+    "name": "Vespers",
+    "description": "Deep plum-black, peach, and lavender",
+    "category": "mew",
+    "mode": "dark",
+    "baseText": "#ebe6f0",
+    "preview": ["#131118", "#f2a679", "#b89cf5", "#8ccf9e", "#e87687"]
+  },
+  {
+    "id": "kanagawa",
+    "name": "Kanagawa",
+    "description": "Sumi ink and wave blue",
+    "category": "Other",
+    "mode": "dark",
+    "baseText": "#dcd7ba",
+    "preview": ["#1f1f28", "#7e9cd8", "#98bb6c", "#dca561", "#e46876"]
+  },
+  {
+    "id": "one-dark",
+    "name": "One Dark",
+    "description": "Balanced charcoal and sky blue",
+    "category": "Other",
+    "mode": "dark",
+    "baseText": "#abb2bf",
+    "preview": ["#282c34", "#61afef", "#98c379", "#e5c07b", "#e06c75"]
+  },
+  {
+    "id": "monokai-pro",
+    "name": "Monokai Pro",
+    "description": "Warm obsidian, amber, and rose",
+    "category": "Other",
+    "mode": "dark",
+    "baseText": "#fcfcfa",
+    "preview": ["#2d2a2e", "#ffd866", "#ff6188", "#a9dc76", "#78dce8"]
+  },
+  {
+    "id": "night-owl",
+    "name": "Night Owl",
+    "description": "Midnight navy, cyan, and coral",
+    "category": "Other",
+    "mode": "dark",
+    "baseText": "#d6deeb",
+    "preview": ["#011627", "#7fdbca", "#82aaff", "#c792ea", "#ef5350"]
+  },
+  {
+    "id": "oxocarbon",
+    "name": "Oxocarbon",
+    "description": "Crisp carbon, cyan, and orchid",
+    "category": "Other",
+    "mode": "dark",
+    "baseText": "#f2f4f8",
+    "preview": ["#161616", "#3ddbd9", "#be95ff", "#78a9ff", "#ee5396"]
   }
 ]

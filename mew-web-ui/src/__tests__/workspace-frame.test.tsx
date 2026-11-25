@@ -148,7 +148,7 @@ describe("native workspace navigation", () => {
       observe(element: Element) { if (element.getAttribute("aria-label") === "Chat") resize = this.callback; }
       disconnect() {}
     });
-    useSessionStore.setState({ sessionId: "wide-chat", sessionCwd: "/code/mew", subagents: new Map(), jobs: new Map(), flaggedFiles: [], gitStatus: [] });
+    useSessionStore.setState({ sessionId: "wide-chat", sessionCwd: "/code/mew", subagents: new Map(), jobs: new Map(), flaggedFiles: [{ path: "notes/brief.md" }], gitStatus: [] });
     render(<WorkspaceFrame><ConversationLayout><article>Conversation</article></ConversationLayout></WorkspaceFrame>);
     act(() => resize!([{ contentRect: { width: 1200 } }] as ResizeObserverEntry[], {} as ResizeObserver));
     const summary = screen.getByRole("complementary", { name: "Conversation summary" });
@@ -181,14 +181,35 @@ describe("native workspace navigation", () => {
     expect(document.activeElement).toBe(within(summary).getByRole("button", { name: /Changes/ }));
   });
 
+  it("only insets the chat column while the summary panel is in its way", () => {
+    let resize: ResizeObserverCallback;
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(element: Element) { if (element.getAttribute("aria-label") === "Chat") resize = this.callback; }
+      disconnect() {}
+    });
+    useSessionStore.setState({ sessionId: "inset-chat", sessionCwd: "/code/mew", subagents: new Map(), jobs: new Map(), flaggedFiles: [], gitStatus: [] });
+    render(<WorkspaceFrame><ConversationLayout><article className="mew-conversation-width">Conversation</article></ConversationLayout></WorkspaceFrame>);
+    const pane = screen.getByRole("region", { name: "Chat" });
+    const inset = () => screen.getByRole("complementary", { name: "Conversation summary" }).parentElement!.style.getPropertyValue("--summary-inset");
+    act(() => resize!([{ contentRect: { width: 1100 } }] as ResizeObserverEntry[], {} as ResizeObserver));
+    expect(inset()).toBe("16rem");
+    // Wide enough for the column and the panel side by side, so the chat stays centred.
+    act(() => resize!([{ contentRect: { width: 1400 } }] as ResizeObserverEntry[], {} as ResizeObserver));
+    expect(inset()).toBe("0px");
+    expect(pane.contains(screen.getByRole("complementary", { name: "Conversation summary" }))).toBe(true);
+    act(() => resize!([{ contentRect: { width: 1040 } }] as ResizeObserverEntry[], {} as ResizeObserver));
+    expect(inset()).toBe("16rem");
+  });
+
   it("opens the corner summary independently and enters subagents through it", () => {
-    useSessionStore.setState({ sessionId: "source-chat", sessionCwd: "/code/mew", subagents: new Map(), jobs: new Map(), flaggedFiles: [], gitStatus: [] });
+    useSessionStore.setState({ sessionId: "source-chat", sessionCwd: "/code/mew", subagents: new Map([["build", { parentCallId: "build", name: "builder", childSessionId: "child-a", displayName: "Build", status: "running", lastProgress: null, outcome: null, manifests: [] }]]), jobs: new Map(), flaggedFiles: [], gitStatus: [] });
     render(<WorkspaceFrame><ConversationLayout><article>Conversation</article></ConversationLayout></WorkspaceFrame>);
     fireEvent.click(screen.getByRole("button", { name: "Open summary" }));
     expect(screen.getByRole("dialog", { name: "Conversation summary" })).toBeTruthy();
     expect(screen.getByLabelText("Workbench").getAttribute("data-open")).toBe("false");
     expect(screen.getByRole("button", { name: "Collapse sidebar" })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Subagents: No subagents" }));
+    fireEvent.click(screen.getByRole("button", { name: /Subagents.*1 working/ }));
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(screen.getByLabelText("Workbench").getAttribute("data-open")).toBe("true");
     expect(screen.getByText("Agents:undefined:source-chat")).toBeTruthy();

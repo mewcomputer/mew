@@ -121,7 +121,6 @@ export function useSessionAttach(sessionId: string) {
       confirm();
       return;
     }
-    if (store.sessionId !== sessionId) store.reset();
     void client.attachSession(sessionId).then(confirm).catch((error: unknown) => {
       if (!current || !client.isConnected()) return;
       setFailure({ sessionId, message: error instanceof Error ? error.message : "Could not open the conversation." });

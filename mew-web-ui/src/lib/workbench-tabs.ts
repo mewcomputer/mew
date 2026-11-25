@@ -9,6 +9,20 @@ export type WorkbenchTabKind =
 
 export type WorkbenchTabStatus = "idle" | "running" | "attention" | "error";
 
+export interface FileWorkbenchState {
+  openPaths: string[];
+  activePath: string | null;
+}
+
+export function normalizeFileWorkbenchState(value: unknown): FileWorkbenchState {
+  const openPaths = isRecord(value) && Array.isArray(value.openPaths)
+    ? [...new Set(value.openPaths.filter((path): path is string => typeof path === "string" && path.length > 0))]
+    : [];
+  const activePath = isRecord(value) && typeof value.activePath === "string" && openPaths.includes(value.activePath)
+    ? value.activePath : null;
+  return { openPaths, activePath };
+}
+
 export interface WorkbenchTab {
   id: string;
   kind: WorkbenchTabKind;
@@ -21,6 +35,7 @@ export interface WorkbenchTab {
     url?: string;
     path?: string;
     jobId?: string;
+    files?: FileWorkbenchState;
   };
 }
 
@@ -122,7 +137,11 @@ export function normalizeWorkbenchTabs(value: unknown): WorkbenchTabsState {
   const tabs = value.tabs
     .filter(isPersistedWorkbenchTab)
     .filter((tab): tab is WorkbenchTab => isWorkbenchTabKind(tab.kind));
-  const withCore = tabs.filter((tab) => !isLegacyDefaultActivityTab(tab));
+  const withCore = tabs.filter((tab) => !isLegacyDefaultActivityTab(tab)).map((tab) => (
+    tab.kind === "file" && tab.payload?.files
+      ? { ...tab, payload: { ...tab.payload, files: normalizeFileWorkbenchState(tab.payload.files) } }
+      : tab
+  ));
   const activeTabId = typeof value.activeTabId === "string"
     && withCore.some((tab) => tab.id === value.activeTabId)
     ? value.activeTabId

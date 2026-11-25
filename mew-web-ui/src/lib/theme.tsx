@@ -18,6 +18,7 @@ export interface ThemeDef {
   name: string;
   description: string;
   category: string;
+  mode: ResolvedMode;
   baseText: string;
   preview: string[];
 }
@@ -83,6 +84,10 @@ interface ThemeContextValue {
   themes: ThemeDef[];
   themeMode: "system" | ResolvedMode;
   setThemeMode: (mode: "system" | ResolvedMode) => void;
+  lightTheme: string;
+  darkTheme: string;
+  setLightTheme: (id: string) => void;
+  setDarkTheme: (id: string) => void;
   titleFontId: TitleFontChoiceId;
   setTitleFontId: (id: TitleFontChoiceId) => void;
   bodyFontId: BodyFontChoiceId;
@@ -106,7 +111,7 @@ function hostThemeDefinition(value: HostTheme): ThemeDef {
   const builtin = THEMES.find((theme) => theme.id === value.id);
   if (builtin) return builtin;
   const color = (name: string, fallback: string) => value.css.match(new RegExp(`--${name}:\\s*(#[a-fA-F0-9]{6})`))?.[1] ?? fallback;
-  return { id: value.id, name: value.id, description: "Installed theme", category: "Custom", baseText: color("foreground", "#ffffff"), preview: [color("background", "#181818"), color("primary", "#aaaaaa"), color("text-success", "#888888")] };
+  return { id: value.id, name: value.id, description: "Installed theme", category: "Custom", mode: value.mode, baseText: color("foreground", "#ffffff"), preview: [color("background", "#181818"), color("primary", "#aaaaaa"), color("text-success", "#888888")] };
 }
 
 function getInitialTitleFontId(): TitleFontChoiceId {
@@ -138,7 +143,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const [preferences, setPreferences] = useState(() => {
     const stored = localStorage.getItem(STORAGE_KEY);
     const validStored = availableThemes.find((theme) => theme.id === stored);
-    const storedMode = validStored && luminance(validStored.preview[0] ?? "#000000") < 0.5 ? "dark" : "light";
+    const storedMode = validStored?.mode ?? (validStored && luminance(validStored.preview[0] ?? "#000000") < 0.5 ? "dark" : "light");
     const defaults = {
       themeMode: host?.themeMode ?? (validStored ? storedMode : "system") as "system" | ResolvedMode,
       lightTheme: host?.lightTheme ?? (validStored && storedMode === "light" ? validStored.id : "codex-light"),
@@ -174,10 +179,19 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     const selected = availableThemes.find((item) => item.id === id);
     if (!selected) return;
     const selectedMode = host?.themes.find((item) => item.id === id)?.mode
+      ?? selected.mode
       ?? (luminance(selected.preview[0] ?? "#000000") < 0.5 ? "dark" : "light");
     savePreferences({ ...preferences, themeMode: selectedMode, [selectedMode === "dark" ? "darkTheme" : "lightTheme"]: id });
   };
   const setThemeMode = (themeMode: "system" | ResolvedMode) => savePreferences({ ...preferences, themeMode });
+  const setLightTheme = (id: string) => {
+    if (!availableThemes.some((item) => item.id === id)) return;
+    savePreferences({ ...preferences, lightTheme: id });
+  };
+  const setDarkTheme = (id: string) => {
+    if (!availableThemes.some((item) => item.id === id)) return;
+    savePreferences({ ...preferences, darkTheme: id });
+  };
 
   useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
@@ -227,6 +241,10 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       themes: availableThemes,
       themeMode: preferences.themeMode,
       setThemeMode,
+      lightTheme: preferences.lightTheme,
+      darkTheme: preferences.darkTheme,
+      setLightTheme,
+      setDarkTheme,
       titleFontId,
       setTitleFontId,
       bodyFontId,

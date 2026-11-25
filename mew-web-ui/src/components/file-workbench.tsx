@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -16,7 +16,10 @@ import type { DirEntry } from "@mew/web-client";
 import { useSessionStore } from "../stores/session";
 import { getClient } from "../lib/client-ref";
 import { cn } from "../lib/utils";
-import { CodeBlock } from "./code-block";
+import { normalizeFileWorkbenchState, type FileWorkbenchState } from "../lib/workbench-tabs";
+import { registerCustomTheme } from "@pierre/diffs";
+import { File } from "@pierre/diffs/react";
+import { createCssVariablesTheme } from "shiki/core";
 import {
   ResizableHandle,
   ResizablePanel,
@@ -28,59 +31,156 @@ type FilePreview = {
   content: string;
   truncated: boolean;
   language?: string;
+  error?: string;
 };
 
+registerCustomTheme("mew-file", async () => createCssVariablesTheme({ name: "mew-file", variablePrefix: "--mew-code-", fontStyle: true }));
+
 /** A small editor workbench: lazy explorer on the left, read-only documents on the right. */
-export function WorkspaceFileWorkbench({ hasWorkspace }: { hasWorkspace: boolean }) {
+export function WorkspaceFileWorkbench({ hasWorkspace, fileState, onFileStateChange, refreshRequest, headerActions }: {
+  hasWorkspace: boolean;
+  fileState?: FileWorkbenchState;
+  onFileStateChange?: (state: FileWorkbenchState) => void;
+  refreshRequest?: { path: string };
+  headerActions?: ReactNode;
+}) {
   const sessionId = useSessionStore((s) => s.sessionId);
-  const dirListing = useSessionStore((s) => s.dirListing);
-  const dirListingPath = useSessionStore((s) => s.dirListingPath);
+  const dirResults = useSessionStore((s) => s.dirResults);
+  const processedDirectories = useRef(new Map<string, { entries: DirEntry[] | null; error: string | null }>());
   const filePreview = useSessionStore((s) => s.filePreview);
   const sessionCwd = useSessionStore((s) => s.sessionCwd);
-  const [directories, setDirectories] = useState<Record<string, DirEntry[]>>({});
+  const connected = useSessionStore((s) => s.connectionState === "connected");
+  const [directories, setDirectories] = useState<Map<string, DirEntry[]>>(() => new Map());
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => new Set([""]));
   const [loadingPaths, setLoadingPaths] = useState<Set<string>>(() => new Set());
-  const [openPaths, setOpenPaths] = useState<string[]>([]);
-  const [activePath, setActivePath] = useState<string | null>(null);
-  const [previews, setPreviews] = useState<Record<string, FilePreview>>({});
+  const [directoryErrors, setDirectoryErrors] = useState<Map<string, string>>(() => new Map());
+  const [openPaths, setOpenPaths] = useState<string[]>(() => normalizeFileWorkbenchState(fileState).openPaths);
+  const [activePath, setActivePath] = useState<string | null>(() => normalizeFileWorkbenchState(fileState).activePath);
+  const [previews, setPreviews] = useState<Map<string, FilePreview>>(() => new Map());
   const [filter, setFilter] = useState("");
   const [explorerVisible, setExplorerVisible] = useState(true);
+  const [wrapLines, setWrapLines] = useState(false);
+  const previewTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const directoryTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+
+  const loadDirectory = (sid: string, path: string) => {
+    const normalized = normalizeRelativePath(path);
+    const previous = directoryTimers.current.get(normalized);
+    if (previous) clearTimeout(previous);
+    setDirectoryErrors((current) => { const next = new Map(current); next.delete(normalized); return next; });
+    setLoadingPaths((current) => withPath(current, normalized));
+    const fail = (error: string) => {
+      directoryTimers.current.delete(normalized);
+      setLoadingPaths((current) => withoutPath(current, normalized));
+      setDirectoryErrors((current) => new Map(current).set(normalized, error));
+    };
+    try {
+      const client = getClient();
+      if (!client) throw new Error("No connection");
+      if (normalized) client.listDir(sid, normalized);
+      else client.listDir(sid);
+      directoryTimers.current.set(normalized, setTimeout(() => fail("Directory listing timed out. Check the connection and retry."), 15_000));
+    } catch { fail("Could not load this directory. Check the connection and retry."); }
+  };
+
+  const requestPreview = (sid: string, path: string) => {
+    const fail = (error: string) => setPreviews((current) => new Map(current).set(path, { path, content: "", truncated: false, error }));
+    const previous = previewTimers.current.get(path);
+    if (previous) clearTimeout(previous);
+    const client = getClient();
+    if (!client || useSessionStore.getState().connectionState !== "connected") {
+      fail("Disconnected. Reconnect to load this file.");
+      return;
+    }
+    try {
+      client.readFilePreview(sid, path);
+      previewTimers.current.set(path, setTimeout(() => {
+        previewTimers.current.delete(path);
+        fail("File preview timed out. Check the connection or update the daemon.");
+      }, 15_000));
+    } catch {
+      fail("Could not request the file preview. Check the connection and retry.");
+    }
+  };
 
   useEffect(() => {
     const client = getClient();
-    if (!client || !sessionId || !hasWorkspace) return;
-    setDirectories({});
+    if (!sessionId || !hasWorkspace) return;
+    if (!client || !connected) {
+      if (activePath) requestPreview(sessionId, activePath);
+      return;
+    }
+    useSessionStore.setState({ dirListing: null, dirListingPath: null, dirListingError: null, dirResults: new Map() });
+    processedDirectories.current.clear();
+    setDirectories(new Map());
     setExpandedPaths(new Set([""]));
-    setLoadingPaths(new Set([""]));
-    setOpenPaths([]);
-    setActivePath(null);
-    setPreviews({});
+    setLoadingPaths(new Set());
+    setDirectoryErrors(new Map());
+    setPreviews(new Map());
     setFilter("");
-    client.listDir(sessionId);
-  }, [sessionId, hasWorkspace]);
+    loadDirectory(sessionId, "");
+    if (activePath) requestPreview(sessionId, activePath);
+    return () => {
+      for (const timer of previewTimers.current.values()) clearTimeout(timer);
+      previewTimers.current.clear();
+      for (const timer of directoryTimers.current.values()) clearTimeout(timer);
+      directoryTimers.current.clear();
+    };
+  }, [sessionId, hasWorkspace, connected]);
 
   useEffect(() => {
-    if (dirListing === null || dirListingPath === null) return;
-    const path = normalizeRelativePath(dirListingPath);
-    setDirectories((current) => ({ ...current, [path]: dirListing }));
-    setLoadingPaths((current) => withoutPath(current, path));
-  }, [dirListing, dirListingPath]);
+    if (!fileState) return;
+    const { openPaths: paths, activePath: selected } = normalizeFileWorkbenchState(fileState);
+    if (paths.length !== openPaths.length || paths.some((path, index) => path !== openPaths[index])) setOpenPaths(paths);
+    if (selected !== activePath) {
+      setActivePath(selected);
+      if (selected && !previews.has(selected) && sessionId) requestPreview(sessionId, selected);
+    }
+  }, [fileState]);
 
   useEffect(() => {
-    if (!filePreview) return;
-    setPreviews((current) => ({ ...current, [filePreview.path]: filePreview }));
-    setOpenPaths((current) => current.includes(filePreview.path) ? current : [...current, filePreview.path]);
-    setActivePath(filePreview.path);
+    if (!refreshRequest || !sessionId) return;
+    const { path } = refreshRequest;
+    setPreviews((current) => { const next = new Map(current); next.delete(path); return next; });
+    requestPreview(sessionId, path);
+  }, [refreshRequest]);
+
+  useEffect(() => {
+    if (useSessionStore.getState().dirResults !== dirResults) return;
+    for (const [rawPath, result] of dirResults) {
+      if (processedDirectories.current.get(rawPath) === result) continue;
+      processedDirectories.current.set(rawPath, result);
+      const path = normalizeRelativePath(rawPath);
+      const timer = directoryTimers.current.get(path);
+      if (timer) clearTimeout(timer);
+      directoryTimers.current.delete(path);
+      setLoadingPaths((current) => withoutPath(current, path));
+      if (result.error) {
+        setDirectoryErrors((current) => new Map(current).set(path, result.error!));
+      } else if (result.entries) {
+        setDirectories((current) => new Map(current).set(path, result.entries!));
+        setDirectoryErrors((current) => { const next = new Map(current); next.delete(path); return next; });
+      }
+    }
+  }, [dirResults]);
+
+  useEffect(() => {
+    if (filePreview) {
+      const timer = previewTimers.current.get(filePreview.path);
+      if (timer) clearTimeout(timer);
+      previewTimers.current.delete(filePreview.path);
+    }
+    if (!filePreview || !openPaths.includes(filePreview.path)) return;
+    setPreviews((current) => new Map(current).set(filePreview.path, filePreview));
   }, [filePreview]);
 
   const requestDirectory = (path: string) => {
     const client = getClient();
     const sid = useSessionStore.getState().sessionId;
-    if (!client || !sid) return;
+    if (!client || !sid || !connected) return;
     const normalized = normalizeRelativePath(path);
-    if (directories[normalized]) return;
-    setLoadingPaths((current) => withPath(current, normalized));
-    client.listDir(sid, normalized || undefined);
+    if (directories.has(normalized) && !directoryErrors.has(normalized)) return;
+    loadDirectory(sid, normalized);
   };
 
   const toggleDirectory = (path: string) => {
@@ -95,13 +195,13 @@ export function WorkspaceFileWorkbench({ hasWorkspace }: { hasWorkspace: boolean
   };
 
   const openFile = (path: string) => {
+    const next = openPaths.includes(path) ? openPaths : [...openPaths, path];
     setActivePath(path);
-    setOpenPaths((current) => current.includes(path) ? current : [...current, path]);
-    if (previews[path]) return;
-    const client = getClient();
+    setOpenPaths(next);
+    onFileStateChange?.({ openPaths: next, activePath: path });
+    if (previews.has(path)) return;
     const sid = useSessionStore.getState().sessionId;
-    if (!client || !sid) return;
-    client.readFilePreview(sid, path);
+    if (sid) requestPreview(sid, path);
   };
 
   const openExternal = (path: string) => {
@@ -113,8 +213,14 @@ export function WorkspaceFileWorkbench({ hasWorkspace }: { hasWorkspace: boolean
   const closeFile = (path: string) => {
     const index = openPaths.indexOf(path);
     const next = openPaths.filter((openPath) => openPath !== path);
+    const timer = previewTimers.current.get(path);
+    if (timer) clearTimeout(timer);
+    previewTimers.current.delete(path);
     setOpenPaths(next);
-    if (activePath === path) setActivePath(next[Math.max(0, index - 1)] ?? next[0] ?? null);
+    const nextActive = activePath === path ? next[Math.max(0, index - 1)] ?? next[0] ?? null : activePath;
+    setActivePath(nextActive);
+    onFileStateChange?.({ openPaths: next, activePath: nextActive });
+    if (nextActive && !previews.has(nextActive) && sessionId) requestPreview(sessionId, nextActive);
   };
 
   if (!hasWorkspace) {
@@ -131,12 +237,14 @@ export function WorkspaceFileWorkbench({ hasWorkspace }: { hasWorkspace: boolean
 
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-background">
-      <div className="flex h-10 shrink-0 items-center justify-between gap-3 border-b border-border px-3">
+      <div className="flex h-8 shrink-0 items-center justify-between gap-2 border-b border-border px-2">
         <div className="flex min-w-0 items-center gap-2">
           <FolderOpen className="h-3.5 w-3.5 shrink-0 text-primary" />
           <span className="truncate text-[11px] font-semibold">{workspaceName(sessionCwd)}</span>
           {activePath && <span className="truncate text-[10px] text-muted-foreground">/ {activePath}</span>}
         </div>
+        <div className="flex shrink-0 items-center gap-1">
+        {headerActions}
         <button
           type="button"
           onClick={() => setExplorerVisible((visible) => !visible)}
@@ -150,14 +258,15 @@ export function WorkspaceFileWorkbench({ hasWorkspace }: { hasWorkspace: boolean
         >
           <PanelLeft className="h-3.5 w-3.5" />
         </button>
+        </div>
       </div>
 
       <ResizablePanelGroup orientation="horizontal" className="min-h-0 min-w-0 flex-1 overflow-hidden">
         {explorerVisible && (
           <>
-            <ResizablePanel id="file-explorer" defaultSize="32%" minSize="11rem" maxSize="48%" className="min-w-0">
+            <ResizablePanel id="file-explorer" defaultSize="28%" minSize="8rem" maxSize="42%" className="min-w-0">
               <div className="flex h-full min-h-0 flex-col">
-                <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border px-3">
+                <div className="flex h-8 shrink-0 items-center gap-2 border-b border-border px-2">
                   <Search className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                   <input
                     value={filter}
@@ -178,18 +287,23 @@ export function WorkspaceFileWorkbench({ hasWorkspace }: { hasWorkspace: boolean
                   )}
                 </div>
                 <div className="min-h-0 flex-1 overflow-auto py-2">
-                  {directories[""] ? (
+                  {directoryErrors.has("") ? (
+                    <DirectoryError path="" error={directoryErrors.get("")!} onRetry={requestDirectory} />
+                  ) : directories.has("") ? (
                     <ExplorerTree
                       path=""
-                      entries={directories[""]}
+                      entries={directories.get("")!}
                       directories={directories}
                       expandedPaths={expandedPaths}
                       loadingPaths={loadingPaths}
+                      directoryErrors={directoryErrors}
+                      onRetryDirectory={requestDirectory}
                       filter={filter}
                       activePath={activePath}
                       onToggleDirectory={toggleDirectory}
                       onOpenFile={openFile}
                     />
+
                   ) : (
                     <div className="flex items-center justify-center gap-2 px-3 py-8 text-[11px] text-muted-foreground">
                       <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -205,12 +319,13 @@ export function WorkspaceFileWorkbench({ hasWorkspace }: { hasWorkspace: boolean
 
         <ResizablePanel id="file-editor" defaultSize={explorerVisible ? "68%" : "100%"} minSize="12rem" className="min-w-0">
           <div className="flex h-full min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden">
-            <div className="flex min-h-10 shrink-0 items-end overflow-x-auto border-b border-border px-1">
+            <div className="flex h-8 shrink-0 items-center border-b border-border px-1">
+              <div className="flex min-w-0 flex-1 items-end overflow-x-auto">
               {openPaths.map((path) => (
-                <div key={path} className={cn("group flex h-9 shrink-0 items-center border-b-2", activePath === path ? "border-primary" : "border-transparent")}>
+                <div key={path} className={cn("group flex h-8 shrink-0 items-center border-b-2", activePath === path ? "border-primary" : "border-transparent")}>
                   <button
                     type="button"
-                    onClick={() => setActivePath(path)}
+                    onClick={() => openFile(path)}
                     className={cn("max-w-44 truncate px-2.5 text-[11px]", activePath === path ? "text-foreground" : "text-muted-foreground hover:text-foreground")}
                     aria-label={`Open ${path}`}
                   >
@@ -226,9 +341,29 @@ export function WorkspaceFileWorkbench({ hasWorkspace }: { hasWorkspace: boolean
                   </button>
                 </div>
               ))}
+              </div>
+              {activePath && previews.has(activePath) && !previews.get(activePath)?.error && <div className="flex shrink-0 items-center gap-0.5">
+                <button type="button" onClick={() => setWrapLines((wrapped) => !wrapped)}
+                  className={cn("rounded p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground", wrapLines && "bg-accent text-foreground")}
+                  title={wrapLines ? "Stop wrapping lines" : "Wrap long lines"} aria-label={wrapLines ? "Stop wrapping lines" : "Wrap lines"} aria-pressed={wrapLines}>
+                  <WrapText className="h-3 w-3" />
+                </button>
+                <button type="button" onClick={() => openExternal(activePath)} className="rounded p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground" title="Open in default editor" aria-label="Open in default editor">
+                  <ExternalLink className="h-3 w-3" />
+                </button>
+              </div>}
             </div>
-            {activePath && previews[activePath] ? (
-              <FileDocument preview={previews[activePath]} onOpenExternal={() => openExternal(activePath)} />
+            {activePath && previews.get(activePath)?.error ? (
+              <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-6 text-center text-xs">
+                <p>Could not open {activePath}</p>
+                <p className="text-muted-foreground">{previews.get(activePath)?.error}</p>
+                <button type="button" className="rounded px-2 py-1 hover:bg-accent" onClick={() => {
+                  setPreviews((current) => { const next = new Map(current); next.delete(activePath); return next; });
+                  if (sessionId) requestPreview(sessionId, activePath);
+                }}>Retry</button>
+              </div>
+            ) : activePath && previews.has(activePath) ? (
+              <FileDocument key={activePath} preview={previews.get(activePath)!} wrapLines={wrapLines} />
             ) : (
               <FileEditorEmptyState hasOpenFiles={openPaths.length > 0} />
             )}
@@ -245,6 +380,8 @@ function ExplorerTree({
   directories,
   expandedPaths,
   loadingPaths,
+  directoryErrors,
+  onRetryDirectory,
   filter,
   activePath,
   onToggleDirectory,
@@ -253,9 +390,11 @@ function ExplorerTree({
 }: {
   path: string;
   entries: DirEntry[];
-  directories: Record<string, DirEntry[]>;
+  directories: Map<string, DirEntry[]>;
   expandedPaths: Set<string>;
   loadingPaths: Set<string>;
+  directoryErrors: Map<string, string>;
+  onRetryDirectory: (path: string) => void;
   filter: string;
   activePath: string | null;
   onToggleDirectory: (path: string) => void;
@@ -276,7 +415,7 @@ function ExplorerTree({
       {visibleEntries.map((entry) => {
         const entryPath = joinRelativePath(path, entry.name);
         const isExpanded = expandedPaths.has(entryPath);
-        const children = directories[entryPath];
+        const children = directories.get(entryPath);
         const isLoading = loadingPaths.has(entryPath);
         const isActive = activePath === entryPath;
         return (
@@ -298,6 +437,9 @@ function ExplorerTree({
               <span className="min-w-0 flex-1 truncate">{entry.name}</span>
               {isLoading && <Loader2 className="h-3 w-3 shrink-0 animate-spin text-muted-foreground" />}
             </button>
+            {entry.is_dir && isExpanded && directoryErrors.has(entryPath) && (
+              <DirectoryError path={entryPath} error={directoryErrors.get(entryPath)!} onRetry={onRetryDirectory} />
+            )}
             {entry.is_dir && isExpanded && children && (
               <ExplorerTree
                 path={entryPath}
@@ -305,6 +447,8 @@ function ExplorerTree({
                 directories={directories}
                 expandedPaths={expandedPaths}
                 loadingPaths={loadingPaths}
+                directoryErrors={directoryErrors}
+                onRetryDirectory={onRetryDirectory}
                 filter={filter}
                 activePath={activePath}
                 onToggleDirectory={onToggleDirectory}
@@ -319,48 +463,21 @@ function ExplorerTree({
   );
 }
 
-function FileDocument({ preview, onOpenExternal }: { preview: FilePreview; onOpenExternal: () => void }) {
-  const [wrapLines, setWrapLines] = useState(true);
+function DirectoryError({ path, error, onRetry }: { path: string; error: string; onRetry: (path: string) => void }) {
+  return <div role="alert" className="px-3 py-3 text-center text-[11px] text-muted-foreground">
+    <p>{error}</p>
+    <button type="button" className="mt-1 rounded px-2 py-1 text-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label={`Retry ${path || "workspace"}`} onClick={() => onRetry(path)}>Retry</button>
+  </div>;
+}
 
+function FileDocument({ preview, wrapLines }: { preview: FilePreview; wrapLines: boolean }) {
   return (
     <div className="flex min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden">
-      <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b border-border px-3 text-[10px] text-muted-foreground">
-        <span className="truncate font-mono">{preview.path}</span>
-        <div className="flex shrink-0 items-center gap-1">
-          <button
-            type="button"
-            onClick={() => setWrapLines((wrapped) => !wrapped)}
-            className={cn(
-              "flex items-center gap-1 rounded px-1.5 py-1 hover:bg-accent hover:text-foreground",
-              wrapLines && "bg-accent text-foreground",
-            )}
-            title={wrapLines ? "Stop wrapping lines" : "Wrap long lines"}
-            aria-label={wrapLines ? "Stop wrapping lines" : "Wrap lines"}
-            aria-pressed={wrapLines}
-          >
-            <WrapText className="h-3 w-3" />
-            Wrap
-          </button>
-          <button
-            type="button"
-            onClick={onOpenExternal}
-            className="flex items-center gap-1 rounded px-1.5 py-1 hover:bg-accent hover:text-foreground"
-            title="Open in default editor"
-          >
-            <ExternalLink className="h-3 w-3" />
-            Open externally
-          </button>
-        </div>
-      </div>
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-auto bg-muted/10 py-3">
-        <CodeBlock
-          code={preview.content}
-          lang={preview.language ?? "text"}
-          showHeader={false}
-          lineNumbers
-          wrapLines={wrapLines}
-          flush
-          fill
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-auto bg-muted/10 py-2">
+        <File
+          className="mew-file-preview"
+          file={{ name: preview.path, contents: preview.content }}
+          options={{ theme: "mew-file", disableFileHeader: true, overflow: wrapLines ? "wrap" : "scroll" }}
         />
         {preview.truncated && <p className="mt-2 px-3 text-[10px] italic text-muted-foreground">Preview truncated</p>}
       </div>

@@ -2,6 +2,7 @@ import { MewClient } from "@mew/web-client";
 import { bridgeClientToStore } from "../stores/session";
 import { setClient } from "./client-ref";
 import { getWebSocketUrl, isDesktopHost } from "./host";
+import { setupAutomationSync } from "./automation-sync";
 
 let clientInstance: MewClient | null = null;
 
@@ -13,6 +14,7 @@ export function getClient(): MewClient {
     });
     setClient(clientInstance);
     bridgeClientToStore(clientInstance);
+    setupAutomationSync(clientInstance);
   }
   return clientInstance;
 }

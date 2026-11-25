@@ -300,6 +300,21 @@ body {
   max-width: 46rem;
 }
 
+/* Horizontal gutters around the conversation column. The transcript and the
+   composer both use them, so their columns share one centre line. The start
+   gutter clears the conversation minimap; the end gutter additionally clears
+   the pinned summary panel through `--summary-inset`. */
+.mew-conversation-gutters {
+  padding-inline: 1rem;
+}
+
+@media (min-width: 40rem) {
+  .mew-conversation-gutters {
+    padding-left: 2.25rem;
+    padding-right: calc(2.25rem + var(--summary-inset, 0px));
+  }
+}
+
 .mew-composer {
   container: composer / inline-size;
 }
@@ -375,6 +390,33 @@ button:focus-visible,
   padding-top: 0.75em;
 }
 
+.mew-code-content > pre {
+  margin: 0;
+  padding: 0;
+  background: transparent !important;
+}
+
+.mew-notification-title {
+  overflow: hidden;
+  white-space: nowrap;
+  padding-right: 8px;
+  margin-right: -4px;
+  mask-image: linear-gradient(to right, #000 calc(100% - 8px), transparent);
+}
+
+.mew-title-overflow {
+  mask-image: linear-gradient(to right, #000 calc(100% - 8px), transparent);
+}
+
+.mew-notification-summary {
+  max-height: 28px;
+  overflow: hidden;
+  mask-image: linear-gradient(#000, #000), linear-gradient(to right, #000 calc(100% - 16px), transparent);
+  mask-size: 100% calc(100% - 14px), 100% 14px;
+  mask-position: top, bottom;
+  mask-repeat: no-repeat;
+}
+
 .file-viewer-code {
   counter-reset: file-line;
   width: 100%;
@@ -439,6 +481,31 @@ button:focus-visible,
   overflow-x: hidden;
 }
 
+.mew-file-preview {
+  --diffs-font-size: 12px;
+  --diffs-line-height: 20px;
+  --diffs-font-family: var(--font-mono);
+  min-width: 0;
+}
+
+.mew-file-diff {
+  --diffs-font-size: 12px;
+  --diffs-line-height: 20px;
+  --diffs-font-family: var(--font-mono);
+  --diffs-bg-addition-override: color-mix(in srgb, var(--green-bg) 45%, transparent);
+  --diffs-bg-deletion-override: color-mix(in srgb, var(--red-bg) 45%, transparent);
+}
+
+.mew-changes-tree {
+  --trees-bg-override: transparent;
+  --trees-fg-override: var(--foreground);
+  --trees-fg-muted-override: var(--muted-foreground);
+  --trees-selected-bg-override: var(--accent);
+  --trees-selected-fg-override: var(--accent-foreground);
+  --trees-font-family-override: var(--font-sans);
+  --trees-font-size-override: 11px;
+}
+
 .motion-enter {
   opacity: 1;
   transform: translateY(0) scale(1);
@@ -449,6 +516,32 @@ button:focus-visible,
   .motion-enter {
     opacity: 0;
     transform: translateY(4px) scale(0.98);
+  }
+}
+
+.motion-presence {
+  display: grid;
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transform: translateY(0);
+  transition:
+    grid-template-rows var(--motion-menu) var(--ease-out),
+    opacity var(--motion-menu) var(--ease-out),
+    transform var(--motion-menu) var(--ease-out);
+}
+
+.motion-presence[data-state="closed"] {
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transform: translateY(4px);
+  pointer-events: none;
+}
+
+@starting-style {
+  .motion-presence {
+    grid-template-rows: 0fr;
+    opacity: 0;
+    transform: translateY(4px);
   }
 }
 
@@ -541,6 +634,34 @@ button:focus-visible,
   transition: width var(--motion-menu) var(--ease-out);
 }
 
+/* The "back to the latest" control drifts gently so it reads as live, and stops
+   moving once it is hovered or focused. */
+@keyframes mew-jump-bob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(3px); }
+}
+
+.mew-jump-arrow {
+  animation: mew-jump-bob 1.8s ease-in-out infinite;
+}
+
+/* Placeholder bars while an older page of history is in flight. */
+.mew-skeleton {
+  animation: mew-skeleton-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes mew-skeleton-pulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
+
+
+.mew-jump-latest:hover .mew-jump-arrow,
+.mew-jump-latest:focus-visible .mew-jump-arrow {
+  animation: none;
+}
+
+
 .mew-summary-content {
   opacity: 1;
   visibility: visible;
@@ -575,6 +696,66 @@ button:focus-visible,
   overflow: hidden;
 }
 
+.mew-action-slot {
+  display: grid;
+  grid-template-columns: 0fr;
+  opacity: 0;
+  transform: scale(0.8);
+  transform-origin: right center;
+  margin-left: 0;
+  transition:
+    grid-template-columns var(--motion-menu) var(--ease-out),
+    opacity var(--motion-press) var(--ease-out),
+    transform var(--motion-menu) var(--ease-out),
+    margin-left var(--motion-menu) var(--ease-out);
+  transition-delay: var(--mew-slot-delay, 0ms);
+}
+
+.mew-action-slot[data-open="true"] {
+  grid-template-columns: 1fr;
+  opacity: 1;
+  transform: scale(1);
+  margin-left: 0.25rem;
+}
+
+.mew-action-slot[aria-hidden="true"] {
+  pointer-events: none;
+}
+
+.mew-action-slot > * {
+  min-width: 0;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+}
+
+.mew-action-slot[data-open="true"] > * {
+  padding: 3px;
+  margin: -3px;
+}
+
+.mew-thinking-content {
+  overflow: hidden;
+}
+
+.mew-thinking-content[data-state="open"] {
+  animation: mew-thinking-open var(--motion-menu) var(--ease-out);
+}
+
+.mew-thinking-content[data-state="closed"] {
+  animation: mew-thinking-close var(--motion-menu) var(--ease-out);
+}
+
+@keyframes mew-thinking-open {
+  from { height: 0; opacity: 0; }
+  to { height: var(--radix-collapsible-content-height); opacity: 1; }
+}
+
+@keyframes mew-thinking-close {
+  from { height: var(--radix-collapsible-content-height); opacity: 1; }
+  to { height: 0; opacity: 0; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .mew-workspace-panels > [data-panel] {
     transition: none !important;
@@ -590,6 +771,7 @@ button:focus-visible,
   }
 
   .motion-enter,
+  .motion-presence,
   .motion-popover,
   .motion-overlay,
   .motion-drawer,
@@ -599,7 +781,8 @@ button:focus-visible,
     transform: none !important;
   }
 
-  .motion-disclosure {
+  .motion-disclosure,
+  .mew-action-slot {
     transition: none !important;
   }
 

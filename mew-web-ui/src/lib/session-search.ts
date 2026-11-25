@@ -15,6 +15,7 @@ export function getSessionSearchText(
     summary,
     session.summary,
     session.first_message,
+    session.last_message,
     content,
     session.cwd,
     session.model,

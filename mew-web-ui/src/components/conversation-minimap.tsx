@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Bookmark } from "lucide-react";
+import type { TurnSummary } from "@mew/web-client";
 import type { ChatMessage } from "../stores/session";
+import { useSessionStore } from "../stores/session";
 import { cn } from "../lib/utils";
 
 export interface ConversationTurn {
@@ -11,6 +13,10 @@ export interface ConversationTurn {
 }
 
 const BOOKMARK_STORAGE_PREFIX = "mew:bookmarked-turns:";
+/** Upper bound on history pages the tape pulls to reach a not-yet-loaded turn. */
+const MAX_INDEX_LOAD_PAGES = 25;
+/** Give up reaching a turn and fall back to the oldest loaded one after this. */
+const INDEX_LOAD_TIMEOUT_MS = 10_000;
 
 function loadBookmarks(sessionId: string | null): Set<string> {
   if (!sessionId || typeof window === "undefined") return new Set();
@@ -124,23 +130,57 @@ export function ConversationMinimap({
   streamingText,
   activeMessageIndex = 0,
   onSelectMessageIndex,
+  sessionIndex,
+  onLoadEarlier,
+  loadingEarlier = false,
 }: {
   messages: ChatMessage[];
   sessionId: string | null;
   streamingText?: string;
   activeMessageIndex?: number;
   onSelectMessageIndex: (index: number) => void;
+  /** Whole-session summaries from the daemon, when available. Empty means fall
+   *  back to the turns derivable from the currently loaded messages. */
+  sessionIndex?: TurnSummary[];
+  /** Requests the next older history page (reuses the chat surface's path). */
+  onLoadEarlier?: () => void;
+  /** True while a history page request is in flight. */
+  loadingEarlier?: boolean;
 }) {
-  const turns = useMemo(
-    () => buildConversationTurns(messages, streamingText),
-    [messages, streamingText],
-  );
+  const turns = useMemo(() => {
+    if (sessionIndex && sessionIndex.length > 0) {
+      const messageIndexById = new Map<string, number>();
+      messages.forEach((message, index) => messageIndexById.set(message.id, index));
+      const indexed = sessionIndex.map((turn) => ({
+        id: turn.id,
+        // -1 marks a turn the transcript has not loaded yet; selecting it
+        // pages backward until its first message id appears.
+        messageIndex: messageIndexById.get(turn.id) ?? -1,
+        promptText: turn.prompt || "User message",
+        replyText: turn.reply,
+      }));
+      // The daemon index is authoritative for old turns, but it can lag a
+      // turn that just started. Keep local turns it has not seen yet.
+      const known = new Set(indexed.map((turn) => turn.id));
+      return [...indexed, ...buildConversationTurns(messages, streamingText).filter((turn) => !known.has(turn.id))];
+    }
+    return buildConversationTurns(messages, streamingText);
+  }, [messages, streamingText, sessionIndex]);
+
   const [bookmarks, setBookmarks] = useState<Set<string>>(() => loadBookmarks(sessionId));
   const [hoveredTurnIndex, setHoveredTurnIndex] = useState<number | null>(null);
   const [popoverTopPx, setPopoverTopPx] = useState<number>(0);
+  const [pendingTargetId, setPendingTargetId] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const railRef = useRef<HTMLDivElement>(null);
   const hideTimerRef = useRef<number | null>(null);
+  const pendingPagesRef = useRef(0);
+  const onSelectRef = useRef(onSelectMessageIndex);
+  onSelectRef.current = onSelectMessageIndex;
+  const onLoadEarlierRef = useRef(onLoadEarlier);
+  onLoadEarlierRef.current = onLoadEarlier;
+  const turnsRef = useRef(turns);
+  turnsRef.current = turns;
 
   useEffect(() => {
     setBookmarks(loadBookmarks(sessionId));
@@ -154,17 +194,60 @@ export function ConversationMinimap({
     };
   }, []);
 
+  const scrollToOldestLoaded = () => {
+    const oldest = turnsRef.current.find((turn) => turn.messageIndex >= 0);
+    if (oldest) onSelectRef.current(oldest.messageIndex);
+  };
+
+  // Give up reaching a not-yet-loaded turn after a bounded wait, rather than
+  // paging forever if the daemon stops answering.
+  useEffect(() => {
+    if (!pendingTargetId) return;
+    const timeout = window.setTimeout(() => {
+      pendingPagesRef.current = 0;
+      setPendingTargetId(null);
+      scrollToOldestLoaded();
+    }, INDEX_LOAD_TIMEOUT_MS);
+    return () => window.clearTimeout(timeout);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingTargetId]);
+
+  // Pull older pages until the selected turn's first message id is loaded.
+  useEffect(() => {
+    if (!pendingTargetId) return;
+    const targetIndex = messages.findIndex((message) => message.id === pendingTargetId);
+    if (targetIndex >= 0) {
+      pendingPagesRef.current = 0;
+      setPendingTargetId(null);
+      onSelectRef.current(targetIndex);
+      return;
+    }
+    if (loadingEarlier) return;
+    if (pendingPagesRef.current >= MAX_INDEX_LOAD_PAGES) {
+      scrollToOldestLoaded();
+      setPendingTargetId(null);
+      return;
+    }
+    if (useSessionStore.getState().historyCursor === null || typeof onLoadEarlierRef.current !== "function") {
+      scrollToOldestLoaded();
+      setPendingTargetId(null);
+      return;
+    }
+    pendingPagesRef.current += 1;
+    onLoadEarlierRef.current();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, loadingEarlier, pendingTargetId]);
+
   const activeTurnIndex = useMemo(() => {
     if (turns.length === 0) return 0;
-    let best = 0;
+    let best = -1;
     for (let i = 0; i < turns.length; i++) {
-      if (turns[i]!.messageIndex <= activeMessageIndex) {
+      const messageIndex = turns[i]!.messageIndex;
+      if (messageIndex >= 0 && messageIndex <= activeMessageIndex) {
         best = i;
-      } else {
-        break;
       }
     }
-    return best;
+    return best >= 0 ? best : 0;
   }, [turns, activeMessageIndex]);
 
   if (turns.length === 0) return null;
@@ -239,6 +322,16 @@ export function ConversationMinimap({
     });
   };
 
+  const handleSelectTurn = (turn: ConversationTurn) => {
+    if (turn.messageIndex >= 0) {
+      onSelectMessageIndex(turn.messageIndex);
+      return;
+    }
+    if (!sessionId) return;
+    pendingPagesRef.current = 0;
+    setPendingTargetId(turn.id);
+  };
+
   const previewTurn = hoveredTurnIndex !== null ? turns[hoveredTurnIndex] : null;
 
   return (
@@ -259,6 +352,7 @@ export function ConversationMinimap({
           const isBookmarked = bookmarks.has(turn.id);
           const isCurrentTurn = idx === activeTurnIndex;
           const isHovered = hoveredTurnIndex === idx;
+          const isLoading = pendingTargetId === turn.id;
 
           // Smooth proximity wave across turns when hovering
           let widthPx = 6;
@@ -275,6 +369,8 @@ export function ConversationMinimap({
             }
           } else if (isCurrentTurn) {
             widthPx = 11;
+          } else if (isLoading) {
+            widthPx = 9;
           } else if (isBookmarked) {
             widthPx = 9;
           }
@@ -284,25 +380,28 @@ export function ConversationMinimap({
               key={turn.id}
               type="button"
               data-turn-tick={idx}
-              aria-label={`Jump to turn ${idx + 1}: ${turn.promptText}`}
+              aria-label={isLoading ? `Loading turn ${idx + 1}…` : `Jump to turn ${idx + 1}: ${turn.promptText}`}
               onFocus={(e) => selectHoveredTurn(idx, e.currentTarget)}
               onBlur={scheduleHide}
-              onClick={() => onSelectMessageIndex(turn.messageIndex)}
+              onClick={() => handleSelectTurn(turn)}
               className="group flex h-2.5 w-full cursor-pointer items-center focus:outline-none"
             >
               <span
                 style={{ width: `${widthPx}px` }}
                 className={cn(
                   "block h-[1.5px] rounded-full transition-[width,background-color,opacity] duration-150 ease-out",
+                  isLoading && "animate-pulse",
                   isHovered
                     ? "bg-foreground opacity-100"
                     : isCurrentTurn
                       ? "bg-foreground/75 opacity-90"
-                      : isBookmarked
-                        ? "bg-primary opacity-85"
-                        : hoveredTurnIndex !== null && Math.abs(idx - hoveredTurnIndex) <= 2
-                          ? "bg-muted-foreground/70"
-                          : "bg-muted-foreground/35",
+                      : isLoading
+                        ? "bg-primary opacity-90"
+                        : isBookmarked
+                          ? "bg-primary opacity-85"
+                          : hoveredTurnIndex !== null && Math.abs(idx - hoveredTurnIndex) <= 2
+                            ? "bg-muted-foreground/70"
+                            : "bg-muted-foreground/35",
                 )}
               />
             </button>
@@ -316,7 +415,7 @@ export function ConversationMinimap({
           role="dialog"
           aria-label="Turn preview"
           onMouseEnter={clearHideTimer}
-          onClick={() => onSelectMessageIndex(previewTurn.messageIndex)}
+          onClick={() => handleSelectTurn(previewTurn)}
           style={{
             top: `clamp(0.5rem, calc(${popoverTopPx}px), calc(100% - 5.75rem))`,
           }}

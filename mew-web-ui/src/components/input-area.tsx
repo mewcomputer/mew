@@ -6,14 +6,17 @@ import {
   useLayoutEffect,
   useImperativeHandle,
   type ClipboardEvent,
+  type CSSProperties,
   type DragEvent,
   type KeyboardEvent,
+  type ReactNode,
 } from "react";
-import { Square, Plus, X, ArrowUp, Shield, Loader2, File } from "lucide-react";
+import { Square, Plus, X, ArrowUp, Shield, Loader2, File, CornerDownRight } from "lucide-react";
 import { cn } from "../lib/utils";
-import { useSessionStore } from "../stores/session";
+import { selectSessionRunning, useSessionStore } from "../stores/session";
 import { useSidebar } from "@/components/ui/sidebar";
 import { ModelPill } from "./model-pill";
+import { ContextIndicator } from "./session-status";
 import { PersonaPill } from "./persona-pill";
 import {
   DropdownMenu,
@@ -28,6 +31,8 @@ import type { Attachment } from "@mew/web-client";
 
 interface InputAreaProps {
   onSend: (text: string, attachments?: Attachment[]) => void | Promise<void>;
+  onEnqueue?: (text: string, attachments?: Attachment[]) => void | Promise<void>;
+  onSteer?: (text: string, attachments?: Attachment[]) => void | Promise<void>;
   onSlash?: (command: string) => void;
   onCancel: () => void;
   connected: boolean;
@@ -37,6 +42,23 @@ interface InputAreaProps {
 interface SlashCommand {
   command: string;
   description: string;
+}
+
+interface MentionItem {
+  id: string;
+  group: string;
+  primary: string;
+  secondary?: string;
+  insert?: string;
+  persona?: string;
+}
+
+/** The active `@token` before the caret, with the index of its `@`. */
+function activeAtToken(value: string, caret: number): { start: number; query: string } | null {
+  const match = /(?:^|\s)@([^\s@]*)$/.exec(value.slice(0, caret));
+  if (!match) return null;
+  const query = match[1] ?? "";
+  return { start: caret - query.length - 1, query };
 }
 
 const SLASH_COMMANDS: SlashCommand[] = [
@@ -55,7 +77,7 @@ const EMPTY_DRAFT: ComposerDraft = { text: "", files: [] };
 
 /** Chat composer with attachments, policy, persona and model controls. */
 export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
-  function InputArea({ onSend, onSlash, onCancel, connected, draftId }, ref) {
+  function InputArea({ onSend, onEnqueue, onSteer, onSlash, onCancel, connected, draftId }, ref) {
     const { isMobile } = useSidebar();
     const sessionId = useSessionStore((state) => state.sessionId) ?? "new";
     const draftOwner = draftId ?? sessionId;
@@ -73,6 +95,7 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
       refreshDraft((revision) => revision + 1);
     };
     const [menuOpen, setMenuOpen] = useState<"slash" | "persona" | null>(null);
+    const [mention, setMention] = useState<{ start: number; query: string } | null>(null);
     const [menuIndex, setMenuIndex] = useState(0);
     const [focused, setFocused] = useState(false);
     const [sendError, setSendError] = useState<string | null>(null);
@@ -106,8 +129,17 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
     }, [connected, draftOwner]);
 
     const hasStreaming = useSessionStore((s) => s.streamingPartId !== null);
+    const sessionRunning = useSessionStore(selectSessionRunning);
+    const sessionBusy = hasStreaming || sessionRunning;
+    const queuedMessages = useSessionStore((s) => s.queuedMessages);
     const selectPersona = useSessionStore((s) => s.selectPersona);
     const availablePersonas = useSessionStore((s) => s.availablePersonas);
+    const availableModels = useSessionStore((s) => s.availableModels);
+    const mentionSkills = useSessionStore((s) => s.mentionSkills);
+    const mentionSubagents = useSessionStore((s) => s.mentionSubagents);
+    const dirResults = useSessionStore((s) => s.dirResults);
+    const gitStatus = useSessionStore((s) => s.gitStatus);
+    const flaggedFiles = useSessionStore((s) => s.flaggedFiles);
     const promptHistory = useSessionStore((s) => s.promptHistory);
     const pushPromptHistory = useSessionStore((s) => s.pushPromptHistory);
     const [isSending, setIsSending] = useState(false);
@@ -119,31 +151,71 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
         text === "/" || c.command.toLowerCase().startsWith(text.toLowerCase()),
     );
 
-    const personaNames = ["default", ...availablePersonas.map((p) => p.name)];
-    const filteredPersonas = personaNames.filter(
-      (p) =>
-        text === "@" || p.toLowerCase().startsWith(text.slice(1).toLowerCase()),
-    );
+    const mentionItems = (() => {
+      if (!mention) return [] as MentionItem[];
+      const query = mention.query;
+      const separator = query.indexOf(":");
+      const namespace = separator >= 0 ? query.slice(0, separator) : null;
+      const term = (namespace ? query.slice(separator + 1) : query).toLowerCase();
+      const matches = (value: string) => value.toLowerCase().includes(term);
+      const items: MentionItem[] = [];
 
-    const activeMenu = menuOpen === "slash" ? filteredSlash : filteredPersonas;
+      if (!namespace || namespace === "skill") {
+        for (const skill of mentionSkills) {
+          if (matches(skill.name) || matches(skill.description)) {
+            items.push({ id: `skill:${skill.name}`, group: "Skills", primary: skill.name, secondary: skill.description, insert: `@skill:${skill.name} ` });
+          }
+        }
+      }
+      if (!namespace || namespace === "model") {
+        for (const model of availableModels) {
+          if (matches(model.id) || matches(model.display_name ?? "")) {
+            items.push({ id: `model:${model.id}`, group: "Models", primary: model.display_name ?? model.id, secondary: model.id, insert: `@model:${model.id} ` });
+          }
+        }
+      }
+      if (!namespace || namespace === "subagent") {
+        for (const subagent of mentionSubagents) {
+          if (matches(subagent.name) || matches(subagent.description)) {
+            items.push({ id: `subagent:${subagent.name}`, group: "Subagents", primary: subagent.name, secondary: subagent.description, insert: `@subagent:${subagent.name} ` });
+          }
+        }
+      }
+      if (!namespace) {
+        const files = new Set<string>();
+        for (const result of dirResults.values()) {
+          for (const entry of result.entries ?? []) if (!entry.is_dir) files.add(entry.name);
+        }
+        for (const entry of gitStatus) files.add(entry.path);
+        for (const file of flaggedFiles) files.add(file.path);
+        for (const file of files) {
+          if (matches(file)) items.push({ id: `file:${file}`, group: "Files", primary: file, insert: `@${file} ` });
+        }
+        for (const persona of ["default", ...availablePersonas.map((p) => p.name)]) {
+          if (matches(persona)) items.push({ id: `persona:${persona}`, group: "Personas", primary: persona, persona });
+        }
+      }
+      return items;
+    })();
+    const menuLength = menuOpen === "slash" ? filteredSlash.length : mentionItems.length;
 
     const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
       if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
-      if (menuOpen && activeMenu.length > 0) {
+      if (menuOpen && menuLength > 0) {
         if (e.key === "ArrowDown") {
           e.preventDefault();
-          setMenuIndex((i) => (i + 1) % activeMenu.length);
+          setMenuIndex((i) => (i + 1) % menuLength);
           return;
         }
         if (e.key === "ArrowUp") {
           e.preventDefault();
-          setMenuIndex((i) => (i - 1 + activeMenu.length) % activeMenu.length);
+          setMenuIndex((i) => (i - 1 + menuLength) % menuLength);
           return;
         }
         if (e.key === "Enter") {
           e.preventDefault();
           if (menuOpen === "slash") selectSlash(filteredSlash[menuIndex]!);
-          else selectPersonaAction(filteredPersonas[menuIndex] ?? "default");
+          else selectMention(mentionItems[menuIndex]);
           return;
         }
         if (e.key === "Escape") {
@@ -204,26 +276,30 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
       }
     };
 
-    const handleChange = (value: string) => {
+    const handleChange = (value: string, caret = value.length) => {
       setText(value);
       setHistoryIndex(null);
       if (value.startsWith("/")) {
         setMenuOpen("slash");
-        setMenuIndex(0);
-      } else if (value.startsWith("@")) {
-        setMenuOpen("persona");
+        setMention(null);
         setMenuIndex(0);
       } else {
-        closeMenu();
+        const token = activeAtToken(value, Math.min(caret, value.length));
+        setMention(token);
+        if (token) {
+          setMenuOpen("persona");
+          setMenuIndex(0);
+        } else closeMenu();
       }
     };
 
     const closeMenu = () => {
       setMenuOpen(null);
+      setMention(null);
       setMenuIndex(0);
     };
 
-    const handleSubmit = async () => {
+    const handleSubmit = async (mode: "default" | "steer" = "default") => {
       // Guard against double-submit while async file conversion is in flight.
       if (isSending) return;
       const trimmed = text.trim();
@@ -232,8 +308,8 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
         selectSlash(filteredSlash[0]!);
         return;
       }
-      if (menuOpen === "persona" && filteredPersonas.length > 0) {
-        selectPersonaAction(filteredPersonas[0]!);
+      if (menuOpen === "persona" && mentionItems.length > 0) {
+        selectMention(mentionItems[0]);
         return;
       }
 
@@ -250,7 +326,13 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
         }
 
         if (activeDraft.current !== source) return;
-        const pending = onSend(trimmed, attachments);
+        const dispatch =
+          mode === "steer" && onSteer
+            ? onSteer
+            : sessionBusy && onEnqueue
+              ? onEnqueue
+              : onSend;
+        const pending = dispatch(trimmed, attachments);
         if (pending !== undefined) await pending;
         pushPromptHistory(trimmed);
         setText((current) => current === text ? "" : current);
@@ -276,6 +358,23 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
       setText("");
       closeMenu();
       if (textareaRef.current) textareaRef.current.style.height = "auto";
+    };
+
+    const selectMention = (item?: MentionItem) => {
+      if (!item) return;
+      if (item.persona) { selectPersonaAction(item.persona); return; }
+      if (!item.insert || !mention) return;
+      const caret = textareaRef.current?.selectionStart ?? text.length;
+      const next = text.slice(0, mention.start) + item.insert + text.slice(caret);
+      setText(next);
+      closeMenu();
+      requestAnimationFrame(() => {
+        const el = textareaRef.current;
+        if (!el) return;
+        const position = mention.start + item.insert!.length;
+        el.focus();
+        el.setSelectionRange(position, position);
+      });
     };
 
     const selectPersonaAction = (name: string) => {
@@ -358,9 +457,37 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
 
     return (
       <div
-        className="shrink-0 px-4 pb-3 pt-3 sm:px-6"
+        className="mew-conversation-gutters shrink-0 pb-3 pt-3"
       >
         <div className="mew-conversation-width mx-auto">
+          {sessionId !== "new" && queuedMessages.length > 0 && (
+            <div className="mb-2 space-y-1" aria-label="Queued messages">
+              {queuedMessages.map((item) => (
+                <div
+                  key={item.id}
+                  className="flex min-w-0 items-center gap-2 rounded-xl border border-border/60 bg-muted/40 px-2.5 py-1.5 text-xs"
+                >
+                  <CornerDownRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+                  <span className="min-w-0 flex-1 truncate text-foreground">{item.text}</span>
+                  <button
+                    type="button"
+                    onClick={() => getClient()?.updateQueuedMessage(sessionId, item.id, { mode: "steer" })}
+                    className="shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
+                  >
+                    Steer
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => getClient()?.removeQueuedMessage(sessionId, item.id)}
+                    aria-label={`Remove queued message ${item.text}`}
+                    className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
           <div className="relative">
             <div
               data-testid="composer-surface"
@@ -378,7 +505,7 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
                 <textarea
                   ref={textareaRef}
                   value={text}
-                  onChange={(e) => handleChange(e.target.value)}
+                  onChange={(e) => handleChange(e.target.value, e.target.selectionStart ?? e.target.value.length)}
                   onKeyDown={handleKeyDown}
                   onPaste={handlePaste}
                   onFocus={() => setFocused(true)}
@@ -442,31 +569,49 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
                   <PersonaPill />
                 </div>
                 <div className="flex min-w-0 flex-1 items-center justify-end gap-1">
+                <ContextIndicator />
                 <ModelPill />
-                {hasStreaming ? (
-                  <button
-                    onClick={onCancel}
-                    className="motion-pressable flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-foreground text-background hover:opacity-90"
-                    title="Cancel"
-                    aria-label="Cancel response"
-                  >
-                    <Square className="h-3 w-3 fill-current" />
-                  </button>
-                ) : (
-                  <button
-                    onClick={handleSubmit}
-                    disabled={!text.trim() || !connected || isSending}
-                    aria-busy={isSending}
-                    className={cn(
-                      "motion-pressable flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-foreground text-background hover:opacity-90 disabled:opacity-40",
-                    )}
-                    title={isSending ? "Sending…" : "Send"}
-                    aria-label="Send prompt"
-                  >
-                    {isSending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowUp className="h-4 w-4" />}
-                  </button>
-                  )}
-                  </div>
+                <div className="flex shrink-0 items-center">
+                  <ActionSlot open={Boolean(sessionBusy && text.trim() && onSteer)} delayMs={35}>
+                    <button
+                      type="button"
+                      onClick={() => void handleSubmit("steer")}
+                      disabled={!connected || isSending}
+                      tabIndex={sessionBusy && text.trim() && onSteer ? undefined : -1}
+                      className="motion-pressable whitespace-nowrap rounded-md border border-border/70 px-2 py-1 text-[11px] font-medium text-foreground hover:bg-accent disabled:opacity-40"
+                      title="Interrupt and steer active turn"
+                    >
+                      Steer
+                    </button>
+                  </ActionSlot>
+                  <ActionSlot open={!sessionBusy || Boolean(text.trim())}>
+                    <button
+                      onClick={() => void handleSubmit("default")}
+                      disabled={!text.trim() || !connected || isSending}
+                      aria-busy={isSending}
+                      tabIndex={!sessionBusy || text.trim() ? undefined : -1}
+                      className={cn(
+                        "motion-pressable flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-foreground text-background hover:opacity-90 disabled:opacity-40",
+                      )}
+                      title={isSending ? "Sending…" : sessionBusy ? "Queue follow-up" : "Send"}
+                      aria-label={sessionBusy ? "Queue follow-up" : "Send prompt"}
+                    >
+                      {isSending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowUp className="h-4 w-4" />}
+                    </button>
+                  </ActionSlot>
+                  <ActionSlot open={Boolean(sessionBusy)}>
+                    <button
+                      onClick={onCancel}
+                      tabIndex={sessionBusy ? undefined : -1}
+                      className="motion-pressable flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-foreground text-background hover:opacity-90"
+                      title="Cancel"
+                      aria-label="Cancel response"
+                    >
+                      <Square className="h-3 w-3 fill-current" />
+                    </button>
+                  </ActionSlot>
+                </div>
+                </div>
               </div>
             </div>
 
@@ -484,17 +629,26 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
               </MenuPanel>
             )}
 
-            {menuOpen === "persona" && filteredPersonas.length > 0 && (
-              <MenuPanel title="Personas">
-                {filteredPersonas.map((p, i) => (
-                  <MenuRow
-                    key={p}
-                    active={i === menuIndex}
-                    onClick={() => selectPersonaAction(p)}
-                    primary={p}
-                  />
-                ))}
-              </MenuPanel>
+            {menuOpen === "persona" && mentionItems.length > 0 && (
+              <>
+                {(["Files", "Skills", "Models", "Subagents", "Personas"] as const).map((group) => {
+                  const groupItems = mentionItems.filter((item) => item.group === group);
+                  if (!groupItems.length) return null;
+                  return (
+                    <MenuPanel key={group} title={group}>
+                      {groupItems.map((item) => (
+                        <MenuRow
+                          key={item.id}
+                          active={mentionItems.indexOf(item) === menuIndex}
+                          onClick={() => selectMention(item)}
+                          primary={item.primary}
+                          secondary={item.secondary}
+                        />
+                      ))}
+                    </MenuPanel>
+                  );
+                })}
+              </>
             )}
           </div>
 
@@ -600,6 +754,64 @@ function MenuRow({
         <span className="text-[10px] text-muted-foreground">{secondary}</span>
       )}
     </button>
+  );
+}
+
+const ACTION_SLOT_EXIT_MS = 180;
+
+function ActionSlot({
+  open,
+  delayMs = 0,
+  children,
+}: {
+  open: boolean;
+  delayMs?: number;
+  children: ReactNode;
+}) {
+  const [mounted, setMounted] = useState(open);
+  const [visible, setVisible] = useState(open);
+
+  useEffect(() => {
+    const reducedMotion =
+      typeof window !== "undefined" &&
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+
+    if (open) {
+      setMounted(true);
+      if (reducedMotion) {
+        setVisible(true);
+        return;
+      }
+      let raf2 = 0;
+      const raf1 = requestAnimationFrame(() => {
+        raf2 = requestAnimationFrame(() => setVisible(true));
+      });
+      return () => {
+        cancelAnimationFrame(raf1);
+        cancelAnimationFrame(raf2);
+      };
+    }
+
+    setVisible(false);
+    if (reducedMotion) {
+      setMounted(false);
+      return;
+    }
+    const timer = setTimeout(() => setMounted(false), ACTION_SLOT_EXIT_MS);
+    return () => clearTimeout(timer);
+  }, [open]);
+
+  if (!mounted) return null;
+
+  return (
+    <div
+      className="mew-action-slot"
+      data-open={visible ? "true" : "false"}
+      aria-hidden={!open || undefined}
+      style={open && delayMs > 0 ? ({ "--mew-slot-delay": `${delayMs}ms` } as CSSProperties) : undefined}
+    >
+      <div>{children}</div>
+    </div>
   );
 }
 

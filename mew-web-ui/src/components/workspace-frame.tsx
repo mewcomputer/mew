@@ -18,6 +18,7 @@ import {
 } from "../lib/workspace-surfaces";
 import { RightRail } from "./right-rail";
 import { SessionRail } from "./session-rail";
+import { SettingsDialog } from "./settings-dialog";
 import { SidebarInset, SidebarProvider } from "./ui/sidebar";
 import {
   ResizableHandle,
@@ -368,6 +369,7 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
           </div>
         </div>
       </SidebarProvider>
+      <SettingsDialog />
     </WorkspaceFrameContext.Provider>
   );
 }

@@ -115,17 +115,17 @@ describe("groupByWorkspace", () => {
 });
 
 describe("deriveTitle", () => {
-  it("returns summary when available", () => {
-    const s = makeSession({ summary: "My Session Summary" });
-    expect(deriveTitle(s)).toBe("My Session Summary");
+  it("returns the persisted title when available", () => {
+    const s = makeSession({ title: "Fix the flaky test" });
+    expect(deriveTitle(s)).toBe("Fix the flaky test");
   });
 
-  it("returns first_message when no summary", () => {
+  it("returns first_message when no title", () => {
     const s = makeSession({ first_message: "How do I fix a bug?" });
     expect(deriveTitle(s)).toBe("How do I fix a bug?");
   });
 
-  it("returns model name when no summary or first_message", () => {
+  it("returns model name when no title or first_message", () => {
     const s = makeSession({ model: "deepseek/deepseek-v4-flash" });
     expect(deriveTitle(s)).toBe("deepseek-v4-flash");
   });
@@ -135,12 +135,20 @@ describe("deriveTitle", () => {
     expect(deriveTitle(s)).toBe("Untitled");
   });
 
-  it("prioritizes summary over first_message", () => {
+  it("never puts the summary in the title slot", () => {
     const s = makeSession({
-      summary: "Summary wins",
+      summary: "Summary loses",
       first_message: "first message text",
     });
-    expect(deriveTitle(s)).toBe("Summary wins");
+    expect(deriveTitle(s)).toBe("first message text");
+  });
+
+  it("prioritizes the title over first_message", () => {
+    const s = makeSession({
+      title: "Title wins",
+      first_message: "first message text",
+    });
+    expect(deriveTitle(s)).toBe("Title wins");
   });
 
   it("never returns raw session ID", () => {
@@ -163,5 +171,25 @@ describe("session rail density", () => {
       "New session · mew",
     );
     expect(displaySessionTitle(undefined)).toBe("New session");
+  });
+
+  it("puts the session title in the title slot, never the summary", () => {
+    const session = makeSession({
+      title: "Fix the flaky test",
+      summary: "A recap of the whole conversation",
+      first_message: "first message text",
+    });
+    expect(displaySessionTitle(undefined, session)).toBe("Fix the flaky test");
+
+    // A live rename wins over the title in the last list snapshot.
+    expect(displaySessionTitle("Renamed", session)).toBe("Renamed");
+
+    // Without a title the first prompt stands in; the summary does not.
+    expect(
+      displaySessionTitle(undefined, makeSession({
+        summary: "A recap of the whole conversation",
+        first_message: "first message text",
+      })),
+    ).toBe("first message text");
   });
 });

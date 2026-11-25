@@ -11,6 +11,7 @@ export function CodeBlock({
   wrapLines = false,
   flush = false,
   fill = false,
+  highlight = true,
 }: {
   code: string;
   lang: string;
@@ -19,44 +20,50 @@ export function CodeBlock({
   wrapLines?: boolean;
   flush?: boolean;
   fill?: boolean;
+  highlight?: boolean;
 }) {
-  const [html, setHtml] = useState<string | null>(null);
+  const [highlighted, setHighlighted] = useState<{ code: string; lang: string; html: string } | null>(null);
 
   useEffect(() => {
+    if (!highlight) {
+      setHighlighted(null);
+      return;
+    }
     let cancelled = false;
     highlightCode(code, lang).then((h) => {
-      if (!cancelled) setHtml(h);
+      if (!cancelled) setHighlighted({ code, lang, html: h });
     });
     return () => {
       cancelled = true;
     };
-  }, [code, lang]);
+  }, [code, lang, highlight]);
 
   return (
     <div className={cn(
       "group relative w-full min-w-0 max-w-full overflow-hidden",
       fill && "flex min-h-0 flex-1 flex-col",
-      showHeader && "my-4 rounded-lg border border-border",
+      showHeader && "not-typeset my-2 rounded-md border border-border bg-muted/30",
     )}>
       {showHeader && (
-        <div className="flex items-center justify-between border-b border-border bg-muted px-3 py-1.5">
+        <div className="flex h-7 items-center justify-between px-3">
           <span className="font-mono text-xs text-muted-foreground">{lang}</span>
           <CopyButton text={code} />
         </div>
       )}
-      {html ? (
+      {highlight && highlighted?.code === code && highlighted.lang === lang ? (
         <div
           className={cn(
             "w-full min-w-0 max-w-full overflow-x-auto p-4 text-sm",
+            showHeader && "mew-code-content px-3 pb-2 pt-0 text-[13px] leading-relaxed",
             lineNumbers && "file-viewer-code",
             wrapLines && "file-viewer-code-wrapped overflow-x-hidden",
             flush && "p-0",
             fill && "file-viewer-code-fill flex min-h-0 flex-1 flex-col",
           )}
-          dangerouslySetInnerHTML={{ __html: html }}
+          dangerouslySetInnerHTML={{ __html: highlighted.html }}
         />
       ) : (
-        <pre className="w-full min-w-0 max-w-full overflow-x-auto bg-muted p-4 text-sm">
+        <pre className={cn("w-full min-w-0 max-w-full overflow-x-auto bg-muted p-4 text-sm", showHeader && "m-0 bg-transparent px-3 pb-2 pt-0 text-[13px] leading-relaxed")}>
           <code>{code}</code>
         </pre>
       )}

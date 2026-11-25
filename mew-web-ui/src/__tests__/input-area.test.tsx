@@ -6,10 +6,14 @@ import type { PersonaInfo } from "@mew/web-client";
 
 // Mock getClient — the store imports from client-ref
 const switchPersonaMock = vi.fn();
+const updateQueuedMessageMock = vi.fn();
+const removeQueuedMessageMock = vi.fn();
 vi.mock("../lib/client-ref", () => ({
   getClient: () => ({
     switchPersona: switchPersonaMock,
     listPersonas: vi.fn(),
+    updateQueuedMessage: updateQueuedMessageMock,
+    removeQueuedMessage: removeQueuedMessageMock,
   }),
 }));
 
@@ -71,6 +75,12 @@ describe("InputArea", () => {
     expect(surface.contains(screen.getByTitle("Persona"))).toBe(true);
     expect(surface.contains(screen.getByTitle("Switch model"))).toBe(true);
     expect(surface.contains(screen.getByTitle("Send"))).toBe(true);
+  });
+
+  it("pads the composer with the shared chat column gutters", () => {
+    const { container } = renderInputArea();
+    // Same class the transcript uses, so both columns share one centre line.
+    expect(container.querySelector(".mew-conversation-width")!.parentElement!.className).toContain("mew-conversation-gutters");
   });
 
   it("keeps unsent text and attachments owned by their chat across navigation", () => {
@@ -300,5 +310,144 @@ describe("InputArea", () => {
     });
 
     expect(screen.getByText("dropped.png")).toBeTruthy();
+  });
+});
+describe("inline @ references", () => {
+  afterEach(cleanup);
+
+  it("filters by namespace and inserts a reference token", () => {
+    useSessionStore.setState({
+      mentionSkills: [{ name: "audit", description: "Review code" }],
+      mentionSubagents: [],
+      availableModels: [],
+      dirResults: new Map(),
+      gitStatus: [],
+      flaggedFiles: [],
+      availablePersonas: [],
+    });
+    const { container } = renderInputArea();
+    const textarea = container.querySelector("textarea")!;
+    fireEvent.change(textarea, { target: { value: "@skill:au", selectionStart: 9 } });
+    expect(screen.getByText("audit")).toBeTruthy();
+    const option = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("audit"));
+    expect(option).toBeTruthy();
+    fireEvent.mouseDown(option!);
+    expect(textarea.value).toBe("@skill:audit ");
+  });
+
+  it("offers workspace files from the root listing", () => {
+    useSessionStore.setState({
+      mentionSkills: [],
+      mentionSubagents: [],
+      availableModels: [],
+      dirResults: new Map([["", { entries: [{ name: "README.md", is_dir: false }], error: null }]]),
+      gitStatus: [],
+      flaggedFiles: [],
+      availablePersonas: [],
+    });
+    const { container } = renderInputArea();
+    const textarea = container.querySelector("textarea")!;
+    fireEvent.change(textarea, { target: { value: "@READ", selectionStart: 5 } });
+    expect(screen.getByText("README.md")).toBeTruthy();
+  });
+});
+
+describe("queued follow-up and steer controls", () => {
+  afterEach(cleanup);
+  beforeEach(() => {
+    updateQueuedMessageMock.mockClear();
+    removeQueuedMessageMock.mockClear();
+    useSessionStore.setState({
+      sessionId: "queue-chat",
+      availablePersonas: [],
+      currentPersona: null,
+      streamingPartId: "part-1",
+      queuedMessages: [
+        { id: "q-1", text: "queued item one", mode: "follow_up", created_at: 10 },
+      ],
+      promptHistory: [],
+    });
+  });
+
+  it("renders queued messages with Steer and Remove actions and dispatches Steer/Queue while busy", async () => {
+    const onSend = vi.fn();
+    const onEnqueue = vi.fn();
+    const onSteer = vi.fn();
+    const onCancel = vi.fn();
+    const { container } = render(
+      <InputArea
+        onSend={onSend}
+        onEnqueue={onEnqueue}
+        onSteer={onSteer}
+        onCancel={onCancel}
+        connected
+      />,
+    );
+
+    expect(screen.getByText("queued item one")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Steer" }));
+    expect(updateQueuedMessageMock).toHaveBeenCalledWith("queue-chat", "q-1", { mode: "steer" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove queued message queued item one" }));
+    expect(removeQueuedMessageMock).toHaveBeenCalledWith("queue-chat", "q-1");
+
+    const input = container.querySelector("textarea")!;
+    fireEvent.change(input, { target: { value: "interrupt now" } });
+    const steerBtn = screen.getByTitle("Interrupt and steer active turn");
+    fireEvent.click(steerBtn);
+    await waitFor(() => expect(onSteer).toHaveBeenCalledWith("interrupt now", undefined));
+
+    fireEvent.change(input, { target: { value: "run next" } });
+    const queueBtn = screen.getByRole("button", { name: "Queue follow-up" });
+    fireEvent.click(queueBtn);
+    await waitFor(() => expect(onEnqueue).toHaveBeenCalledWith("run next", undefined));
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it("animates action slots from one button to three when typing while busy", () => {
+    vi.useFakeTimers();
+    try {
+      const { container } = render(
+        <InputArea
+          onSend={vi.fn()}
+          onEnqueue={vi.fn()}
+          onSteer={vi.fn()}
+          onCancel={vi.fn()}
+          connected
+        />,
+      );
+
+      expect(screen.getByRole("button", { name: "Cancel response" }).closest(".mew-action-slot")?.getAttribute("data-open")).toBe("true");
+      expect(screen.queryByTitle("Interrupt and steer active turn")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Queue follow-up" })).toBeNull();
+
+      const input = container.querySelector("textarea")!;
+      fireEvent.change(input, { target: { value: "follow up" } });
+
+      const steerSlot = screen.getByTitle("Interrupt and steer active turn").closest(".mew-action-slot")!;
+      const queueSlot = screen.getByRole("button", { name: "Queue follow-up" }).closest(".mew-action-slot")!;
+      expect(steerSlot.getAttribute("data-open")).toBe("false");
+      expect(steerSlot.getAttribute("aria-hidden")).toBeNull();
+
+      act(() => {
+        vi.advanceTimersByTime(50);
+      });
+      expect(steerSlot.getAttribute("data-open")).toBe("true");
+      expect(queueSlot.getAttribute("data-open")).toBe("true");
+
+      fireEvent.change(input, { target: { value: "" } });
+      expect(steerSlot.getAttribute("data-open")).toBe("false");
+      expect(steerSlot.getAttribute("aria-hidden")).toBe("true");
+      expect(screen.queryByRole("button", { name: "Queue follow-up" })).toBeNull();
+
+      act(() => {
+        vi.advanceTimersByTime(180);
+      });
+      expect(steerSlot.isConnected).toBe(false);
+      expect(queueSlot.isConnected).toBe(false);
+      expect(screen.getByRole("button", { name: "Cancel response" }).closest(".mew-action-slot")?.getAttribute("data-open")).toBe("true");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

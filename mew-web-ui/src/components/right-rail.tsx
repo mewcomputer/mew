@@ -33,6 +33,8 @@ import { BrowserPanel } from "./browser-panel";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { FrameWorkbenchTitlebar, useOptionalWorkspaceFrame } from "./workspace-frame";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { SubagentIdenticon } from "./subagent-identicon";
 
 const SubagentConversation = lazy(() => import("./subagent-conversation"));
 
@@ -76,6 +78,7 @@ export function RightRail({
   const inFrameTitlebar = mode === "dock" && !isMobile && Boolean(frame?.workbenchTitlebar);
   const tabList = useRef<HTMLDivElement>(null);
   const [uncontrolledWorkbenchTabs, setUncontrolledWorkbenchTabs] = useState(DEFAULT_WORKBENCH_TABS);
+  const [fileRefresh, setFileRefresh] = useState<{ tabId: string; owner?: string; path: string }>();
   const selectedWorkbenchTabs = onWorkbenchTabsChange || onWorkbenchTabsAction
     ? workbenchTabs
     : uncontrolledWorkbenchTabs;
@@ -95,7 +98,10 @@ export function RightRail({
   const flaggedFiles = useSessionStore((s) => s.flaggedFiles);
   const jobs = useSessionStore((s) => s.jobs);
   const connected = useSessionStore((s) => s.connectionState === "connected");
+  const confirmedSessionId = useSessionStore((s) => s.confirmedSessionId);
   const gitStatus = useSessionStore((s) => s.gitStatus);
+  const gitStatusError = useSessionStore((s) => s.gitStatusError);
+  const gitStatusLoaded = useSessionStore((s) => s.gitStatusLoaded);
   const sessionId = useSessionStore((s) => s.sessionId);
   const sessionCwd = useSessionStore((s) => s.sessionCwd);
   const availableSessions = useSessionStore((s) => s.availableSessions);
@@ -124,22 +130,74 @@ export function RightRail({
     addWorkbenchTab("browser");
   };
 
+  const openChangedFile = (path: string) => {
+    const existing = selectedWorkbenchTabs.tabs.find((tab) => tab.kind === "file");
+    const paths = Array.isArray(existing?.payload?.files?.openPaths) ? existing.payload.files.openPaths : [];
+    const files = { openPaths: paths.includes(path) ? paths : [...paths, path], activePath: path };
+    if (existing && paths.includes(path)) setFileRefresh({ tabId: existing.id, owner: currentOwner, path });
+    if (!existing) {
+      applyWorkbenchAction({ type: "add", tab: createWorkbenchTab("file", {
+        sessionId: sessionId ?? undefined, cwd: sessionCwd ?? undefined, payload: { files },
+      }) });
+      return;
+    }
+    const update: WorkbenchTabsAction = { type: "update", id: existing.id, patch: { payload: { ...existing.payload, files } } };
+    const select: WorkbenchTabsAction = { type: "select", id: existing.id };
+    if (onWorkbenchTabsAction) {
+      applyWorkbenchAction(update);
+      applyWorkbenchAction(select);
+    } else {
+      setSelectedWorkbenchTabs(workbenchTabsReducer(workbenchTabsReducer(selectedWorkbenchTabs, update), select));
+    }
+  };
+
+  const openFileRef = useRef(openChangedFile);
+  openFileRef.current = openChangedFile;
+  const openChangeRef = useRef(onOpenChange);
+  openChangeRef.current = onOpenChange;
+  useEffect(() => {
+    const receive = (event: Event) => {
+      const detail = (event as CustomEvent<{ sessionId?: string | null; path?: string }>).detail;
+      if (!detail?.path || detail.sessionId !== sessionId) return;
+      openChangeRef.current(true);
+      openFileRef.current(detail.path);
+    };
+    window.addEventListener("mew:open-file", receive);
+    return () => window.removeEventListener("mew:open-file", receive);
+  }, [sessionId]);
+
   // When the Files or Changes tab is opened, enable workspace watching so
   // fs_changed events keep the listings/git status live. Stop watching
   // when those tabs are closed to avoid unnecessary traffic.
   useEffect(() => {
-    if (!open || !sessionId || !sessionHasWorkspace) return;
+    if (!open || !connected || !sessionId || confirmedSessionId !== sessionId || !sessionHasWorkspace) return;
     if (!selectedWorkbenchTab) return;
-    if (selectedWorkbenchTab.kind !== "changes" && selectedWorkbenchTab.kind !== "file") return;
+    if (selectedWorkbenchTab.kind !== "changes" && selectedWorkbenchTab.kind !== "file" && selectedWorkbenchTab.kind !== "review") return;
     const client = getClient();
     if (!client) return;
-    client.watchWorkspace(sessionId, true);
+    try { client.watchWorkspace(sessionId, true); }
+    catch {
+      useSessionStore.setState({ gitStatusError: "Could not watch the workspace. Check the connection." });
+      return;
+    }
     // Also seed the git status when the Changes tab opens.
-    if (selectedWorkbenchTab.kind === "changes") client.gitStatus(sessionId);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    if (selectedWorkbenchTab.kind === "changes" || selectedWorkbenchTab.kind === "review") {
+      useSessionStore.setState({ gitStatusLoaded: false, gitStatusError: null });
+      try { client.gitStatus(sessionId); }
+      catch { useSessionStore.setState({ gitStatusError: "Could not load changes. Check the connection." }); }
+      timer = setTimeout(() => {
+        const state = useSessionStore.getState();
+        if (state.sessionId === sessionId && !state.gitStatusLoaded && !state.gitStatusError) {
+          useSessionStore.setState({ gitStatusError: "Loading changes timed out. Check the connection and reopen this tab." });
+        }
+      }, 15_000);
+    }
     return () => {
-      client.watchWorkspace(sessionId, false);
+      if (timer) clearTimeout(timer);
+      try { client.watchWorkspace(sessionId, false); } catch { /* The connection is already closed. */ }
     };
-  }, [open, selectedWorkbenchTab, sessionId, sessionHasWorkspace]);
+  }, [open, connected, confirmedSessionId, selectedWorkbenchTab?.id, selectedWorkbenchTab?.kind, sessionId, sessionHasWorkspace]);
 
   const activeCounts = {
     subagents: [...subagents.values()].filter((s) => s.status === "running").length,
@@ -354,18 +412,28 @@ export function RightRail({
           </div>}
         />;
       case "file":
+        if (workbenchSessionId && workbenchSessionId !== sessionId) return null;
         return (
           <div className="flex h-full min-h-0 flex-col">
-            {flaggedFiles.length > 0 && <PinnedContext files={flaggedFiles} />}
             <div className="min-h-0 flex-1">
-              <FileTreePanel hasWorkspace={sessionHasWorkspace} />
+              <FileTreePanel
+                hasWorkspace={sessionHasWorkspace}
+                headerActions={flaggedFiles.length > 0 ? <PinnedContext files={flaggedFiles} /> : undefined}
+                fileState={tab.payload?.files}
+                refreshRequest={fileRefresh?.tabId === tab.id && fileRefresh.owner === currentOwner ? fileRefresh : undefined}
+                onFileStateChange={(files) => applyWorkbenchAction({
+                  type: "update", id: tab.id, patch: { payload: { ...tab.payload, files } },
+                }, currentOwner)}
+              />
             </div>
           </div>
         );
       case "changes":
-        return <div className="h-full min-h-0 overflow-y-auto p-3"><ChangesPanel gitStatus={gitStatus} hasWorkspace={sessionHasWorkspace} /></div>;
+        if (workbenchSessionId && workbenchSessionId !== sessionId) return null;
+        return <div className="h-full min-h-0 p-3"><ChangesPanel gitStatus={gitStatus} sessionId={sessionId} connected={connected} statusError={gitStatusError} statusLoaded={gitStatusLoaded} hasWorkspace={sessionHasWorkspace} onOpenFile={openChangedFile} /></div>;
       case "review":
-        return <div className="h-full min-h-0 overflow-y-auto p-3"><ReviewPanel gitStatus={gitStatus} hasWorkspace={sessionHasWorkspace} /></div>;
+        if (workbenchSessionId && workbenchSessionId !== sessionId) return null;
+        return <div className="h-full min-h-0 overflow-y-auto p-3"><ReviewPanel gitStatus={gitStatus} statusError={gitStatusError} statusLoaded={gitStatusLoaded} hasWorkspace={sessionHasWorkspace} /></div>;
       case "terminal":
         return <TerminalWorkbenchPanel jobs={jobs} />;
     }
@@ -401,14 +469,16 @@ export function RightRail({
 
 function PinnedContext({ files }: { files: { path: string; reason?: string }[] }) {
   return (
-    <div className="motion-enter border-b border-border px-3 py-2.5">
-      <div className="rounded-lg bg-muted/35 px-2.5 py-2">
-        <div className="flex items-center gap-1.5 text-[10px] font-semibold text-foreground">
+    <Popover>
+      <PopoverTrigger asChild>
+        <button type="button" aria-label={`Pinned context ${files.length}`} className="flex items-center gap-1 rounded p-1.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground">
           <Pin className="h-3 w-3 text-primary" />
-          Pinned context
-          <span className="text-muted-foreground">{files.length}</span>
-        </div>
-        <div className="mt-1.5 space-y-1">
+          <span>{files.length}</span>
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-72 p-3" aria-label="Pinned context">
+        <div className="mb-2 text-xs font-medium">Pinned context</div>
+        <div className="space-y-1">
           {files.map((file) => (
             <div key={file.path} className="group flex min-w-0 items-center gap-1.5">
               <span className="min-w-0 truncate font-mono text-[10px] text-muted-foreground">{file.path}</span>
@@ -429,16 +499,20 @@ function PinnedContext({ files }: { files: { path: string; reason?: string }[] }
             </div>
           ))}
         </div>
-      </div>
-    </div>
+      </PopoverContent>
+    </Popover>
   );
 }
 
 function ReviewPanel({
   gitStatus,
+  statusError,
+  statusLoaded,
   hasWorkspace,
 }: {
   gitStatus: GitEntry[];
+  statusError: string | null;
+  statusLoaded: boolean;
   hasWorkspace: boolean;
 }) {
   if (!hasWorkspace) {
@@ -452,6 +526,10 @@ function ReviewPanel({
       </div>
     );
   }
+
+  if (statusError) return <div role="alert" className="px-2 py-6 text-center text-xs text-muted-foreground">{statusError}</div>;
+
+  if (!statusLoaded) return <div className="py-8 text-center text-[11px] text-muted-foreground">Loading changes…</div>;
 
   if (gitStatus.length === 0) {
     return (
@@ -571,6 +649,7 @@ function SubagentRailRow({ sub, onOpen }: { sub: SubagentInfo; onOpen?: () => vo
   const content = (
     <>
       <div className="flex items-center gap-2">
+        <SubagentIdenticon seed={sub.childSessionId || sub.displayName || sub.parentCallId} size={16} />
         <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", dotColor)} />
         <span className="truncate text-xs font-medium text-foreground">
           {sub.displayName ?? sub.name}

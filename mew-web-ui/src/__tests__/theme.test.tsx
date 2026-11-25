@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { ThemeProvider, useTheme } from "../lib/theme";
+import { ThemeProvider, THEMES, useTheme } from "../lib/theme";
 import { initializeHost, resetHost } from "../lib/host";
 
 function Appearance() {
@@ -33,5 +33,31 @@ describe("appearance", () => {
     expect(screen.getByRole("status").textContent).toBe("custom-night:dark:dark:banga:mi-sans");
     expect(document.documentElement.getAttribute("data-title-font")).toBe("banga");
     expect(document.documentElement.getAttribute("data-body-font")).toBe("mi-sans");
+  });
+
+  it("classifies every built-in theme as light or dark and exposes paired lightTheme/darkTheme", () => {
+    const light = THEMES.filter((t) => t.mode === "light");
+    const dark = THEMES.filter((t) => t.mode === "dark");
+    expect(light.length).toBeGreaterThan(0);
+    expect(dark.length).toBeGreaterThan(0);
+    expect(light.length + dark.length).toBe(THEMES.length);
+
+    function PairReader() {
+      const { themeMode, lightTheme, darkTheme, setThemeMode, setLightTheme, setDarkTheme } = useTheme();
+      return (
+        <>
+          <output>{`${themeMode}:${lightTheme}|${darkTheme}`}</output>
+          <button onClick={() => setThemeMode("system")}>Follow</button>
+          <button onClick={() => setLightTheme("paperback")}>PickLight</button>
+          <button onClick={() => setDarkTheme("kanagawa")}>PickDark</button>
+        </>
+      );
+    }
+    render(<ThemeProvider><PairReader /></ThemeProvider>);
+    expect(screen.getByRole("status").textContent).toBe("system:codex-light|codex-dark");
+    fireEvent.click(screen.getByText("Follow"));
+    fireEvent.click(screen.getByText("PickLight"));
+    fireEvent.click(screen.getByText("PickDark"));
+    expect(screen.getByRole("status").textContent).toBe("system:paperback|kanagawa");
   });
 });

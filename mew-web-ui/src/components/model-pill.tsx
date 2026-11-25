@@ -6,6 +6,7 @@ import { shortModel } from "../lib/format";
 import { getClient } from "../lib/client-ref";
 import { getHostBootstrap } from "../lib/host";
 import { cn } from "../lib/utils";
+import { ProviderIcon } from "./provider-icon";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
 
 const RECENT_MODELS_STORAGE_KEY = "mew.recentModels";
@@ -201,6 +202,7 @@ export function ModelPill() {
           title="Switch model"
           className="motion-pressable flex h-7 min-w-0 max-w-56 items-center gap-1.5 rounded-full px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-accent-foreground data-[state=open]:bg-accent data-[state=open]:text-accent-foreground"
         >
+          {currentProvider && <ProviderIcon provider={currentProvider} variant="mono" className="h-3 w-3" />}
           <span className="truncate" title={label}>{label}</span>
           {currentThinkingVariant && (
             <span className="max-w-16 truncate text-[10px] capitalize text-muted-foreground/80">
@@ -372,7 +374,10 @@ export function ModelPill() {
                         <span className="min-w-0 flex-1">
                           <span className="flex items-center gap-1.5">
                             <span className="truncate font-medium">{model.display_name || model.model}</span>
-                            <span className="shrink-0 text-[10px] font-normal text-muted-foreground/75">{model.provider}</span>
+                            <span className="inline-flex shrink-0 items-center gap-1 text-[10px] font-normal text-muted-foreground/75">
+                              <ProviderIcon provider={model.provider} variant="mono" className="h-3 w-3" />
+                              <span>{model.provider}</span>
+                            </span>
                           </span>
                           {model.description && (
                             <span className="block truncate text-[11px] font-normal text-muted-foreground">
@@ -388,8 +393,9 @@ export function ModelPill() {
               )}
               {[...filteredByProvider.keys()].sort().map((provider) => (
                 <div key={provider} className="mb-1 last:mb-0">
-                  <div className="px-2 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/75">
-                    {provider}
+                  <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/75">
+                    <ProviderIcon provider={provider} variant="color" className="h-3.5 w-3.5" />
+                    <span>{provider}</span>
                   </div>
                   {filteredByProvider.get(provider)!.map((model) => {
                     const checked = model.provider === currentProvider && model.model === currentModel;

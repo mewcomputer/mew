@@ -8,6 +8,7 @@ import { useSessionStore } from "../stores/session";
 import { useTheme } from "../lib/theme";
 import { cn } from "../lib/utils";
 import { filterProjects, filterSessions, formatSessionDate, getSessionSearchText, projectName } from "../lib/session-search";
+import { createAndOpenSession } from "../lib/session-actions";
 
 interface CommandPaletteProps {
   client: MewClient | null;
@@ -61,15 +62,8 @@ export function CommandPalette({ client, open, onOpenChange }: CommandPalettePro
 
   const handleNewSession = async (cwd: string | null = null) => {
     if (!client) return;
-    try {
-      useSessionStore.getState().reset();
-      const newId = await client.newSession(cwd);
-      localStorage.setItem("mew.sessionId", newId);
-      router.navigate({ to: "/session/$sessionId", params: { sessionId: newId } });
-      onOpenChange(false);
-    } catch (error) {
-      useSessionStore.getState().onError(error instanceof Error ? error.message : "Could not create a session.");
-    }
+    const newId = await createAndOpenSession(client, router, { cwd });
+    if (newId) onOpenChange(false);
   };
 
   const handleAttach = (sessionId: string) => {
@@ -93,7 +87,7 @@ export function CommandPalette({ client, open, onOpenChange }: CommandPalettePro
           onOpenChange(false);
         },
       },
-      { id: "settings", label: "Open settings", icon: <Settings />, action: () => { router.navigate({ to: "/settings" }); onOpenChange(false); } },
+      { id: "settings", label: "Open settings", icon: <Settings />, action: () => { window.dispatchEvent(new Event("mew:open-settings")); onOpenChange(false); } },
       { id: "generate-wiki", label: "Generate repo wiki", icon: <Layers />, action: () => { client?.slashCommand("/wiki"); onOpenChange(false); } },
     ];
     if (currentSessionId) {
@@ -189,7 +183,7 @@ function SessionItem({ session, title, onSelect }: { session: SessionInfo; title
 }
 
 function deriveTitle(session: SessionInfo): string {
-  if (session.summary) return session.summary;
+  if (session.title) return session.title;
   if (session.first_message) return session.first_message;
   if (session.model) return session.model.split("/").pop() ?? session.model;
   return session.session_id.slice(0, 8);

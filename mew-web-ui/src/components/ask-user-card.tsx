@@ -5,6 +5,7 @@ import type { PendingAskUser } from "../stores/session";
 /** The MewClient instance is passed down via a React context set up in App.
  * For now, we grab it from a module-level ref that App sets. */
 import { getClient } from "../lib/client-ref";
+import { SubagentIdenticon } from "./subagent-identicon";
 
 /** Renders pending AskUserRequest modals. Each request shows its questions
  * with selectable options or free-text input. When the user submits, the
@@ -57,7 +58,15 @@ export function AskUserForm({
     <div className="rounded-lg border border-border bg-background p-3">
       {req.subagent && (
         <div className="mb-2 flex items-center justify-between gap-2 text-xs text-muted-foreground">
-          <span>input needed from {req.subagent.display_name ?? req.subagent.name} ({req.subagent.name})</span>
+          <span className="flex min-w-0 items-center gap-1.5">
+            <SubagentIdenticon
+              seed={req.subagent.child_session_id || req.subagent.display_name || req.subagent.parent_call_id}
+              size={14}
+            />
+            <span className="truncate">
+              input needed from {req.subagent.display_name ?? req.subagent.name} ({req.subagent.name})
+            </span>
+          </span>
           <button type="button" onClick={() => {
             getClient()?.cancelAskUser(req.requestId);
             resolveAskUser(req.requestId);

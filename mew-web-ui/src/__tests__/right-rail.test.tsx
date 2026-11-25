@@ -44,8 +44,8 @@ vi.mock("../lib/client-ref", () => ({
 }));
 
 vi.mock("../components/file-tree", () => ({
-  FileTreePanel: ({ hasWorkspace }: { hasWorkspace: boolean }) => (
-    <div>{hasWorkspace ? "Files panel" : "Choose a workspace to browse files."}</div>
+  FileTreePanel: ({ hasWorkspace, headerActions }: { hasWorkspace: boolean; headerActions?: React.ReactNode }) => (
+    <div>{headerActions}{hasWorkspace ? "Files panel" : "Choose a workspace to browse files."}</div>
   ),
   ChangesPanel: ({ hasWorkspace }: { hasWorkspace: boolean }) => (
     <div>{hasWorkspace ? "Changes panel" : "Choose a workspace to see changes."}</div>
@@ -84,6 +84,36 @@ describe("RightRail", () => {
 
   beforeEach(() => {
     useSessionStore.setState({ connectionState: "connected" });
+  });
+
+  it("opens and reveals the workbench when a message file chip asks for it", () => {
+    useSessionStore.setState({ sessionId: "chat", sessionCwd: "/work" });
+    const onAction = vi.fn();
+    const onOpenChange = vi.fn();
+    render(<RightRail mode="dock" open={false} onOpenChange={onOpenChange} workbenchSessionId="chat" workbenchTabs={{
+      tabs: [], activeTabId: "",
+    }} onWorkbenchTabsAction={onAction} />);
+    fireEvent(window, new CustomEvent("mew:open-file", { detail: { sessionId: "other", path: "ignored.ts" } }));
+    expect(onAction).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalled();
+    fireEvent(window, new CustomEvent("mew:open-file", { detail: { sessionId: "chat", path: "mascot.tsx" } }));
+    expect(onOpenChange).toHaveBeenCalledWith(true);
+    expect(onAction).toHaveBeenCalledWith(expect.objectContaining({
+      type: "add",
+      tab: expect.objectContaining({ kind: "file", payload: { files: { openPaths: ["mascot.tsx"], activePath: "mascot.tsx" } } }),
+    }), undefined);
+  });
+
+  it("keeps pinned context compact and lets users inspect it", () => {
+    useSessionStore.setState({ sessionId: "chat", sessionCwd: "/work", flaggedFiles: [{ path: "/work/PLAN.md" }] });
+    render(<RightRail mode="dock" open onOpenChange={vi.fn()} workbenchSessionId="chat" workbenchTabs={{
+      tabs: [{ id: "files", kind: "file", title: "Files", closable: true }], activeTabId: "files",
+    }} onWorkbenchTabsAction={vi.fn()} />);
+    const button = screen.getByRole("button", { name: /Pinned context/ });
+    expect(button.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByText("/work/PLAN.md")).toBeNull();
+    fireEvent.click(button);
+    expect(screen.getByText("/work/PLAN.md")).toBeTruthy();
   });
 
   it("retains visited Electron guests through pane, tab and chat switches and closes only the removed owner", async () => {

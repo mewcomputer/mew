@@ -7,6 +7,15 @@ import {
 } from "@/lib/workspace-surfaces";
 
 describe("workspace surfaces", () => {
+  it("safely restores malformed saved file tabs", () => {
+    const state = loadWorkspaceSurfaces({ getItem: () => JSON.stringify({
+      workbenchTabs: { activeTabId: "files", tabs: [{
+        id: "files", kind: "file", title: "Files", closable: true,
+        payload: { files: { openPaths: {}, activePath: "README.md" } },
+      }] },
+    }) });
+    expect(state.workbenchTabs.tabs[0]?.payload?.files).toEqual({ openPaths: [], activePath: null });
+  });
   it("starts with the pinned sidebar visible and workbench hidden", () => {
     expect(DEFAULT_WORKSPACE_SURFACES).toEqual({
       sidebarOpen: true,

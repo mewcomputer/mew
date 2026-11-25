@@ -13,6 +13,7 @@ import {
 } from "../stores/session";
 import { Button } from "./ui/button";
 import { MessageItem } from "./message-item";
+import { SubagentIdenticon } from "./subagent-identicon";
 
 export default function SubagentConversation({ parentId, agent, active, onBack }: {
   parentId: string;
@@ -85,6 +86,7 @@ export default function SubagentConversation({ parentId, agent, active, onBack }
         <Button type="button" size="icon-sm" variant="ghost" aria-label="Back to agents" onClick={onBack}>
           <ChevronLeft />
         </Button>
+        <SubagentIdenticon seed={agent.childSessionId || agent.displayName || agent.parentCallId} size={16} />
         <h2 className="min-w-0 flex-1 truncate text-xs font-medium">{name}</h2>
         <Button type="button" size="icon-sm" variant="ghost" aria-label="Refresh agent history" disabled={!attached || loading} onClick={() => setRefresh((count) => count + 1)}>
           <RotateCw />

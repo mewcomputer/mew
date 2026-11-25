@@ -66,8 +66,7 @@ function SessionsRouteComponent() {
       if (localStorage.getItem(SESSION_ID_KEY) === sid) localStorage.removeItem(SESSION_ID_KEY);
       setConfirmDelete(null);
       if (store.sessionId === sid) {
-        store.reset();
-        useSessionStore.setState({ sessionId: null, confirmedSessionId: null });
+        store.clearSession();
         const route = router.state.location.pathname;
         if (route === "/settings/sessions" || route === `/session/${sid}`) void router.navigate({ to: "/" });
       }
@@ -121,8 +120,8 @@ function SessionsRouteComponent() {
       </div>
       </FrameTitlebar>
 
-      <div className="flex-1 overflow-y-auto p-4">
-        <div className="mx-auto max-w-2xl space-y-4">
+      <div className="flex-1 overflow-y-auto px-6 pb-8 pt-8">
+        <div className="mx-auto max-w-2xl space-y-5">
           {/* Search */}
           <div className="relative">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -131,179 +130,177 @@ function SessionsRouteComponent() {
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search sessions…"
-              className="h-9 pl-8"
+              className="h-9 rounded-lg pl-8"
             />
           </div>
 
           {/* Session count */}
-          <div className="text-[10px] text-muted-foreground">
+          <div className="px-1 text-xs font-medium text-muted-foreground">
             {filtered.length} of {sessions.length} sessions
           </div>
           {deleteError && confirmDelete && (
-            <p role="alert" className="text-sm text-destructive">
+            <p role="alert" className="px-1 text-xs text-destructive">
               Could not delete {titles.get(confirmDelete) ?? confirmDelete}. {deleteError}
             </p>
           )}
 
           {/* Session list */}
-          {filtered.length === 0 && (
-            <div className="py-8 text-center text-xs text-muted-foreground">
+          {filtered.length === 0 ? (
+            <div className="rounded-xl border border-border/80 bg-card/40 py-10 text-center text-xs text-muted-foreground">
               {query ? `No sessions match "${query}"` : "No sessions yet"}
             </div>
-          )}
-
-          <div className="space-y-1.5">
-            {filtered.map((s) => {
-              const title = titles.get(s.session_id) ?? s.session_id.slice(0, 12) + "…";
-              const isCurrent = s.session_id === sessionId;
-              const isConfirming = confirmDelete === s.session_id;
-              const isDeleting = deletingSession === s.session_id;
-              const isEditing = editingTitle === s.session_id;
-              return (
-                <div
-                  key={s.session_id}
-                  className={cn(
-                    "flex items-center gap-3 rounded-lg border p-3 transition-colors",
-                    isCurrent
-                      ? "border-primary/50 bg-accent/50"
-                      : "border-border hover:bg-accent/30",
-                  )}
-                >
-                  {isEditing ? (
-                    <div className="flex flex-1 items-center gap-2">
-                      <MessageSquare className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                      <Input
-                        autoFocus
-                        value={titleDraft}
-                        onChange={(e) => setTitleDraft(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") handleSaveTitle();
-                          if (e.key === "Escape") setEditingTitle(null);
-                        }}
-                        className="h-7 text-xs"
-                      />
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        onClick={handleSaveTitle}
-                        title="Save"
-                      >
-                        <Check className="h-3.5 w-3.5" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        onClick={() => setEditingTitle(null)}
-                        title="Cancel"
-                      >
-                        <X className="h-3.5 w-3.5" />
-                      </Button>
-                    </div>
-                  ) : (
-                    <button
-                      onClick={() => handleOpen(s.session_id)}
-                      className="flex min-w-0 flex-1 flex-col gap-0.5 text-left"
-                    >
-                      <div className="flex items-center gap-2">
+          ) : (
+            <div className="divide-y divide-border/60 overflow-hidden rounded-xl border border-border/80 bg-card/40">
+              {filtered.map((s) => {
+                const title = titles.get(s.session_id) ?? s.session_id.slice(0, 12) + "…";
+                const isCurrent = s.session_id === sessionId;
+                const isConfirming = confirmDelete === s.session_id;
+                const isDeleting = deletingSession === s.session_id;
+                const isEditing = editingTitle === s.session_id;
+                return (
+                  <div
+                    key={s.session_id}
+                    className={cn(
+                      "flex items-center gap-3 px-4 py-3 transition-colors duration-150 ease-out",
+                      isCurrent ? "bg-accent/50" : "hover:bg-accent/35",
+                    )}
+                  >
+                    {isEditing ? (
+                      <div className="flex flex-1 items-center gap-2">
                         <MessageSquare className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                        <span className="truncate text-xs font-medium text-foreground">
-                          {title}
-                        </span>
-                        {isCurrent && (
-                          <span className="shrink-0 rounded-full bg-primary/10 px-1.5 py-0.5 text-[9px] font-medium text-primary">
-                            current
-                          </span>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-2 pl-5.5 text-[10px] text-muted-foreground">
-                        <span
-                          className={cn(
-                            "shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-medium uppercase",
-                            s.state === "active"
-                              ? "bg-green-500/15 text-green-600 dark:text-green-400"
-                              : "bg-muted text-muted-foreground",
-                          )}
-                        >
-                          {s.state}
-                        </span>
-                        {s.model && (
-                          <span className="truncate font-mono">
-                            {s.model.split("/").pop() ?? s.model}
-                          </span>
-                        )}
-                        <span className="shrink-0">
-                          · {formatRelativeAge(s.last_message_at ?? s.created_at)}
-                        </span>
-                        {s.client_count > 0 && (
-                          <span className="shrink-0">· {s.client_count}c</span>
-                        )}
-                      </div>
-                      {summaries.get(s.session_id) && !isEditing && (
-                        <div className="pl-5.5 mt-0.5 truncate text-[10px] italic text-muted-foreground/80">
-                          {summaries.get(s.session_id)}
-                        </div>
-                      )}
-                    </button>
-                  )}
-
-                  {/* Action buttons: pencil + delete (only when not editing) */}
-                  {!isEditing && (
-                    <div className="flex shrink-0 items-center gap-1">
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        className="text-muted-foreground"
-                        onClick={() => handleStartEdit(s.session_id)}
-                        title="Rename session"
-                      >
-                        <Pencil className="h-3.5 w-3.5" />
-                      </Button>
-                      {isConfirming ? (
-                        <>
-                          <Button
-                            variant="destructive"
-                            size="sm"
-                            className="h-7 text-[10px]"
-                            onClick={() => handleDelete(s.session_id)}
-                            disabled={!connected || deletingSession !== null}
-                            aria-busy={isDeleting}
-                          >
-                            {isDeleting ? "Deleting…" : "Delete"}
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-7 text-[10px]"
-                            onClick={() => {
-                              setConfirmDelete(null);
-                              setDeleteError(null);
-                            }}
-                            disabled={isDeleting}
-                          >
-                            Cancel
-                          </Button>
-                        </>
-                      ) : (
+                        <Input
+                          autoFocus
+                          value={titleDraft}
+                          onChange={(e) => setTitleDraft(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") handleSaveTitle();
+                            if (e.key === "Escape") setEditingTitle(null);
+                          }}
+                          className="h-7 text-xs"
+                        />
                         <Button
                           variant="ghost"
                           size="icon-sm"
-                          className="text-muted-foreground hover:text-destructive"
-                          onClick={() => {
-                            setConfirmDelete(s.session_id);
-                            setDeleteError(null);
-                          }}
-                          disabled={!connected || deletingSession !== null}
-                          title="Delete session"
+                          onClick={handleSaveTitle}
+                          title="Save"
                         >
-                          <Trash2 className="h-3.5 w-3.5" />
+                          <Check className="h-3.5 w-3.5" />
                         </Button>
-                      )}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          onClick={() => setEditingTitle(null)}
+                          title="Cancel"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => handleOpen(s.session_id)}
+                        className="flex min-w-0 flex-1 flex-col gap-1 text-left"
+                      >
+                        <div className="flex items-center gap-2">
+                          <MessageSquare className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                          <span className="truncate text-[13px] font-medium text-foreground">
+                            {title}
+                          </span>
+                          {isCurrent && (
+                            <span className="shrink-0 rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                              current
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2 pl-5.5 text-xs text-muted-foreground">
+                          <span
+                            className={cn(
+                              "shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium uppercase",
+                              s.state === "active"
+                                ? "bg-green-500/15 text-green-600 dark:text-green-400"
+                                : "bg-muted text-muted-foreground",
+                            )}
+                          >
+                            {s.state}
+                          </span>
+                          {s.model && (
+                            <span className="truncate font-mono">
+                              {s.model.split("/").pop() ?? s.model}
+                            </span>
+                          )}
+                          <span className="shrink-0">
+                            · {formatRelativeAge(s.last_message_at ?? s.created_at)}
+                          </span>
+                          {s.client_count > 0 && (
+                            <span className="shrink-0">· {s.client_count}c</span>
+                          )}
+                        </div>
+                        {summaries.get(s.session_id) && !isEditing && (
+                          <div className="mt-0.5 truncate pl-5.5 text-xs italic text-muted-foreground/80">
+                            {summaries.get(s.session_id)}
+                          </div>
+                        )}
+                      </button>
+                    )}
+
+                    {/* Action buttons: pencil + delete (only when not editing) */}
+                    {!isEditing && (
+                      <div className="flex shrink-0 items-center gap-1">
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          className="text-muted-foreground"
+                          onClick={() => handleStartEdit(s.session_id)}
+                          title="Rename session"
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                        </Button>
+                        {isConfirming ? (
+                          <>
+                            <Button
+                              variant="destructive"
+                              size="sm"
+                              className="h-7 text-xs"
+                              onClick={() => handleDelete(s.session_id)}
+                              disabled={!connected || deletingSession !== null}
+                              aria-busy={isDeleting}
+                            >
+                              {isDeleting ? "Deleting…" : "Delete"}
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 text-xs"
+                              onClick={() => {
+                                setConfirmDelete(null);
+                                setDeleteError(null);
+                              }}
+                              disabled={isDeleting}
+                            >
+                              Cancel
+                            </Button>
+                          </>
+                        ) : (
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            className="text-muted-foreground hover:text-destructive"
+                            onClick={() => {
+                              setConfirmDelete(s.session_id);
+                              setDeleteError(null);
+                            }}
+                            disabled={!connected || deletingSession !== null}
+                            title="Delete session"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       </div>
     </>

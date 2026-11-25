@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo, useRef } from "react";
+import { useEffect, useLayoutEffect, useState, useMemo, useRef } from "react";
 import { useRouter } from "@tanstack/react-router";
 import type { MewClient, SessionInfo, GroupInfo, ProjectInfo, AlertKind } from "@mew/web-client";
 import type { DirEntry } from "@mew/web-client";
@@ -62,6 +62,7 @@ import {
   ArrowUp,
 } from "lucide-react";
 import { getClient } from "../lib/client-ref";
+import { createAndOpenSession } from "../lib/session-actions";
 
 interface SessionRailProps {
   client: MewClient | null;
@@ -134,38 +135,17 @@ export function SessionRail({ client }: SessionRailProps) {
     }
   }, [client, connectionState, currentSessionId]);
 
-  const handleNewSession = async () => {
+  const handleNewSession = async (cwd: string | null = null) => {
     if (!client) return;
-    const location = router.state.location;
-    try {
-      // Clear the previous chat before creation. newSession emits session-ready
-      // and seeds the store; resetting afterward would make the route attach
-      // to the new session a second time.
-      useSessionStore.getState().reset();
-      const newId = await client.newSession();
-      if (router.state.location !== location) return;
-      localStorage.setItem("mew.sessionId", newId);
-      router.navigate({ to: "/session/$sessionId", params: { sessionId: newId } });
-      setOpenMobile(false);
-    } catch (error) {
-      reportActionError(error, "Could not create a session.");
-    }
-  };
-
-  const handleNewSessionFromCwd = async (cwd: string) => {
-    if (!client) return;
-    const location = router.state.location;
-    try {
-      useSessionStore.getState().reset();
-      const newId = await client.newSession(cwd);
-      if (router.state.location !== location) return;
-      localStorage.setItem("mew.sessionId", newId);
-      router.navigate({ to: "/session/$sessionId", params: { sessionId: newId } });
-      setShowProjectPicker(false);
-      setOpenMobile(false);
-    } catch (error) {
-      reportActionError(error, "Could not create a session for that workspace.");
-    }
+    const newId = await createAndOpenSession(client, router, {
+      cwd,
+      errorMessage: cwd
+        ? "Could not create a session for that workspace."
+        : "Could not create a session.",
+    });
+    if (!newId) return;
+    if (cwd !== null) setShowProjectPicker(false);
+    setOpenMobile(false);
   };
 
   const handleAttach = (sessionId: string) => {
@@ -206,6 +186,7 @@ export function SessionRail({ client }: SessionRailProps) {
         sessionSummaries.get(session.session_id),
         session.summary,
         session.first_message,
+        session.last_message,
         session.cwd,
         session.model,
       ]
@@ -263,7 +244,7 @@ export function SessionRail({ client }: SessionRailProps) {
             else { searchRequested.current = true; setSearchOpen(true); }
           }}><Search className="h-3.5 w-3.5" /></Button>
         </div>
-        <Button onClick={handleNewSession} disabled={!client || connectionState !== "connected"} variant="ghost" size="sm" className="h-8 w-full justify-start gap-2 rounded-lg border border-sidebar-border/80 bg-sidebar-accent/40 px-2.5 text-xs font-medium text-sidebar-foreground shadow-2xs hover:bg-sidebar-accent"><Plus className="h-3.5 w-3.5 text-muted-foreground" />New chat</Button>
+        <Button onClick={() => handleNewSession()} disabled={!client || connectionState !== "connected"} variant="ghost" size="sm" className="h-8 w-full justify-start gap-2 rounded-lg border border-sidebar-border/80 bg-sidebar-accent/40 px-2.5 text-xs font-medium text-sidebar-foreground shadow-2xs hover:bg-sidebar-accent"><Plus className="h-3.5 w-3.5 text-muted-foreground" />New chat</Button>
         {searchOpen && <Input ref={searchInput} value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => {
           if (event.key !== "Escape") return;
           event.preventDefault();
@@ -370,8 +351,9 @@ export function SessionRail({ client }: SessionRailProps) {
                       session={s}
                       isActive={s.session_id === currentSessionId}
                       showWorkspace={view !== "workspace"}
+                      notificationLayout={view === "timeline"}
                       title={displaySessionTitle(sessionTitles.get(s.session_id), s)}
-                      summary={sessionSummaries.get(s.session_id) ?? s.summary}
+                      summary={sessionSummaries.get(s.session_id)?.trim() || s.summary?.trim() || s.last_message?.trim()}
                       onClick={() => handleAttach(s.session_id)}
                       onArchive={(archived) => handleArchive(s.session_id, archived)}
                       onPin={(pinned) => handlePin(s.session_id, pinned)}
@@ -398,13 +380,13 @@ export function SessionRail({ client }: SessionRailProps) {
           </SidebarGroup>
         )}
       </SidebarContent>
-      <SidebarFooter className="px-2 py-2"><Button variant="ghost" size="sm" className="h-7 justify-start gap-2 px-2 text-xs font-normal text-muted-foreground" aria-label="Open settings" onClick={() => router.navigate({ to: "/settings" })}><Settings className="h-3.5 w-3.5" />Settings</Button></SidebarFooter>
+      <SidebarFooter className="px-2 py-2"><Button variant="ghost" size="sm" className="h-7 justify-start gap-2 px-2 text-xs font-normal text-muted-foreground" aria-label="Open settings" onClick={() => window.dispatchEvent(new Event("mew:open-settings"))}><Settings className="h-3.5 w-3.5" />Settings</Button></SidebarFooter>
       </TooltipProvider>
       <ProjectPickerModal
         open={showProjectPicker}
         onOpenChange={setShowProjectPicker}
         projects={projects}
-        onSelect={handleNewSessionFromCwd}
+        onSelect={(cwd) => handleNewSession(cwd)}
       />
     </Sidebar>
   );
@@ -423,15 +405,111 @@ function formatRelativeAge(timestampMs: number): string {
   return `${months}mo`;
 }
 
-function SessionRow({ session: s, isActive, showWorkspace, title, summary, onClick, onArchive, onPin, onRegenerateTitle, groups, client, attention }: {
-  session: SessionInfo; isActive: boolean; showWorkspace: boolean; title: string; summary?: string;
+const TITLE_MARQUEE_SPEED_PX_PER_SEC = 40;
+const TITLE_MARQUEE_START_DELAY_MS = 150;
+const TITLE_MARQUEE_PAUSE_MS = 700;
+const TITLE_MARQUEE_RESET_MS = 200;
+
+function SessionTitle({ title, isActive, notificationLayout, hovered }: {
+  title: string;
+  isActive: boolean;
+  notificationLayout: boolean;
+  hovered: boolean;
+}) {
+  const containerRef = useRef<HTMLSpanElement>(null);
+  const textRef = useRef<HTMLSpanElement>(null);
+  const [overflow, setOverflow] = useState(0);
+  const [marquee, setMarquee] = useState<{ offset: number; durationMs: number; easing: "linear" | "ease-out" }>({
+    offset: 0,
+    durationMs: 0,
+    easing: "ease-out",
+  });
+
+  useLayoutEffect(() => {
+    const container = containerRef.current;
+    const text = textRef.current;
+    if (!container || !text) return;
+
+    const measure = () => {
+      const paddingRight = Number.parseFloat(getComputedStyle(container).paddingRight) || 0;
+      const available = Math.max(0, container.clientWidth - paddingRight);
+      const delta = Math.ceil(text.scrollWidth - available);
+      setOverflow(delta > 1 ? delta : 0);
+    };
+
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(container);
+    observer.observe(text);
+    return () => observer.disconnect();
+  }, [title, notificationLayout]);
+
+  useEffect(() => {
+    if (!hovered || overflow <= 0) {
+      setMarquee((prev) => (prev.offset === 0 ? prev : { offset: 0, durationMs: TITLE_MARQUEE_RESET_MS, easing: "ease-out" }));
+      return;
+    }
+    if (typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+      return;
+    }
+
+    const scrollMs = Math.round((overflow / TITLE_MARQUEE_SPEED_PX_PER_SEC) * 1000);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let toEnd = true;
+
+    const step = () => {
+      const nextOffset = toEnd ? -overflow : 0;
+      toEnd = !toEnd;
+      setMarquee({ offset: nextOffset, durationMs: scrollMs, easing: "linear" });
+      timer = setTimeout(step, scrollMs + TITLE_MARQUEE_PAUSE_MS);
+    };
+
+    timer = setTimeout(step, TITLE_MARQUEE_START_DELAY_MS);
+    return () => {
+      if (timer !== undefined) clearTimeout(timer);
+    };
+  }, [hovered, overflow]);
+
+  return (
+    <span
+      ref={containerRef}
+      className={cn(
+        "min-w-0 overflow-hidden whitespace-nowrap text-xs leading-4",
+        notificationLayout ? "mew-notification-title" : "flex-1",
+        !notificationLayout && overflow > 0 && "mew-title-overflow",
+        isActive ? "font-medium text-sidebar-foreground" : "font-normal",
+      )}
+    >
+      <span
+        ref={textRef}
+        className="inline-block"
+        style={
+          overflow > 0
+            ? {
+                transform: `translateX(${marquee.offset}px)`,
+                transition: marquee.durationMs > 0 ? `transform ${marquee.durationMs}ms ${marquee.easing}` : "none",
+                willChange: "transform",
+              }
+            : undefined
+        }
+      >
+        {title}
+      </span>
+    </span>
+  );
+}
+
+function SessionRow({ session: s, isActive, showWorkspace, notificationLayout, title, summary, onClick, onArchive, onPin, onRegenerateTitle, groups, client, attention }: {
+  session: SessionInfo; isActive: boolean; showWorkspace: boolean; notificationLayout: boolean; title: string; summary?: string;
   onClick: () => void; onArchive: (a: boolean) => void; onPin: (p: boolean) => void;
   onRegenerateTitle: () => void; groups: GroupInfo[]; client: MewClient | null; attention: SessionAttention[];
 }) {
+  const [hovered, setHovered] = useState(false);
   const age = formatRelativeAge(s.last_message_at ?? s.created_at);
   const hasStatus = s.state === "running" || attention.length > 0 || s.last_turn_failed;
   const twoLine = (showWorkspace && Boolean(s.cwd)) || attention.length > 0 || Boolean(summary && summary !== title);
-  return <div className="group/chat-row relative">
+  return <div className="group/chat-row relative" onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}>
     <SidebarMenuButton
       isActive={isActive}
       aria-current={isActive ? "page" : undefined}
@@ -446,15 +524,16 @@ function SessionRow({ session: s, isActive, showWorkspace, title, summary, onCli
       )}
     >
       <div className="flex w-full items-center gap-2">
-        <span className={cn("min-w-0 flex-1 truncate text-xs leading-4", isActive ? "font-medium text-sidebar-foreground" : "font-normal")}>{title}</span>
-        <span className="flex shrink-0 items-center gap-1.5 text-[11px] tabular-nums text-muted-foreground/80 transition-opacity group-hover/chat-row:opacity-0 group-focus-within/chat-row:opacity-0">
+        <SessionTitle title={title} isActive={isActive} notificationLayout={notificationLayout} hovered={hovered} />
+        {notificationLayout && s.cwd && <span className="max-w-[65%] shrink-0 whitespace-normal break-words text-xs leading-4 text-muted-foreground/75 transition-opacity group-hover/chat-row:opacity-0 group-focus-within/chat-row:opacity-0 [overflow-wrap:anywhere]">{deriveWorkspaceName(s.cwd)}</span>}
+        <span className={cn("flex shrink-0 items-center gap-1.5 text-[11px] tabular-nums text-muted-foreground/80 transition-opacity group-hover/chat-row:opacity-0 group-focus-within/chat-row:opacity-0", notificationLayout && "ml-auto")}>
           {hasStatus && <StatusDot state={s.state} failed={s.last_turn_failed} attention={attention[0]} />}
-          <span aria-hidden="true">{age}</span>
+          {!notificationLayout && <span aria-hidden="true">{age}</span>}
         </span>
       </div>
-      {summary && summary !== title && <span className="line-clamp-1 text-[11px] leading-[14px] text-muted-foreground/80">{summary}</span>}
+      {summary && summary !== title && <div className={cn("w-full text-left text-[11px] leading-[14px] text-muted-foreground/80", notificationLayout ? "mew-notification-summary" : "line-clamp-1")}>{summary}</div>}
       {attention.length > 0 && <span className="flex items-center gap-1 text-[10px] text-text-warning"><AttentionIcon kind={attention[0]!.kind} />{attention[0]!.label}</span>}
-      {showWorkspace && s.cwd && (
+      {showWorkspace && !notificationLayout && s.cwd && (
         <span className="flex max-w-full items-center gap-1.5 truncate text-[11px] leading-[14px] text-muted-foreground/75">
           <Folder className="h-3 w-3 shrink-0 opacity-75" />
           <span className="truncate">{deriveWorkspaceName(s.cwd)}</span>
@@ -628,7 +707,7 @@ function AttentionIcon({ kind }: { kind: SessionAttention["kind"] }) {
 }
 
 export function displaySessionTitle(customTitle?: string, s?: SessionInfo): string {
-  const explicit = customTitle?.trim() || s?.summary?.trim() || s?.first_message?.trim();
+  const explicit = customTitle?.trim() || s?.title?.trim() || s?.first_message?.trim();
   if (explicit) return explicit;
   if (s?.model) return s.model.split("/").pop() ?? s.model;
   if (s?.cwd) return `New session · ${deriveWorkspaceName(s.cwd)}`;
@@ -640,7 +719,7 @@ export function limitTimelineSessions(sorted: SessionInfo[], query: string, limi
 }
 
 export function deriveTitle(s: SessionInfo): string {
-  if (s.summary) return s.summary;
+  if (s.title) return s.title;
   if (s.first_message) return s.first_message;
   if (s.model) return s.model.split("/").pop() ?? s.model;
   return "Untitled";
@@ -650,12 +729,6 @@ function deriveWorkspaceName(cwd?: string): string {
   if (!cwd) return "~";
   const parts = cwd.replace(/\/+$/, "").split("/");
   return parts[parts.length - 1] ?? cwd;
-}
-
-function reportActionError(error: unknown, fallback: string) {
-  useSessionStore
-    .getState()
-    .onError(error instanceof Error ? error.message : fallback);
 }
 
 /** A section of sessions grouped by workspace, group, or flat list. */

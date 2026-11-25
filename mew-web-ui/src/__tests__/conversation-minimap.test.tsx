@@ -99,3 +99,30 @@ describe("ConversationMinimap", () => {
     expect(onSelect).toHaveBeenCalledWith(0);
   });
 });
+describe("session index merge", () => {
+  afterEach(cleanup);
+
+  it("keeps local turns the daemon index has not seen yet", () => {
+    const sessionIndex = [
+      {
+        id: "user-1",
+        index: 0,
+        message_count: 2,
+        prompt: "older prompt",
+        reply: "older reply",
+      },
+    ];
+    render(
+      <ConversationMinimap
+        messages={SAMPLE_MESSAGES}
+        sessionId="sess-1"
+        activeMessageIndex={2}
+        onSelectMessageIndex={() => {}}
+        sessionIndex={sessionIndex}
+      />,
+    );
+    expect(document.querySelectorAll("[data-turn-tick]")).toHaveLength(2);
+    expect(document.querySelector('[data-turn-tick="0"]')?.getAttribute("aria-label")).toContain("older prompt");
+    expect(document.querySelector('[data-turn-tick="1"]')?.getAttribute("aria-label")).toContain("can we wire up the timeline scrubber?");
+  });
+});

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { render, screen, fireEvent, act, cleanup, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, act, cleanup, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { toast } from "sonner";
 import type { SessionInfo } from "@mew/web-client";
 import { useSessionStore } from "../stores/session";
 import { SidebarProvider } from "../components/ui/sidebar";
@@ -144,6 +145,116 @@ describe("SessionRail workspace collapse", () => {
     expect(screen.getByRole("button", { name: "mew menu" })).toBeTruthy();
   });
 
+  it("shows the workspace beside the title and a two-line summary in notifications", () => {
+    useSessionStore.setState({ availableSessions: [makeSession({
+      first_message: "Blume.town", cwd: "/projects/streamplace",
+      summary: "Fixed both: selected Bluesky posting waits for permission.", state: "running",
+    })] });
+    renderRail();
+    const row = screen.getByRole("button", { name: /^Blume\.town/ });
+    const title = within(row).getByText("Blume.town");
+    const workspace = within(row).getByText("streamplace");
+    const summary = within(row).getByText("Fixed both: selected Bluesky posting waits for permission.");
+    expect(title.closest(".mew-notification-title")?.parentElement).toBe(workspace.parentElement);
+    expect(summary.className).toContain("mew-notification-summary");
+    expect(row.querySelector(".lucide-folder")).toBeNull();
+    expect(row.textContent).not.toMatch(/\d+(?:h|d|mo)$/);
+  });
+
+  it("falls back to last_message in notifications when summary is missing", () => {
+    useSessionStore.setState({
+      availableSessions: [
+        makeSession({
+          session_id: "fallback",
+          first_message: "Initial prompt",
+          last_message: "Latest assistant reply",
+        }),
+        makeSession({
+          session_id: "single",
+          first_message: "Only message",
+          last_message: "Only message",
+        }),
+      ],
+    });
+    renderRail();
+    const fallbackRow = screen.getByRole("button", { name: /^Initial prompt/ });
+    const preview = within(fallbackRow).getByText("Latest assistant reply");
+    expect(preview.className).toContain("mew-notification-summary");
+
+    const singleRow = screen.getByRole("button", { name: /^Only message$/ });
+    expect(within(singleRow).getAllByText("Only message")).toHaveLength(1);
+  });
+
+  it("prefers summary over last_message when both exist", () => {
+    useSessionStore.setState({
+      availableSessions: [
+        makeSession({
+          first_message: "Initial prompt",
+          summary: "Short session summary",
+          last_message: "Latest assistant reply",
+        }),
+      ],
+    });
+    renderRail();
+    const row = screen.getByRole("button", { name: /^Initial prompt/ });
+    expect(within(row).getByText("Short session summary")).toBeTruthy();
+    expect(within(row).queryByText("Latest assistant reply")).toBeNull();
+  });
+
+  it("scrolls overflowing titles back and forth only on hover at constant speed", () => {
+    vi.useFakeTimers();
+    const clientWidthSpy = vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(function (this: HTMLElement) {
+      return this.className.includes("mew-notification-title") ? 100 : 0;
+    });
+    const scrollWidthSpy = vi.spyOn(HTMLElement.prototype, "scrollWidth", "get").mockImplementation(function (this: HTMLElement) {
+      return this.textContent === "A very long conversation title that overflows" ? 180 : 60;
+    });
+    try {
+      useSessionStore.setState({
+        availableSessions: [
+          makeSession({ session_id: "long", title: "A very long conversation title that overflows" }),
+          makeSession({ session_id: "short", title: "Short title" }),
+        ],
+      });
+      renderRail();
+
+      const longText = screen.getByText("A very long conversation title that overflows");
+      const longRow = longText.closest(".group\\/chat-row")!;
+      expect(longText.style.transform).toBe("translateX(0px)");
+      expect(longText.style.transition).toBe("none");
+
+      fireEvent.mouseEnter(longRow);
+      act(() => {
+        vi.advanceTimersByTime(150);
+      });
+      expect(longText.style.transform).toBe("translateX(-80px)");
+      expect(longText.style.transition).toBe("transform 2000ms linear");
+
+      act(() => {
+        vi.advanceTimersByTime(2700);
+      });
+      expect(longText.style.transform).toBe("translateX(0px)");
+      expect(longText.style.transition).toBe("transform 2000ms linear");
+
+      act(() => {
+        vi.advanceTimersByTime(2700);
+      });
+      expect(longText.style.transform).toBe("translateX(-80px)");
+
+      fireEvent.mouseLeave(longRow);
+      expect(longText.style.transform).toBe("translateX(0px)");
+      expect(longText.style.transition).toBe("transform 200ms ease-out");
+
+      const shortText = screen.getByText("Short title");
+      expect(shortText.style.transform).toBe("");
+      expect(shortText.style.transition).toBe("");
+    } finally {
+      vi.useRealTimers();
+      clientWidthSpy.mockRestore();
+      scrollWidthSpy.mockRestore();
+    }
+  });
+
   it("labels recent chat groups by their local calendar date", () => {
     const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1);
     const weekday = new Date(); weekday.setDate(weekday.getDate() - 3);
@@ -185,12 +296,11 @@ describe("SessionRail workspace collapse", () => {
     expect(screen.getByRole("button", { name: "Second chat" }).getAttribute("aria-current")).toBe("page");
   });
 
-  it("clears the previous session before creating a new one", async () => {
-    const newSession = vi.fn(async () => {
-      expect(useSessionStore.getState().sessionId).toBeNull();
-      expect(useSessionStore.getState().messages).toHaveLength(0);
-      return "sess_new";
-    });
+  it("preserves the current session and surfaces a toast if creating a new chat fails", async () => {
+    const toastError = vi.spyOn(toast, "error").mockImplementation(() => "");
+    const newSession = vi.fn().mockRejectedValue(
+      new Error("failed to create session: credential not found: opencode-zen"),
+    );
     useSessionStore.setState({
       sessionId: "sess_old",
       messages: [{
@@ -202,10 +312,21 @@ describe("SessionRail workspace collapse", () => {
       connectionState: "connected",
     });
 
-    renderRail({ newSession, listSessions: vi.fn(() => Promise.resolve([])) } as never);
-    await userEvent.setup().click(screen.getByRole("button", { name: "New chat" }));
+    try {
+      renderRail({ newSession, listSessions: vi.fn(() => Promise.resolve([])) } as never);
+      await userEvent.setup().click(screen.getByRole("button", { name: "New chat" }));
 
-    expect(newSession).toHaveBeenCalledOnce();
+      expect(newSession).toHaveBeenCalledOnce();
+      const state = useSessionStore.getState();
+      expect(state.sessionId).toBe("sess_old");
+      expect(state.messages).toHaveLength(1);
+      expect(state.messages[0]?.parts).toEqual([{ type: "text", text: "old prompt" }]);
+      expect(toastError).toHaveBeenCalledWith(
+        "failed to create session: credential not found: opencode-zen",
+      );
+    } finally {
+      toastError.mockRestore();
+    }
   });
 
   it("switching to workspace view shows folder headers with session counts", async () => {
