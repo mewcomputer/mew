@@ -48,9 +48,10 @@ Run `mew auth logout codex` to delete Mew's saved OAuth session.
 
 ## Use Antigravity
 
-Mew uses the official `agy` executable on `PATH` and its existing local
-account. If needed, run `mew auth login antigravity` to sign in through AGY.
-The model picker discovers models through that installation.
+Mew uses the official `agy` executable on `PATH` (or in `~/.local/bin`, plus
+`/opt/homebrew/bin` and `/usr/local/bin` on macOS) and its existing local account.
+If needed, run `mew auth login antigravity` to sign in through AGY. The model
+picker discovers models through that installation.
 
 AGY runs without an OS sandbox by default. Mew restricts AGY's native tools
 and routes client tool calls through Mew's permission policy, but a failure in
@@ -77,9 +78,9 @@ Select an available model, for example:
 mew run --provider antigravity --model gemini-4-argon-low "Reply with hello."
 ```
 
-AGY's native subagents and browser tools, attachments, and structured output
-are not supported by this bridge. Mew's own tools and subagents remain
-available through the MCP bridge.
+AGY's native subagents, native browser tools, and structured output are not
+supported by this bridge. Image and file attachments, tool result images, and
+Mew's own tools and subagents remain available through ACP and the MCP bridge.
 
 ## Provider shapes
 

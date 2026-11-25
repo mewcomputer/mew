@@ -7,7 +7,6 @@ fn agent_instructions_identify_the_client_mcp_tool_server() {
     let launch = prepare(
         parent.path(),
         "model",
-        &["read"],
         "http://127.0.0.1:12345/0123456789abcdef",
         Capabilities::default(),
         "",
@@ -29,7 +28,6 @@ fn creates_private_workspace_with_minimal_agent_and_exact_permissions() {
     let launch = prepare(
         parent.path(),
         "gemini-4-argon-low",
-        &["read", "write_file"],
         "http://127.0.0.1:12345/0123456789abcdef0123456789abcdef",
         Capabilities::default(),
         "",
@@ -60,25 +58,15 @@ fn creates_private_workspace_with_minimal_agent_and_exact_permissions() {
     assert_eq!(config["mcpServers"]["mew"]["timeoutSeconds"], -1);
     let args = launch.args();
     assert!(!args.iter().any(|a| a == "--dangerously-skip-permissions"));
+    assert_eq!(args.first().map(String::as_str), Some("acp"));
     assert!(args
         .windows(2)
         .any(|pair| pair == ["--agent", "mew-boundary"]));
-    let settings_index = args.iter().position(|a| a == "--settings").unwrap();
-    let settings: serde_json::Value = serde_json::from_str(&args[settings_index + 1]).unwrap();
-    assert_eq!(
-        settings["permissions"]["allow"],
-        serde_json::json!(["mcp(mew/read)", "mcp(mew/write_file)"])
-    );
-    assert_eq!(
-        settings["permissions"]["deny"],
-        serde_json::json!([
-            "read_file(*)",
-            "write_file(*)",
-            "command(*)",
-            "read_url(*)",
-            "execute_url(*)"
-        ])
-    );
+    assert!(args
+        .iter()
+        .any(|a| a == "--include-default-customizations=false"));
+    assert!(args.iter().any(|a| a == "--sandbox"));
+    assert!(!args.iter().any(|a| a == "--settings"));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -101,31 +89,9 @@ fn creates_private_workspace_with_minimal_agent_and_exact_permissions() {
 }
 
 #[test]
-fn rejects_unsafe_names_urls_and_duplicate_grants_before_writing() {
+fn rejects_unsafe_models_and_urls_before_writing() {
     let parent = tempfile::tempdir().unwrap();
     let url = "http://127.0.0.1:12345/0123456789abcdef0123456789abcdef";
-    for tools in [
-        vec![""],
-        vec!["*"],
-        vec!["read)\",\"command(*)"],
-        vec!["a/b"],
-        vec!["safe", "safe"],
-        vec!["é"],
-        vec!["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
-    ] {
-        assert!(
-            prepare(
-                parent.path(),
-                "gemini-4-argon-low",
-                &tools,
-                url,
-                Capabilities::default(),
-                ""
-            )
-            .is_err(),
-            "accepted {tools:?}"
-        );
-    }
     for invalid in [
         "https://example.com/0123456789abcdef",
         "http://127.0.0.1:12345/",
@@ -135,28 +101,12 @@ fn rejects_unsafe_names_urls_and_duplicate_grants_before_writing() {
         "http://127.0.0.1:12345/0123456789abcdef%2fsecret",
     ] {
         assert!(
-            prepare(
-                parent.path(),
-                "model",
-                &["read"],
-                invalid,
-                Capabilities::default(),
-                ""
-            )
-            .is_err(),
+            prepare(parent.path(), "model", invalid, Capabilities::default(), "").is_err(),
             "accepted {invalid}"
         );
     }
     for model in ["", "-p", "a/b", "space model"] {
-        assert!(prepare(
-            parent.path(),
-            model,
-            &["read"],
-            url,
-            Capabilities::default(),
-            ""
-        )
-        .is_err());
+        assert!(prepare(parent.path(), model, url, Capabilities::default(), "").is_err());
     }
     assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
 }
@@ -174,10 +124,6 @@ fn unsupported_capabilities_never_create_workspace() {
             ..Default::default()
         },
         Capabilities {
-            attachments: true,
-            ..Default::default()
-        },
-        Capabilities {
             structured_output: true,
             ..Default::default()
         },
@@ -185,13 +131,25 @@ fn unsupported_capabilities_never_create_workspace() {
         assert!(prepare(
             parent.path(),
             "model",
-            &[],
             "http://127.0.0.1:12345/0123456789abcdef",
             caps,
             ""
         )
         .is_err());
     }
+    assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+    let supported = prepare(
+        parent.path(),
+        "model",
+        "http://127.0.0.1:12345/0123456789abcdef",
+        Capabilities {
+            attachments: true,
+            ..Default::default()
+        },
+        "",
+    )
+    .unwrap();
+    drop(supported);
     assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
 }
 
@@ -201,7 +159,6 @@ fn workspace_can_be_transferred_to_the_process_supervisor() {
     let launch = prepare(
         parent.path(),
         "gemini-4-argon-low",
-        &["read"],
         "http://127.0.0.1:12345/0123456789abcdef0123456789abcdef",
         Capabilities::default(),
         "",
@@ -224,7 +181,6 @@ fn system_instructions_are_preserved_verbatim_after_fixed_agent_preamble() {
         let launch = prepare(
             parent.path(),
             "model",
-            &[],
             "http://127.0.0.1:12345/0123456789abcdef",
             Capabilities::default(),
             system,

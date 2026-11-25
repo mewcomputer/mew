@@ -19,9 +19,11 @@ use mew_provider_openai::Adapter as OpenAIAdapter;
 use mew_provider_responses::Adapter as ResponsesAdapter;
 
 #[cfg(unix)]
-pub(crate) fn find_agy_on_path(path: &std::ffi::OsStr) -> Option<std::path::PathBuf> {
+fn find_executable_agy_in_dirs(
+    dirs: impl IntoIterator<Item = std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
     use std::os::unix::fs::PermissionsExt;
-    std::env::split_paths(path).find_map(|dir| {
+    dirs.into_iter().find_map(|dir| {
         let candidate = dir.join("agy");
         let metadata = candidate.metadata().ok()?;
         if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
@@ -29,6 +31,39 @@ pub(crate) fn find_agy_on_path(path: &std::ffi::OsStr) -> Option<std::path::Path
         }
         candidate.canonicalize().ok()
     })
+}
+
+#[cfg(unix)]
+fn find_agy_on_path(path: &std::ffi::OsStr) -> Option<std::path::PathBuf> {
+    find_executable_agy_in_dirs(std::env::split_paths(path))
+}
+
+#[cfg(unix)]
+pub(crate) fn agy_fallback_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) {
+        dirs.push(std::path::PathBuf::from(home).join(".local/bin"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        dirs.push(std::path::PathBuf::from("/opt/homebrew/bin"));
+        dirs.push(std::path::PathBuf::from("/usr/local/bin"));
+    }
+    dirs
+}
+
+#[cfg(unix)]
+pub(crate) fn find_agy_in(
+    path: Option<&std::ffi::OsStr>,
+    fallbacks: &[std::path::PathBuf],
+) -> Option<std::path::PathBuf> {
+    path.and_then(find_agy_on_path)
+        .or_else(|| find_executable_agy_in_dirs(fallbacks.iter().cloned()))
+}
+
+#[cfg(unix)]
+pub(crate) fn find_agy_executable() -> Option<std::path::PathBuf> {
+    find_agy_in(std::env::var_os("PATH").as_deref(), &agy_fallback_dirs())
 }
 
 /// Static fallback for Codex models that require the Responses Lite transport.
@@ -614,38 +649,32 @@ pub(crate) fn resolve_model(
     model_flag: Option<String>,
 ) -> (String, String) {
     let mut provider_id = provider_flag.to_string();
-    let mut model_id = model_flag.unwrap_or_default();
+    let model_id = model_flag.unwrap_or_default();
 
     if !model_id.is_empty() {
-        // Check catalog first for automatic provider/shape selection.
-        if let Some(c) = cat {
-            if let Some(m) = c.lookup(&model_id) {
-                // The catalog may use a different provider name than the
-                // config (e.g. catalog may use a different name). Map it back
-                // to the configured provider if a known mapping exists. If the
-                // catalog provider isn't configured at all, keep the current
-                // provider: models.dev dedups model ids across resellers, so
-                // the catalog entry may name a provider the user has no
-                // credentials for ("unknown provider" at startup otherwise).
-                if let Some(configured) = config_provider_for_catalog(cfg, &m.provider) {
-                    provider_id = configured;
-                }
-            } else if let Some(idx) = model_id.find('/') {
-                let candidate = &model_id[..idx];
-                if is_known_provider(cfg, candidate) {
-                    if provider_id == "opencode-zen" {
-                        provider_id = candidate.to_string();
-                    }
-                    model_id = model_id[idx + 1..].to_string();
-                }
-            }
-        } else if let Some(idx) = model_id.find('/') {
+        // Explicit `known_provider/model` prefixes always resolve directly to
+        // that provider rather than letting a remembered provider keep ownership.
+        if let Some(idx) = model_id.find('/') {
             let candidate = &model_id[..idx];
-            if is_known_provider(cfg, candidate) {
-                if provider_id == "opencode-zen" {
-                    provider_id = candidate.to_string();
+            let rest = &model_id[idx + 1..];
+            if !rest.is_empty() && is_known_provider(cfg, candidate) {
+                return (candidate.to_string(), rest.to_string());
+            }
+        }
+
+        // Check catalog for automatic provider resolution only when `provider_id`
+        // is still on the built-in `"opencode-zen"` fallback default. Selected or
+        // non-catalog providers (e.g. antigravity, custom providers, routers)
+        // must not have bare model IDs hijacked by colliding models.dev entries.
+        if let Some(c) = cat {
+            if provider_catalog_model(c, &provider_id, &model_id).is_some() {
+                return (provider_id, model_id);
+            } else if provider_id == "opencode-zen" {
+                if let Some(m) = c.lookup(&model_id) {
+                    if let Some(configured) = config_provider_for_catalog(cfg, &m.provider) {
+                        provider_id = configured;
+                    }
                 }
-                model_id = model_id[idx + 1..].to_string();
             }
         }
     }
@@ -693,9 +722,7 @@ pub(crate) fn provider_available(cfg: &Config, provider_id: &str) -> bool {
         #[cfg(unix)]
         return cfg.providers.contains_key(provider_id)
             && (cfg!(target_os = "macos") || !cfg.antigravity.isolated)
-            && std::env::var_os("PATH")
-                .and_then(|path| find_agy_on_path(&path))
-                .is_some();
+            && find_agy_executable().is_some();
         #[cfg(not(unix))]
         return false;
     }
@@ -759,6 +786,31 @@ fn config_provider_for_catalog(cfg: &Config, catalog: &str) -> Option<String> {
         .cloned()
 }
 
+#[cfg(unix)]
+pub(crate) fn build_antigravity_provider(
+    cfg: &Config,
+    model_override: &str,
+    default_effort: Option<String>,
+) -> Result<Arc<dyn Provider>> {
+    if cfg.antigravity.isolated && !cfg!(target_os = "macos") {
+        anyhow::bail!("Antigravity isolation is unavailable on this platform");
+    }
+    if model_override.is_empty() {
+        anyhow::bail!("select an Antigravity model explicitly");
+    }
+    let executable = find_agy_executable().context(
+        "agy executable not found on PATH, in ~/.local/bin, or standard macOS bin directories",
+    )?;
+    Ok(Arc::new(
+        super::antigravity::LocalAgyProvider::new(
+            executable,
+            model_override.to_owned(),
+            cfg.antigravity.isolated,
+        )
+        .with_default_effort(default_effort),
+    ))
+}
+
 /// Build a direct provider adapter from a concrete provider config.
 ///
 /// `session_id` is the conversation's stable id. Only OpenCode endpoints
@@ -774,22 +826,7 @@ pub(crate) fn build_direct_provider(
 ) -> Result<Arc<dyn Provider>> {
     if provider_id == "antigravity" {
         #[cfg(unix)]
-        {
-            if cfg.antigravity.isolated && !cfg!(target_os = "macos") {
-                anyhow::bail!("Antigravity isolation is unavailable on this platform");
-            }
-            if model_override.is_empty() {
-                anyhow::bail!("select an Antigravity model explicitly");
-            }
-            let executable = std::env::var_os("PATH")
-                .and_then(|path| find_agy_on_path(&path))
-                .context("agy executable not found on PATH")?;
-            return Ok(Arc::new(super::antigravity::LocalAgyProvider::new(
-                executable,
-                model_override.to_owned(),
-                cfg.antigravity.isolated,
-            )));
-        }
+        return build_antigravity_provider(cfg, model_override, None);
         #[cfg(not(unix))]
         anyhow::bail!("Antigravity local CLI is available only on Unix");
     }
@@ -1081,6 +1118,42 @@ mod tests {
         );
         std::fs::set_permissions(&second, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(find_agy_on_path(&path), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_agy_in_prefers_path_and_falls_back_to_standard_dirs() {
+        use std::os::unix::fs::PermissionsExt;
+        let on_path = tempfile::tempdir().unwrap();
+        let fallback = tempfile::tempdir().unwrap();
+        let path_agy = on_path.path().join("agy");
+        let fallback_agy = fallback.path().join("agy");
+        std::fs::write(&path_agy, "path").unwrap();
+        std::fs::write(&fallback_agy, "fallback").unwrap();
+        std::fs::set_permissions(&path_agy, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&fallback_agy, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let fallbacks = [fallback.path().to_path_buf()];
+        assert_eq!(
+            find_agy_in(Some(on_path.path().as_os_str()), &fallbacks),
+            Some(path_agy.canonicalize().unwrap())
+        );
+
+        let empty_path = tempfile::tempdir().unwrap();
+        assert_eq!(
+            find_agy_in(Some(empty_path.path().as_os_str()), &fallbacks),
+            Some(fallback_agy.canonicalize().unwrap())
+        );
+        assert_eq!(
+            find_agy_in(None, &fallbacks),
+            Some(fallback_agy.canonicalize().unwrap())
+        );
+
+        std::fs::set_permissions(&fallback_agy, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            find_agy_in(Some(empty_path.path().as_os_str()), &fallbacks),
+            None
+        );
     }
 
     #[test]
@@ -1920,6 +1993,94 @@ mod tests {
     }
 
     // --- resolve_model ---
+
+    #[test]
+    fn resolve_model_keeps_selected_provider_when_it_offers_the_model() {
+        let cfg = cfg_with_default_providers();
+        for (model, catalog_provider) in [
+            ("deepseek-v4.1-flash", "opencode"),
+            ("qwen3.8-max", "alibaba-token-plan"),
+        ] {
+            let mut cat = Catalog::empty();
+            cat.models
+                .insert(model.into(), catalog_model(catalog_provider, model, &[]));
+            cat.providers.insert(
+                "opencode-go".into(),
+                [(model.into(), catalog_model("opencode-go", model, &[]))].into(),
+            );
+
+            let (provider, resolved_model) =
+                resolve_model(&cfg, Some(&cat), "opencode-go", Some(model.into()));
+            assert_eq!(provider, "opencode-go");
+            assert_eq!(resolved_model, model);
+        }
+    }
+
+    #[test]
+    fn resolve_model_keeps_antigravity_when_catalog_lists_same_model_id() {
+        let cfg = cfg_with_default_providers();
+        let mut cat = Catalog::empty();
+        cat.models.insert(
+            "gemini-4-hydrogen".into(),
+            catalog_model("opencode", "gemini-4-hydrogen", &[]),
+        );
+
+        assert_eq!(
+            resolve_model(
+                &cfg,
+                Some(&cat),
+                "antigravity",
+                Some("gemini-4-hydrogen".into())
+            ),
+            ("antigravity".into(), "gemini-4-hydrogen".into())
+        );
+        assert_eq!(
+            resolve_model(
+                &cfg,
+                Some(&cat),
+                "antigravity",
+                Some("antigravity/gemini-4-hydrogen".into())
+            ),
+            ("antigravity".into(), "gemini-4-hydrogen".into())
+        );
+        assert_eq!(
+            resolve_model(
+                &cfg,
+                Some(&cat),
+                "antigravity",
+                Some("codex/gpt-5.6-luna".into())
+            ),
+            ("codex".into(), "gpt-5.6-luna".into())
+        );
+        assert_eq!(
+            resolve_model(
+                &cfg,
+                Some(&cat),
+                "codex",
+                Some("antigravity/gemini-4-hydrogen".into())
+            ),
+            ("antigravity".into(), "gemini-4-hydrogen".into())
+        );
+
+        let mut custom_cfg = cfg;
+        custom_cfg.providers.insert(
+            "local-vllm".into(),
+            ProviderConfig {
+                shape: "openai".into(),
+                base_url: "http://127.0.0.1:8000/v1".into(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            resolve_model(
+                &custom_cfg,
+                Some(&cat),
+                "local-vllm",
+                Some("gemini-4-hydrogen".into())
+            ),
+            ("local-vllm".into(), "gemini-4-hydrogen".into())
+        );
+    }
 
     #[test]
     fn resolve_model_maps_catalog_provider_to_configured_name() {

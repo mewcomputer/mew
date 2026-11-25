@@ -5,8 +5,8 @@ use mew_agy::{
     provider::{AgyProvider, Config},
 };
 use mew_message::{
-    Finish, Message, Part, PartBase, Role, TextPart, Time, ToolResultPart, ToolState,
-    ToolStateCompleted, ToolTime,
+    FilePart, Finish, Message, Part, PartBase, Role, TextPart, Time, ToolImage, ToolResultPart,
+    ToolState, ToolStateCompleted, ToolTime,
 };
 use mew_provider::{Provider, ProviderEvent, Request, ToolDef};
 use serde_json::json;
@@ -91,9 +91,12 @@ fn fixture(dir: &Path, script: &str) -> FixtureBoundary {
 async fn auxiliary_sampling_hints_are_advisory_but_regular_turn_controls_are_rejected() {
     let parent = tempfile::tempdir().unwrap();
     let script = r#"import sys,json
+for i,r in [(1,{'protocolVersion':1}),(2,{}),(3,{'sessionId':'s1'}),(4,{})]:
+ json.loads(sys.stdin.readline())
+ print(json.dumps({'jsonrpc':'2.0','id':i,'result':r}),flush=True)
 sys.stdin.readline()
-print(json.dumps({'event':'step_update','step_update':{'step_type':'agent_response','text_delta':'ALLOW'}}),flush=True)
-print(json.dumps({'event':'result','result':{'status':'SUCCESS'}}),flush=True)
+print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'s1','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'ALLOW'}}}}),flush=True)
+print(json.dumps({'jsonrpc':'2.0','id':5,'result':{'stopReason':'end_turn'}}),flush=True)
 "#;
     let provider = AgyProvider::new(config(parent.path()), fixture(parent.path(), script));
     let mut auxiliary = request();
@@ -331,8 +334,11 @@ async fn official_agy_calls_client_tool_and_receives_its_result() {
 async fn provider_reports_safe_quota_errors_without_disclosing_cli_details() {
     let parent = tempfile::tempdir().unwrap();
     let script = r#"import sys,json
+for i,r in [(1,{'protocolVersion':1}),(2,{}),(3,{'sessionId':'s1'}),(4,{})]:
+ json.loads(sys.stdin.readline())
+ print(json.dumps({'jsonrpc':'2.0','id':i,'result':r}),flush=True)
 sys.stdin.readline()
-print(json.dumps({'event':'result','result':{'status':'ERROR','error':'quota exhausted secret-canary'}}),flush=True)
+print(json.dumps({'jsonrpc':'2.0','id':5,'error':{'code':-32001,'message':'quota exhausted secret-canary'}}),flush=True)
 "#;
     let provider = AgyProvider::new(config(parent.path()), fixture(parent.path(), script));
     let events: Vec<_> = provider.stream(request()).await.unwrap().collect().await;
@@ -346,26 +352,57 @@ print(json.dumps({'event':'result','result':{'status':'ERROR','error':'quota exh
     assert!(error.contains("quota"));
     assert!(!error.contains("secret-canary"));
 }
+
+#[tokio::test]
+async fn provider_reports_auth_error_pointing_to_login() {
+    let parent = tempfile::tempdir().unwrap();
+    let script = r#"import sys,json
+json.loads(sys.stdin.readline())
+print(json.dumps({'jsonrpc':'2.0','id':1,'result':{'protocolVersion':1}}),flush=True)
+json.loads(sys.stdin.readline())
+print(json.dumps({'jsonrpc':'2.0','id':2,'result':{}}),flush=True)
+json.loads(sys.stdin.readline())
+print(json.dumps({'jsonrpc':'2.0','id':3,'error':{'code':-32000,'message':'Authentication required'}}),flush=True)
+"#;
+    let provider = AgyProvider::new(config(parent.path()), fixture(parent.path(), script));
+    let events: Vec<_> = provider.stream(request()).await.unwrap().collect().await;
+    let error = events
+        .iter()
+        .find_map(|event| match event {
+            ProviderEvent::Error(error) => Some(error.message.as_str()),
+            _ => None,
+        })
+        .expect("provider must report auth error");
+    assert!(error.contains("mew auth login antigravity"), "{error}");
+}
+
 const TOOL_SCRIPT: &str = r#"import sys,json,urllib.request
+for i,r in [(1,{'protocolVersion':1}),(2,{}),(3,{'sessionId':'s1'}),(4,{})]:
+ json.loads(sys.stdin.readline())
+ print(json.dumps({'jsonrpc':'2.0','id':i,'result':r}),flush=True)
 line=sys.stdin.readline()
 with open('.agents/mcp_config.json') as f: url=json.load(f)['mcpServers']['mew']['serverUrl']
 def post(body,sid=None):
  h={'Content-Type':'application/json'}
  if sid: h['mcp-session-id']=sid
  with urllib.request.urlopen(urllib.request.Request(url,data=json.dumps(body).encode(),headers=h)) as r: return r.headers, r.read()
-h,b=post({'jsonrpc':'2.0','id':1,'method':'initialize','params':{'protocolVersion':'2025-06-18','capabilities':{},'clientInfo':{'name':'fake','version':'1'}}})
+_,_=post({'jsonrpc':'2.0','id':0,'method':'server/discover','params':{}})
+h,b=post({'jsonrpc':'2.0','id':1,'method':'initialize','params':{'protocolVersion':'2025-11-25','capabilities':{},'clientInfo':{'name':'fake','version':'1'}}})
 sid=h['mcp-session-id']
 post({'jsonrpc':'2.0','method':'notifications/initialized'},sid)
+print(json.dumps({'jsonrpc':'2.0','id':'p1','method':'session/request_permission','params':{'sessionId':'s1','toolCall':{'name':'call_mcp_tool','args':{'ServerName':'mew','ToolName':'echo'}},'options':[{'optionId':'allow','kind':'allow_once'},{'optionId':'deny','kind':'reject_once'}]}}),flush=True)
+perm=json.loads(sys.stdin.readline())
+assert perm['result']['outcome']=={'outcome':'selected','optionId':'allow'}
 h,b=post({'jsonrpc':'2.0','id':2,'method':'tools/call','params':{'name':'echo','arguments':{'text':'hello'}}},sid)
 r=json.loads(b)
-print(json.dumps({'event':'step_update','step_update':{'step_type':'agent_response','text_delta':r['result']['content'][0]['text']}}),flush=True)
-print(json.dumps({'event':'result','result':{'status':'SUCCESS'}}),flush=True)
+print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'s1','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':r['result']['content'][0]['text']}}}}),flush=True)
+print(json.dumps({'jsonrpc':'2.0','id':5,'result':{'stopReason':'end_turn'}}),flush=True)
 "#;
 
 #[tokio::test]
 async fn long_mcp_name_is_aliased_for_agy_and_restored_for_mew() {
     let parent = tempfile::tempdir().unwrap();
-    let script = TOOL_SCRIPT.replace("'name':'echo'", "'name':'mew_tool_0'");
+    let script = TOOL_SCRIPT.replace("'echo'", "'mew_tool_0'");
     let provider = AgyProvider::new(config(parent.path()), fixture(parent.path(), &script));
     let mut req = request();
     let name = format!("mcp__server__{}", "long_name_".repeat(10));
@@ -386,7 +423,7 @@ async fn long_mcp_name_is_aliased_for_agy_and_restored_for_mew() {
 #[tokio::test]
 async fn generated_alias_does_not_shadow_a_real_tool_name() {
     let parent = tempfile::tempdir().unwrap();
-    let script = TOOL_SCRIPT.replace("'name':'echo'", "'name':'mew_tool_0_1'");
+    let script = TOOL_SCRIPT.replace("'echo'", "'mew_tool_0_1'");
     let provider = AgyProvider::new(config(parent.path()), fixture(parent.path(), &script));
     let mut req = request();
     req.tools[0].name = "non-ascii-工具".into();
@@ -478,27 +515,199 @@ async fn tool_handoff_resumes_only_with_matching_history_and_result() {
 }
 
 #[tokio::test]
-async fn replay_budget_counts_the_actual_nested_json_framing() {
+async fn abandon_pending_cleans_up_handoff_without_cancelling_turn_token_and_allows_next_turn() {
+    let parent = tempfile::tempdir().unwrap();
+    let script = r#"import sys,json,urllib.request
+for i,r in [(1,{'protocolVersion':1}),(2,{}),(3,{'sessionId':'s1'}),(4,{})]:
+ json.loads(sys.stdin.readline())
+ print(json.dumps({'jsonrpc':'2.0','id':i,'result':r}),flush=True)
+prompt_msg=json.loads(sys.stdin.readline())
+prompt_text='\n'.join(b.get('text','') for b in prompt_msg['params']['prompt'] if isinstance(b,dict))
+if 'after max turns' in prompt_text:
+ print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'s1','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'resumed cleanly'}}}}),flush=True)
+ print(json.dumps({'jsonrpc':'2.0','id':5,'result':{'stopReason':'end_turn'}}),flush=True)
+else:
+ with open('.agents/mcp_config.json') as f: url=json.load(f)['mcpServers']['mew']['serverUrl']
+ def post(body,sid=None):
+  h={'Content-Type':'application/json'}
+  if sid: h['mcp-session-id']=sid
+  with urllib.request.urlopen(urllib.request.Request(url,data=json.dumps(body).encode(),headers=h)) as r: return r.headers, r.read()
+ h,_=post({'jsonrpc':'2.0','id':1,'method':'initialize','params':{'protocolVersion':'2025-11-25','capabilities':{},'clientInfo':{'name':'fake','version':'1'}}})
+ sid=h['mcp-session-id']
+ post({'jsonrpc':'2.0','method':'notifications/initialized'},sid)
+ post({'jsonrpc':'2.0','id':2,'method':'tools/call','params':{'name':'echo','arguments':{'text':'hello'}}},sid)
+"#;
+    let provider = AgyProvider::new(config(parent.path()), fixture(parent.path(), script));
+    let mut req = request();
+    let events: Vec<_> = provider.stream(req.clone()).await.unwrap().collect().await;
+    let call = events
+        .iter()
+        .find_map(|e| {
+            if let ProviderEvent::PartStart {
+                part: Part::ToolCall(c),
+            } = e
+            {
+                Some(c.clone())
+            } else {
+                None
+            }
+        })
+        .expect("tool call");
+    assert!(matches!(
+        events.last(),
+        Some(ProviderEvent::MessageEnd {
+            finish: Finish::ToolUse,
+            ..
+        })
+    ));
+
+    provider.abandon_pending(req.session_id.unwrap()).await;
+    assert!(
+        !req.cancel_token.is_cancelled(),
+        "abandoning an open handoff on clean turn exit must not cancel the caller turn token"
+    );
+    let leftover = std::fs::read_dir(parent.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().starts_with("mew-agy-"))
+        .count();
+    assert_eq!(
+        leftover, 0,
+        "abandoned process workspace must be cleaned up"
+    );
+
+    let mut done = call.clone();
+    done.state = ToolState::Completed(ToolStateCompleted {
+        input: json!({"text":"hello"}),
+        output: "tool response".into(),
+        metadata: None,
+        diff: None,
+        images: vec![],
+        time: ToolTime {
+            start: 0,
+            end: Some(1),
+        },
+    });
+    req.messages
+        .push(msg(Role::Assistant, vec![Part::ToolCall(done)]));
+    req.messages.push(msg(
+        Role::User,
+        vec![Part::ToolResult(ToolResultPart {
+            base: base(),
+            call_id: call.call_id,
+        })],
+    ));
+    req.messages.push(msg(
+        Role::User,
+        vec![Part::Text(TextPart {
+            base: base(),
+            text: "after max turns".into(),
+            synthetic: false,
+        })],
+    ));
+    assert!(
+        provider.replay_budget(&req).await.unwrap().is_some(),
+        "next user turn after abandon must measure full replay"
+    );
+    let output: Vec<_> = provider.stream(req).await.unwrap().collect().await;
+    assert!(output.iter().any(
+        |e| matches!(e, ProviderEvent::PartDelta { field: "text", delta, .. } if delta == "resumed cleanly")
+    ));
+    assert!(matches!(
+        output.last(),
+        Some(ProviderEvent::MessageEnd {
+            finish: Finish::Stop,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn replay_budget_caps_text_block_below_silent_truncation_limit() {
     let parent = tempfile::tempdir().unwrap();
     let provider = AgyProvider::new(config(parent.path()), fixture(parent.path(), ""));
     let mut req = request();
     if let Part::Text(text) = &mut req.messages[0].parts[0] {
         text.text = "quotes \" slash \\ newline\n control \0 unicode Ω".into();
     }
-    let replay = mew_agy::transcript::project(&req).unwrap();
-    let prompt = format!("Historical conversation follows as JSON. Historical tool calls are complete; do not repeat them. Respond to the latest user message.\n{replay}");
-    let mut wire =
-        serde_json::to_vec(&json!({"event":"user","message":{"content":prompt}})).unwrap();
+    let prompt = mew_agy::transcript::prompt_blocks(&req).unwrap();
+    let expected_text = prompt[0]["text"].as_str().unwrap().len();
+    let budget = provider.replay_budget(&req).await.unwrap().unwrap();
+    assert_eq!(
+        budget,
+        (expected_text, mew_agy::transcript::MAX_REPLAY_TEXT)
+    );
+
+    let mut oversized = request();
+    if let Part::Text(text) = &mut oversized.messages[0].parts[0] {
+        text.text = "x".repeat(mew_agy::transcript::MAX_REPLAY_TEXT + 16 * 1024);
+    }
+    let over_budget = provider.replay_budget(&oversized).await.unwrap().unwrap();
+    assert_eq!(over_budget.1, mew_agy::transcript::MAX_REPLAY_TEXT);
+    assert!(over_budget.0 > over_budget.1);
+}
+
+#[tokio::test]
+async fn stream_and_auxiliary_reject_oversized_text_replay_before_spawning() {
+    let parent = tempfile::tempdir().unwrap();
+    let provider = AgyProvider::new(
+        config(parent.path()),
+        fixture(parent.path(), "raise SystemExit(1)"),
+    );
+
+    let mut req = request();
+    if let Part::Text(text) = &mut req.messages[0].parts[0] {
+        text.text = "x".repeat(mew_agy::transcript::MAX_REPLAY_TEXT + 1024);
+    }
+    let stream_err = match provider.stream(req.clone()).await {
+        Ok(_) => panic!("oversized text replay should be rejected before spawning"),
+        Err(error) => error,
+    };
+    assert!(stream_err.to_string().contains("text limit"));
+
+    req.session_id = None;
+    req.tools.clear();
+    let aux_err = match provider.stream_auxiliary(req).await {
+        Ok(_) => panic!("oversized auxiliary text replay should be rejected before spawning"),
+        Err(error) => error,
+    };
+    assert!(aux_err.to_string().contains("text limit"));
+}
+
+#[tokio::test]
+async fn replay_budget_counts_nested_json_framing_when_attachments_dominate() {
+    let parent = tempfile::tempdir().unwrap();
+    let provider = AgyProvider::new(config(parent.path()), fixture(parent.path(), ""));
+    let mut req = request();
+    req.messages[0].parts.push(Part::File(FilePart {
+        base: base(),
+        mime: "image/png".into(),
+        filename: Some("large.png".into()),
+        url: format!("data:image/png;base64,{}", "AAAA".repeat(6_000)),
+    }));
+    let prompt = mew_agy::transcript::prompt_blocks(&req).unwrap();
+    let mut wire = serde_json::to_vec(&json!({
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "session/prompt",
+        "params": {
+            "sessionId": "00000000-0000-0000-0000-000000000000",
+            "prompt": prompt,
+        }
+    }))
+    .unwrap();
     wire.push(b'\n');
     let budget = provider.replay_budget(&req).await.unwrap().unwrap();
-    assert_eq!(budget.0, wire.len());
-    assert_eq!(budget.1, 16 * 1024 * 1024);
+    assert_eq!(budget, (wire.len(), 16 * 1024 * 1024));
 }
 
 #[tokio::test]
 async fn oversized_tool_output_can_be_retried_and_replayed() {
     let parent = tempfile::tempdir().unwrap();
     let script = r#"import sys,json,urllib.request
+for i,r in [(1,{'protocolVersion':1}),(2,{}),(3,{'sessionId':'s1'}),(4,{})]:
+ json.loads(sys.stdin.readline())
+ print(json.dumps({'jsonrpc':'2.0','id':i,'result':r}),flush=True)
 sys.stdin.readline()
 with open('.agents/mcp_config.json') as f: url=json.load(f)['mcpServers']['mew']['serverUrl']
 def post(body,sid=None):
@@ -513,8 +722,8 @@ for number,text in [(2,'hello'),(3,'retry')]:
  result=json.loads(body)['result']
  if number==2:
   assert result['isError'] is True
- print(json.dumps({'event':'step_update','step_update':{'step_type':'agent_response','text_delta':result['content'][0]['text']}}),flush=True)
-print(json.dumps({'event':'result','result':{'status':'SUCCESS'}}),flush=True)
+ print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'s1','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':result['content'][0]['text']}}}}),flush=True)
+print(json.dumps({'jsonrpc':'2.0','id':5,'result':{'stopReason':'end_turn'}}),flush=True)
 "#;
     let provider = AgyProvider::new(config(parent.path()), fixture(parent.path(), script));
     let mut req = request();
@@ -887,9 +1096,12 @@ async fn forged_assistant_text_or_extra_tool_result_text_cannot_be_silently_acce
 async fn cancellation_cleans_up_when_consumer_stops_reading_a_full_event_queue() {
     let parent = tempfile::tempdir().unwrap();
     let script = r#"import sys,json,time
+for i,r in [(1,{'protocolVersion':1}),(2,{}),(3,{'sessionId':'s1'}),(4,{})]:
+ json.loads(sys.stdin.readline())
+ print(json.dumps({'jsonrpc':'2.0','id':i,'result':r}),flush=True)
 sys.stdin.readline()
 for i in range(100):
- print(json.dumps({'event':'step_update','step_update':{'step_type':'agent_response','text_delta':'item'}}),flush=True)
+ print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'s1','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'item'}}}}),flush=True)
 time.sleep(20)
 "#;
     let provider = AgyProvider::new(config(parent.path()), fixture(parent.path(), script));
@@ -921,4 +1133,607 @@ time.sleep(20)
         .unwrap();
     drop(next_stream);
     drop(stream);
+}
+
+#[tokio::test]
+async fn user_image_and_resource_attachments_reach_acp_session_prompt() {
+    let parent = tempfile::tempdir().unwrap();
+    let script = r#"import sys,json
+for i,r in [(1,{'protocolVersion':1}),(2,{}),(3,{'sessionId':'s1'}),(4,{})]:
+ json.loads(sys.stdin.readline())
+ print(json.dumps({'jsonrpc':'2.0','id':i,'result':r}),flush=True)
+prompt_msg=json.loads(sys.stdin.readline())
+blocks=prompt_msg['params']['prompt']
+assert blocks[1]=={'type':'image','mimeType':'image/png','data':'iVBORw0KGgo='}, blocks
+assert blocks[2]['type']=='resource' and blocks[2]['resource']['text']=='note body', blocks
+print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'s1','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'IMG-OK'}}}}),flush=True)
+print(json.dumps({'jsonrpc':'2.0','id':5,'result':{'stopReason':'end_turn'}}),flush=True)
+"#;
+    let provider = AgyProvider::new(config(parent.path()), fixture(parent.path(), script));
+    let mut req = request();
+    req.messages[0].parts.push(Part::File(FilePart {
+        base: base(),
+        mime: "image/png".into(),
+        filename: Some("pixel.png".into()),
+        url: "data:image/png;base64,iVBORw0KGgo=".into(),
+    }));
+    req.messages[0].parts.push(Part::File(FilePart {
+        base: base(),
+        mime: "text/plain".into(),
+        filename: Some("note.txt".into()),
+        url: "data:text/plain,note body".into(),
+    }));
+    let events: Vec<_> = provider.stream(req).await.unwrap().collect().await;
+    assert!(events.iter().any(
+        |e| matches!(e, ProviderEvent::PartDelta { field: "text", delta, .. } if delta == "IMG-OK")
+    ));
+}
+
+#[tokio::test]
+async fn tool_result_images_and_foreign_permission_denial_work_end_to_end() {
+    let parent = tempfile::tempdir().unwrap();
+    let script = r#"import sys,json,urllib.request
+for i,r in [(1,{'protocolVersion':1}),(2,{}),(3,{'sessionId':'s1'}),(4,{})]:
+ json.loads(sys.stdin.readline())
+ print(json.dumps({'jsonrpc':'2.0','id':i,'result':r}),flush=True)
+sys.stdin.readline()
+print(json.dumps({'jsonrpc':'2.0','id':'deny-1','method':'session/request_permission','params':{'sessionId':'s1','toolCall':{'name':'run_command','args':{'CommandLine':'id'}},'options':[{'optionId':'allow','kind':'allow_once'},{'optionId':'deny','kind':'reject_once'}]}}),flush=True)
+denied=json.loads(sys.stdin.readline())
+assert denied['result']['outcome']=={'outcome':'selected','optionId':'deny'}, denied
+print(json.dumps({'jsonrpc':'2.0','id':'allow-mew-typo','method':'session/request_permission','params':{'sessionId':'s1','toolCall':{'name':'call_mcp_tool','args':{'ServerName':'mew','ToolName':'read_file'}},'options':[{'optionId':'allow','kind':'allow_once'},{'optionId':'deny','kind':'reject_once'}]}}),flush=True)
+allowed=json.loads(sys.stdin.readline())
+assert allowed['result']['outcome']=={'outcome':'selected','optionId':'allow'}, allowed
+with open('.agents/mcp_config.json') as f: url=json.load(f)['mcpServers']['mew']['serverUrl']
+def post(body,sid=None):
+ h={'Content-Type':'application/json'}
+ if sid: h['mcp-session-id']=sid
+ with urllib.request.urlopen(urllib.request.Request(url,data=json.dumps(body).encode(),headers=h)) as r: return r.headers, r.read()
+h,_=post({'jsonrpc':'2.0','id':1,'method':'initialize','params':{'protocolVersion':'2025-11-25','capabilities':{},'clientInfo':{'name':'fake','version':'1'}}})
+sid=h['mcp-session-id']
+post({'jsonrpc':'2.0','method':'notifications/initialized'},sid)
+_,bad_b=post({'jsonrpc':'2.0','id':99,'method':'tools/call','params':{'name':'read_file','arguments':{}}},sid)
+bad=json.loads(bad_b)
+assert bad['error']['code']==-32602 and 'unknown tool' in bad['error']['message'], bad
+_,b=post({'jsonrpc':'2.0','id':2,'method':'tools/call','params':{'name':'echo','arguments':{'text':'shot'}}},sid)
+res=json.loads(b)['result']
+assert res['content'][1]=={'type':'image','data':'c2hvdA==','mimeType':'image/png'}, res
+print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'s1','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'TOOL-IMG-OK'}}}}),flush=True)
+print(json.dumps({'jsonrpc':'2.0','id':5,'result':{'stopReason':'end_turn'}}),flush=True)
+"#;
+    let provider = AgyProvider::new(config(parent.path()), fixture(parent.path(), script));
+    let req = request();
+    let events: Vec<_> = provider.stream(req.clone()).await.unwrap().collect().await;
+    let call = events
+        .iter()
+        .find_map(|e| {
+            if let ProviderEvent::PartStart {
+                part: Part::ToolCall(c),
+            } = e
+            {
+                Some(c.clone())
+            } else {
+                None
+            }
+        })
+        .expect("tool call");
+    let mut done = call.clone();
+    done.state = ToolState::Completed(ToolStateCompleted {
+        input: json!({"text": "shot"}),
+        output: "here is the image".into(),
+        metadata: None,
+        diff: None,
+        images: vec![ToolImage {
+            mime: "image/png".into(),
+            data: "c2hvdA==".into(),
+        }],
+        time: ToolTime {
+            start: 0,
+            end: Some(1),
+        },
+    });
+    let mut continuation = req;
+    continuation
+        .messages
+        .push(msg(Role::Assistant, vec![Part::ToolCall(done)]));
+    continuation.messages.push(msg(
+        Role::User,
+        vec![Part::ToolResult(ToolResultPart {
+            base: base(),
+            call_id: call.call_id,
+        })],
+    ));
+    let output: Vec<_> = provider.stream(continuation).await.unwrap().collect().await;
+    assert!(output.iter().any(|e| matches!(
+        e,
+        ProviderEvent::PartDelta { field: "text", delta, .. } if delta == "TOOL-IMG-OK"
+    )));
+}
+
+#[tokio::test]
+async fn persistent_session_reuses_process_and_sends_delta_prompt_across_turns() {
+    let parent = tempfile::tempdir().unwrap();
+    let count_path = parent.path().join("spawns.txt");
+    let log_path = parent.path().join("prompts.jsonl");
+    let script = format!(
+        r#"import sys,json,urllib.request
+count_path={:?}
+log_path={:?}
+with open(count_path,'a') as f: f.write('1\n')
+def read_msg():
+ line=sys.stdin.readline()
+ if not line: sys.exit(0)
+ return json.loads(line)
+for i,r in [(1,{{'protocolVersion':1}}),(2,{{}}),(3,{{'sessionId':'s-persist'}}),(4,{{}})]:
+ m=read_msg()
+ print(json.dumps({{'jsonrpc':'2.0','id':m['id'],'result':r}}),flush=True)
+with open('.agents/mcp_config.json') as f: url=json.load(f)['mcpServers']['mew']['serverUrl']
+def post(body,sid=None):
+ h={{'Content-Type':'application/json'}}
+ if sid: h['mcp-session-id']=sid
+ with urllib.request.urlopen(urllib.request.Request(url,data=json.dumps(body).encode(),headers=h)) as r: return r.headers, r.read()
+# Turn 1: full replay prompt, triggers MCP tool call -> handoff -> end_turn
+p1=read_msg()
+with open(log_path,'a') as f: f.write(json.dumps({{'turn':1,'method':p1['method'],'prompt':p1['params']['prompt']}})+'\n')
+h,_=post({{'jsonrpc':'2.0','id':1,'method':'initialize','params':{{'protocolVersion':'2025-11-25','capabilities':{{}},'clientInfo':{{'name':'fake','version':'1'}}}}}})
+sid=h['mcp-session-id']
+post({{'jsonrpc':'2.0','method':'notifications/initialized'}},sid)
+_,b=post({{'jsonrpc':'2.0','id':2,'method':'tools/call','params':{{'name':'echo','arguments':{{'text':'big'}}}}}},sid)
+res=json.loads(b)['result']
+print(json.dumps({{'jsonrpc':'2.0','method':'session/update','params':{{'sessionId':'s-persist','update':{{'sessionUpdate':'agent_message_chunk','content':{{'type':'text','text':'t1-ok'}}}}}}}}),flush=True)
+print(json.dumps({{'jsonrpc':'2.0','id':p1['id'],'result':{{'stopReason':'end_turn'}}}}),flush=True)
+# Turn 2: model switched -> set_model then delta prompt on SAME process
+m2=read_msg()
+if m2['method']=='session/close': sys.exit(0)
+assert m2['method']=='session/set_model' and m2['params']['modelId']=='model-b', m2
+print(json.dumps({{'jsonrpc':'2.0','id':m2['id'],'result':{{}}}}),flush=True)
+p2=read_msg()
+with open(log_path,'a') as f: f.write(json.dumps({{'turn':2,'method':p2['method'],'prompt':p2['params']['prompt']}})+'\n')
+print(json.dumps({{'jsonrpc':'2.0','method':'session/update','params':{{'sessionId':'s-persist','update':{{'sessionUpdate':'agent_message_chunk','content':{{'type':'text','text':'t2-ok'}}}}}}}}),flush=True)
+print(json.dumps({{'jsonrpc':'2.0','id':p2['id'],'result':{{'stopReason':'end_turn'}}}}),flush=True)
+# Turn 3: attachment follow-up on SAME process
+p3=read_msg()
+with open(log_path,'a') as f: f.write(json.dumps({{'turn':3,'method':p3['method'],'prompt':p3['params']['prompt']}})+'\n')
+print(json.dumps({{'jsonrpc':'2.0','method':'session/update','params':{{'sessionId':'s-persist','update':{{'sessionUpdate':'agent_message_chunk','content':{{'type':'text','text':'t3-ok'}}}}}}}}),flush=True)
+print(json.dumps({{'jsonrpc':'2.0','id':p3['id'],'result':{{'stopReason':'end_turn'}}}}),flush=True)
+# Expect session/close when system prompt changes on Turn 4
+c=read_msg()
+"#,
+        count_path, log_path
+    );
+    let provider = AgyProvider::new(config(parent.path()), fixture(parent.path(), &script));
+    let mut req = request();
+    let events: Vec<_> = provider.stream(req.clone()).await.unwrap().collect().await;
+    let call = events
+        .iter()
+        .find_map(|e| match e {
+            ProviderEvent::PartStart {
+                part: Part::ToolCall(c),
+            } => Some(c.clone()),
+            _ => None,
+        })
+        .expect("tool call");
+    let huge_output = "x".repeat(420 * 1024);
+    let mut done = call.clone();
+    done.state = ToolState::Completed(ToolStateCompleted {
+        input: json!({"text": "big"}),
+        output: huge_output.clone(),
+        metadata: None,
+        diff: None,
+        images: vec![],
+        time: ToolTime {
+            start: 0,
+            end: Some(1),
+        },
+    });
+    req.messages
+        .push(msg(Role::Assistant, vec![Part::ToolCall(done)]));
+    req.messages.push(msg(
+        Role::User,
+        vec![Part::ToolResult(ToolResultPart {
+            base: base(),
+            call_id: call.call_id,
+        })],
+    ));
+    let events: Vec<_> = provider.stream(req.clone()).await.unwrap().collect().await;
+    assert!(events.iter().any(
+        |e| matches!(e, ProviderEvent::PartDelta { field: "text", delta, .. } if delta == "t1-ok")
+    ));
+    assert!(matches!(
+        events.last(),
+        Some(ProviderEvent::MessageEnd {
+            finish: Finish::Stop,
+            ..
+        })
+    ));
+
+    // Turn 2: model switch + short follow-up must keep same ACP session & tiny delta budget!
+    req.model = "model-b".into();
+    req.messages.push(msg(
+        Role::Assistant,
+        vec![Part::Text(TextPart {
+            base: base(),
+            text: "t1-ok".into(),
+            synthetic: false,
+        })],
+    ));
+    req.messages.push(msg(
+        Role::User,
+        vec![Part::Text(TextPart {
+            base: base(),
+            text: "follow-up 2".into(),
+            synthetic: false,
+        })],
+    ));
+    let (budget, limit) = provider.replay_budget(&req).await.unwrap().unwrap();
+    assert_eq!(limit, mew_agy::transcript::MAX_REPLAY_TEXT);
+    assert!(
+        budget < 1024,
+        "delta budget should ignore 420KB tool output from Turn 1, got {budget}"
+    );
+    let events: Vec<_> = provider.stream(req.clone()).await.unwrap().collect().await;
+    assert!(events.iter().any(
+        |e| matches!(e, ProviderEvent::PartDelta { field: "text", delta, .. } if delta == "t2-ok")
+    ));
+
+    // Turn 3: follow-up with attachment on same live process
+    req.messages.push(msg(
+        Role::Assistant,
+        vec![Part::Text(TextPart {
+            base: base(),
+            text: "t2-ok".into(),
+            synthetic: false,
+        })],
+    ));
+    req.messages.push(msg(
+        Role::User,
+        vec![
+            Part::Text(TextPart {
+                base: base(),
+                text: "follow-up 3".into(),
+                synthetic: false,
+            }),
+            Part::File(FilePart {
+                base: base(),
+                mime: "image/png".into(),
+                filename: Some("p.png".into()),
+                url: "data:image/png;base64,iVBORw0KGgo=".into(),
+            }),
+        ],
+    ));
+    let events: Vec<_> = provider.stream(req.clone()).await.unwrap().collect().await;
+    assert!(events.iter().any(
+        |e| matches!(e, ProviderEvent::PartDelta { field: "text", delta, .. } if delta == "t3-ok")
+    ));
+
+    // Only 1 process spawned across Turns 1..=3!
+    let spawns = std::fs::read_to_string(&count_path)
+        .unwrap()
+        .lines()
+        .count();
+    assert_eq!(spawns, 1, "Turns 1..=3 must reuse a single AGY process");
+
+    let logged: Vec<serde_json::Value> = std::fs::read_to_string(&log_path)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(logged.len(), 3);
+    assert_eq!(logged[1]["prompt"][0]["text"], "follow-up 2");
+    assert_eq!(logged[2]["prompt"][0]["text"], "follow-up 3");
+    assert_eq!(logged[2]["prompt"][1]["type"], "image");
+
+    // Turn 4: changed system contract cannot reuse or fit 420KB replay -> fresh session rejects >384KB
+    req.system = "changed rules".into();
+    req.messages.push(msg(
+        Role::Assistant,
+        vec![Part::Text(TextPart {
+            base: base(),
+            text: "t3-ok".into(),
+            synthetic: false,
+        })],
+    ));
+    req.messages.push(msg(
+        Role::User,
+        vec![Part::Text(TextPart {
+            base: base(),
+            text: "follow-up 4".into(),
+            synthetic: false,
+        })],
+    ));
+    assert!(provider.replay_budget(&req).await.unwrap().unwrap().0 > limit);
+    assert!(provider.stream(req).await.is_err());
+}
+
+#[tokio::test]
+async fn persistent_session_resumes_after_idle_exit_and_after_abandon_pending() {
+    // Part A: clean EOF while idle -> session/resume -> fallback to session/new on error
+    let parent = tempfile::tempdir().unwrap();
+    let methods_path = parent.path().join("methods.jsonl");
+    let script = format!(
+        r#"import sys,json
+methods_path={:?}
+def record(obj):
+ with open(methods_path,'a') as f: f.write(json.dumps(obj)+'\n')
+def read_msg():
+ line=sys.stdin.readline()
+ if not line: sys.exit(0)
+ m=json.loads(line)
+ record({{'id':m.get('id'),'method':m.get('method'),'params':m.get('params')}})
+ return m
+m1=read_msg(); print(json.dumps({{'jsonrpc':'2.0','id':m1['id'],'result':{{'protocolVersion':1}}}}),flush=True)
+m2=read_msg(); print(json.dumps({{'jsonrpc':'2.0','id':m2['id'],'result':{{}}}}),flush=True)
+m3=read_msg()
+if m3['method']=='session/new':
+ print(json.dumps({{'jsonrpc':'2.0','id':m3['id'],'result':{{'sessionId':'s-orig'}}}}),flush=True)
+ m4=read_msg(); print(json.dumps({{'jsonrpc':'2.0','id':m4['id'],'result':{{}}}}),flush=True)
+ m5=read_msg()
+ text='fallback-ok' if 'mew_transcript_v1' in m5['params']['prompt'][0]['text'] else 'turn1-ok'
+ print(json.dumps({{'jsonrpc':'2.0','method':'session/update','params':{{'sessionId':'s-orig','update':{{'sessionUpdate':'agent_message_chunk','content':{{'type':'text','text':text}}}}}}}}),flush=True)
+ print(json.dumps({{'jsonrpc':'2.0','id':m5['id'],'result':{{'stopReason':'end_turn'}}}}),flush=True)
+ sys.exit(0)
+elif m3['method']=='session/resume':
+ # Reject resume on turn 3 (`reject-resume` trigger), accept otherwise
+ print(json.dumps({{'jsonrpc':'2.0','id':m3['id'],'error':{{'code':-32004,'message':'gone'}}}}),flush=True) if 'reject' in open(methods_path).read() else None
+ # Wait: check turn number from recorded methods
+"#,
+        methods_path
+    );
+    let _ = script;
+    // Simpler deterministic script tracking spawn count via spawns.txt:
+    let spawns_path = parent.path().join("spawns.txt");
+    let script = format!(
+        r#"import sys,json
+spawns_path={:?}
+methods_path={:?}
+with open(spawns_path,'a') as f: f.write('1\n')
+spawn=len(open(spawns_path).readlines())
+def record(obj):
+ with open(methods_path,'a') as f: f.write(json.dumps(obj)+'\n')
+def read_msg():
+ line=sys.stdin.readline()
+ if not line: sys.exit(0)
+ m=json.loads(line)
+ record({{'spawn':spawn,'id':m.get('id'),'method':m.get('method'),'params':m.get('params')}})
+ return m
+m1=read_msg(); print(json.dumps({{'jsonrpc':'2.0','id':m1['id'],'result':{{'protocolVersion':1}}}}),flush=True)
+m2=read_msg(); print(json.dumps({{'jsonrpc':'2.0','id':m2['id'],'result':{{}}}}),flush=True)
+while True:
+ m=read_msg()
+ meth=m['method']
+ if meth=='session/new':
+  print(json.dumps({{'jsonrpc':'2.0','id':m['id'],'result':{{'sessionId':f's-{{spawn}}'}}}}),flush=True)
+ elif meth=='session/resume':
+  if spawn==3:
+   print(json.dumps({{'jsonrpc':'2.0','id':m['id'],'error':{{'code':-32004,'message':'expired'}}}}),flush=True)
+  else:
+   print(json.dumps({{'jsonrpc':'2.0','id':m['id'],'result':{{'sessionId':m['params']['sessionId']}}}}),flush=True)
+ elif meth=='session/set_model':
+  print(json.dumps({{'jsonrpc':'2.0','id':m['id'],'result':{{}}}}),flush=True)
+ elif meth=='session/prompt':
+  sid=m['params']['sessionId']
+  prompt_txt=m['params']['prompt'][0]['text']
+  reply=f'spawn={{spawn}};sid={{sid}};txt={{prompt_txt}}'
+  print(json.dumps({{'jsonrpc':'2.0','method':'session/update','params':{{'sessionId':sid,'update':{{'sessionUpdate':'agent_message_chunk','content':{{'type':'text','text':reply}}}}}}}}),flush=True)
+  print(json.dumps({{'jsonrpc':'2.0','id':m['id'],'result':{{'stopReason':'end_turn'}}}}),flush=True)
+  # Spawn 1 & 2 exit immediately after end_turn to force session/resume on next turn
+  if spawn in (1,2): sys.exit(0)
+"#,
+        spawns_path, methods_path
+    );
+    let provider = AgyProvider::new(config(parent.path()), fixture(parent.path(), &script));
+    let mut req = request();
+    let e1: Vec<_> = provider.stream(req.clone()).await.unwrap().collect().await;
+    assert!(e1.iter().any(
+        |e| matches!(e, ProviderEvent::PartDelta { field: "text", delta, .. } if delta.contains("spawn=1;sid=s-1"))
+    ));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Turn 2: Spawn 1 exited -> Spawn 2 uses session/resume('s-1') + delta prompt!
+    req.messages.push(msg(
+        Role::Assistant,
+        vec![Part::Text(TextPart {
+            base: base(),
+            text: e1
+                .iter()
+                .filter_map(|e| match e {
+                    ProviderEvent::PartDelta {
+                        field: "text",
+                        delta,
+                        ..
+                    } => Some(delta.as_str()),
+                    _ => None,
+                })
+                .collect(),
+            synthetic: false,
+        })],
+    ));
+    req.messages.push(msg(
+        Role::User,
+        vec![Part::Text(TextPart {
+            base: base(),
+            text: "turn2-delta".into(),
+            synthetic: false,
+        })],
+    ));
+    let e2: Vec<_> = provider.stream(req.clone()).await.unwrap().collect().await;
+    let t2: String = e2
+        .iter()
+        .filter_map(|e| match e {
+            ProviderEvent::PartDelta {
+                field: "text",
+                delta,
+                ..
+            } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(t2, "spawn=2;sid=s-1;txt=turn2-delta");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Turn 3: Spawn 2 exited, Spawn 3 rejects session/resume -> falls back in-process to session/new + full replay!
+    req.messages.push(msg(
+        Role::Assistant,
+        vec![Part::Text(TextPart {
+            base: base(),
+            text: t2,
+            synthetic: false,
+        })],
+    ));
+    req.messages.push(msg(
+        Role::User,
+        vec![Part::Text(TextPart {
+            base: base(),
+            text: "turn3-fallback".into(),
+            synthetic: false,
+        })],
+    ));
+    let e3: Vec<_> = provider.stream(req).await.unwrap().collect().await;
+    let t3: String = e3
+        .iter()
+        .filter_map(|e| match e {
+            ProviderEvent::PartDelta {
+                field: "text",
+                delta,
+                ..
+            } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    let recorded: Vec<serde_json::Value> = std::fs::read_to_string(&methods_path)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert!(
+        recorded.iter().any(|m| m["spawn"] == 2
+            && m["method"] == "session/resume"
+            && m["params"]["sessionId"] == "s-1"),
+        "expected Turn 2 to send session/resume for s-1: {recorded:?}"
+    );
+    assert!(
+        recorded
+            .iter()
+            .any(|m| m["spawn"] == 3 && m["method"] == "session/new"),
+        "expected Turn 3 to fall back to session/new after resume error: {recorded:?}"
+    );
+    assert!(
+        t3.starts_with("spawn=3;sid=s-3;txt=") && t3.contains("mew_transcript_v1"),
+        "expected fallback full replay on s-3, got: {t3}"
+    );
+
+    // Part B: abandon_pending retains continuity and resumes via session/resume + delta transcript
+    let methods_b = parent.path().join("methods_b.jsonl");
+    let script_b = format!(
+        r#"import sys,json,urllib.request
+methods_b={:?}
+def record(obj):
+ with open(methods_b,'a') as f: f.write(json.dumps(obj)+'\n')
+def read_msg():
+ line=sys.stdin.readline()
+ if not line: sys.exit(0)
+ m=json.loads(line)
+ record({{'id':m.get('id'),'method':m.get('method'),'params':m.get('params')}})
+ return m
+m1=read_msg(); print(json.dumps({{'jsonrpc':'2.0','id':m1['id'],'result':{{'protocolVersion':1}}}}),flush=True)
+m2=read_msg(); print(json.dumps({{'jsonrpc':'2.0','id':m2['id'],'result':{{}}}}),flush=True)
+m3=read_msg()
+if m3['method']=='session/new':
+ print(json.dumps({{'jsonrpc':'2.0','id':m3['id'],'result':{{'sessionId':'s-abandon'}}}}),flush=True)
+ m4=read_msg(); print(json.dumps({{'jsonrpc':'2.0','id':m4['id'],'result':{{}}}}),flush=True)
+ read_msg()
+ with open('.agents/mcp_config.json') as f: url=json.load(f)['mcpServers']['mew']['serverUrl']
+ def post(body,sid=None):
+  h={{'Content-Type':'application/json'}}
+  if sid: h['mcp-session-id']=sid
+  with urllib.request.urlopen(urllib.request.Request(url,data=json.dumps(body).encode(),headers=h)) as r: return r.headers, r.read()
+ h,_=post({{'jsonrpc':'2.0','id':1,'method':'initialize','params':{{'protocolVersion':'2025-11-25','capabilities':{{}},'clientInfo':{{'name':'fake','version':'1'}}}}}})
+ sid=h['mcp-session-id']
+ post({{'jsonrpc':'2.0','method':'notifications/initialized'}},sid)
+ post({{'jsonrpc':'2.0','id':2,'method':'tools/call','params':{{'name':'echo','arguments':{{'text':'hello'}}}}}},sid)
+elif m3['method']=='session/resume':
+ print(json.dumps({{'jsonrpc':'2.0','id':m3['id'],'result':{{'sessionId':m3['params']['sessionId']}}}}),flush=True)
+ m4=read_msg(); print(json.dumps({{'jsonrpc':'2.0','id':m4['id'],'result':{{}}}}),flush=True)
+ m5=read_msg()
+ txt=m5['params']['prompt'][0]['text']
+ print(json.dumps({{'jsonrpc':'2.0','method':'session/update','params':{{'sessionId':'s-abandon','update':{{'sessionUpdate':'agent_message_chunk','content':{{'type':'text','text':txt}}}}}}}}),flush=True)
+ print(json.dumps({{'jsonrpc':'2.0','id':m5['id'],'result':{{'stopReason':'end_turn'}}}}),flush=True)
+"#,
+        methods_b
+    );
+    let provider_b = AgyProvider::new(config(parent.path()), fixture(parent.path(), &script_b));
+    let mut req_b = request();
+    let e_handoff: Vec<_> = provider_b
+        .stream(req_b.clone())
+        .await
+        .unwrap()
+        .collect()
+        .await;
+    let call = e_handoff
+        .iter()
+        .find_map(|e| match e {
+            ProviderEvent::PartStart {
+                part: Part::ToolCall(c),
+            } => Some(c.clone()),
+            _ => None,
+        })
+        .expect("tool call");
+    provider_b.abandon_pending(req_b.session_id.unwrap()).await;
+
+    let mut done = call.clone();
+    done.state = ToolState::Completed(ToolStateCompleted {
+        input: json!({"text":"hello"}),
+        output: "tool response".into(),
+        metadata: None,
+        diff: None,
+        images: vec![],
+        time: ToolTime {
+            start: 0,
+            end: Some(1),
+        },
+    });
+    req_b
+        .messages
+        .push(msg(Role::Assistant, vec![Part::ToolCall(done)]));
+    req_b.messages.push(msg(
+        Role::User,
+        vec![Part::ToolResult(ToolResultPart {
+            base: base(),
+            call_id: call.call_id,
+        })],
+    ));
+    req_b.messages.push(msg(
+        Role::User,
+        vec![Part::Text(TextPart {
+            base: base(),
+            text: "after abandon".into(),
+            synthetic: false,
+        })],
+    ));
+    let e_resumed: Vec<_> = provider_b.stream(req_b).await.unwrap().collect().await;
+    let t_resumed: String = e_resumed
+        .iter()
+        .filter_map(|e| match e {
+            ProviderEvent::PartDelta {
+                field: "text",
+                delta,
+                ..
+            } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        t_resumed.contains("mew_transcript_delta_v1") && t_resumed.contains("after abandon"),
+        "expected delta transcript on resumed session after abandon, got: {t_resumed}"
+    );
+    let recorded_b: Vec<serde_json::Value> = std::fs::read_to_string(&methods_b)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert!(
+        recorded_b
+            .iter()
+            .any(|m| m["method"] == "session/resume" && m["params"]["sessionId"] == "s-abandon"),
+        "expected session/resume('s-abandon') after abandon_pending: {recorded_b:?}"
+    );
 }

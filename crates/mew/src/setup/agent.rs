@@ -68,7 +68,7 @@ fn apply_model_metadata(agent: &mut Agent, cat: Option<&Catalog>, model_id: &str
         .map_or(0, |max| max.min(32_768));
     if agent.provider_id == "antigravity" {
         agent.default_max_output_tokens = 0;
-        agent.supports_vision = false;
+        agent.supports_vision = true;
         agent.context_window = 0;
         apply_catalog_pricing(agent, None, model_id);
     } else {
@@ -863,7 +863,7 @@ mod tests {
         agent.set_model_info("shared", "antigravity");
         apply_model_metadata(&mut agent, Some(&catalog), "shared");
         assert_eq!(agent.default_max_output_tokens, 0);
-        assert!(!agent.supports_vision);
+        assert!(agent.supports_vision);
         assert_eq!(agent.context_window, 0);
         assert_eq!(agent.input_price, 0.0);
         assert_eq!(agent.output_price, 0.0);
@@ -909,7 +909,7 @@ mod tests {
             false,
         );
         assert_eq!(agent.default_max_output_tokens, 0);
-        assert!(!agent.supports_vision);
+        assert!(agent.supports_vision);
         assert_eq!(agent.context_window, 0);
         assert_eq!(agent.input_price, 0.0);
     }

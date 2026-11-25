@@ -19,6 +19,9 @@ use mew_provider::{EventStream, Provider, ProviderError, Request};
 use tokio::io::AsyncReadExt;
 use tokio::sync::OnceCell;
 
+pub(crate) const EFFORT_SUFFIXES: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+const AGY_EFFORT_PARAM: &str = "agy_effort";
+
 pub(crate) struct ModelCache {
     state: std::sync::Mutex<ModelCacheState>,
     generation: tokio::sync::watch::Sender<u64>,
@@ -42,8 +45,7 @@ impl ModelCache {
     pub(crate) fn refresh(
         self: &std::sync::Arc<Self>,
     ) -> Option<tokio::sync::watch::Receiver<u64>> {
-        let executable =
-            std::env::var_os("PATH").and_then(|path| super::providers::find_agy_on_path(&path))?;
+        let executable = super::providers::find_agy_executable()?;
         let runtime = tokio::runtime::Handle::try_current().ok()?;
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let receiver = self.generation.subscribe();
@@ -80,6 +82,31 @@ impl ModelCache {
             .models
             .clone()
     }
+
+    pub(crate) fn thinking_variants(&self, model_id: &str) -> Vec<String> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .models
+            .iter()
+            .find(|model| model.model == model_id)
+            .map(|model| {
+                model
+                    .thinking_variants
+                    .iter()
+                    .map(|variant| variant.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .models
+            .is_empty()
+    }
 }
 
 /// Discovery has a 25 second deadline followed by bounded subprocess cleanup.
@@ -90,6 +117,7 @@ pub(crate) async fn wait_for_model_refresh(mut pending: tokio::sync::watch::Rece
 pub(super) struct LocalAgyProvider {
     executable: PathBuf,
     model: String,
+    default_effort: Option<String>,
     isolated: bool,
     ready: OnceCell<Ready>,
 }
@@ -105,9 +133,15 @@ impl LocalAgyProvider {
         Self {
             executable,
             model,
+            default_effort: None,
             isolated,
             ready: OnceCell::new(),
         }
+    }
+
+    pub(super) fn with_default_effort(mut self, effort: Option<String>) -> Self {
+        self.default_effort = effort;
+        self
     }
 
     async fn ready(&self) -> Result<&Ready, ProviderError> {
@@ -190,9 +224,11 @@ async fn run_login(command: &mut tokio::process::Command) -> io::Result<()> {
 }
 
 pub(crate) async fn login() -> anyhow::Result<()> {
-    let executable = std::env::var_os("PATH")
-        .and_then(|path| super::providers::find_agy_on_path(&path))
-        .ok_or_else(|| anyhow::anyhow!("agy executable not found on PATH"))?;
+    let executable = super::providers::find_agy_executable().ok_or_else(|| {
+        anyhow::anyhow!(
+            "agy executable not found on PATH, in ~/.local/bin, or standard macOS bin directories"
+        )
+    })?;
     eprintln!("Signing in through the official AGY CLI.");
     run_login(&mut login_command(&executable)).await?;
     Ok(())
@@ -210,7 +246,6 @@ pub(super) async fn discover_models(
     let launch = launch::prepare(
         &ready.workspace_parent,
         "models",
-        &[],
         server.url(),
         Capabilities::default(),
         "",
@@ -269,11 +304,31 @@ pub(super) async fn discover_models(
         .map_err(ProviderError::from)
 }
 
+fn split_effort_model<'a>(id: &'a str, name: &'a str) -> Option<(&'a str, &'static str, &'a str)> {
+    let (base_id, effort) = EFFORT_SUFFIXES.iter().find_map(|&effort| {
+        let base_id = id.strip_suffix(effort)?.strip_suffix('-')?;
+        (!base_id.is_empty()).then_some((base_id, effort))
+    })?;
+    let base_name = name
+        .strip_suffix(')')
+        .and_then(|without_paren| without_paren.rsplit_once(" ("))
+        .filter(|(prefix, suffix)| !prefix.is_empty() && suffix.eq_ignore_ascii_case(effort))
+        .map_or(name, |(prefix, _)| prefix);
+    Some((base_id, effort, base_name))
+}
+
+fn effort_rank(effort: &str) -> usize {
+    EFFORT_SUFFIXES
+        .iter()
+        .position(|&candidate| candidate == effort)
+        .unwrap_or(usize::MAX)
+}
+
 fn parse_models(output: &[u8]) -> io::Result<Vec<mew_protocol::ModelInfo>> {
     let output =
         std::str::from_utf8(output).map_err(|_| io::Error::other("invalid AGY model list"))?;
     let mut seen = std::collections::HashSet::new();
-    Ok(output
+    let entries: Vec<(&str, &str)> = output
         .lines()
         .filter_map(|line| {
             let (id, name) = line.split_once('\t')?;
@@ -290,18 +345,120 @@ fn parse_models(output: &[u8]) -> io::Result<Vec<mew_protocol::ModelInfo>> {
             {
                 return None;
             }
-            Some(mew_protocol::ModelInfo {
-                id: format!("antigravity/{id}"),
-                provider: "antigravity".into(),
-                model: id.into(),
-                display_name: Some(name.into()),
-                description: None,
-                thinking_variants: Vec::new(),
-                thinking_budget: None,
-                context_window: None,
-            })
+            Some((id, name))
         })
-        .collect())
+        .collect();
+
+    let mut groups: std::collections::HashMap<&str, (Vec<&'static str>, &str)> =
+        std::collections::HashMap::new();
+    for &(id, name) in &entries {
+        if let Some((base_id, effort, base_name)) = split_effort_model(id, name) {
+            let entry = groups
+                .entry(base_id)
+                .or_insert_with(|| (Vec::new(), base_name));
+            if !entry.0.contains(&effort) {
+                entry.0.push(effort);
+            }
+        }
+    }
+
+    let mut emitted_bases = std::collections::HashSet::new();
+    let mut models = Vec::with_capacity(entries.len());
+    for (id, name) in entries {
+        if let Some((base_id, _, _)) = split_effort_model(id, name) {
+            if let Some((efforts, base_name)) = groups.get(base_id) {
+                if efforts.len() >= 2 {
+                    if !emitted_bases.insert(base_id) {
+                        continue;
+                    }
+                    let mut sorted = efforts.clone();
+                    sorted.sort_by_key(|effort| effort_rank(effort));
+                    models.push(mew_protocol::ModelInfo {
+                        id: format!("antigravity/{base_id}"),
+                        provider: "antigravity".into(),
+                        model: base_id.into(),
+                        display_name: Some((*base_name).into()),
+                        description: None,
+                        thinking_variants: sorted
+                            .into_iter()
+                            .map(|effort| mew_protocol::ThinkingVariantInfo {
+                                name: effort.into(),
+                            })
+                            .collect(),
+                        thinking_budget: None,
+                        context_window: None,
+                    });
+                    continue;
+                }
+            }
+        }
+        models.push(mew_protocol::ModelInfo {
+            id: format!("antigravity/{id}"),
+            provider: "antigravity".into(),
+            model: id.into(),
+            display_name: Some(name.into()),
+            description: None,
+            thinking_variants: Vec::new(),
+            thinking_budget: None,
+            context_window: None,
+        });
+    }
+    Ok(models)
+}
+
+pub(crate) fn resolve_agy_reasoning(
+    variants: &[String],
+    variant_name: Option<&str>,
+) -> Option<(mew_provider::ReasoningConfig, String)> {
+    if variants.is_empty() {
+        return None;
+    }
+    let resolved = match variant_name {
+        Some(name) if name == "off" || name == "none" => return None,
+        Some(name) => variants
+            .iter()
+            .find(|candidate| candidate.eq_ignore_ascii_case(name))?
+            .clone(),
+        None => variants
+            .iter()
+            .find(|candidate| *candidate == "high")
+            .or_else(|| variants.iter().find(|candidate| *candidate == "medium"))
+            .or_else(|| variants.first())?
+            .clone(),
+    };
+    let mut params = serde_json::Map::new();
+    params.insert(
+        AGY_EFFORT_PARAM.into(),
+        serde_json::Value::String(resolved.clone()),
+    );
+    Some((mew_provider::ReasoningConfig { params }, resolved))
+}
+
+fn strip_effort_suffix(model: &str) -> &str {
+    EFFORT_SUFFIXES
+        .iter()
+        .find_map(|effort| model.strip_suffix(effort)?.strip_suffix('-'))
+        .filter(|base| !base.is_empty())
+        .unwrap_or(model)
+}
+
+fn resolve_model_for_request(
+    model: &str,
+    reasoning: Option<mew_provider::ReasoningConfig>,
+    default_effort: Option<&str>,
+) -> String {
+    let effort = reasoning
+        .as_ref()
+        .and_then(|config| config.params.get(AGY_EFFORT_PARAM))
+        .and_then(|value| value.as_str())
+        .or(default_effort);
+    match effort {
+        Some(effort) => {
+            let base = strip_effort_suffix(model);
+            format!("{base}-{effort}")
+        }
+        None => model.to_owned(),
+    }
 }
 
 #[async_trait]
@@ -324,10 +481,19 @@ impl Provider for LocalAgyProvider {
             .await
     }
 
+    async fn abandon_pending(&self, session_id: mew_message::SessionId) {
+        if let Some(ready) = self.ready.get() {
+            ready.provider.abandon_pending(session_id).await;
+        }
+    }
+
     async fn stream(&self, mut request: Request) -> Result<EventStream, ProviderError> {
         if request.model.is_empty() {
             request.model.clone_from(&self.model);
         }
+        let reasoning = request.reasoning.take();
+        request.model =
+            resolve_model_for_request(&request.model, reasoning, self.default_effort.as_deref());
         self.ready().await?.provider.stream(request).await
     }
 
@@ -335,6 +501,9 @@ impl Provider for LocalAgyProvider {
         if request.model.is_empty() {
             request.model.clone_from(&self.model);
         }
+        let reasoning = request.reasoning.take();
+        request.model =
+            resolve_model_for_request(&request.model, reasoning, self.default_effort.as_deref());
         self.ready().await?.provider.stream_auxiliary(request).await
     }
 }
@@ -390,9 +559,22 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let script = directory.path().join("classifier.py");
         std::fs::write(&script, r#"import sys,json
-sys.stdin.readline()
-print(json.dumps({'event':'step_update','step_update':{'step_type':'agent_response','text_delta':'allow'}}),flush=True)
-print(json.dumps({'event':'result','result':{'status':'SUCCESS'}}),flush=True)
+for line in sys.stdin:
+ msg=json.loads(line)
+ mid=msg.get('id')
+ method=msg.get('method')
+ if method=='initialize':
+  print(json.dumps({'jsonrpc':'2.0','id':mid,'result':{'protocolVersion':1}}),flush=True)
+ elif method=='authenticate':
+  print(json.dumps({'jsonrpc':'2.0','id':mid,'result':{}}),flush=True)
+ elif method=='session/new':
+  print(json.dumps({'jsonrpc':'2.0','id':mid,'result':{'sessionId':'s1'}}),flush=True)
+ elif method=='session/set_model':
+  print(json.dumps({'jsonrpc':'2.0','id':mid,'result':{}}),flush=True)
+ elif method=='session/prompt':
+  print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'s1','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'allow'}}}}),flush=True)
+  print(json.dumps({'jsonrpc':'2.0','id':mid,'result':{'stopReason':'end_turn'}}),flush=True)
+  break
 "#).unwrap();
         let provider = std::sync::Arc::new(AgyProvider::new(
             Config {
@@ -478,6 +660,69 @@ print(json.dumps({'event':'result','result':{'status':'SUCCESS'}}),flush=True)
         );
         assert_eq!(models[1].model, "gemini-4-argon-low");
         assert!(parse_models(&[0xff]).is_err());
+    }
+
+    #[test]
+    fn groups_effort_variants_into_single_model_with_thinking_variants() {
+        let input = b"\
+gemini-4-neon-high\tGemini 4 Neon (High)\n\
+gemini-4-neon-xhigh\tGemini 4 Neon (XHigh)\n\
+gemini-4-neon-medium\tGemini 4 Neon (Medium)\n\
+gemini-4-neon-low\tGemini 4 Neon (Low)\n\
+gemini-pro-orchestrator\tOrchestrator (Carbon)\n\
+gpt-oss-120b-medium\tGPT-OSS 120B (Medium)\n";
+        let models = parse_models(input).unwrap();
+        assert_eq!(models.len(), 3);
+
+        assert_eq!(models[0].id, "antigravity/gemini-4-neon");
+        assert_eq!(models[0].model, "gemini-4-neon");
+        assert_eq!(models[0].display_name.as_deref(), Some("Gemini 4 Neon"));
+        let variants: Vec<&str> = models[0]
+            .thinking_variants
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect();
+        assert_eq!(variants, vec!["low", "medium", "high", "xhigh"]);
+
+        assert_eq!(models[1].id, "antigravity/gemini-pro-orchestrator");
+        assert!(models[1].thinking_variants.is_empty());
+
+        assert_eq!(models[2].id, "antigravity/gpt-oss-120b-medium");
+        assert!(models[2].thinking_variants.is_empty());
+    }
+
+    #[test]
+    fn resolves_agy_reasoning_and_request_model() {
+        let variants = vec!["low".into(), "medium".into(), "high".into(), "xhigh".into()];
+        let (default_cfg, default_name) = resolve_agy_reasoning(&variants, None).unwrap();
+        assert_eq!(default_name, "high");
+        assert_eq!(
+            resolve_model_for_request("gemini-4-neon", Some(default_cfg), Some("low")),
+            "gemini-4-neon-high"
+        );
+
+        let (explicit_cfg, explicit_name) =
+            resolve_agy_reasoning(&variants, Some("XHigh")).unwrap();
+        assert_eq!(explicit_name, "xhigh");
+        assert_eq!(
+            resolve_model_for_request("gemini-4-neon", Some(explicit_cfg), Some("low")),
+            "gemini-4-neon-xhigh"
+        );
+
+        assert!(resolve_agy_reasoning(&variants, Some("off")).is_none());
+        assert!(resolve_agy_reasoning(&variants, Some("unknown")).is_none());
+        assert_eq!(
+            resolve_model_for_request("gemini-4-neon", None, Some("low")),
+            "gemini-4-neon-low"
+        );
+        assert_eq!(
+            resolve_model_for_request("gemini-3.8-flash-low", None, Some("low")),
+            "gemini-3.8-flash-low"
+        );
+        assert_eq!(
+            resolve_model_for_request("gemini-4-neon-high", None, Some("low")),
+            "gemini-4-neon-low"
+        );
     }
 
     #[test]

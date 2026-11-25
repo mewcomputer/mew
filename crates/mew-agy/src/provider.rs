@@ -6,7 +6,7 @@ mod unix {
         launch::{self, Capabilities},
         mcp::{McpServer, Tool},
         process::{IsolationBoundary, LaunchSpec, ManagedProcess},
-        session::{Session, SessionEvent, Turn},
+        session::{PersistentOptions, Session, SessionConfig, SessionEvent, Turn},
         transcript,
     };
     use async_trait::async_trait;
@@ -46,6 +46,13 @@ mod unix {
     struct Slot {
         session: Option<Session>,
         pending: Option<Pending>,
+        continuity: Option<Continuity>,
+    }
+    struct Continuity {
+        acp_session_id: String,
+        session_contract: Value,
+        history: Vec<Value>,
+        after_abandon: bool,
     }
     struct Pending {
         id: String,
@@ -185,7 +192,161 @@ mod unix {
         let is_error = results[0]["is_error"]
             .as_bool()
             .ok_or_else(|| invalid("invalid tool result state"))?;
-        Ok(json!({"content":[{"type":"text","text":text}],"isError":is_error}))
+        let mut content_blocks = vec![json!({"type": "text", "text": text})];
+        if let Some(images) = results[0].get("images").and_then(Value::as_array) {
+            for image in images {
+                let mime = image
+                    .get("mime")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| invalid("invalid tool result image mime"))?;
+                let data = image
+                    .get("data")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| invalid("invalid tool result image data"))?;
+                content_blocks.push(json!({"type": "image", "data": data, "mimeType": mime}));
+            }
+        }
+        Ok(json!({"content": content_blocks, "isError": is_error}))
+    }
+    fn session_contract_of(contract: &Value) -> Value {
+        json!({
+            "system": contract["system"],
+            "tools": contract["tools"],
+            "supports_vision": contract["supports_vision"],
+        })
+    }
+    fn match_continuity<'a>(
+        continuity: &Continuity,
+        session_contract: &Value,
+        history: &'a [Value],
+    ) -> Option<&'a [Value]> {
+        if continuity.session_contract != *session_contract
+            || history.len() <= continuity.history.len()
+            || history[..continuity.history.len()] != continuity.history
+        {
+            return None;
+        }
+        let suffix = &history[continuity.history.len()..];
+        if !continuity.after_abandon {
+            let pure_user_append = suffix.iter().all(|message| {
+                message["role"] == "user"
+                    && message["content"].as_array().is_some_and(|parts| {
+                        parts.iter().all(|part| {
+                            matches!(part["type"].as_str(), Some("text" | "attachment"))
+                        })
+                    })
+            });
+            if !pure_user_append {
+                return None;
+            }
+        } else {
+            let has_compaction = suffix.iter().any(|message| {
+                message["content"].as_array().is_some_and(|parts| {
+                    parts.iter().any(|part| {
+                        matches!(
+                            part["type"].as_str(),
+                            Some("compaction" | "preserved_context")
+                        )
+                    })
+                })
+            });
+            let ends_with_user = suffix.last().is_some_and(|message| {
+                message["role"] == "user"
+                    && message["content"].as_array().is_some_and(|parts| {
+                        parts.iter().any(|part| {
+                            matches!(part["type"].as_str(), Some("text" | "attachment"))
+                        })
+                    })
+            });
+            if has_compaction || !ends_with_user {
+                return None;
+            }
+        }
+        Some(suffix)
+    }
+    fn idle_timeout(lifetime: Duration) -> Duration {
+        lifetime.min(Duration::from_secs(600))
+    }
+    impl<B: IsolationBoundary + Send + Sync + 'static> AgyProvider<B> {
+        async fn spawn_session(
+            &self,
+            request: &Request,
+            system: &str,
+            persistent: Option<PersistentOptions>,
+        ) -> Result<Session, ProviderError> {
+            let mut seen = HashSet::new();
+            for tool in &request.tools {
+                if !seen.insert(tool.name.as_str()) {
+                    return Err(invalid("duplicate tool name"));
+                }
+            }
+            let mut used: HashSet<String> = request
+                .tools
+                .iter()
+                .filter(|tool| crate::mcp::valid_name(&tool.name))
+                .map(|tool| tool.name.clone())
+                .collect();
+            let mut defs = Vec::with_capacity(request.tools.len());
+            for (index, tool) in request.tools.iter().enumerate() {
+                let alias = if crate::mcp::valid_name(&tool.name) {
+                    tool.name.clone()
+                } else {
+                    let mut candidate = format!("mew_tool_{index}");
+                    let mut suffix = 0usize;
+                    while used.contains(&candidate) {
+                        suffix += 1;
+                        candidate = format!("mew_tool_{index}_{suffix}");
+                    }
+                    used.insert(candidate.clone());
+                    candidate
+                };
+                defs.push(
+                    Tool::aliased(&alias, &tool.name, &tool.description, tool.schema.clone())
+                        .map_err(invalid)?,
+                );
+            }
+            let (server, calls) = McpServer::bind(defs, 16).await.map_err(invalid)?;
+            let launch = launch::prepare(
+                &self.config.workspace_parent,
+                &request.model,
+                server.url(),
+                Capabilities {
+                    attachments: true,
+                    ..Default::default()
+                },
+                system,
+            )?;
+            let cwd = launch.workspace().to_path_buf();
+            let cwd_str = cwd
+                .to_str()
+                .ok_or_else(|| invalid("workspace path is not UTF-8"))?
+                .to_owned();
+            let (workspace, args) = launch.into_parts();
+            let spec = LaunchSpec {
+                program: self.config.executable.clone(),
+                args: args.into_iter().map(OsString::from).collect(),
+                env: self.config.environment.clone(),
+                cwd,
+            };
+            let process =
+                ManagedProcess::spawn(spec, &self.boundary, workspace, self.config.lifetime)?;
+            let session_config = SessionConfig {
+                model: request.model.clone(),
+                cwd: cwd_str,
+            };
+            let session = match persistent {
+                Some(options) => Session::new_persistent(
+                    process,
+                    server,
+                    calls,
+                    self.config.lifetime,
+                    session_config,
+                    options,
+                )?,
+                None => Session::new(process, server, calls, self.config.lifetime, session_config)?,
+            };
+            Ok(session)
+        }
     }
     #[async_trait]
     impl<B: IsolationBoundary + Send + Sync + 'static> Provider for AgyProvider<B> {
@@ -205,6 +366,38 @@ mod unix {
                 None => true,
             })
         }
+        async fn abandon_pending(&self, session_id: SessionId) {
+            let slot = self
+                .sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&session_id)
+                .cloned();
+            let Some(slot) = slot else {
+                return;
+            };
+            let mut guard = slot.lock().await;
+            let Some(pending) = guard.pending.take() else {
+                return;
+            };
+            pending.watch_stop.cancel();
+            if let Some(session) = guard.session.take() {
+                let acp_sid = session.acp_session_id();
+                let _ = session.abandon().await;
+                if let Some(acp_session_id) = acp_sid {
+                    guard.continuity = Some(Continuity {
+                        acp_session_id,
+                        session_contract: session_contract_of(&pending.contract),
+                        history: pending.history,
+                        after_abandon: true,
+                    });
+                } else {
+                    guard.continuity = None;
+                }
+            } else {
+                guard.continuity = None;
+            }
+        }
         async fn replay_budget(
             &self,
             request: &Request,
@@ -216,13 +409,59 @@ mod unix {
                     .get(&id)
                     .cloned()
             });
-            if let Some(slot) = slot {
-                if slot.lock().await.pending.is_some() {
+            let continuity = if let Some(slot) = slot {
+                let guard = slot.lock().await;
+                if guard.pending.is_some() {
                     return Ok(None);
                 }
+                guard.continuity.as_ref().map(|c| {
+                    (
+                        c.session_contract.clone(),
+                        c.history.clone(),
+                        c.after_abandon,
+                    )
+                })
+            } else {
+                None
+            };
+            if let Some((session_contract, seen_history, after_abandon)) = continuity {
+                if let Ok((contract, history, _)) = checked(request) {
+                    let temp = Continuity {
+                        acp_session_id: String::new(),
+                        session_contract,
+                        history: seen_history,
+                        after_abandon,
+                    };
+                    if let Some(suffix) =
+                        match_continuity(&temp, &session_contract_of(&contract), &history)
+                    {
+                        let req_for_size = request.clone();
+                        let seen_len = temp.history.len();
+                        let suffix_owned = suffix.to_vec();
+                        let budget = tokio::task::spawn_blocking(move || {
+                            transcript::delta_replay_budget(
+                                &req_for_size,
+                                seen_len,
+                                &suffix_owned,
+                                after_abandon,
+                                crate::session::MAX_INPUT,
+                            )
+                        })
+                        .await
+                        .map_err(|error| invalid(format!("replay size task failed: {error}")))?
+                        .map_err(invalid)?;
+                        return Ok(Some(budget));
+                    }
+                }
             }
-            let size = transcript::replay_size(request).map_err(invalid)?;
-            Ok(Some((size, crate::session::MAX_INPUT)))
+            let req_for_size = request.clone();
+            let budget = tokio::task::spawn_blocking(move || {
+                transcript::replay_budget(&req_for_size, crate::session::MAX_INPUT)
+            })
+            .await
+            .map_err(|error| invalid(format!("replay size task failed: {error}")))?
+            .map_err(invalid)?;
+            Ok(Some(budget))
         }
         async fn stream_auxiliary(
             &self,
@@ -265,6 +504,7 @@ mod unix {
                     });
                     if let Some(slot) = existing {
                         let mut slot = slot.lock().await;
+                        slot.continuity = None;
                         if let Some(pending) = slot.pending.take() {
                             pending.watch_stop.cancel();
                         }
@@ -282,9 +522,9 @@ mod unix {
                 let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
                 sessions.retain(|_, slot| {
                     Arc::strong_count(slot) > 1
-                        || slot
-                            .try_lock()
-                            .map_or(true, |entry| entry.session.is_some())
+                        || slot.try_lock().map_or(true, |entry| {
+                            entry.session.is_some() || entry.continuity.is_some()
+                        })
                 });
                 if !sessions.contains_key(&id) && sessions.len() >= 128 {
                     return Err(invalid("AGY session capacity exceeded"));
@@ -301,6 +541,7 @@ mod unix {
                 let result = match continuation(pending, &contract, &history) {
                     Ok(v) => v,
                     Err(e) => {
+                        guard.continuity = None;
                         if let Some(session) = guard.session.take() {
                             let _ = session.shutdown().await;
                         }
@@ -323,6 +564,7 @@ mod unix {
                 match resumed {
                     Ok(turn) => turn,
                     Err(error) => {
+                        guard.continuity = None;
                         if let Some(session) = guard.session.take() {
                             let _ = session.shutdown().await;
                         }
@@ -330,71 +572,141 @@ mod unix {
                     }
                 }
             } else {
-                if guard.session.is_some() {
-                    return Err(invalid("AGY session is already active"));
-                }
-                let mut seen = HashSet::new();
-                for tool in &request.tools {
-                    if !seen.insert(tool.name.as_str()) {
-                        return Err(invalid("duplicate tool name"));
-                    }
-                }
-                let mut used: HashSet<String> = request
-                    .tools
-                    .iter()
-                    .filter(|tool| crate::mcp::valid_name(&tool.name))
-                    .map(|tool| tool.name.clone())
-                    .collect();
-                let mut names = Vec::with_capacity(request.tools.len());
-                let mut defs = Vec::with_capacity(request.tools.len());
-                for (index, tool) in request.tools.iter().enumerate() {
-                    let alias = if crate::mcp::valid_name(&tool.name) {
-                        tool.name.clone()
-                    } else {
-                        let mut candidate = format!("mew_tool_{index}");
-                        let mut suffix = 0usize;
-                        while used.contains(&candidate) {
-                            suffix += 1;
-                            candidate = format!("mew_tool_{index}_{suffix}");
-                        }
-                        used.insert(candidate.clone());
-                        candidate
-                    };
-                    defs.push(
-                        Tool::aliased(&alias, &tool.name, &tool.description, tool.schema.clone())
-                            .map_err(invalid)?,
-                    );
-                    names.push(alias);
-                }
-                let (server, calls) = McpServer::bind(defs, 16).await.map_err(invalid)?;
-                let names: Vec<_> = names.iter().map(String::as_str).collect();
-                let launch = launch::prepare(
-                    &self.config.workspace_parent,
-                    &request.model,
-                    &names,
-                    server.url(),
-                    Capabilities::default(),
-                    &system,
-                )?;
-                let cwd = launch.workspace().to_path_buf();
-                let (workspace, args) = launch.into_parts();
-                let spec = LaunchSpec {
-                    program: self.config.executable.clone(),
-                    args: args.into_iter().map(OsString::from).collect(),
-                    env: self.config.environment.clone(),
-                    cwd,
+                let session_contract = session_contract_of(&contract);
+                let matched = if request.session_id.is_some() {
+                    guard.continuity.as_ref().and_then(|continuity| {
+                        match_continuity(continuity, &session_contract, &history).map(|suffix| {
+                            (
+                                continuity.acp_session_id.clone(),
+                                continuity.history.len(),
+                                suffix.to_vec(),
+                                continuity.after_abandon,
+                            )
+                        })
+                    })
+                } else {
+                    None
                 };
-                let process =
-                    ManagedProcess::spawn(spec, &self.boundary, workspace, self.config.lifetime)?;
-                let session = Session::new(process, server, calls, self.config.lifetime)?;
-                let replay = transcript::project(&request).map_err(invalid)?;
-                let prompt = format!("{}{replay}", transcript::REPLAY_PREFIX);
-                let mut input =
-                    serde_json::to_vec(&json!({"event":"user","message":{"content":prompt}}))?;
-                input.push(b'\n');
-                let turn = session.start(&input, request.cancel_token.clone()).await?;
-                guard.session = Some(session);
-                turn
+
+                if let Some((acp_session_id, seen_len, suffix_owned, after_abandon)) = matched {
+                    let req_for_delta = request.clone();
+                    let (delta_blocks, delta_text_size) = tokio::task::spawn_blocking(move || {
+                        transcript::build_delta_prompt_blocks(
+                            &req_for_delta,
+                            seen_len,
+                            &suffix_owned,
+                            after_abandon,
+                        )
+                    })
+                    .await
+                    .map_err(|error| invalid(format!("delta build task failed: {error}")))?
+                    .map_err(invalid)?;
+                    if delta_text_size > transcript::MAX_REPLAY_TEXT {
+                        return Err(invalid("AGY transcript replay exceeds text limit"));
+                    }
+
+                    let mut live_turn = None;
+                    if !after_abandon {
+                        if let Some(session) = guard.session.as_ref() {
+                            match session
+                                .prompt(
+                                    delta_blocks.clone(),
+                                    request.model.clone(),
+                                    request.cancel_token.clone(),
+                                )
+                                .await
+                            {
+                                Ok(turn) => live_turn = Some(turn),
+                                Err(_) => {
+                                    if let Some(dead) = guard.session.take() {
+                                        let _ = dead.abandon().await;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some(turn) = live_turn {
+                        tracing::debug!(
+                            text_size = delta_text_size,
+                            block_count = delta_blocks.len(),
+                            "reusing live AGY session"
+                        );
+                        turn
+                    } else {
+                        if let Some(old) = guard.session.take() {
+                            let _ = old.abandon().await;
+                        }
+                        let req_for_fallback = request.clone();
+                        let fallback_prompt = tokio::task::spawn_blocking(move || {
+                            transcript::build_prompt_blocks(&req_for_fallback)
+                        })
+                        .await
+                        .map_err(|error| invalid(format!("prompt build task failed: {error}")))?
+                        .ok()
+                        .and_then(|(blocks, text_size)| {
+                            (text_size <= transcript::MAX_REPLAY_TEXT).then_some(blocks)
+                        });
+                        let session = self
+                            .spawn_session(
+                                &request,
+                                &system,
+                                Some(PersistentOptions {
+                                    resume_session_id: Some(acp_session_id),
+                                    fallback_prompt,
+                                    parent_shutdown: self.shutdown.clone(),
+                                    idle_timeout: idle_timeout(self.config.lifetime),
+                                }),
+                            )
+                            .await?;
+                        let turn = session
+                            .start(delta_blocks, request.cancel_token.clone())
+                            .await?;
+                        guard.session = Some(session);
+                        turn
+                    }
+                } else {
+                    if let Some(old) = guard.session.take() {
+                        let _ = old.abandon().await;
+                    }
+                    guard.continuity = None;
+                    let req_for_blocks = request.clone();
+                    let (prompt, text_size) = tokio::task::spawn_blocking(move || {
+                        transcript::build_prompt_blocks(&req_for_blocks)
+                    })
+                    .await
+                    .map_err(|error| invalid(format!("prompt build task failed: {error}")))?
+                    .map_err(invalid)?;
+                    if text_size > transcript::MAX_REPLAY_TEXT {
+                        return Err(invalid("AGY transcript replay exceeds text limit"));
+                    }
+                    if text_size > transcript::MAX_REPLAY_TEXT * 4 / 5 {
+                        tracing::warn!(
+                            text_size,
+                            limit = transcript::MAX_REPLAY_TEXT,
+                            system_bytes = system.len(),
+                            block_count = prompt.len(),
+                            "AGY transcript replay approaching silent truncation ceiling"
+                        );
+                    } else {
+                        tracing::debug!(
+                            text_size,
+                            system_bytes = system.len(),
+                            block_count = prompt.len(),
+                            "prepared AGY session prompt"
+                        );
+                    }
+                    let persistent = request.session_id.map(|_| PersistentOptions {
+                        resume_session_id: None,
+                        fallback_prompt: None,
+                        parent_shutdown: self.shutdown.clone(),
+                        idle_timeout: idle_timeout(self.config.lifetime),
+                    });
+                    let session = self.spawn_session(&request, &system, persistent).await?;
+                    let turn = session.start(prompt, request.cancel_token.clone()).await?;
+                    guard.session = Some(session);
+                    turn
+                }
             };
             let (tx, rx) = mpsc::channel(16);
             tokio::spawn(deliver(
@@ -583,13 +895,32 @@ mod unix {
                             break "provider stream dropped";
                         }
                     }
-                    let cleanup = if let Some(session) = slot.session.take() {
-                        session.shutdown().await
+                    if request.session_id.is_none() {
+                        let cleanup = if let Some(session) = slot.session.take() {
+                            session.shutdown().await
+                        } else {
+                            Err(std::io::Error::other("session unavailable"))
+                        };
+                        if cleanup.is_err() {
+                            break "AGY process cleanup failed";
+                        }
                     } else {
-                        Err(std::io::Error::other("session unavailable"))
-                    };
-                    if cleanup.is_err() {
-                        break "AGY process cleanup failed";
+                        let acp_sid = slot.session.as_ref().and_then(Session::acp_session_id);
+                        if let Some(acp_session_id) = acp_sid {
+                            let mut seen_history = history;
+                            seen_history.push(json!({
+                                "role": "assistant",
+                                "content": [{"type": "text", "text": emitted_text}]
+                            }));
+                            slot.continuity = Some(Continuity {
+                                acp_session_id,
+                                session_contract: session_contract_of(&contract),
+                                history: seen_history,
+                                after_abandon: false,
+                            });
+                        } else {
+                            slot.continuity = None;
+                        }
                     }
                     let _ = send!(Delivery::Event(ProviderEvent::MessageEnd {
                         finish: Finish::Stop,
@@ -604,8 +935,12 @@ mod unix {
                 Err(error) => {
                     break match error.to_string().as_str() {
                         "AGY quota or rate limit reached" => "AGY quota or rate limit reached",
-                        "AGY authentication failed" => "AGY authentication failed",
+                        "AGY authentication failed; run 'mew auth login antigravity'" => {
+                            "AGY authentication failed; run 'mew auth login antigravity'"
+                        }
                         "AGY service is overloaded" => "AGY service is overloaded",
+                        "AGY prompt was cancelled" => "AGY prompt was cancelled",
+                        "AGY refused the prompt" => "AGY refused the prompt",
                         _ => "AGY session failed",
                     };
                 }
@@ -613,6 +948,7 @@ mod unix {
         };
         drop(turn);
         slot.pending = None;
+        slot.continuity = None;
         if let Some(session) = slot.session.take() {
             let _ = session.shutdown().await;
         }

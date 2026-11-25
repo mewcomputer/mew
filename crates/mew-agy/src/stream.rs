@@ -3,34 +3,45 @@ use std::io;
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CliEvent {
-    Text(String),
-    Usage {
-        input: u64,
-        output: u64,
-        cache_read: u64,
-    },
-    Finished,
+pub struct RpcError {
+    pub code: i64,
+    pub message: String,
 }
 
-/// Parses bounded newline-delimited CLI events without losing split UTF-8.
-pub struct CliStream {
+#[derive(Debug, Clone, PartialEq)]
+pub enum AcpFrame {
+    Response {
+        id: u64,
+        result: Option<Value>,
+        error: Option<RpcError>,
+    },
+    Notification {
+        method: String,
+        params: Value,
+    },
+    Request {
+        id: Value,
+        method: String,
+        params: Value,
+    },
+}
+
+/// Parses bounded newline-delimited JSON-RPC 2.0 ACP frames without losing split UTF-8.
+pub struct AcpStream {
     buffer: Vec<u8>,
     max_frame_bytes: usize,
-    finished: bool,
 }
 
-impl CliStream {
+impl AcpStream {
     pub fn new(max_frame_bytes: usize) -> Self {
         Self {
             buffer: Vec::new(),
             max_frame_bytes,
-            finished: false,
         }
     }
 
-    pub fn push(&mut self, bytes: &[u8]) -> io::Result<Vec<CliEvent>> {
-        let mut events = Vec::new();
+    pub fn push(&mut self, bytes: &[u8]) -> io::Result<Vec<AcpFrame>> {
+        let mut frames = Vec::new();
         for part in bytes.split_inclusive(|byte| *byte == b'\n') {
             if self.buffer.len().saturating_add(part.len()) > self.max_frame_bytes {
                 return Err(invalid("AGY stream frame is too large"));
@@ -43,73 +54,59 @@ impl CliStream {
             if frame.iter().all(u8::is_ascii_whitespace) {
                 continue;
             }
-            if self.finished {
-                return Err(invalid("AGY emitted an event after its result"));
-            }
             let value: Value =
                 serde_json::from_slice(&frame).map_err(|_| invalid("invalid AGY stream frame"))?;
-            match value.get("event").and_then(Value::as_str) {
-                Some("init") => {}
-                Some("step_update") => {
-                    let step = value
-                        .get("step_update")
-                        .and_then(Value::as_object)
-                        .ok_or_else(|| invalid("invalid AGY step update"))?;
-                    if step.get("step_type").and_then(Value::as_str) == Some("agent_response") {
-                        if let Some(text) = step
-                            .get("text_delta")
-                            .and_then(Value::as_str)
-                            .filter(|s| !s.is_empty())
-                        {
-                            events.push(CliEvent::Text(text.to_owned()));
-                        }
+            let obj = value
+                .as_object()
+                .ok_or_else(|| invalid("invalid AGY stream frame"))?;
+            if obj.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+                return Err(invalid("invalid AGY JSON-RPC version"));
+            }
+            if let Some(method) = obj.get("method").and_then(Value::as_str) {
+                let params = obj.get("params").cloned().unwrap_or(Value::Null);
+                if let Some(id) = obj.get("id") {
+                    if !(id.is_string() || id.is_u64() || id.is_i64()) {
+                        return Err(invalid("invalid AGY JSON-RPC request id"));
                     }
-                    if step.get("state").and_then(Value::as_str) == Some("DONE") {
-                        if let Some(usage) = step.get("usage").and_then(Value::as_object) {
-                            let count = |key| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
-                            events.push(CliEvent::Usage {
-                                input: count("input_tokens"),
-                                output: count("output_tokens"),
-                                cache_read: count("cache_read_tokens"),
-                            });
-                        }
-                    }
+                    frames.push(AcpFrame::Request {
+                        id: id.clone(),
+                        method: method.to_owned(),
+                        params,
+                    });
+                } else {
+                    frames.push(AcpFrame::Notification {
+                        method: method.to_owned(),
+                        params,
+                    });
                 }
-                Some("result") => {
-                    let result = value
-                        .get("result")
-                        .and_then(Value::as_object)
-                        .ok_or_else(|| invalid("invalid AGY result"))?;
-                    if result.get("status").and_then(Value::as_str) != Some("SUCCESS") {
-                        let message = result
-                            .get("error")
+            } else if let Some(id) = obj.get("id").and_then(Value::as_u64) {
+                let error = match obj.get("error") {
+                    Some(err) => {
+                        let code = err
+                            .get("code")
+                            .and_then(Value::as_i64)
+                            .ok_or_else(|| invalid("invalid AGY JSON-RPC error"))?;
+                        let message = err
+                            .get("message")
                             .and_then(Value::as_str)
-                            .filter(|message| !message.is_empty())
-                            .unwrap_or("AGY returned an unsuccessful result")
+                            .unwrap_or("AGY request failed")
                             .chars()
                             .take(1024)
-                            .collect::<String>();
-                        return Err(io::Error::new(io::ErrorKind::InvalidData, message));
+                            .collect();
+                        Some(RpcError { code, message })
                     }
-                    match result.get("denied_actions") {
-                        None | Some(Value::Null) => {}
-                        Some(Value::Array(actions)) if actions.is_empty() => {}
-                        _ => return Err(invalid("AGY denied an action")),
-                    }
-                    self.finished = true;
-                    events.push(CliEvent::Finished);
+                    None => None,
+                };
+                let result = obj.get("result").cloned();
+                if result.is_none() && error.is_none() {
+                    return Err(invalid("invalid AGY JSON-RPC response"));
                 }
-                _ => return Err(invalid("unknown AGY stream event")),
+                frames.push(AcpFrame::Response { id, result, error });
+            } else {
+                return Err(invalid("unknown AGY JSON-RPC frame"));
             }
         }
-        Ok(events)
-    }
-
-    pub fn finish(&self) -> io::Result<()> {
-        if !self.finished || !self.buffer.is_empty() {
-            return Err(invalid("AGY stream ended before its result"));
-        }
-        Ok(())
+        Ok(frames)
     }
 }
 

@@ -1,8 +1,8 @@
-use mew_agy::transcript::{project, system_instructions};
+use mew_agy::transcript::{project, prompt_blocks, system_instructions};
 use mew_message::{
     CompactionPart, FilePart, Message, Part, PartBase, ReasoningPart, Role, TextPart, Time,
-    ToolCallPart, ToolResultPart, ToolState, ToolStateCompleted, ToolStateError, ToolStateRunning,
-    ToolTime,
+    ToolCallPart, ToolImage, ToolResultPart, ToolState, ToolStateCompleted, ToolStateError,
+    ToolStateRunning, ToolTime,
 };
 use mew_provider::Request;
 use serde_json::{json, Value};
@@ -227,7 +227,7 @@ fn tool_errors_and_compaction_are_preserved_once_without_reasoning() {
 }
 
 #[test]
-fn rejects_orphans_duplicate_ids_unfinished_calls_and_attachments() {
+fn rejects_orphans_duplicate_ids_unfinished_calls_and_invalid_attachments() {
     let time = ToolTime {
         start: 0,
         end: None,
@@ -254,12 +254,12 @@ fn rejects_orphans_duplicate_ids_unfinished_calls_and_attachments() {
             )],
         )],
         vec![message(
-            Role::User,
+            Role::System,
             vec![Part::File(FilePart {
                 base: base(),
                 mime: "image/png".into(),
                 filename: None,
-                url: "file:///private".into(),
+                url: "data:image/png;base64,AAAA".into(),
             })],
         )],
     ];
@@ -270,31 +270,53 @@ fn rejects_orphans_duplicate_ids_unfinished_calls_and_attachments() {
         })
         .is_err())
     }
+    let bad_url = Request {
+        messages: vec![message(
+            Role::User,
+            vec![Part::File(FilePart {
+                base: base(),
+                mime: "image/png".into(),
+                filename: None,
+                url: "https://example.invalid/secret.png".into(),
+            })],
+        )],
+        ..Default::default()
+    };
+    assert!(prompt_blocks(&bad_url).is_err());
 }
 
 #[test]
-fn rejects_non_object_inputs_duplicate_results_and_tool_images() {
-    let mut image = match completed("ok") {
+fn rejects_non_object_inputs_and_duplicate_results_while_projecting_tool_images() {
+    let mut with_image = match completed("ok") {
         ToolState::Completed(value) => value,
         _ => unreachable!(),
     };
-    image.images.push(mew_message::ToolImage {
+    with_image.images.push(ToolImage {
         mime: "image/png".into(),
         data: "c2VjcmV0".into(),
     });
+    let with_image_req = Request {
+        messages: vec![
+            message(
+                Role::Assistant,
+                vec![call("x", ToolState::Completed(with_image))],
+            ),
+            message(Role::User, vec![result("x")]),
+        ],
+        ..Default::default()
+    };
+    let projected: Value = serde_json::from_str(&project(&with_image_req).unwrap()).unwrap();
+    assert_eq!(
+        projected["messages"][1]["content"][0]["images"][0],
+        json!({"mime": "image/png", "data": "c2VjcmV0"})
+    );
+
     let mut malformed = match completed("ok") {
         ToolState::Completed(value) => value,
         _ => unreachable!(),
     };
     malformed.input = json!(null);
     let cases = vec![
-        vec![
-            message(
-                Role::Assistant,
-                vec![call("x", ToolState::Completed(image))],
-            ),
-            message(Role::User, vec![result("x")]),
-        ],
         vec![
             message(
                 Role::Assistant,
@@ -314,6 +336,70 @@ fn rejects_non_object_inputs_duplicate_results_and_tool_images() {
         })
         .is_err());
     }
+}
+
+#[test]
+fn prompt_blocks_emit_user_images_and_text_resources_in_order() {
+    let note = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(note.path(), "hello file").unwrap();
+    let file_url = url::Url::from_file_path(note.path()).unwrap().to_string();
+    let bare_path = note.path().to_string_lossy().into_owned();
+    let req = Request {
+        messages: vec![message(
+            Role::User,
+            vec![
+                text("check these"),
+                Part::File(FilePart {
+                    base: base(),
+                    mime: "image/png".into(),
+                    filename: Some("dot.png".into()),
+                    url: "data:image/png;base64,iVBORw0KGgo=".into(),
+                }),
+                Part::File(FilePart {
+                    base: base(),
+                    mime: "text/plain".into(),
+                    filename: Some("note.txt".into()),
+                    url: file_url.clone(),
+                }),
+                Part::File(FilePart {
+                    base: base(),
+                    mime: "text/plain".into(),
+                    filename: Some("bare.txt".into()),
+                    url: bare_path,
+                }),
+            ],
+        )],
+        ..Default::default()
+    };
+    let blocks = prompt_blocks(&req).unwrap();
+    assert_eq!(blocks.len(), 4);
+    assert_eq!(blocks[0]["type"], "text");
+    assert_eq!(
+        blocks[1],
+        json!({"type": "image", "mimeType": "image/png", "data": "iVBORw0KGgo="})
+    );
+    assert_eq!(
+        blocks[2],
+        json!({
+            "type": "resource",
+            "resource": {
+                "uri": file_url,
+                "mimeType": "text/plain",
+                "text": "hello file",
+            }
+        })
+    );
+    assert_eq!(
+        blocks[3],
+        json!({
+            "type": "resource",
+            "resource": {
+                "uri": "file:///bare.txt",
+                "mimeType": "text/plain",
+                "text": "hello file",
+            }
+        })
+    );
 }
 
 #[test]
@@ -370,4 +456,93 @@ fn system_messages_are_in_agent_instructions_once_not_in_history() {
     assert!(!encoded.contains("second"));
     assert_eq!(v["messages"][0]["content"][0]["text"], "ordinary");
     assert_eq!(system_instructions(&Request::default()).unwrap(), "");
+}
+
+#[test]
+fn decodes_data_urls_and_rejects_malformed_non_regular_or_oversized_file_attachments() {
+    let data_req = Request {
+        messages: vec![message(
+            Role::User,
+            vec![
+                Part::File(FilePart {
+                    base: base(),
+                    mime: "text/plain".into(),
+                    filename: Some("encoded.txt".into()),
+                    url: "data:text/plain;base64,aGVsbG8gd29ybGQ=".into(),
+                }),
+                Part::File(FilePart {
+                    base: base(),
+                    mime: "text/plain".into(),
+                    filename: Some("percent.txt".into()),
+                    url: "data:text/plain,hello%20world".into(),
+                }),
+            ],
+        )],
+        ..Default::default()
+    };
+    let blocks = prompt_blocks(&data_req).unwrap();
+    assert_eq!(blocks[1]["resource"]["text"], "hello world");
+    assert_eq!(blocks[2]["resource"]["text"], "hello world");
+
+    let dir = tempfile::tempdir().unwrap();
+    let dir_url = url::Url::from_directory_path(dir.path())
+        .unwrap()
+        .to_string();
+    let oversized_path = dir.path().join("huge.txt");
+    let oversized = std::fs::File::create(&oversized_path).unwrap();
+    oversized.set_len(16 * 1024 * 1024 + 1).unwrap();
+    let oversized_url = url::Url::from_file_path(&oversized_path)
+        .unwrap()
+        .to_string();
+
+    for url in [
+        "file://remote-host/etc/passwd".to_string(),
+        dir_url,
+        oversized_url,
+    ] {
+        let bad_req = Request {
+            messages: vec![message(
+                Role::User,
+                vec![Part::File(FilePart {
+                    base: base(),
+                    mime: "text/plain".into(),
+                    filename: None,
+                    url,
+                })],
+            )],
+            ..Default::default()
+        };
+        assert!(prompt_blocks(&bad_req).is_err());
+    }
+}
+
+#[test]
+fn prefixed_rendered_compaction_summary_is_not_duplicated() {
+    let mut rendered = match text("Handoff context follows:\n\nConcise checkpoint summary.") {
+        Part::Text(part) => part,
+        _ => unreachable!(),
+    };
+    rendered.synthetic = true;
+    let compact = Part::Compaction(CompactionPart {
+        base: base(),
+        auto: true,
+        overflow: false,
+        tail_start_id: None,
+        summary: Some("Concise checkpoint summary.".into()),
+        removed_count: Some(4),
+        preserved_context: vec![],
+    });
+    let req = Request {
+        messages: vec![message(Role::User, vec![Part::Text(rendered), compact])],
+        ..Default::default()
+    };
+    let encoded = project(&req).unwrap();
+    let v: Value = serde_json::from_str(&encoded).unwrap();
+    let content = v["messages"][0]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 1);
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(
+        content[0]["text"],
+        "Handoff context follows:\n\nConcise checkpoint summary."
+    );
 }

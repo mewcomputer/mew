@@ -78,7 +78,12 @@ pub async fn auth_cmd(command: AuthCommands) -> Result<()> {
                 }
             }
             #[cfg(unix)]
-            println!("antigravity: uses the local AGY account; sign-in status unavailable");
+            if let Some(line) = antigravity_status_line(
+                std::env::var_os("PATH").as_deref(),
+                &crate::setup::providers::agy_fallback_dirs(),
+            ) {
+                println!("{line}");
+            }
             Ok(())
         }
         AuthCommands::Logout { provider } => {
@@ -93,6 +98,15 @@ pub async fn auth_cmd(command: AuthCommands) -> Result<()> {
             Ok(())
         }
     }
+}
+
+#[cfg(unix)]
+fn antigravity_status_line(
+    path: Option<&std::ffi::OsStr>,
+    fallbacks: &[std::path::PathBuf],
+) -> Option<&'static str> {
+    crate::setup::providers::find_agy_in(path, fallbacks)?;
+    Some("antigravity: log in via antigravity CLI (sign-in status unavailable)")
 }
 
 /// Resolve a provider from an explicit name, or prompt interactively when
@@ -186,6 +200,46 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("sign-out is not available"));
         assert!(message.contains("existing account"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_status_is_omitted_when_agy_is_missing() {
+        use std::os::unix::fs::PermissionsExt;
+
+        assert_eq!(antigravity_status_line(None, &[]), None);
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            antigravity_status_line(Some(dir.path().as_os_str()), &[]),
+            None
+        );
+
+        let non_exec = dir.path().join("agy");
+        std::fs::write(&non_exec, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&non_exec, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            antigravity_status_line(Some(dir.path().as_os_str()), &[]),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_status_reports_cli_when_agy_is_present() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let agy = dir.path().join("agy");
+        std::fs::write(&agy, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&agy, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            antigravity_status_line(Some(dir.path().as_os_str()), &[]),
+            Some("antigravity: log in via antigravity CLI (sign-in status unavailable)")
+        );
+        assert_eq!(
+            antigravity_status_line(None, &[dir.path().to_path_buf()]),
+            Some("antigravity: log in via antigravity CLI (sign-in status unavailable)")
+        );
     }
 
     #[test]

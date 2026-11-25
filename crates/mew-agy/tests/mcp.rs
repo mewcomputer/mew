@@ -264,6 +264,32 @@ async fn supports_other_known_mcp_versions_and_rejects_unknown_versions() {
 }
 
 #[tokio::test]
+async fn accepts_server_discover_before_initialize_and_roots_notifications() {
+    let (server, _calls, client) = setup().await;
+    let discover: Value = client
+        .post(server.url())
+        .json(&json!({"jsonrpc":"2.0","id":0,"method":"server/discover","params":{}}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(discover["result"], json!({}));
+
+    let session = initialize(&server, &client).await;
+    let status = client
+        .post(server.url())
+        .header("mcp-session-id", &session)
+        .json(&json!({"jsonrpc":"2.0","method":"notifications/roots/list_changed","params":{}}))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(status, 202);
+}
+
+#[tokio::test]
 async fn explicit_cancellation_drops_only_the_matching_pending_call() {
     let (server, mut calls, client) = setup().await;
     let session = initialize(&server, &client).await;

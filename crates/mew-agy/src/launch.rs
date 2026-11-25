@@ -1,7 +1,6 @@
 //! Builds a disposable AGY project and CLI policy. This is not an OS sandbox.
 //! No PreToolUse hook is installed by this module.
 
-use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -43,14 +42,12 @@ impl Launch {
 pub fn prepare(
     parent: &Path,
     model: &str,
-    tools: &[&str],
     mcp_url: &str,
     capabilities: Capabilities,
     system: &str,
 ) -> io::Result<Launch> {
     if capabilities.native_browser
         || capabilities.native_subagents
-        || capabilities.attachments
         || capabilities.structured_output
     {
         return Err(invalid("unsupported AGY capability"));
@@ -63,18 +60,6 @@ pub fn prepare(
             .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
     {
         return Err(invalid("invalid AGY model name"));
-    }
-    let mut names = HashSet::new();
-    for name in tools {
-        if name.is_empty()
-            || name.len() > 64
-            || !name
-                .bytes()
-                .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
-            || !names.insert(*name)
-        {
-            return Err(invalid("invalid or duplicate MCP tool name"));
-        }
     }
     let url = url::Url::parse(mcp_url).map_err(|_| invalid("invalid MCP URL"))?;
     let token = url.path().strip_prefix('/').unwrap_or_default();
@@ -118,27 +103,14 @@ pub fn prepare(
         workspace.path().join(".agents/mcp_config.json"),
         config.to_string().as_bytes(),
     )?;
-    let allow: Vec<_> = tools
-        .iter()
-        .map(|name| format!("mcp(mew/{name})"))
-        .collect();
-    let settings = serde_json::json!({ "permissions": { "allow": allow, "deny": ["read_file(*)", "write_file(*)", "command(*)", "read_url(*)", "execute_url(*)"] } });
     let args = vec![
-        "--new-project".into(),
+        "acp".into(),
         "--add-dir".into(),
         workspace_arg,
-        "--input-format".into(),
-        "stream-json".into(),
-        "--output-format".into(),
-        "stream-json".into(),
-        "--disable-slash-commands".into(),
-        "--sandbox".into(),
-        "--model".into(),
-        model.into(),
         "--agent".into(),
         "mew-boundary".into(),
-        "--settings".into(),
-        settings.to_string(),
+        "--include-default-customizations=false".into(),
+        "--sandbox".into(),
     ];
     Ok(Launch { workspace, args })
 }

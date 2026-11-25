@@ -236,6 +236,16 @@ impl McpServer {
         registry.quiesced = true;
         registry.requests.is_empty()
     }
+
+    /// Re-enable admitting tool calls for a subsequent prompt turn on a persistent session.
+    pub fn unquiesce(&self) {
+        let mut registry = self
+            .state
+            .registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        registry.quiesced = false;
+    }
     pub fn resolve(&self, id: &str, result: Value) -> Result<(), &'static str> {
         let sender = self
             .state
@@ -337,6 +347,19 @@ async fn handle_inner(req: Request<Incoming>, state: Arc<State>) -> Response<Bod
         return rpc_error(Value::Null, -32600, "invalid request");
     }
     let method = obj["method"].as_str().unwrap();
+    if method == "server/discover" {
+        let Some(id) = id else {
+            return response(StatusCode::BAD_REQUEST, "");
+        };
+        if session.is_some() {
+            return rpc_error(id, -32602, "unexpected session on discover");
+        }
+        let reg = state.registry.lock().unwrap_or_else(|e| e.into_inner());
+        if !reg.sessions.is_empty() {
+            return rpc_error(id, -32000, "session already initialized");
+        }
+        return rpc_result(id, json!({}));
+    }
     if method == "initialize" {
         let Some(id) = id else {
             return rpc_error(Value::Null, -32600, "id required");
@@ -403,6 +426,14 @@ async fn handle_inner(req: Request<Incoming>, state: Arc<State>) -> Response<Bod
             reg.pending.remove(&call_id);
         }
         return response(StatusCode::ACCEPTED, "");
+    }
+    if method == "notifications/roots/list_changed" && id.is_none() {
+        let reg = state.registry.lock().unwrap_or_else(|e| e.into_inner());
+        return if reg.sessions.get(&sid).is_some_and(|s| s.initialized) {
+            response(StatusCode::ACCEPTED, "")
+        } else {
+            response(StatusCode::NOT_FOUND, "")
+        };
     }
     let Some(id) = id else {
         return response(StatusCode::BAD_REQUEST, "");
@@ -552,29 +583,41 @@ fn json_size<T: serde::Serialize>(value: &T, limit: usize) -> Result<usize, serd
 
 /// Project the result exactly as it would fit in an MCP tool response, without
 /// copying large tool output. Mew's stored tool result remains unchanged.
-pub(crate) fn bounded_tool_output(output: &str, is_error: bool) -> (&str, bool) {
+pub(crate) fn bounded_tool_output<'a>(
+    output: &'a str,
+    is_error: bool,
+    images: &'a [mew_message::ToolImage],
+) -> (&'a str, bool, &'a [mew_message::ToolImage]) {
     #[derive(serde::Serialize)]
-    struct Text<'a> {
-        #[serde(rename = "type")]
-        kind: &'static str,
-        text: &'a str,
+    #[serde(tag = "type", rename_all = "lowercase")]
+    enum Content<'a> {
+        Text {
+            text: &'a str,
+        },
+        Image {
+            data: &'a str,
+            #[serde(rename = "mimeType")]
+            mime_type: &'a str,
+        },
     }
     #[derive(serde::Serialize)]
     #[serde(rename_all = "camelCase")]
     struct ResultEnvelope<'a> {
-        content: [Text<'a>; 1],
+        content: Vec<Content<'a>>,
         is_error: bool,
     }
-    let envelope = ResultEnvelope {
-        content: [Text {
-            kind: "text",
-            text: output,
-        }],
-        is_error,
-    };
+    let mut content = Vec::with_capacity(1 + images.len());
+    content.push(Content::Text { text: output });
+    for image in images {
+        content.push(Content::Image {
+            data: &image.data,
+            mime_type: &image.mime,
+        });
+    }
+    let envelope = ResultEnvelope { content, is_error };
     if json_size(&envelope, MAX_BODY).is_err() {
-        (OVERSIZED_TOOL_OUTPUT, true)
+        (OVERSIZED_TOOL_OUTPUT, true, &[])
     } else {
-        (output, is_error)
+        (output, is_error, images)
     }
 }

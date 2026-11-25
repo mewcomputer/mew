@@ -145,6 +145,18 @@ fn build_daemon_server_with_config(
         )
     };
     info!(model = %default_model, "mew daemon starting");
+    #[cfg(unix)]
+    let agy_models = {
+        let cache = Arc::new(crate::setup::antigravity::ModelCache::new(
+            cfg.antigravity.isolated,
+        ));
+        if !fake_provider && cfg.providers.contains_key("antigravity") {
+            let _ = cache.refresh();
+        }
+        cache
+    };
+    #[cfg(unix)]
+    let agy_models_builder = Arc::clone(&agy_models);
     let builder: mew_daemon::AgentBuilder = Arc::new(move |params| {
         let cwd = params
             .cwd
@@ -239,13 +251,15 @@ fn build_daemon_server_with_config(
             }
             agent
         } else {
-            let provider = crate::setup::providers::build_provider(
+            let provider = build_session_provider(
                 &session_cfg,
                 cat.as_ref().as_ref(),
                 &provider_id,
                 &model_id,
                 raw,
                 session_id,
+                #[cfg(unix)]
+                Some(&agy_models_builder),
             )?;
             crate::setup::agent::build_session_agent(
                 &session_cfg,
@@ -268,7 +282,14 @@ fn build_daemon_server_with_config(
             .policy
             .as_ref()
             .map(|policy| policy.thinking_variant.as_deref().unwrap_or(""));
-        apply_session_thinking(&mut agent, cat.as_ref().as_ref(), &model_id, variant)?;
+        apply_session_thinking(
+            &mut agent,
+            cat.as_ref().as_ref(),
+            &model_id,
+            variant,
+            #[cfg(unix)]
+            Some(&agy_models_builder),
+        )?;
         Ok((agent, Some(model_id), Some(provider_id)))
     });
 
@@ -312,17 +333,10 @@ fn build_daemon_server_with_config(
         let cat_lister = Arc::clone(&cat_for_models);
         let cfg_switcher = Arc::clone(&cfg_for_models);
         let cat_switcher = Arc::clone(&cat_for_models);
-
         #[cfg(unix)]
-        let agy_models = {
-            let cache = Arc::new(crate::setup::antigravity::ModelCache::new(
-                cfg_lister.antigravity.isolated,
-            ));
-            if cfg_lister.providers.contains_key("antigravity") {
-                let _ = cache.refresh();
-            }
-            cache
-        };
+        let agy_models_switcher = Arc::clone(&agy_models);
+        #[cfg(unix)]
+        let agy_models_thinking = Arc::clone(&agy_models);
 
         // Model lister: returns all catalog models that belong to
         // configured providers with credentials.
@@ -422,13 +436,15 @@ fn build_daemon_server_with_config(
         let switcher: mew_daemon::ModelSwitcher = Arc::new(
             move |agent: &mut Agent, provider_id: &str, model_id: &str| {
                 let cat_ref = (*cat_switcher).as_ref();
-                let new_provider = crate::setup::providers::build_provider(
+                let new_provider = build_session_provider(
                     &cfg_switcher,
                     cat_ref,
                     provider_id,
                     model_id,
                     raw2,
                     Some(agent.session_id),
+                    #[cfg(unix)]
+                    Some(&agy_models_switcher),
                 )
                 .context("build provider for model switch")?;
                 crate::setup::agent::switch_session_model(
@@ -440,7 +456,14 @@ fn build_daemon_server_with_config(
                     model_id,
                     raw2,
                 );
-                apply_session_thinking(agent, cat_ref, model_id, None)?;
+                apply_session_thinking(
+                    agent,
+                    cat_ref,
+                    model_id,
+                    None,
+                    #[cfg(unix)]
+                    Some(&agy_models_switcher),
+                )?;
                 if let Ok(mut state) = mew_config::load_state() {
                     let full_id = format!("{provider_id}/{model_id}");
                     state.last_provider = provider_id.to_string();
@@ -463,7 +486,14 @@ fn build_daemon_server_with_config(
         let cat_thinking = Arc::clone(&cat_for_models);
         let thinking_setter: mew_daemon::ThinkingSetter =
             Arc::new(move |agent: &mut Agent, model_id: &str, variant: &str| {
-                apply_session_thinking(agent, (*cat_thinking).as_ref(), model_id, Some(variant))
+                apply_session_thinking(
+                    agent,
+                    (*cat_thinking).as_ref(),
+                    model_id,
+                    Some(variant),
+                    #[cfg(unix)]
+                    Some(&agy_models_thinking),
+                )
             });
         server = server.with_thinking_setter(thinking_setter);
     }
@@ -471,13 +501,64 @@ fn build_daemon_server_with_config(
     Ok(server)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn build_session_provider(
+    cfg: &mew_config::Config,
+    cat: Option<&mew_catalog::Catalog>,
+    provider_id: &str,
+    model_id: &str,
+    raw: bool,
+    session_id: Option<SessionId>,
+    #[cfg(unix)] agy_models: Option<&crate::setup::antigravity::ModelCache>,
+) -> Result<Arc<dyn mew_provider::Provider>> {
+    #[cfg(unix)]
+    if provider_id == "antigravity" {
+        let default_effort =
+            agy_models.and_then(|cache| cache.thinking_variants(model_id).into_iter().next());
+        return crate::setup::providers::build_antigravity_provider(cfg, model_id, default_effort);
+    }
+    crate::setup::providers::build_provider(cfg, cat, provider_id, model_id, raw, session_id)
+}
+
 fn apply_session_thinking(
     agent: &mut Agent,
     catalog: Option<&mew_catalog::Catalog>,
     model: &str,
     variant: Option<&str>,
+    #[cfg(unix)] agy_models: Option<&crate::setup::antigravity::ModelCache>,
 ) -> Result<Option<String>> {
     let off = variant.is_some_and(|name| matches!(name, "" | "none" | "off"));
+    #[cfg(unix)]
+    let resolved = if agent.provider_id == "antigravity" {
+        let mut variants = agy_models
+            .map(|cache| cache.thinking_variants(model))
+            .unwrap_or_default();
+        // Only fall back when the user/policy explicitly named a variant; when
+        // variant is None before discovery completes, we cannot tell grouped
+        // base IDs apart from standalone un-suffixed models like orchestrator.
+        if variants.is_empty()
+            && !off
+            && variant.is_some()
+            && agy_models.is_none_or(|cache| cache.is_empty())
+        {
+            variants = crate::setup::antigravity::EFFORT_SUFFIXES
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+        }
+        crate::setup::antigravity::resolve_agy_reasoning(
+            &variants,
+            if off { Some("off") } else { variant },
+        )
+    } else {
+        crate::setup::providers::resolve_reasoning(
+            catalog,
+            &agent.provider_id,
+            model,
+            if off { Some("off") } else { variant },
+        )
+    };
+    #[cfg(not(unix))]
     let resolved = crate::setup::providers::resolve_reasoning(
         catalog,
         &agent.provider_id,
