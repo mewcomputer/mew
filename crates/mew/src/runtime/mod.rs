@@ -8,7 +8,6 @@
 pub mod client;
 pub mod daemon;
 pub mod dispatch;
-pub mod mentions;
 pub mod target;
 
 pub use dispatch::{handle_action, Ctx, Flow};

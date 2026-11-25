@@ -347,6 +347,98 @@ async fn listing_idle_session_previews_stops_after_the_first_user_message() {
         sessions[0].first_message.as_deref(),
         Some("first user message")
     );
+    assert_eq!(
+        sessions[0].last_message.as_deref(),
+        Some("first user message")
+    );
+}
+
+#[tokio::test]
+async fn listing_sessions_populates_last_message_for_active_and_idle_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = test_server(dir.path().to_path_buf());
+    let session = server.session_manager.create(None).await.unwrap();
+    let id = session.id.clone();
+    let session_id = session.agent.lock().await.session_id;
+
+    let make_msg = |role: mew_message::Role, text: &str, synthetic: bool| {
+        let message_id = ulid::Ulid::new();
+        mew_message::Message {
+            id: message_id,
+            session_id,
+            role,
+            parts: vec![mew_message::Part::Text(mew_message::TextPart {
+                base: mew_message::PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id,
+                    session_id,
+                },
+                text: text.into(),
+                synthetic,
+            })],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        }
+    };
+
+    let messages = vec![
+        make_msg(mew_message::Role::User, "first prompt", false),
+        make_msg(
+            mew_message::Role::Assistant,
+            "latest assistant reply\nwith second line",
+            false,
+        ),
+        make_msg(mew_message::Role::Assistant, "synthetic note", true),
+        make_msg(mew_message::Role::System, "system notice", false),
+    ];
+
+    {
+        let agent = session.agent.lock().await;
+        let mut guard = agent.messages.lock().await;
+        guard.extend(messages.clone());
+    }
+    {
+        use tokio::io::AsyncWriteExt;
+        let path = dir.path().join(&id).join("session.jsonl");
+        let mut log = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .await
+            .unwrap();
+        for msg in &messages {
+            log.write_all(&serde_json::to_vec(msg).unwrap())
+                .await
+                .unwrap();
+            log.write_all(b"\n").await.unwrap();
+        }
+        log.flush().await.unwrap();
+    }
+
+    let active_sessions = server.session_manager.list().await;
+    assert_eq!(active_sessions.len(), 1);
+    assert_eq!(
+        active_sessions[0].first_message.as_deref(),
+        Some("first prompt")
+    );
+    assert_eq!(
+        active_sessions[0].last_message.as_deref(),
+        Some("latest assistant reply with second line")
+    );
+
+    server.session_manager.remove(&id).await;
+    let idle_sessions = server.session_manager.list().await;
+    assert_eq!(idle_sessions.len(), 1);
+    assert_eq!(
+        idle_sessions[0].first_message.as_deref(),
+        Some("first prompt")
+    );
+    assert_eq!(
+        idle_sessions[0].last_message.as_deref(),
+        Some("latest assistant reply with second line")
+    );
 }
 
 #[tokio::test]
@@ -453,6 +545,165 @@ async fn attaching_during_an_assistant_response_replays_the_visible_prefix_once(
 }
 
 #[tokio::test]
+async fn auto_summary_setting_survives_daemon_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let server = test_server(directory.path().to_path_buf());
+    let mut socket = connect(&server).await;
+    send(
+        &mut socket,
+        ClientMessage::SetAutoSummary { enabled: false },
+    )
+    .await;
+    assert!(flush(&mut socket).await.iter().any(|message| matches!(
+        message,
+        ServerMessage::AutomationSettings {
+            auto_summary_enabled: false,
+            ..
+        }
+    )));
+
+    let restarted = test_server(directory.path().to_path_buf());
+    let mut socket = connect(&restarted).await;
+    send(&mut socket, ClientMessage::ReadAutomationSettings).await;
+    assert!(flush(&mut socket).await.iter().any(|message| matches!(
+        message,
+        ServerMessage::AutomationSettings {
+            auto_summary_enabled: false,
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
+async fn auto_title_setting_is_shared_and_survives_daemon_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let server = test_server(directory.path().to_path_buf());
+    let mut writer = connect(&server).await;
+    let mut observer = connect(&server).await;
+    send(&mut writer, ClientMessage::SetAutoTitle { enabled: false }).await;
+    flush(&mut writer).await;
+    assert!(flush(&mut observer).await.iter().any(|message| matches!(
+        message,
+        ServerMessage::AutomationSettings {
+            auto_title_enabled: false,
+            ..
+        }
+    )));
+    send(&mut observer, ClientMessage::ReadAutomationSettings).await;
+    assert!(flush(&mut observer).await.iter().any(|message| matches!(
+        message,
+        ServerMessage::AutomationSettings {
+            auto_title_enabled: false,
+            ..
+        }
+    )));
+
+    let restarted = test_server(directory.path().to_path_buf());
+    let mut socket = connect(&restarted).await;
+    send(&mut socket, ClientMessage::ReadAutomationSettings).await;
+    assert!(flush(&mut socket).await.iter().any(|message| matches!(
+        message,
+        ServerMessage::AutomationSettings {
+            auto_title_enabled: false,
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
+async fn legacy_automation_migration_does_not_override_saved_settings() {
+    let directory = tempfile::tempdir().unwrap();
+    let server = test_server(directory.path().to_path_buf());
+    let mut first = connect(&server).await;
+    let mut second = connect(&server).await;
+    send(
+        &mut first,
+        ClientMessage::MigrateAutomationSettings {
+            auto_title_enabled: Some(false),
+            auto_summary_enabled: Some(false),
+        },
+    )
+    .await;
+    flush(&mut first).await;
+    send(
+        &mut second,
+        ClientMessage::MigrateAutomationSettings {
+            auto_title_enabled: Some(true),
+            auto_summary_enabled: Some(true),
+        },
+    )
+    .await;
+    assert!(flush(&mut second).await.iter().any(|message| matches!(
+        message,
+        ServerMessage::AutomationSettings {
+            auto_title_enabled: false,
+            auto_summary_enabled: false,
+            initialized: true
+        }
+    )));
+}
+
+#[tokio::test]
+async fn legacy_migration_respects_settings_written_by_another_daemon() {
+    let directory = tempfile::tempdir().unwrap();
+    let first = test_server(directory.path().to_path_buf());
+    let second = test_server(directory.path().to_path_buf());
+    let mut writer = connect(&first).await;
+    let mut stale = connect(&second).await;
+    send(
+        &mut writer,
+        ClientMessage::SetAutoSummary { enabled: false },
+    )
+    .await;
+    flush(&mut writer).await;
+    send(
+        &mut stale,
+        ClientMessage::MigrateAutomationSettings {
+            auto_title_enabled: None,
+            auto_summary_enabled: Some(true),
+        },
+    )
+    .await;
+    assert!(flush(&mut stale).await.iter().any(|message| matches!(
+        message,
+        ServerMessage::AutomationSettings {
+            auto_summary_enabled: false,
+            initialized: true,
+            ..
+        }
+    )));
+    let restarted = test_server(directory.path().to_path_buf());
+    assert!(!*restarted.auto_summary_enabled.borrow());
+}
+
+#[tokio::test]
+async fn invalid_automation_settings_are_not_overwritten() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("automation-settings.json");
+    std::fs::write(&path, b"invalid").unwrap();
+    let server = test_server(directory.path().to_path_buf());
+    let mut socket = connect(&server).await;
+    send(&mut socket, ClientMessage::ReadAutomationSettings).await;
+    assert!(flush(&mut socket).await.iter().any(|message| matches!(message,
+        ServerMessage::Error { message } if message.contains("could not read saved automation settings")
+    )));
+    assert!(!*server.auto_summary_enabled.borrow());
+    assert!(!*server.session_manager.auto_title_enabled.borrow());
+    send(
+        &mut socket,
+        ClientMessage::SetAutoSummary { enabled: false },
+    )
+    .await;
+    assert!(flush(&mut socket)
+        .await
+        .iter()
+        .any(|message| matches!(message,
+            ServerMessage::Error { message } if message.contains("could not save auto-summary")
+        )));
+    assert_eq!(std::fs::read(path).unwrap(), b"invalid");
+}
+
+#[tokio::test]
 async fn automation_settings_are_readable_before_attachment_and_acknowledge_updates() {
     let directory = tempfile::tempdir().unwrap();
     let server = test_server(directory.path().to_path_buf());
@@ -462,7 +713,8 @@ async fn automation_settings_are_readable_before_attachment_and_acknowledge_upda
         flush(&mut socket).await.as_slice(),
         [ServerMessage::AutomationSettings {
             auto_title_enabled: true,
-            auto_summary_enabled: true
+            auto_summary_enabled: true,
+            ..
         }]
     ));
 
@@ -471,7 +723,8 @@ async fn automation_settings_are_readable_before_attachment_and_acknowledge_upda
         flush(&mut socket).await.as_slice(),
         [ServerMessage::AutomationSettings {
             auto_title_enabled: false,
-            auto_summary_enabled: true
+            auto_summary_enabled: true,
+            ..
         }]
     ));
     send(
@@ -483,7 +736,8 @@ async fn automation_settings_are_readable_before_attachment_and_acknowledge_upda
         flush(&mut socket).await.as_slice(),
         [ServerMessage::AutomationSettings {
             auto_title_enabled: false,
-            auto_summary_enabled: false
+            auto_summary_enabled: false,
+            ..
         }]
     ));
 
@@ -492,8 +746,9 @@ async fn automation_settings_are_readable_before_attachment_and_acknowledge_upda
     assert!(matches!(
         flush(&mut reconnected).await.as_slice(),
         [ServerMessage::AutomationSettings {
-            auto_title_enabled: true,
-            auto_summary_enabled: false
+            auto_title_enabled: false,
+            auto_summary_enabled: false,
+            ..
         }]
     ));
 }
@@ -527,7 +782,7 @@ async fn shared_summary_changes_notify_other_clients_without_changing_their_titl
             matches!(message, ServerMessage::AutoSummaryChanged { enabled: value } if *value == enabled)));
         send(&mut observer, ClientMessage::ReadAutomationSettings).await;
         assert!(matches!(flush(&mut observer).await.as_slice(),
-            [ServerMessage::AutomationSettings { auto_title_enabled: false, auto_summary_enabled }] if *auto_summary_enabled == enabled));
+            [ServerMessage::AutomationSettings { auto_title_enabled: false, auto_summary_enabled, .. }] if *auto_summary_enabled == enabled));
     }
 }
 
@@ -575,7 +830,7 @@ async fn summary_changes_reach_settings_observers_that_never_attach_to_a_session
             "unattached settings observer missed shared setting: {notifications:?}");
         send(&mut observer, ClientMessage::ReadAutomationSettings).await;
         assert!(matches!(flush(&mut observer).await.as_slice(),
-            [ServerMessage::AutomationSettings { auto_title_enabled: false, auto_summary_enabled }] if *auto_summary_enabled == enabled));
+            [ServerMessage::AutomationSettings { auto_title_enabled: false, auto_summary_enabled, .. }] if *auto_summary_enabled == enabled));
     }
     assert!(server.session_manager.active.lock().await.is_empty());
 }
@@ -883,6 +1138,110 @@ async fn history_read_errors_are_reported_on_attach_and_older_page_requests() {
         rx.await.unwrap(),
         mew_hooks::PermissionDecision::AllowOnce
     ));
+}
+
+#[tokio::test]
+async fn session_index_summarizes_every_turn_from_the_transcript() {
+    let directory = tempfile::tempdir().unwrap();
+    let server = test_server(directory.path().to_path_buf());
+    let session = server.session_manager.create(None).await.unwrap();
+    let session_id = session.agent.lock().await.session_id;
+    let mut ids = Vec::new();
+    {
+        let agent = session.agent.lock().await;
+        let mut writer = agent.session.as_ref().unwrap().lock().await;
+        for (role, text) in [
+            (
+                mew_message::Role::User,
+                "wire the tape from the session index",
+            ),
+            (
+                mew_message::Role::Assistant,
+                "the daemon reports one summary per turn",
+            ),
+            (mew_message::Role::User, "and bookmarks keep working"),
+            (
+                mew_message::Role::Assistant,
+                "because the summary id is the turn's first message id",
+            ),
+        ] {
+            let message_id = mew_message::MessageId::new();
+            let message = mew_message::Message {
+                id: message_id,
+                session_id,
+                role,
+                parts: vec![mew_message::Part::Text(mew_message::TextPart {
+                    base: mew_message::PartBase {
+                        id: mew_message::PartId::new(),
+                        message_id,
+                        session_id,
+                    },
+                    text: text.into(),
+                    synthetic: false,
+                })],
+                time: mew_message::Time {
+                    created: ids.len() as i64,
+                    completed: None,
+                },
+                assistant: None,
+            };
+            writer.write_message(&message).await.unwrap();
+            ids.push(message_id);
+        }
+    }
+    let id = session.id.clone();
+    drop(session);
+
+    let mut socket = connect(&server).await;
+    send(
+        &mut socket,
+        ClientMessage::AttachSession {
+            session_id: id.clone(),
+            client_kind: ClientKind::Desktop,
+        },
+    )
+    .await;
+    flush(&mut socket).await;
+
+    send(
+        &mut socket,
+        ClientMessage::LoadSessionIndex {
+            session_id: id.clone(),
+        },
+    )
+    .await;
+    let turns = flush(&mut socket)
+        .await
+        .into_iter()
+        .find_map(|message| match message {
+            ServerMessage::SessionIndex { session_id, turns } if session_id == id => Some(turns),
+            _ => None,
+        })
+        .expect("session index reply");
+
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[0].id, ids[0].to_string());
+    assert_eq!(turns[0].index, 0);
+    assert_eq!(turns[0].message_count, 2);
+    assert_eq!(turns[0].prompt, "wire the tape from the session index");
+    assert_eq!(turns[0].reply, "the daemon reports one summary per turn");
+    assert_eq!(turns[1].id, ids[2].to_string());
+    assert_eq!(turns[1].index, 1);
+    assert_eq!(turns[1].prompt, "and bookmarks keep working");
+
+    // A request scoped to another session is refused instead of answered from
+    // the transcript that happens to be attached.
+    send(
+        &mut socket,
+        ClientMessage::LoadSessionIndex {
+            session_id: "some-other-session".into(),
+        },
+    )
+    .await;
+    assert!(flush(&mut socket).await.iter().any(|message| matches!(
+        message,
+        ServerMessage::Error { message } if message.contains("does not match the attached session")
+    )));
 }
 
 #[tokio::test]
@@ -1593,7 +1952,7 @@ async fn cancelling_before_the_agent_lock_is_released_prevents_provider_work() {
                 if let Message::Text(text) = frame {
                     let message: ServerMessage = mew_protocol::decode_json(&text).unwrap();
                     let idle = matches!(&message, ServerMessage::SessionActivityChanged {
-                        session_id, activity: SessionState::Idle,
+                        session_id, activity: SessionState::Idle, ..
                     } if session_id == &session.id);
                     messages.push(message);
                     if idle {
@@ -1890,7 +2249,10 @@ async fn equal_prompt_text_is_broadcast_with_each_exact_submission_id() {
                 continue;
             };
             let message: ServerMessage = mew_protocol::decode_json(&text).unwrap();
-            if let ServerMessage::UserMessage { text, request_id } = message {
+            if let ServerMessage::UserMessage {
+                text, request_id, ..
+            } = message
+            {
                 assert_eq!(text, "same prompt");
                 assert_eq!(request_id.as_deref(), Some(request));
                 break;
@@ -2340,4 +2702,206 @@ async fn nonzero_shell_exit_is_failed_with_original_exit_code() {
         format!("{:?}", *jobs[&id].state.lock().await),
         "Completed { exit_code: 7 }"
     );
+}
+
+struct MockRemoteController {
+    enabled: std::sync::atomic::AtomicBool,
+    node_id: String,
+    store: Arc<crate::remote::RemoteAccessStore>,
+}
+
+impl crate::remote::RemoteAccessController for MockRemoteController {
+    fn status(&self) -> mew_protocol::RemoteAccessInfo {
+        mew_protocol::RemoteAccessInfo {
+            supported: true,
+            enabled: self.enabled.load(std::sync::atomic::Ordering::Acquire),
+            node_id: Some(self.node_id.clone()),
+        }
+    }
+
+    fn set_enabled(
+        &self,
+        enabled: bool,
+    ) -> crate::remote::RemoteFuture<'_, mew_protocol::RemoteAccessInfo> {
+        Box::pin(async move {
+            self.enabled
+                .store(enabled, std::sync::atomic::Ordering::Release);
+            let node = if enabled {
+                Some(self.node_id.clone())
+            } else {
+                None
+            };
+            self.store
+                .set_hosting(enabled, crate::remote::RemoteMode::Desktop, node)?;
+            Ok(self.status())
+        })
+    }
+
+    fn create_pairing_invite(
+        &self,
+        scope: RemoteScope,
+        ttl_secs: u64,
+    ) -> crate::remote::RemoteFuture<'_, (String, String, u64)> {
+        Box::pin(async move {
+            anyhow::ensure!(
+                self.enabled.load(std::sync::atomic::Ordering::Acquire),
+                "remote access is not active"
+            );
+            let now = crate::remote::unix_now();
+            let ttl = ttl_secs.clamp(30, 600);
+            let token = self.store.create_pairing(scope, now, ttl)?;
+            let payload = format!("computer.mew.mew://{}?token={token}", self.node_id);
+            Ok((self.node_id.clone(), payload, now + ttl))
+        })
+    }
+}
+
+#[tokio::test]
+async fn daemon_settings_include_automation_remote_and_pairing_invites() {
+    let directory = tempfile::tempdir().unwrap();
+    let server = test_server(directory.path().to_path_buf());
+    let store = Arc::new(crate::remote::RemoteAccessStore::new(
+        directory.path().join("remote.json"),
+    ));
+    let _ = server
+        .session_manager
+        .remote_devices
+        .set(crate::remote::RemoteDeviceManager::Scoped(store.clone()));
+    let _ = server
+        .session_manager
+        .remote_controller
+        .set(Arc::new(MockRemoteController {
+            enabled: std::sync::atomic::AtomicBool::new(false),
+            node_id: "node-abc".into(),
+            store,
+        }));
+
+    let mut socket = connect(&server).await;
+    let mut observer = connect(&server).await;
+    send(
+        &mut observer,
+        ClientMessage::ReadDaemonSettings {
+            request_id: "obs-read".into(),
+        },
+    )
+    .await;
+    let initial = flush(&mut observer).await;
+    assert!(matches!(
+        initial.as_slice(),
+        [ServerMessage::DaemonSettings {
+            request_id: Some(id),
+            automation: Some(mew_protocol::AutomationSettingsInfo {
+                auto_title_enabled: true,
+                auto_summary_enabled: true,
+            }),
+            remote: Some(mew_protocol::RemoteAccessInfo {
+                supported: true,
+                enabled: false,
+                node_id: Some(node),
+            }),
+            ..
+        }] if id == "obs-read" && node == "node-abc"
+    ));
+
+    // Invite while disabled fails cleanly as DaemonSettingsFailed.
+    send(
+        &mut socket,
+        ClientMessage::CreatePairingInvite {
+            request_id: "pair-off".into(),
+            scope: None,
+            ttl_secs: None,
+        },
+    )
+    .await;
+    assert!(matches!(
+        flush(&mut socket).await.as_slice(),
+        [ServerMessage::DaemonSettingsFailed { request_id, .. }] if request_id == "pair-off"
+    ));
+
+    // Enabling remote access updates both caller and observers.
+    send(
+        &mut socket,
+        ClientMessage::SetRemoteAccess {
+            enabled: true,
+            request_id: "enable".into(),
+        },
+    )
+    .await;
+    assert!(flush(&mut socket).await.iter().any(|msg| matches!(
+        msg,
+        ServerMessage::DaemonSettings {
+            request_id: Some(id),
+            remote: Some(mew_protocol::RemoteAccessInfo {
+                supported: true,
+                enabled: true,
+                node_id: Some(node),
+            }),
+            ..
+        } if id == "enable" && node == "node-abc"
+    )));
+    assert!(flush(&mut observer).await.iter().any(|msg| matches!(
+        msg,
+        ServerMessage::DaemonSettings {
+            request_id: None,
+            remote: Some(mew_protocol::RemoteAccessInfo { enabled: true, .. }),
+            ..
+        }
+    )));
+
+    // Invite while enabled returns node_id and pairing payload.
+    send(
+        &mut socket,
+        ClientMessage::CreatePairingInvite {
+            request_id: "pair-on".into(),
+            scope: Some(RemoteScope::Control),
+            ttl_secs: Some(120),
+        },
+    )
+    .await;
+    assert!(matches!(
+        flush(&mut socket).await.as_slice(),
+        [ServerMessage::PairingInvite {
+            request_id,
+            node_id,
+            payload,
+            expires_at,
+        }] if request_id == "pair-on"
+            && node_id == "node-abc"
+            && payload.starts_with("computer.mew.mew://node-abc?token=mew_")
+            && *expires_at > 0
+    ));
+
+    // Only RemoteScope::Control may toggle remote access or create pairing invites.
+    for scope in [RemoteScope::Observe, RemoteScope::Collaborate] {
+        assert!(!remote_message_allowed(
+            scope,
+            &ClientMessage::SetRemoteAccess {
+                enabled: true,
+                request_id: "x".into(),
+            }
+        ));
+        assert!(!remote_message_allowed(
+            scope,
+            &ClientMessage::CreatePairingInvite {
+                request_id: "x".into(),
+                scope: None,
+                ttl_secs: None,
+            }
+        ));
+    }
+    assert!(remote_message_allowed(
+        RemoteScope::Control,
+        &ClientMessage::SetRemoteAccess {
+            enabled: false,
+            request_id: "x".into(),
+        }
+    ));
+    assert!(remote_message_allowed(
+        RemoteScope::Control,
+        &ClientMessage::CreatePairingInvite {
+            request_id: "x".into(),
+            scope: None,
+            ttl_secs: None,
+        }
+    ));
 }

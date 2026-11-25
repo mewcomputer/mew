@@ -174,7 +174,7 @@ impl App {
             .session_titles
             .get(id)
             .map(String::as_str)
-            .or(session.summary.as_deref())
+            .or(session.title.as_deref())
             .or(session.first_message.as_deref());
         let (permissions, questions) = self
             .session_attention

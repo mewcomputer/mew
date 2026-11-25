@@ -42,7 +42,7 @@ fn window(multiple: bool) -> Harness {
     .map(|(id, title, cwd)| {
         serde_json::from_value(serde_json::json!({
             "session_id": id, "state": "idle", "created_at": 0,
-            "client_count": 1, "summary": title, "cwd": cwd
+            "client_count": 1, "title": title, "cwd": cwd
         }))
         .unwrap()
     })

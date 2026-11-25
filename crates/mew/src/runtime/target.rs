@@ -145,9 +145,6 @@ pub trait CommandTarget: Send {
     /// Enable or disable idle session summaries (daemon mode).
     async fn set_auto_summary(&mut self, enabled: bool) -> Result<(), Unsupported>;
 
-    /// Yield control of the session to other clients (daemon mode).
-    async fn yield_control(&mut self) -> Result<(), Unsupported>;
-
     /// Remove a file from the session's flagged-files set.
     async fn unflag_file(&mut self, path: &str) -> Result<(), Unsupported>;
 

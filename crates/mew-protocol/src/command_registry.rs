@@ -134,11 +134,6 @@ pub static BUILTIN_COMMANDS: &[CommandDef] = &[
         locus: CommandLocus::Client,
     },
     CommandDef {
-        name: "/yield",
-        description: "yield control to other clients",
-        locus: CommandLocus::Daemon,
-    },
-    CommandDef {
         name: "/autotitle",
         description: "toggle auto session titling (daemon mode)",
         locus: CommandLocus::Daemon,

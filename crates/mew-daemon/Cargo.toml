@@ -33,6 +33,9 @@ mew-pty = { workspace = true }
 
 tokio-util = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true }
+
 iroh = { workspace = true, optional = true }
 
 [features]

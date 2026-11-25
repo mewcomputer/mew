@@ -926,7 +926,7 @@ async fn daemon_defaults_commands_capture_only_the_attached_chat_and_confirm_per
     .await;
     let replies = flush(&mut socket).await;
     assert!(
-        matches!(&replies[..], [ServerMessage::DaemonSettings { request_id: Some(id), defaults: None, devices: None }] if id == "read")
+        matches!(&replies[..], [ServerMessage::DaemonSettings { request_id: Some(id), defaults: None, devices: None, .. }] if id == "read")
     );
     send(
         &mut socket,

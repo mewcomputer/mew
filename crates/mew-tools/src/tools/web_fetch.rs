@@ -31,6 +31,10 @@ impl Tool for WebFetch {
                     "url": {
                         "type": "string",
                         "description": "The HTTP or HTTPS URL to fetch."
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Short (3-8 word) user-facing summary of why this URL is being fetched."
                     }
                 },
                 "required": ["url"]
@@ -132,5 +136,18 @@ impl Tool for WebFetch {
             diff: None,
             ..Default::default()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_web_fetch_schema_includes_optional_description() {
+        let schema = WebFetch.schema();
+        assert_eq!(schema["properties"]["description"]["type"], "string");
+        let required = schema["required"].as_array().unwrap();
+        assert_eq!(required, &vec![serde_json::json!("url")]);
     }
 }

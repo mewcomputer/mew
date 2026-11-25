@@ -127,6 +127,7 @@ fn idle_and_terminal_daemon_errors_clear_retry_without_clearing_jobs() {
     state.apply_server_message(ServerMessage::SessionActivityChanged {
         session_id: "a".into(),
         activity: SessionState::Active,
+        cancelled: false,
     });
     assert!(state.session("a").unwrap().retry.is_none());
     state.apply_server_message(ServerMessage::Provider {
@@ -367,6 +368,7 @@ fn identical_authoritative_user_messages_are_not_mistaken_for_optimistic_echoes(
         state.apply_server_message(ServerMessage::UserMessage {
             text: "same".into(),
             request_id: None,
+            steered: false,
         });
     }
     assert_eq!(state.session("a").unwrap().messages.len(), 2);
@@ -445,6 +447,7 @@ fn identical_prompt_echoes_preserve_distinct_submission_provenance() {
         let events = state.apply_server_message(ServerMessage::UserMessage {
             text: "same prompt".into(),
             request_id: Some(request.into()),
+            steered: false,
         });
         let message = state.session("a").unwrap().messages.last().unwrap();
         assert!(events.iter().any(|event| matches!(event,
@@ -539,10 +542,12 @@ async fn session_refreshes_coalesce_until_exact_list_reply_and_follow_up_once() 
         ServerMessage::SessionActivityChanged {
             session_id: "a".into(),
             activity: SessionState::Running,
+            cancelled: false,
         },
         ServerMessage::SessionActivityChanged {
             session_id: "a".into(),
             activity: SessionState::Idle,
+            cancelled: false,
         },
         ServerMessage::SessionMetaChanged {
             session_id: "a".into(),
@@ -565,6 +570,7 @@ async fn session_refreshes_coalesce_until_exact_list_reply_and_follow_up_once() 
     transport.push_server_message(ServerMessage::SessionActivityChanged {
         session_id: "a".into(),
         activity: SessionState::Idle,
+        cancelled: false,
     });
     engine.receive().await.unwrap();
     assert_eq!(list_count(), 2, "duplicate idle must not refresh again");

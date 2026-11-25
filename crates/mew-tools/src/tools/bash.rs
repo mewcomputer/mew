@@ -32,6 +32,10 @@ impl Tool for Bash {
                     "timeout": {
                         "type": "integer",
                         "description": "Timeout in seconds (default 120)."
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Short (3-8 word) user-facing summary of why this command is being run."
                     }
                 },
                 "required": ["command"]
@@ -441,5 +445,13 @@ mod tests {
             "tail length: {}",
             out.output.len()
         );
+    }
+
+    #[test]
+    fn test_bash_schema_includes_optional_description() {
+        let schema = Bash.schema();
+        assert_eq!(schema["properties"]["description"]["type"], "string");
+        let required = schema["required"].as_array().unwrap();
+        assert_eq!(required, &vec![serde_json::json!("command")]);
     }
 }

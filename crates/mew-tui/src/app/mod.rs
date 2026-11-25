@@ -64,8 +64,6 @@ pub enum SlashResult {
     SetAutoTitle(bool),
     /// `/autosummary on|off` (daemon mode).
     SetAutoSummary(bool),
-    /// `/yield` — yield control of the session to other clients (daemon mode).
-    YieldControl,
     /// `/unflag <path>` — remove a file from the session's flagged-files set.
     UnflagFile(String),
     /// `/project` — request the daemon's project list and open the picker.
@@ -1159,6 +1157,7 @@ impl App {
             ServerMessage::SessionActivityChanged {
                 session_id,
                 activity,
+                ..
             } if session_id == &self.status.session_id
                 && *activity == mew_protocol::SessionState::Idle =>
             {
@@ -2810,6 +2809,7 @@ impl App {
                 self.change_stats.apply_delta(&path, added, removed);
             }
             AgentEvent::ChildGuidanceContinuation => {}
+            AgentEvent::Compacting { .. } => {}
             AgentEvent::FlaggedFilesChanged { files } => {
                 self.flagged_files = files;
             }
@@ -3213,77 +3213,10 @@ pub(crate) fn byte_at_display_offset(s: &str, target_col: usize) -> usize {
     s.len()
 }
 
-/// Extract `@path` file mentions from input text.
-/// Returns a list of path strings (without the `@` prefix).
-///
-/// Tokens starting with a known namespace prefix (`skill:`, `model:`,
-/// `subagent:`) are skipped — they are handled by their respective
-/// namespace parsers.
-pub fn parse_file_mentions(text: &str) -> Vec<String> {
-    let mut mentions = Vec::new();
-    for word in text.split_whitespace() {
-        if let Some(path) = word.strip_prefix('@') {
-            // Strip trailing punctuation.
-            let path = path.trim_end_matches(|c: char| c.is_ascii_punctuation());
-            if path.is_empty() || is_namespace_prefix(path) {
-                continue;
-            }
-            mentions.push(path.to_string());
-        }
-    }
-    mentions
-}
-
-/// Known namespace prefixes for inline references.
-pub const NAMESPACE_PREFIXES: &[(&str, &str)] = &[
-    ("skill", "skill:"),
-    ("model", "model:"),
-    ("subagent", "subagent:"),
-];
-
-/// Returns true if the path (after the `@`) begins with a known namespace
-/// prefix used by inline references.
-fn is_namespace_prefix(path: &str) -> bool {
-    NAMESPACE_PREFIXES.iter().any(|(_, p)| path.starts_with(p))
-}
-
-/// A parsed namespace reference from user input (e.g. `@skill:clarify`,
-/// `@model:openai/gpt-4o`, `@subagent:researcher`).
-#[derive(Debug, Clone, PartialEq)]
-pub struct NamespaceRef {
-    /// The raw token as it appeared in text, e.g. `@skill:clarify`.
-    pub raw: String,
-    /// The namespace kind: `skill`, `model`, or `subagent`.
-    pub kind: String,
-    /// The value extracted after the namespace prefix.
-    pub value: String,
-}
-
-/// Extract `@namespace:value` references from input text. Recognizes
-/// `skill:`, `model:`, and `subagent:` namespaces. Does NOT extract
-/// `@path` file mentions (that's [`parse_file_mentions`]).
-pub fn parse_namespace_refs(text: &str) -> Vec<NamespaceRef> {
-    let mut refs = Vec::new();
-    for word in text.split_whitespace() {
-        if let Some(rest) = word.strip_prefix('@') {
-            let rest = rest.trim_end_matches(|c: char| c.is_ascii_punctuation());
-            for &(kind, prefix) in NAMESPACE_PREFIXES {
-                if let Some(value) = rest.strip_prefix(prefix) {
-                    if !value.is_empty() {
-                        refs.push(NamespaceRef {
-                            raw: format!("@{prefix}{value}"),
-                            kind: kind.to_string(),
-                            value: value.to_string(),
-                        });
-                    }
-                    break;
-                }
-            }
-        }
-    }
-    refs
-}
-
+pub use mew_agent::mentions::{
+    is_namespace_prefix, parse_file_mentions, parse_namespace_refs, NamespaceRef,
+    NAMESPACE_PREFIXES,
+};
 #[cfg(test)]
 mod tests;
 

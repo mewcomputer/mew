@@ -55,8 +55,7 @@ pub fn title_for_app(app: &App) -> String {
     };
     let conversation = [
         app.session_titles.get(id).map(String::as_str),
-        app.session_summaries.get(id).map(String::as_str),
-        session.and_then(|session| session.summary.as_deref()),
+        session.and_then(|session| session.title.as_deref()),
         session.and_then(|session| session.first_message.as_deref()),
     ]
     .into_iter()
@@ -159,7 +158,8 @@ mod tests {
         app.short_cwd = "~/code/mew".into();
         app.daemon_sessions = vec![serde_json::from_value(serde_json::json!({
             "session_id": "current", "state": "idle", "created_at": 0,
-            "client_count": 1, "summary": "Saved summary", "first_message": "First prompt"
+            "client_count": 1, "title": "Saved title", "summary": "Saved summary",
+            "first_message": "First prompt"
         }))
         .unwrap()];
         app
@@ -175,8 +175,10 @@ mod tests {
             "mew · idle · Native browser lifecycle · ~/code/mew"
         );
         app.session_titles.clear();
-        assert!(title_for_app(&app).contains("Saved summary"));
-        app.daemon_sessions[0].summary = Some(" \n ".into());
+        // The list snapshot carries the persisted title, and a summary never
+        // stands in for it.
+        assert!(title_for_app(&app).contains("Saved title"));
+        app.daemon_sessions[0].title = None;
         assert!(title_for_app(&app).contains("First prompt"));
         app.daemon_sessions.clear();
         assert!(title_for_app(&app).contains("New conversation"));
@@ -275,7 +277,7 @@ mod tests {
         app.unread_completions.insert("other-window".into());
         assert_eq!(
             title_for_app(&app),
-            "mew · running · Saved summary · ~/code/mew · 1 needs you"
+            "mew · running · Saved title · ~/code/mew · 1 needs you"
         );
         app.session_attention.remove("background");
         app.unread_completions.insert("background".into());

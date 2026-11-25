@@ -174,6 +174,7 @@ impl DaemonServer {
                 .unwrap_or_default()
         };
         let groups_store = Arc::new(groups::GroupsStore::from_state(groups_state, session_dir));
+        let auto_summary_enabled = session_manager.auto_summary_enabled.clone();
         Self {
             builder,
             model_switcher: None,
@@ -182,7 +183,7 @@ impl DaemonServer {
             session_manager,
             groups_store,
             project_pins,
-            auto_summary_enabled: watch::channel(true).0,
+            auto_summary_enabled,
             shutdown_tools: Arc::new(Vec::new()),
         }
     }
@@ -201,6 +202,7 @@ impl DaemonServer {
             Some(lister),
             self.project_pins.clone(),
         ));
+        self.auto_summary_enabled = self.session_manager.auto_summary_enabled.clone();
         self
     }
 
@@ -226,10 +228,51 @@ impl DaemonServer {
         }
     }
 
+    fn init_default_remote_controller(&self) {
+        #[cfg(feature = "iroh")]
+        {
+            if self.session_manager.remote_controller.get().is_some() {
+                return;
+            }
+            let allowlist_path = iroh_transport::default_allowlist_path();
+            let secret_key_path = iroh_transport::default_secret_key_path();
+            let secret_key = match iroh_transport::load_or_create_secret_key(&secret_key_path) {
+                Ok(key) => key,
+                Err(error) => {
+                    tracing::warn!(%error, "could not load iroh secret key; remote toggle unavailable");
+                    return;
+                }
+            };
+            let store = match remote::RemoteAccessStore::load(remote::default_state_path()) {
+                Ok(store) => Arc::new(store),
+                Err(error) => {
+                    tracing::warn!(%error, "could not load remote access state; remote toggle unavailable");
+                    return;
+                }
+            };
+            let _ = self
+                .session_manager
+                .remote_devices
+                .get_or_init(|| remote::RemoteDeviceManager::Scoped(store.clone()));
+            let controller = Arc::new(remote::IrohRemoteController::new(
+                self.session_manager.clone(),
+                self.groups_store.clone(),
+                self.thinking_setter.clone(),
+                self.auto_summary_enabled.clone(),
+                store,
+                secret_key,
+                allowlist_path,
+                remote::RemoteMode::Desktop,
+            ));
+            let _ = self.session_manager.remote_controller.set(controller);
+        }
+    }
+
     /// Run the daemon, listening on the given Unix socket path.
     /// Blocks until the listener is closed, a signal (SIGINT/SIGTERM) is
     /// received, or an unrecoverable error occurs.
     pub async fn run(self, socket_path: &str) -> Result<()> {
+        self.init_default_remote_controller();
         // Remove stale socket.
         let _ = std::fs::remove_file(socket_path);
 
@@ -296,12 +339,16 @@ impl DaemonServer {
                 }
             }
         }
+        if let Some(controller) = session_manager.remote_controller.get() {
+            let _ = controller.set_enabled(false).await;
+        }
         Ok(())
     }
 
     /// Run the native TCP transport on loopback. Browser clients connect
     /// through a host relay that authenticates their origin and connection.
     pub async fn run_tcp(self, addr: SocketAddr) -> Result<()> {
+        self.init_default_remote_controller();
         anyhow::ensure!(
             addr.ip().is_loopback(),
             "the native daemon TCP listener requires a loopback address"
@@ -376,6 +423,9 @@ impl DaemonServer {
                 }
             }
         }
+        if let Some(controller) = session_manager.remote_controller.get() {
+            let _ = controller.set_enabled(false).await;
+        }
         Ok(())
     }
 }
@@ -420,15 +470,19 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
                 | ClientMessage::NewSessionInGroup { .. }
                 | ClientMessage::AttachSession { .. }
                 | ClientMessage::LoadSessionHistory { .. }
+                | ClientMessage::LoadSessionIndex { .. }
                 | ClientMessage::ListSessions
                 | ClientMessage::DeleteSession { .. }
                 | ClientMessage::DeleteSessionConfirmed { .. }
                 | ClientMessage::RenameSession { .. }
                 | ClientMessage::ReadAutomationSettings
+                | ClientMessage::MigrateAutomationSettings { .. }
                 | ClientMessage::ReadDaemonSettings { .. }
                 | ClientMessage::SaveSessionDefaults { .. }
                 | ClientMessage::ResetSessionDefaults { .. }
                 | ClientMessage::RevokeDevice { .. }
+                | ClientMessage::SetRemoteAccess { .. }
+                | ClientMessage::CreatePairingInvite { .. }
                 | ClientMessage::SetAutoTitle { .. }
                 | ClientMessage::SetAutoSummary { .. }
                 | ClientMessage::Prompt { .. }
@@ -439,10 +493,10 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
                 | ClientMessage::GoalResponse { .. }
                 | ClientMessage::SlashCommand { .. }
                 | ClientMessage::ListModels
+                | ClientMessage::ListMentionCandidates
                 | ClientMessage::SwitchModel { .. }
                 | ClientMessage::SetThinkingVariant { .. }
                 | ClientMessage::SetPermissionMode { .. }
-                | ClientMessage::YieldControl { .. }
                 | ClientMessage::CreateGroup { .. }
                 | ClientMessage::UpdateGroup { .. }
                 | ClientMessage::DeleteGroup { .. }
@@ -454,6 +508,7 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
                 | ClientMessage::ReadFilePreview { .. }
                 | ClientMessage::GitStatus { .. }
                 | ClientMessage::ReadSessionDiff { .. }
+                | ClientMessage::ReadSessionFileDiff { .. }
                 | ClientMessage::ReadSubagentHistory { .. }
                 | ClientMessage::GuideSubagent { .. }
                 | ClientMessage::ReadSubagentMessageReceipt { .. }
@@ -480,6 +535,11 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
                 | ClientMessage::TerminalInput { .. }
                 | ClientMessage::TerminalResize { .. }
                 | ClientMessage::TerminalClose { .. }
+                | ClientMessage::UploadAttachment { .. }
+                | ClientMessage::GetAttachment { .. }
+                | ClientMessage::EnqueueMessage { .. }
+                | ClientMessage::UpdateQueuedMessage { .. }
+                | ClientMessage::RemoveQueuedMessage { .. }
         );
     }
 
@@ -488,9 +548,11 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
         ClientMessage::RemoteHello { .. }
             | ClientMessage::AttachSession { .. }
             | ClientMessage::LoadSessionHistory { .. }
+            | ClientMessage::LoadSessionIndex { .. }
             | ClientMessage::ListSessions
             | ClientMessage::ListProjects
             | ClientMessage::ListModels
+            | ClientMessage::ListMentionCandidates
             | ClientMessage::ReadAutomationSettings
             | ClientMessage::Ping
             | ClientMessage::ListDir { .. }
@@ -498,11 +560,13 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
             | ClientMessage::ReadFilePreview { .. }
             | ClientMessage::GitStatus { .. }
             | ClientMessage::ReadSessionDiff { .. }
+            | ClientMessage::ReadSessionFileDiff { .. }
             | ClientMessage::ReadSubagentHistory { .. }
             | ClientMessage::ReadSubagentMessageReceipt { .. }
             | ClientMessage::ReadJobOutput { .. }
             | ClientMessage::ReadPromptReceipt { .. }
             | ClientMessage::WatchWorkspace { .. }
+            | ClientMessage::GetAttachment { .. }
     );
     if observe {
         return true;
@@ -516,7 +580,10 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
                 | ClientMessage::Cancel
                 | ClientMessage::PermissionResponse { .. }
                 | ClientMessage::AskUserResponse { .. }
-                | ClientMessage::YieldControl { .. }
+                | ClientMessage::UploadAttachment { .. }
+                | ClientMessage::EnqueueMessage { .. }
+                | ClientMessage::UpdateQueuedMessage { .. }
+                | ClientMessage::RemoveQueuedMessage { .. }
         )
 }
 
@@ -860,7 +927,8 @@ where
     let mut workspace_watch: Option<CancellationToken> = None;
     let mut model_list_update: Option<CancellationToken> = None;
     let guidance_slots = Arc::new(tokio::sync::Semaphore::new(16));
-    let mut auto_title_enabled = true;
+    let mut auto_title_enabled = *session_manager.auto_title_enabled.borrow();
+    let mut title_updates = session_manager.auto_title_enabled.subscribe();
     let mut summary_updates = auto_summary_enabled.subscribe();
     let mut settings_updates = session_manager.settings_changed.subscribe();
     let mut observes_daemon_settings = false;
@@ -935,6 +1003,7 @@ where
     enum ConnectionUpdate {
         Frame(std::result::Result<Message, tungstenite::Error>),
         Summary,
+        Title,
         Settings,
     }
     'connection: loop {
@@ -970,6 +1039,10 @@ where
                 if changed.is_err() { break; }
                 ConnectionUpdate::Summary
             }
+            changed = title_updates.changed(), if remote_ready => {
+                if changed.is_err() { break; }
+                ConnectionUpdate::Title
+            }
             message = ws_rx.next() => {
                 let Some(message) = message else { break; };
                 ConnectionUpdate::Frame(message)
@@ -996,6 +1069,17 @@ where
             ConnectionUpdate::Summary => {
                 reply(ServerMessage::AutoSummaryChanged {
                     enabled: *summary_updates.borrow_and_update(),
+                });
+                continue;
+            }
+            ConnectionUpdate::Title => {
+                auto_title_enabled = *title_updates.borrow_and_update();
+                reply(ServerMessage::AutomationSettings {
+                    auto_title_enabled,
+                    auto_summary_enabled: *summary_updates.borrow(),
+                    initialized: session_manager
+                        .automation_initialized
+                        .load(std::sync::atomic::Ordering::Acquire),
                 });
                 continue;
             }
@@ -1112,7 +1196,9 @@ where
                     ClientMessage::ReadDaemonSettings { request_id }
                     | ClientMessage::SaveSessionDefaults { request_id, .. }
                     | ClientMessage::ResetSessionDefaults { request_id }
-                    | ClientMessage::RevokeDevice { request_id, .. } => {
+                    | ClientMessage::RevokeDevice { request_id, .. }
+                    | ClientMessage::SetRemoteAccess { request_id, .. }
+                    | ClientMessage::CreatePairingInvite { request_id, .. } => {
                         reply(ServerMessage::DaemonSettingsFailed {
                             request_id: request_id.clone(),
                             message,
@@ -1312,16 +1398,38 @@ where
                         }
                         let running = session.is_running.lock().await;
                         reply(ServerMessage::SessionActivityChanged {
-                            session_id,
+                            session_id: session_id.clone(),
                             activity: if *running {
                                 SessionState::Running
                             } else {
                                 SessionState::Idle
                             },
+                            cancelled: false,
                         });
                         drop(running);
+                        if *session.is_compacting.lock().await {
+                            reply(ServerMessage::SessionCompacting {
+                                session_id: session_id.clone(),
+                                active: true,
+                                removed: None,
+                                summary: None,
+                            });
+                        }
                         session.send_activity(&client_tx).await;
                         session.send_todos(&client_tx).await;
+                        {
+                            let items: Vec<_> = session
+                                .queued_messages
+                                .lock()
+                                .await
+                                .iter()
+                                .cloned()
+                                .collect();
+                            reply(ServerMessage::SessionQueueChanged {
+                                session_id: session_id.clone(),
+                                items,
+                            });
+                        }
                         // Report the new session's active thinking variant so
                         // the frontend renders the pill immediately.
                         reply(ServerMessage::ThinkingVariantChanged {
@@ -1418,10 +1526,32 @@ where
                             } else {
                                 SessionState::Idle
                             },
+                            cancelled: false,
                         });
                         drop(running);
+                        if *session.is_compacting.lock().await {
+                            reply(ServerMessage::SessionCompacting {
+                                session_id: session_id.clone(),
+                                active: true,
+                                removed: None,
+                                summary: None,
+                            });
+                        }
                         session.send_activity(&client_tx).await;
                         session.send_todos(&client_tx).await;
+                        {
+                            let items: Vec<_> = session
+                                .queued_messages
+                                .lock()
+                                .await
+                                .iter()
+                                .cloned()
+                                .collect();
+                            reply(ServerMessage::SessionQueueChanged {
+                                session_id: session_id.clone(),
+                                items,
+                            });
+                        }
                         // Report the session's current thinking variant so the
                         // frontend renders the pill immediately on attach instead
                         // of showing "no thinking" until the user toggles it.
@@ -1635,6 +1765,46 @@ where
                         replace: false,
                     })
                     .await;
+            }
+            ClientMessage::LoadSessionIndex { session_id } => {
+                let Some(session) = attached_session.as_ref() else {
+                    reply(ServerMessage::Error {
+                        message: "no session attached".into(),
+                    });
+                    continue;
+                };
+                if session.id != session_id {
+                    reply(ServerMessage::Error {
+                        message: "session index request does not match the attached session".into(),
+                    });
+                    continue;
+                }
+                let Some(path) = session.transcript_path().await else {
+                    reply(ServerMessage::Error {
+                        message: "session index needs a persisted session".into(),
+                    });
+                    continue;
+                };
+                // Summarizing the index reads and decodes the whole transcript,
+                // so keep it off the runtime's worker threads.
+                let index =
+                    tokio::task::spawn_blocking(move || mew_session::read_turn_index(&path)).await;
+                let turns = match index {
+                    Ok(Ok(turns)) => turns,
+                    Ok(Err(error)) => {
+                        reply(ServerMessage::Error {
+                            message: format!("failed to load session index: {error:#}"),
+                        });
+                        continue;
+                    }
+                    Err(error) => {
+                        reply(ServerMessage::Error {
+                            message: format!("failed to load session index: {error}"),
+                        });
+                        continue;
+                    }
+                };
+                reply(ServerMessage::SessionIndex { session_id, turns });
             }
             ClientMessage::ReadJobOutput {
                 session_id,
@@ -1884,21 +2054,35 @@ where
                 }
             }
             ClientMessage::ReadAutomationSettings => {
+                if let Some(error) = &session_manager.automation_error {
+                    reply(ServerMessage::Error {
+                        message: format!("could not read saved automation settings: {error}"),
+                    });
+                    continue;
+                }
+                auto_title_enabled = *title_updates.borrow_and_update();
                 reply(ServerMessage::AutomationSettings {
                     auto_title_enabled,
                     auto_summary_enabled: *auto_summary_enabled.borrow(),
+                    initialized: session_manager
+                        .automation_initialized
+                        .load(std::sync::atomic::Ordering::Acquire),
                 });
             }
             message @ (ClientMessage::ReadDaemonSettings { .. }
             | ClientMessage::SaveSessionDefaults { .. }
             | ClientMessage::ResetSessionDefaults { .. }
-            | ClientMessage::RevokeDevice { .. }) => {
+            | ClientMessage::RevokeDevice { .. }
+            | ClientMessage::SetRemoteAccess { .. }
+            | ClientMessage::CreatePairingInvite { .. }) => {
                 observes_daemon_settings = true;
                 let request_id = match &message {
                     ClientMessage::ReadDaemonSettings { request_id }
                     | ClientMessage::SaveSessionDefaults { request_id, .. }
                     | ClientMessage::ResetSessionDefaults { request_id }
-                    | ClientMessage::RevokeDevice { request_id, .. } => request_id.clone(),
+                    | ClientMessage::RevokeDevice { request_id, .. }
+                    | ClientMessage::SetRemoteAccess { request_id, .. }
+                    | ClientMessage::CreatePairingInvite { request_id, .. } => request_id.clone(),
                     _ => unreachable!(),
                 };
                 let operation = async {
@@ -1923,6 +2107,52 @@ where
                             session_manager
                                 .set_session_defaults_authorized(None, authorization.clone())
                                 .await?
+                        }
+                        ClientMessage::SetRemoteAccess { enabled, .. } => {
+                            if let Some(authorization) = authorization.clone() {
+                                tokio::task::spawn_blocking(move || {
+                                    authorization.require_control()
+                                })
+                                .await??;
+                            }
+                            let controller = session_manager
+                                .remote_controller
+                                .get()
+                                .cloned()
+                                .context(
+                                    "iroh remote access is unavailable (build mew with --features iroh)",
+                                )?;
+                            controller.set_enabled(enabled).await?;
+                            session_manager.settings_changed.send_replace(());
+                        }
+                        ClientMessage::CreatePairingInvite {
+                            scope, ttl_secs, ..
+                        } => {
+                            if let Some(authorization) = authorization.clone() {
+                                tokio::task::spawn_blocking(move || {
+                                    authorization.require_control()
+                                })
+                                .await??;
+                            }
+                            let controller = session_manager
+                                .remote_controller
+                                .get()
+                                .cloned()
+                                .context(
+                                    "iroh remote access is unavailable (build mew with --features iroh)",
+                                )?;
+                            let (node_id, payload, expires_at) = controller
+                                .create_pairing_invite(
+                                    scope.unwrap_or(RemoteScope::Control),
+                                    ttl_secs.unwrap_or(120),
+                                )
+                                .await?;
+                            return Ok(Some(ServerMessage::PairingInvite {
+                                request_id: request_id.clone(),
+                                node_id,
+                                payload,
+                                expires_at,
+                            }));
                         }
                         ClientMessage::RevokeDevice { device_id, .. } => {
                             // Capture the final authorized snapshot before self-revocation removes access.
@@ -2003,19 +2233,64 @@ where
                 }
             }
             ClientMessage::SetAutoTitle { enabled } => {
-                auto_title_enabled = enabled;
+                if let Err(error) = session_manager
+                    .set_automation(Some(enabled), None, false, authorization.clone())
+                    .await
+                {
+                    reply(ServerMessage::Error {
+                        message: format!("could not save auto-title setting: {error:#}"),
+                    });
+                    continue;
+                }
+                auto_title_enabled = *title_updates.borrow_and_update();
                 tracing::info!(auto_title = enabled, "auto-title setting changed");
                 reply(ServerMessage::AutomationSettings {
                     auto_title_enabled,
                     auto_summary_enabled: *auto_summary_enabled.borrow(),
+                    initialized: session_manager
+                        .automation_initialized
+                        .load(std::sync::atomic::Ordering::Acquire),
                 });
             }
             ClientMessage::SetAutoSummary { enabled } => {
-                auto_summary_enabled.send_replace(enabled);
+                if let Err(error) = session_manager
+                    .set_automation(None, Some(enabled), false, authorization.clone())
+                    .await
+                {
+                    reply(ServerMessage::Error {
+                        message: format!("could not save auto-summary setting: {error:#}"),
+                    });
+                    continue;
+                }
                 tracing::info!(auto_summary = enabled, "auto-summary setting changed");
                 reply(ServerMessage::AutomationSettings {
                     auto_title_enabled,
                     auto_summary_enabled: *summary_updates.borrow_and_update(),
+                    initialized: session_manager
+                        .automation_initialized
+                        .load(std::sync::atomic::Ordering::Acquire),
+                });
+            }
+            ClientMessage::MigrateAutomationSettings {
+                auto_title_enabled: title,
+                auto_summary_enabled: summary,
+            } => {
+                if let Err(error) = session_manager
+                    .set_automation(title, summary, true, authorization.clone())
+                    .await
+                {
+                    reply(ServerMessage::Error {
+                        message: format!("could not migrate automation settings: {error:#}"),
+                    });
+                    continue;
+                }
+                auto_title_enabled = *title_updates.borrow_and_update();
+                reply(ServerMessage::AutomationSettings {
+                    auto_title_enabled,
+                    auto_summary_enabled: *summary_updates.borrow_and_update(),
+                    initialized: session_manager
+                        .automation_initialized
+                        .load(std::sync::atomic::Ordering::Acquire),
                 });
             }
             ClientMessage::ReadPromptReceipt {
@@ -2134,6 +2409,8 @@ where
                     }
                     let guard = guard.expect("validated turn lock");
                     let token = register_turn(&session).await;
+                    let (enriched, display, mention_parts) =
+                        resolve_mentions(&session, &text).await;
                     // Attach registers and queues its history under the same lock.
                     // A new peer sees this message in history or in the live echo.
                     let projection = session.provider_replay.lock().await;
@@ -2141,7 +2418,7 @@ where
                         .agent
                         .lock()
                         .await
-                        .accept_prompt(text.clone(), attachment_parts(attachments), &request_id)
+                        .accept_prompt(display.clone(), attachment_parts(attachments), &request_id)
                         .await;
                     let prompt = match admitted {
                         Ok(prompt) => prompt,
@@ -2183,16 +2460,21 @@ where
                     });
                     session
                         .broadcast(ServerMessage::UserMessage {
-                            text: text.clone(),
+                            text: display.clone(),
                             request_id: Some(request_id),
+                            steered: false,
                         })
                         .await;
                     drop(projection);
                     finish_prompt_turn(
                         &session,
                         &session_mgr,
-                        text,
-                        PromptTurn::Accepted(prompt),
+                        display,
+                        PromptTurn::AcceptedEnriched {
+                            prompt,
+                            text: enriched,
+                            attachments: mention_parts,
+                        },
                         auto_title_enabled,
                         guard,
                         token,
@@ -2207,14 +2489,6 @@ where
                     });
                     continue;
                 };
-                // Broadcast the user message to all attached clients.
-                // The sending client deduplicates by matching text content.
-                session
-                    .broadcast(ServerMessage::UserMessage {
-                        text: text.clone(),
-                        request_id: None,
-                    })
-                    .await;
                 let client_tx = client_tx.clone();
                 let session_mgr = session_manager.clone();
                 tokio::spawn(async move {
@@ -2227,11 +2501,25 @@ where
                         return;
                     }
                     let token = register_turn(&session).await;
+                    let (enriched, display, mention_parts) =
+                        resolve_mentions(&session, &text).await;
+                    let mut parts = attachment_parts(attachments);
+                    parts.extend(mention_parts);
+                    session
+                        .broadcast(ServerMessage::UserMessage {
+                            text: display.clone(),
+                            request_id: None,
+                            steered: false,
+                        })
+                        .await;
                     finish_prompt_turn(
                         &session,
                         &session_mgr,
-                        text.clone(),
-                        PromptTurn::New { text, attachments },
+                        display,
+                        PromptTurn::Parts {
+                            text: enriched,
+                            parts,
+                        },
                         auto_title_enabled,
                         _guard,
                         token,
@@ -2268,8 +2556,123 @@ where
                     .broadcast(ServerMessage::UserMessage {
                         text,
                         request_id: None,
+                        steered: true,
                     })
                     .await;
+            }
+            ClientMessage::EnqueueMessage {
+                session_id,
+                request_id,
+                text,
+                attachments,
+                mode,
+            } => {
+                let Ok(session) = session_manager.attach(&session_id).await else {
+                    reply(ServerMessage::Error {
+                        message: format!("unknown session {session_id}"),
+                    });
+                    continue;
+                };
+                if text.trim().is_empty() && attachments.is_empty() {
+                    continue;
+                }
+                let running = *session.is_running.lock().await
+                    || session.current_turn_cancel.lock().await.is_some();
+                if running {
+                    if mode == mew_protocol::QueueMode::Steer {
+                        let (_, display, _) = resolve_mentions(&session, &text).await;
+                        let agent = session.agent.lock().await;
+                        agent.enqueue_guidance(display.clone()).await;
+                        drop(agent);
+                        session
+                            .broadcast(ServerMessage::UserMessage {
+                                text: display,
+                                request_id: Some(request_id),
+                                steered: true,
+                            })
+                            .await;
+                    } else {
+                        let item = mew_protocol::QueuedMessageWire {
+                            id: ulid::Ulid::new().to_string(),
+                            text,
+                            attachments,
+                            mode,
+                            created_at: now_millis(),
+                        };
+                        session.queued_messages.lock().await.push_back(item);
+                        broadcast_queue(&session).await;
+                    }
+                } else {
+                    let session_mgr = session_manager.clone();
+                    tokio::spawn(async move {
+                        run_submitted_turn(
+                            session,
+                            session_mgr,
+                            text,
+                            attachments,
+                            Some(request_id),
+                            auto_title_enabled,
+                        )
+                        .await;
+                    });
+                }
+            }
+            ClientMessage::UpdateQueuedMessage {
+                session_id,
+                id,
+                text,
+                mode,
+            } => {
+                let Ok(session) = session_manager.attach(&session_id).await else {
+                    continue;
+                };
+                let mut promoted_text: Option<String> = None;
+                {
+                    let mut queue = session.queued_messages.lock().await;
+                    if let Some(pos) = queue.iter().position(|item| item.id == id) {
+                        if let Some(new_text) = text {
+                            queue[pos].text = new_text;
+                        }
+                        if mode == Some(mew_protocol::QueueMode::Steer) {
+                            let running = *session.is_running.lock().await
+                                || session.current_turn_cancel.lock().await.is_some();
+                            if running {
+                                if let Some(removed) = queue.remove(pos) {
+                                    promoted_text = Some(removed.text);
+                                }
+                            } else {
+                                queue[pos].mode = mew_protocol::QueueMode::Steer;
+                            }
+                        } else if let Some(new_mode) = mode {
+                            queue[pos].mode = new_mode;
+                        }
+                    }
+                }
+                broadcast_queue(&session).await;
+                if let Some(steer_text) = promoted_text {
+                    let (_, display, _) = resolve_mentions(&session, &steer_text).await;
+                    let agent = session.agent.lock().await;
+                    agent.enqueue_guidance(display.clone()).await;
+                    drop(agent);
+                    session
+                        .broadcast(ServerMessage::UserMessage {
+                            text: display,
+                            request_id: None,
+                            steered: true,
+                        })
+                        .await;
+                }
+            }
+            ClientMessage::RemoveQueuedMessage { session_id, id } => {
+                let Ok(session) = session_manager.attach(&session_id).await else {
+                    continue;
+                };
+                session
+                    .queued_messages
+                    .lock()
+                    .await
+                    .retain(|item| item.id != id);
+                broadcast_queue(&session).await;
             }
             ClientMessage::TerminalOpen { rows, cols } => {
                 let Some(session) = attached_session.clone() else {
@@ -2395,6 +2798,52 @@ where
                     }
                 }
             }
+            ClientMessage::UploadAttachment {
+                request_id,
+                mime,
+                filename: _,
+                data_base64,
+            } => {
+                use base64::Engine;
+                match base64::engine::general_purpose::STANDARD.decode(data_base64.trim()) {
+                    Ok(bytes) => {
+                        let size = bytes.len() as u64;
+                        match mew_session::BlobStore::default_store().put(&bytes) {
+                            Ok(id) => reply(ServerMessage::AttachmentUploaded {
+                                request_id,
+                                url: mew_session::blob_url(&id),
+                                id,
+                                mime,
+                                size,
+                            }),
+                            Err(error) => reply(ServerMessage::Error {
+                                message: format!("attachment upload failed: {error}"),
+                            }),
+                        }
+                    }
+                    Err(error) => reply(ServerMessage::Error {
+                        message: format!("invalid attachment base64: {error}"),
+                    }),
+                }
+            }
+            ClientMessage::GetAttachment { request_id, id } => {
+                use base64::Engine;
+                match mew_session::BlobStore::default_store().get(&id) {
+                    Ok(bytes) => {
+                        let size = bytes.len() as u64;
+                        let data_base64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                        reply(ServerMessage::AttachmentData {
+                            request_id,
+                            id,
+                            data_base64,
+                            size,
+                        });
+                    }
+                    Err(error) => reply(ServerMessage::Error {
+                        message: format!("attachment read failed: {error}"),
+                    }),
+                }
+            }
             ClientMessage::Ping => {
                 reply(ServerMessage::Pong {
                     version: env!("CARGO_PKG_VERSION").to_string(),
@@ -2509,7 +2958,7 @@ where
                 let session_manager_clone = session_manager.clone();
                 tokio::spawn(async move {
                     let _guard = session.turn_lock.lock().await;
-                    let (cmd, _arg) = match command.split_once(' ') {
+                    let (cmd, arg) = match command.split_once(' ') {
                         Some((c, a)) => (c, Some(a)),
                         None => (command.as_str(), None),
                     };
@@ -2529,14 +2978,44 @@ where
                                 }
                                 Err(error) => Some(format!("Could not clear context. {error}")),
                             },
-                            "/compact" => Some(match agent.compact_context().await {
-                                Ok(0) => "nothing to compact".to_string(),
-                                Ok(removed) => {
-                                    compacted = true;
-                                    format!("compacted {removed} messages")
-                                }
-                                Err(error) => format!("compaction failed: {error}"),
-                            }),
+                            "/compact" => {
+                                *session.is_compacting.lock().await = true;
+                                session
+                                    .broadcast(ServerMessage::SessionCompacting {
+                                        session_id: session.id.clone(),
+                                        active: true,
+                                        removed: None,
+                                        summary: None,
+                                    })
+                                    .await;
+                                let instructions = arg.map(str::trim).filter(|s| !s.is_empty());
+                                let outcome =
+                                    agent.compact_context_with_instructions(instructions).await;
+                                *session.is_compacting.lock().await = false;
+                                let (removed_count, summary, reply_text) = match outcome {
+                                    Ok((0, _)) => (Some(0), None, "nothing to compact".to_string()),
+                                    Ok((removed, summary)) => {
+                                        compacted = true;
+                                        (
+                                            Some(removed),
+                                            summary,
+                                            format!("compacted {removed} messages"),
+                                        )
+                                    }
+                                    Err(error) => {
+                                        (None, None, format!("compaction failed: {error}"))
+                                    }
+                                };
+                                session
+                                    .broadcast(ServerMessage::SessionCompacting {
+                                        session_id: session.id.clone(),
+                                        active: false,
+                                        removed: removed_count,
+                                        summary,
+                                    })
+                                    .await;
+                                Some(reply_text)
+                            }
                             "/goal" => {
                                 use mew_agent::{GoalState, GoalStatus};
                                 let sub = command.strip_prefix("/goal").unwrap_or("").trim();
@@ -2715,6 +3194,33 @@ where
                     });
                 }
             }
+            ClientMessage::ListMentionCandidates => {
+                let Some(session) = attached_session.clone() else {
+                    reply(ServerMessage::Error {
+                        message: "no session — attach a conversation first".into(),
+                    });
+                    continue;
+                };
+                let agent = session.agent.lock().await;
+                reply(ServerMessage::MentionCandidates {
+                    skills: agent
+                        .skills
+                        .iter()
+                        .map(|s| mew_protocol::MentionCandidate {
+                            name: s.name.clone(),
+                            description: s.description.clone(),
+                        })
+                        .collect(),
+                    subagents: agent
+                        .subagent_defs
+                        .iter()
+                        .map(|s| mew_protocol::MentionCandidate {
+                            name: s.name.clone(),
+                            description: s.description.clone(),
+                        })
+                        .collect(),
+                });
+            }
             ClientMessage::SwitchModel { provider, model } => {
                 let Some(session) = attached_session.clone() else {
                     reply(ServerMessage::Error {
@@ -2852,17 +3358,6 @@ where
                         }
                     }
                 });
-            }
-            ClientMessage::YieldControl {} => {
-                let Some(session) = attached_session.clone() else {
-                    continue;
-                };
-                let Some(cid) = client_id else {
-                    continue;
-                };
-                session
-                    .broadcast(ServerMessage::ControlYielded { client_id: cid })
-                    .await;
             }
 
             // -- Phase 2: groups & archive --
@@ -3033,9 +3528,20 @@ where
             }
 
             // -- Phase 3: File service --
-            ClientMessage::ListDir { session_id, path } => {
-                match crate::files::handle_list_dir(&session_manager, &session_id, path).await {
+            ClientMessage::ListDir {
+                session_id,
+                path,
+                scoped_errors,
+            } => {
+                match crate::files::handle_list_dir(&session_manager, &session_id, path.clone())
+                    .await
+                {
                     Ok(listing) => reply(listing),
+                    Err(e) if scoped_errors => reply(ServerMessage::DirListingError {
+                        session_id,
+                        path: path.unwrap_or_default(),
+                        error: e,
+                    }),
                     Err(e) => reply(ServerMessage::Error {
                         message: format!("list_dir: {e}"),
                     }),
@@ -3045,6 +3551,7 @@ where
                 session_id,
                 path,
                 max_bytes,
+                scoped_errors,
             } => {
                 match crate::files::handle_read_preview(
                     &session_manager,
@@ -3055,19 +3562,34 @@ where
                 .await
                 {
                     Ok(preview) => reply(preview),
-                    Err(e) => reply(ServerMessage::Error {
-                        message: format!("read_file_preview: {e}"),
-                    }),
+                    Err(e) => {
+                        if scoped_errors {
+                            reply(ServerMessage::FilePreviewError {
+                                session_id,
+                                path,
+                                error: e,
+                            });
+                        } else {
+                            reply(ServerMessage::Error {
+                                message: format!("read_file_preview: {e}"),
+                            });
+                        }
+                    }
                 }
             }
-            ClientMessage::GitStatus { session_id } => {
-                match crate::files::handle_git_status(&session_manager, &session_id).await {
-                    Ok(result) => reply(result),
-                    Err(e) => reply(ServerMessage::Error {
-                        message: format!("git_status: {e}"),
-                    }),
-                }
-            }
+            ClientMessage::GitStatus {
+                session_id,
+                scoped_errors,
+            } => match crate::files::handle_git_status(&session_manager, &session_id).await {
+                Ok(result) => reply(result),
+                Err(e) if scoped_errors => reply(ServerMessage::GitStatusError {
+                    session_id,
+                    error: e,
+                }),
+                Err(e) => reply(ServerMessage::Error {
+                    message: format!("git_status: {e}"),
+                }),
+            },
             ClientMessage::UpdateTodo {
                 session_id,
                 request_id,
@@ -3093,10 +3615,20 @@ where
                     },
                 });
             }
-            ClientMessage::ReadSessionDiff {
-                session_id,
-                request_id,
-            } => {
+            message @ (ClientMessage::ReadSessionDiff { .. }
+            | ClientMessage::ReadSessionFileDiff { .. }) => {
+                let (session_id, request_id, path) = match message {
+                    ClientMessage::ReadSessionDiff {
+                        session_id,
+                        request_id,
+                    } => (session_id, request_id, None),
+                    ClientMessage::ReadSessionFileDiff {
+                        session_id,
+                        request_id,
+                        path,
+                    } => (session_id, request_id, Some(path)),
+                    _ => unreachable!(),
+                };
                 let Some(root) = session_manager.session_cwd(&session_id).await else {
                     reply(ServerMessage::SessionDiffError {
                         session_id,
@@ -3107,9 +3639,11 @@ where
                 };
                 let client_tx = client_tx.clone();
                 tokio::spawn(async move {
-                    let result =
-                        tokio::task::spawn_blocking(move || mew_diff::load_session_diffs(&root))
-                            .await;
+                    let result = tokio::task::spawn_blocking(move || match path {
+                        Some(path) => mew_diff::load_session_file_diffs(&root, &path),
+                        None => mew_diff::load_session_diffs(&root),
+                    })
+                    .await;
                     let message = match result {
                         Ok(Ok(files)) => ServerMessage::SessionDiff {
                             session_id,
@@ -3536,10 +4070,27 @@ async fn daemon_settings_message(
     if let Some(authorization) = authorization {
         tokio::task::spawn_blocking(move || authorization.require_control()).await??;
     }
+    let automation = Some(mew_protocol::AutomationSettingsInfo {
+        auto_title_enabled: *manager.auto_title_enabled.borrow(),
+        auto_summary_enabled: *manager.auto_summary_enabled.borrow(),
+    });
+    let remote = Some(
+        manager
+            .remote_controller
+            .get()
+            .map(|controller| controller.status())
+            .unwrap_or(mew_protocol::RemoteAccessInfo {
+                supported: false,
+                enabled: false,
+                node_id: None,
+            }),
+    );
     Ok(ServerMessage::DaemonSettings {
         request_id,
         defaults,
         devices,
+        automation,
+        remote,
     })
 }
 
@@ -3628,10 +4179,20 @@ enum PromptTurn {
         text: String,
         attachments: Vec<mew_protocol::Attachment>,
     },
-    Accepted(mew_agent::AcceptedPrompt),
+    /// Enriched text and ready-made parts from mention resolution.
+    Parts {
+        text: String,
+        parts: Vec<mew_message::Part>,
+    },
+    /// Persisted visible message with enriched model input from @mentions.
+    AcceptedEnriched {
+        prompt: mew_agent::AcceptedPrompt,
+        text: String,
+        attachments: Vec<mew_message::Part>,
+    },
 }
 
-/// Complete the serialized turn before generating its optional title.
+/// Complete the serialized turn, run optional auto-title, and drain any queued follow-ups.
 async fn finish_prompt_turn(
     session: &Arc<Session>,
     session_mgr: &Arc<SessionManager>,
@@ -3641,6 +4202,30 @@ async fn finish_prompt_turn(
     guard: tokio::sync::MutexGuard<'_, ()>,
     token: CancellationToken,
 ) {
+    if finish_single_prompt_turn(
+        session,
+        session_mgr,
+        prompt_text,
+        prompt,
+        auto_title,
+        guard,
+        token,
+    )
+    .await
+    {
+        drain_queued_turns(session, session_mgr, auto_title).await;
+    }
+}
+
+async fn finish_single_prompt_turn(
+    session: &Arc<Session>,
+    session_mgr: &Arc<SessionManager>,
+    prompt_text: String,
+    prompt: PromptTurn,
+    auto_title: bool,
+    guard: tokio::sync::MutexGuard<'_, ()>,
+    token: CancellationToken,
+) -> bool {
     let agent = session.agent.lock().await.clone();
     let had_error = run_turn(session, session_mgr, &agent, prompt, token.clone()).await;
     drop(guard);
@@ -3678,22 +4263,160 @@ async fn finish_prompt_turn(
             }
         }
     }
+
+    !had_error && !token.is_cancelled()
+}
+
+async fn drain_queued_turns(
+    session: &Arc<Session>,
+    session_mgr: &Arc<SessionManager>,
+    auto_title: bool,
+) {
+    loop {
+        let Some(next) = session.queued_messages.lock().await.pop_front() else {
+            break;
+        };
+        broadcast_queue(session).await;
+        let guard = session.turn_lock.lock().await;
+        let token = register_turn(session).await;
+        let (enriched, display, mention_parts) = resolve_mentions(session, &next.text).await;
+        let mut parts = attachment_parts(next.attachments);
+        parts.extend(mention_parts);
+        session
+            .broadcast(ServerMessage::UserMessage {
+                text: display.clone(),
+                request_id: None,
+                steered: next.mode == mew_protocol::QueueMode::Steer,
+            })
+            .await;
+        if !finish_single_prompt_turn(
+            session,
+            session_mgr,
+            display,
+            PromptTurn::Parts {
+                text: enriched,
+                parts,
+            },
+            auto_title,
+            guard,
+            token,
+        )
+        .await
+        {
+            break;
+        }
+    }
+}
+
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+async fn broadcast_queue(session: &Session) {
+    let items: Vec<_> = session
+        .queued_messages
+        .lock()
+        .await
+        .iter()
+        .cloned()
+        .collect();
+    session
+        .broadcast(ServerMessage::SessionQueueChanged {
+            session_id: session.id.clone(),
+            items,
+        })
+        .await;
+}
+
+async fn run_submitted_turn(
+    session: Arc<Session>,
+    session_mgr: Arc<SessionManager>,
+    text: String,
+    attachments: Vec<mew_protocol::Attachment>,
+    request_id: Option<String>,
+    auto_title: bool,
+) {
+    let guard = session.turn_lock.lock().await;
+    let token = register_turn(&session).await;
+    let (enriched, display, mention_parts) = resolve_mentions(&session, &text).await;
+    let mut parts = attachment_parts(attachments);
+    parts.extend(mention_parts);
+    session
+        .broadcast(ServerMessage::UserMessage {
+            text: display.clone(),
+            request_id,
+            steered: false,
+        })
+        .await;
+    finish_prompt_turn(
+        &session,
+        &session_mgr,
+        display,
+        PromptTurn::Parts {
+            text: enriched,
+            parts,
+        },
+        auto_title,
+        guard,
+        token,
+    )
+    .await;
+}
+
+/// Resolve @mentions against the session's workspace and catalogs. Returns
+/// `(model_text, display_text, extra_attachments)`.
+async fn resolve_mentions(
+    session: &Arc<Session>,
+    text: &str,
+) -> (String, String, Vec<mew_message::Part>) {
+    let (cwd, skills, subagents) = {
+        let agent = session.agent.lock().await;
+        (
+            agent.cwd.clone(),
+            agent.skills.clone(),
+            agent.subagent_defs.clone(),
+        )
+    };
+    let mut context_files = Vec::new();
+    mew_agent::mentions::process_mentions(text, &cwd, &mut context_files, &skills, &subagents).await
 }
 
 fn attachment_parts(attachments: Vec<mew_protocol::Attachment>) -> Vec<mew_message::Part> {
+    let store = mew_session::BlobStore::default_store();
     attachments
         .into_iter()
         .map(|attachment| {
-            let filename = attachment.path.rsplit('/').next().map(str::to_owned);
+            let mut mime = attachment.mime.unwrap_or_default();
+            let (url, filename) = match mew_session::decode_data_url(&attachment.path) {
+                Some((detected_mime, bytes)) => {
+                    if mime.is_empty() {
+                        mime = detected_mime;
+                    }
+                    match store.put(&bytes) {
+                        Ok(id) => (mew_session::blob_url(&id), None),
+                        Err(_) => (attachment.path, None),
+                    }
+                }
+                None if mew_session::parse_blob_id(&attachment.path).is_some() => {
+                    (attachment.path, None)
+                }
+                None => {
+                    let filename = attachment.path.rsplit('/').next().map(str::to_owned);
+                    (attachment.path, filename)
+                }
+            };
             mew_message::Part::File(mew_message::FilePart {
                 base: mew_message::PartBase {
                     id: ulid::Ulid::new(),
                     message_id: ulid::Ulid::new(),
                     session_id: ulid::Ulid::new(),
                 },
-                mime: attachment.mime.unwrap_or_default(),
+                mime,
                 filename,
-                url: attachment.path,
+                url,
             })
         })
         .collect()
@@ -3730,14 +4453,20 @@ async fn run_turn(
 
     let rx = match prompt {
         PromptTurn::New { text, attachments } => {
-            agent.run_with_parts(text, attachment_parts(attachments), Some(token))
+            agent.run_with_parts(text, attachment_parts(attachments), Some(token.clone()))
         }
-        PromptTurn::Accepted(prompt) => agent.run_accepted_prompt(prompt, token),
+        PromptTurn::Parts { text, parts } => agent.run_with_parts(text, parts, Some(token.clone())),
+        PromptTurn::AcceptedEnriched {
+            prompt,
+            text,
+            attachments,
+        } => agent.run_accepted_prompt_with_parts(prompt, text, attachments, token.clone()),
     };
     let had_error = forward_events(rx, session.clone(), session_mgr.clone()).await;
 
     *session.current_turn_cancel.lock().await = None;
     *session.is_running.lock().await = false;
+    *session.is_compacting.lock().await = false;
 
     let cached_usage = session.last_usage.lock().await.clone();
     let cached_context = *session.last_context_tokens.lock().await;
@@ -3763,7 +4492,7 @@ async fn run_turn(
 
     // Broadcast idle state.
     session_mgr
-        .broadcast_activity(&session.id, SessionState::Idle)
+        .broadcast_activity_outcome(&session.id, SessionState::Idle, token.is_cancelled())
         .await;
 
     // Broadcast usage (only if we have data).
@@ -3887,9 +4616,9 @@ async fn generate_session_title(agent: &Agent, prompt_text: &str) -> String {
     use mew_provider::ProviderEvent;
 
     let req = utility_request(
-        "You generate concise session titles. Respond with ONLY a 3-5 word title. No quotes, no punctuation at the end, no explanation.",
+        "You generate concise session titles in sentence case (capitalize only the first word and proper nouns or acronyms). Respond with ONLY a 3-5 word title. No quotes, no punctuation at the end, no explanation.",
         format!(
-            "Generate a 3-5 word title for a session that starts with this message:\n\n{}",
+            "Generate a 3-5 word sentence-case title for a session that starts with this message:\n\n{}",
             prompt_text.chars().take(500).collect::<String>()
         ),
         512,
@@ -4153,7 +4882,7 @@ async fn generate_session_summary(agent: &Agent) -> Option<String> {
     }
     // Build a condensed transcript (first user msg + last few exchanges).
     let mut transcript = String::new();
-    transcript.push_str("Summarize this conversation in 1-2 sentences (max 30 words):\n\n");
+    transcript.push_str("Summarize in 1–2 sentences (≤30 words). Do NOT frame it as 'the user' or 'user states'. Just state the facts, decisions, and conclusions plainly.\n\n");
     for msg in messages.iter().take(20) {
         if let Role::User = msg.role {
             transcript.push_str("User: ");
@@ -4647,6 +5376,19 @@ async fn translate_event(
                 files: wire_files,
             }]
         }
+        AgentEvent::Compacting {
+            active,
+            removed,
+            summary,
+        } => {
+            *session.is_compacting.lock().await = active;
+            vec![ServerMessage::SessionCompacting {
+                session_id: session.id.clone(),
+                active,
+                removed,
+                summary,
+            }]
+        }
         AgentEvent::GoalProposed {
             call_id,
             objective,
@@ -4727,6 +5469,13 @@ mod tests {
                 assert!(request.session_id.is_none());
                 assert!(request.tools.is_empty());
                 assert!(request.params.as_ref().unwrap().max_tokens.is_some());
+                if request.system.contains("session titles") {
+                    assert!(
+                        request.system.contains("sentence case"),
+                        "title prompt should request sentence case: {}",
+                        request.system
+                    );
+                }
                 Ok(Box::pin(futures::stream::iter(
                     mew_provider_fake::FakeProvider::text_response("Helper result"),
                 )))
@@ -4901,6 +5650,16 @@ mod tests {
         ));
         assert!(!remote_message_allowed(
             RemoteScope::Observe,
+            &ClientMessage::EnqueueMessage {
+                session_id: "sess_1".into(),
+                request_id: "req_1".into(),
+                text: "follow up".into(),
+                attachments: Vec::new(),
+                mode: mew_protocol::QueueMode::FollowUp,
+            }
+        ));
+        assert!(!remote_message_allowed(
+            RemoteScope::Observe,
             &ClientMessage::DeleteSession {
                 session_id: "sess_1".into()
             }
@@ -4914,6 +5673,32 @@ mod tests {
             &ClientMessage::Prompt {
                 text: "hello".into(),
                 attachments: Vec::new(),
+            }
+        ));
+        assert!(remote_message_allowed(
+            RemoteScope::Collaborate,
+            &ClientMessage::EnqueueMessage {
+                session_id: "sess_1".into(),
+                request_id: "req_1".into(),
+                text: "follow up".into(),
+                attachments: Vec::new(),
+                mode: mew_protocol::QueueMode::FollowUp,
+            }
+        ));
+        assert!(remote_message_allowed(
+            RemoteScope::Collaborate,
+            &ClientMessage::UpdateQueuedMessage {
+                session_id: "sess_1".into(),
+                id: "q_1".into(),
+                text: None,
+                mode: Some(mew_protocol::QueueMode::Steer),
+            }
+        ));
+        assert!(remote_message_allowed(
+            RemoteScope::Collaborate,
+            &ClientMessage::RemoveQueuedMessage {
+                session_id: "sess_1".into(),
+                id: "q_1".into(),
             }
         ));
         assert!(remote_message_allowed(

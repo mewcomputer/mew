@@ -19,8 +19,12 @@ impl EditPlan {
     }
 
     pub fn generated() -> Self {
+        Self::generated_in("plans")
+    }
+
+    pub fn generated_in(plans_dir: impl Into<PathBuf>) -> Self {
         Self {
-            plan_path: "plans".into(),
+            plan_path: plans_dir.into().to_string_lossy().into_owned(),
             generated: true,
         }
     }
@@ -37,43 +41,38 @@ impl EditPlan {
     fn generated_path(&self, cwd: &std::path::Path, input: &Value) -> Result<PathBuf, ToolError> {
         use std::path::Component;
 
+        let plans_dir = self.resolve(cwd);
         let supplied = input.get("path").and_then(Value::as_str).ok_or_else(|| {
             ToolError::InvalidInput("missing plan path; use the path returned by write_plan".into())
         })?;
         let path = std::path::Path::new(supplied);
         let relative = if path.is_absolute() {
-            path.strip_prefix(cwd).map_err(|_| {
+            path.strip_prefix(&plans_dir).map_err(|_| {
                 ToolError::InvalidInput(
-                    "plan path must be in the workspace plans/ directory".into(),
+                    "plan path must be in the configured plans directory".into(),
                 )
             })?
         } else {
-            path
+            path.strip_prefix(&self.plan_path).unwrap_or(path)
         };
         let components: Vec<_> = relative.components().collect();
-        let [Component::Normal(dir), Component::Normal(file)] = components.as_slice() else {
+        let [Component::Normal(file)] = components.as_slice() else {
             return Err(ToolError::InvalidInput(
-                "plan path must be plans/<name>.md".into(),
+                "plan path must be <name>.md inside the configured plans directory".into(),
             ));
         };
-        if *dir != "plans" || !file.to_string_lossy().ends_with(".md") {
+        let file_name = file.to_string_lossy();
+        let Some(stem) = file_name.strip_suffix(".md") else {
             return Err(ToolError::InvalidInput(
-                "plan path must be plans/<name>.md".into(),
+                "plan path must end with .md".into(),
+            ));
+        };
+        if stem.is_empty() || file_name.contains('/') || file_name.contains('\\') {
+            return Err(ToolError::InvalidInput(
+                "plan filename must be a valid .md file".into(),
             ));
         }
-        let name = file.to_string_lossy();
-        let stem = name.strip_suffix(".md").unwrap_or_default();
-        let words: Vec<_> = stem.split('-').collect();
-        if words.len() != 2
-            || words
-                .iter()
-                .any(|word| word.is_empty() || !word.bytes().all(|ch| ch.is_ascii_lowercase()))
-        {
-            return Err(ToolError::InvalidInput(
-                "plan path must be a generated plan filename".into(),
-            ));
-        }
-        Ok(cwd.join(relative))
+        Ok(plans_dir.join(relative))
     }
 }
 
@@ -138,8 +137,9 @@ impl Tool for EditPlan {
             .unwrap_or(false);
 
         let path = if self.generated {
+            let plans_dir = self.resolve(&ctx.cwd);
             let path = self.generated_path(&ctx.cwd, &input)?;
-            for check in [&ctx.cwd.join("plans"), &path] {
+            for check in [&plans_dir, &path] {
                 let metadata = tokio::fs::symlink_metadata(check).await.map_err(|e| {
                     ToolError::Execution(format!(
                         "plan file {} could not be inspected ({e})",
@@ -316,21 +316,17 @@ mod tests {
     #[tokio::test]
     async fn generated_edit_requires_a_plan_path_and_cannot_escape_plans() {
         let dir = tempfile::tempdir().unwrap();
-        let writer = crate::tools::write_plan::WritePlan::generated();
+        let plans_dir = crate::tools::write_plan::session_plan_dir(&dir.path().join("data-plans"));
+        let writer = crate::tools::write_plan::WritePlan::generated_in(&plans_dir);
         writer
             .execute(
                 ctx(dir.path().to_path_buf()),
-                serde_json::json!({"content": "first"}),
+                serde_json::json!({"content": "first", "name": "auth-flow"}),
             )
             .await
             .unwrap();
-        let path = std::fs::read_dir(dir.path().join("plans"))
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
-        let tool = EditPlan::generated();
+        let path = plans_dir.join("auth-flow.md");
+        let tool = EditPlan::generated_in(&plans_dir);
         let input = serde_json::json!({"old_string": "first", "new_string": "revised"});
         assert!(tool
             .execute(ctx(dir.path().to_path_buf()), input.clone())
@@ -339,7 +335,7 @@ mod tests {
         assert!(tool
             .execute(
                 ctx(dir.path().to_path_buf()),
-                serde_json::json!({"path": "plans/../outside.md", "old_string": "first", "new_string": "revised"}),
+                serde_json::json!({"path": "../outside.md", "old_string": "first", "new_string": "revised"}),
             )
             .await
             .is_err());
@@ -367,11 +363,11 @@ mod tests {
         std::fs::create_dir(&plans).unwrap();
         let outside = dir.path().join("outside.md");
         std::fs::write(&outside, "do not change").unwrap();
-        std::os::unix::fs::symlink(&outside, plans.join("luma-vare.md")).unwrap();
+        std::os::unix::fs::symlink(&outside, plans.join("plan.md")).unwrap();
         let err = EditPlan::generated()
             .execute(
                 ctx(dir.path().to_path_buf()),
-                serde_json::json!({"path": "plans/luma-vare.md", "old_string": "do not", "new_string": "please"}),
+                serde_json::json!({"path": "plans/plan.md", "old_string": "do not", "new_string": "please"}),
             )
             .await
             .unwrap_err()

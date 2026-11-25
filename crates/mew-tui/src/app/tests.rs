@@ -348,17 +348,20 @@ fn daemon_idle_clears_cancellation_only_for_the_attached_session_without_finishi
     app.apply_daemon_notification(&mew_protocol::ServerMessage::SessionActivityChanged {
         session_id: "other".into(),
         activity: mew_protocol::SessionState::Idle,
+        cancelled: false,
     });
     assert!(app.cancelling);
     app.apply_daemon_notification(&mew_protocol::ServerMessage::SessionActivityChanged {
         session_id: "active".into(),
         activity: mew_protocol::SessionState::Running,
+        cancelled: false,
     });
     assert!(app.cancelling);
 
     app.apply_daemon_notification(&mew_protocol::ServerMessage::SessionActivityChanged {
         session_id: "active".into(),
         activity: mew_protocol::SessionState::Idle,
+        cancelled: false,
     });
 
     assert!(!app.cancelling);
@@ -2518,6 +2521,7 @@ fn test_session_list_syncs_active_change_stats() {
             provider: None,
             created_at: 0,
             last_message_at: None,
+            title: None,
             summary: None,
             client_count: 1,
             cwd: None,
@@ -2536,6 +2540,7 @@ fn test_session_list_syncs_active_change_stats() {
             pending_permissions: 0,
             pending_questions: 0,
             first_message: None,
+            last_message: None,
         }],
     });
     assert_eq!(app.change_stats.added, 7);
@@ -2552,6 +2557,7 @@ fn test_session_list_sorted_by_last_seen() {
             provider: None,
             created_at,
             last_message_at,
+            title: None,
             summary: None,
             client_count: 0,
             cwd: None,
@@ -2566,6 +2572,7 @@ fn test_session_list_sorted_by_last_seen() {
             pending_permissions: 0,
             pending_questions: 0,
             first_message: None,
+            last_message: None,
         }
     }
 
@@ -2602,6 +2609,7 @@ fn test_session_list_seeds_active_context_tokens() {
         provider: None,
         created_at: 0,
         last_message_at: None,
+        title: None,
         summary: None,
         client_count: 1,
         cwd: None,
@@ -2616,6 +2624,7 @@ fn test_session_list_seeds_active_context_tokens() {
         pending_permissions: 0,
         pending_questions: 0,
         first_message: None,
+        last_message: None,
     };
     app.apply_daemon_notification(&mew_protocol::ServerMessage::SessionList {
         sessions: vec![info.clone()],

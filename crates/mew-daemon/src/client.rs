@@ -465,7 +465,7 @@ impl DaemonClient {
     }
 
     /// Send a raw protocol message (for messages not covered by a dedicated
-    /// method, e.g. `YieldControl`).
+    /// method, e.g. `AssignSessionGroup`).
     pub async fn send_raw(&self, json: &str) -> Result<()> {
         self.state
             .ws_out
@@ -565,7 +565,7 @@ impl DaemonClient {
             .map_err(|e| anyhow::anyhow!("daemon send error: {}", e))
     }
 
-    /// Toggle auto-title for the current session.
+    /// Toggle auto-title for the daemon.
     pub async fn set_auto_title(&self, enabled: bool) -> Result<()> {
         let msg = ClientMessage::SetAutoTitle { enabled };
         let json = mew_protocol::encode_json(&msg)?;
@@ -576,7 +576,7 @@ impl DaemonClient {
             .map_err(|e| anyhow::anyhow!("daemon send error: {}", e))
     }
 
-    /// Toggle auto-summary for the current session.
+    /// Toggle auto-summary for the daemon.
     pub async fn set_auto_summary(&self, enabled: bool) -> Result<()> {
         let msg = ClientMessage::SetAutoSummary { enabled };
         let json = mew_protocol::encode_json(&msg)?;
@@ -1020,6 +1020,7 @@ async fn translate_server_message(
         ServerMessage::SessionActivityChanged {
             session_id,
             activity,
+            ..
         } => {
             // Idle is emitted only after the agent's full event stream drains,
             // including tools and continuations. Closing this prompt-scoped
@@ -1036,8 +1037,10 @@ async fn translate_server_message(
         ServerMessage::BrowserPageRegistration { .. }
         | ServerMessage::PromptReceipt { .. }
         | ServerMessage::ModelList { .. }
+        | ServerMessage::MentionCandidates { .. }
         | ServerMessage::AutomationSettings { .. }
         | ServerMessage::DaemonSettings { .. }
+        | ServerMessage::PairingInvite { .. }
         | ServerMessage::DaemonSettingsFailed { .. }
         | ServerMessage::SessionOperationFailed { .. }
         | ServerMessage::SessionDeletionResult { .. }
@@ -1049,13 +1052,15 @@ async fn translate_server_message(
         | ServerMessage::PermissionModeChanged { .. }
         | ServerMessage::ClientAttached { .. }
         | ServerMessage::ClientDetached { .. }
-        | ServerMessage::ControlYielded { .. }
         | ServerMessage::SessionStatsChanged { .. }
         | ServerMessage::GroupList { .. }
         | ServerMessage::GroupsChanged { .. }
         | ServerMessage::DirListing { .. }
         | ServerMessage::FilePreview { .. }
+        | ServerMessage::FilePreviewError { .. }
+        | ServerMessage::DirListingError { .. }
         | ServerMessage::GitStatusResult { .. }
+        | ServerMessage::GitStatusError { .. }
         | ServerMessage::SessionDiff { .. }
         | ServerMessage::SessionDiffError { .. }
         | ServerMessage::FsChanged { .. }
@@ -1065,7 +1070,11 @@ async fn translate_server_message(
         | ServerMessage::TerminalOpened { .. }
         | ServerMessage::TerminalOutput { .. }
         | ServerMessage::TerminalExited { .. }
-        | ServerMessage::TerminalError { .. } => {
+        | ServerMessage::TerminalError { .. }
+        | ServerMessage::AttachmentUploaded { .. }
+        | ServerMessage::AttachmentData { .. }
+        | ServerMessage::SessionQueueChanged { .. }
+        | ServerMessage::SessionCompacting { .. } => {
             // Forward to the notification channel for the TUI's daemon
             // session rail / alerts / metadata. These don't map to
             // AgentEvents.
@@ -1087,6 +1096,7 @@ async fn translate_server_message(
         ServerMessage::SessionList { .. }
         | ServerMessage::SessionHistory { .. }
         | ServerMessage::SessionHistoryPage { .. }
+        | ServerMessage::SessionIndex { .. }
         | ServerMessage::SubagentHistory { .. }
         | ServerMessage::SubagentMessageReceipt { .. }
         | ServerMessage::JobOutput { .. }
@@ -1385,7 +1395,7 @@ mod tests {
                         ws.send(Message::Text(mew_protocol::encode_json(&ServerMessage::RequestResolved { request_id }).unwrap())).await.unwrap();
                     }
                     ws.send(Message::Text(mew_protocol::encode_json(&ServerMessage::SessionActivityChanged {
-                        session_id: "active".into(), activity: mew_protocol::SessionState::Idle,
+                        session_id: "active".into(), activity: mew_protocol::SessionState::Idle, cancelled: false,
                     }).unwrap())).await.unwrap();
                     while ws.next().await.is_some() {}
                 });
@@ -1548,6 +1558,7 @@ mod tests {
                     ServerMessage::SessionActivityChanged {
                         session_id: "other".into(),
                         activity: mew_protocol::SessionState::Idle,
+                        cancelled: false,
                     },
                 ] {
                     ws.send(Message::Text(mew_protocol::encode_json(&msg).unwrap()))
@@ -1558,6 +1569,7 @@ mod tests {
                 let idle = ServerMessage::SessionActivityChanged {
                     session_id: "active".into(),
                     activity: mew_protocol::SessionState::Idle,
+                    cancelled: false,
                 };
                 ws.send(Message::Text(mew_protocol::encode_json(&idle).unwrap()))
                     .await

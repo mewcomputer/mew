@@ -782,7 +782,34 @@ pub(crate) async fn run_daemon_remote(
         .map(|_| mew_daemon::remote::RemoteMode::Desktop)
         .unwrap_or(mew_daemon::remote::RemoteMode::Daemon);
 
+    let controller = Arc::new(mew_daemon::remote::IrohRemoteController::new(
+        server.session_manager.clone(),
+        server.groups_store.clone(),
+        server.thinking_setter.clone(),
+        server.auto_summary_enabled.clone(),
+        remote_store.clone(),
+        secret_key.clone(),
+        allowlist_path.clone(),
+        remote_mode,
+    ));
+    let _ = server
+        .session_manager
+        .remote_devices
+        .get_or_init(|| mew_daemon::remote::RemoteDeviceManager::Scoped(remote_store.clone()));
+    let _ = server
+        .session_manager
+        .remote_controller
+        .set(controller.clone());
+
     let local = run_local_server(server, socket, port);
+    let (remote_shutdown_tx, remote_shutdown_rx) =
+        tokio::sync::watch::channel(shutdown.borrow().as_ref().map(|_| 0));
+    let mut shutdown_watch = shutdown.clone();
+    let remote_shutdown_forwarder = remote_shutdown_tx.clone();
+    tokio::spawn(async move {
+        let _ = shutdown_watch.wait_for(Option::is_some).await;
+        let _ = remote_shutdown_forwarder.send(Some(0));
+    });
     let remote = mew_daemon::iroh_transport::run_iroh(
         remote_server.session_manager,
         remote_server.groups_store,
@@ -795,17 +822,19 @@ pub(crate) async fn run_daemon_remote(
             remote_token: None,
             remote_store: Some(remote_store.clone()),
             remote_mode,
-                shutdown: Some(shutdown.clone()),
+            shutdown: Some(remote_shutdown_rx),
         },
     );
 
     let remote_store_for_task = remote_store.clone();
-        let mut remote_task = tokio::spawn(async move {
+    let mut remote_task = tokio::spawn(async move {
         if let Err(error) = remote.await {
             tracing::error!(%error, "iroh remote listener stopped; local daemon remains available");
             let _ = remote_store_for_task.set_hosting(false, remote_mode, None);
         }
     });
+    // Keep the controller able to create QR pairing invites while `--remote` owns the listener.
+    controller.mark_running(remote_shutdown_tx);
         let result = tokio::select! {
             result = local => result,
             _ = shutdown.wait_for(Option::is_some) => Ok(()),

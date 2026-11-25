@@ -169,7 +169,6 @@ pub struct UiModel {
     pub todos: Vec<ActivityTodo>,
     pub usage: Option<UsageSummary>,
     pub presence: Vec<PresenceEntry>,
-    pub control_yielded_by: Option<u64>,
 }
 
 impl Default for UiModel {
@@ -199,7 +198,6 @@ impl Default for UiModel {
             todos: Vec::new(),
             usage: None,
             presence: Vec::new(),
-            control_yielded_by: None,
         }
     }
 }
@@ -222,7 +220,6 @@ impl UiModel {
         self.projects = state.projects.clone();
         self.browser = state.browser.clone();
         self.presence = state.presence.clone();
-        self.control_yielded_by = state.control_yielded_by;
         // Metadata-only snapshots omit session state entirely, so keep the last
         // known activity projection unless the attached session is present.
         if let Some(session) = state
@@ -405,7 +402,6 @@ impl UiModel {
         self.flagged_files.clear();
         self.browser = BrowserState::default();
         self.presence.clear();
-        self.control_yielded_by = None;
     }
 
     pub fn new_conversation_in_group(
@@ -443,8 +439,10 @@ impl UiModel {
 
 impl From<&SessionInfo> for ConversationItem {
     fn from(session: &SessionInfo) -> Self {
+        // `summary` is a recap shown elsewhere; it does not belong in the
+        // title slot.
         let title = session
-            .summary
+            .title
             .as_deref()
             .or(session.first_message.as_deref())
             .or(session
@@ -471,6 +469,36 @@ impl From<&SessionInfo> for ConversationItem {
     }
 }
 
+/// Native clients cannot open a web file chip, so show the directive's label.
+fn display_file_directives(text: &str) -> String {
+    const START: &str = ":file[";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(START) {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + START.len()..];
+        let Some((label, attributes)) = after.split_once("]{") else {
+            out.push_str(START);
+            rest = after;
+            continue;
+        };
+        let Some(end) = attributes.find('}') else {
+            out.push_str(START);
+            rest = after;
+            continue;
+        };
+        if label.is_empty() || !attributes[..end].contains("path=") {
+            out.push_str(START);
+            rest = after;
+            continue;
+        }
+        out.push_str(label);
+        rest = &attributes[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
 impl TranscriptItem {
     fn from_message(message: &Message) -> Option<Self> {
         let mut text = String::new();
@@ -480,14 +508,14 @@ impl TranscriptItem {
                 continue;
             }
             let (part_text, projected): (Option<String>, Option<TranscriptPart>) = match part {
-                Part::Text(part) => (
-                    Some(part.text.clone()),
-                    Some(TranscriptPart::Text(part.text.clone())),
-                ),
-                Part::Reasoning(part) => (
-                    Some(part.text.clone()),
-                    Some(TranscriptPart::Reasoning(part.text.clone())),
-                ),
+                Part::Text(part) => {
+                    let text = display_file_directives(&part.text);
+                    (Some(text.clone()), Some(TranscriptPart::Text(text)))
+                }
+                Part::Reasoning(part) => {
+                    let text = display_file_directives(&part.text);
+                    (Some(text.clone()), Some(TranscriptPart::Reasoning(text)))
+                }
                 Part::File(part) => {
                     let label = part.filename.clone().unwrap_or_else(|| part.url.clone());
                     let attachment = Attachment {
@@ -588,6 +616,20 @@ mod tests {
 
     const SESSION_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
 
+    #[test]
+    fn file_directives_render_as_labels_in_native_transcripts() {
+        assert_eq!(
+            display_file_directives(
+                r#"open :file[src/mascot.tsx]{path="src/mascot.tsx"} and :file[notes]{label="notes"}"#
+            ),
+            r#"open src/mascot.tsx and :file[notes]{label="notes"}"#
+        );
+        assert_eq!(
+            display_file_directives("no directives here"),
+            "no directives here"
+        );
+    }
+
     fn session_info() -> SessionInfo {
         SessionInfo {
             session_id: SESSION_ID.into(),
@@ -596,6 +638,7 @@ mod tests {
             provider: None,
             created_at: 0,
             last_message_at: None,
+            title: None,
             summary: None,
             client_count: 0,
             cwd: Some("/tmp/mew-project".into()),
@@ -610,7 +653,18 @@ mod tests {
             pending_permissions: 0,
             pending_questions: 0,
             first_message: Some("first prompt".into()),
+            last_message: None,
         }
+    }
+
+    #[test]
+    fn conversation_title_prefers_the_title_over_the_summary() {
+        let mut session = session_info();
+        session.summary = Some("a long recap of what happened".into());
+        assert_eq!(ConversationItem::from(&session).title, "first prompt");
+
+        session.title = Some("Fix the flaky test".into());
+        assert_eq!(ConversationItem::from(&session).title, "Fix the flaky test");
     }
 
     #[test]
@@ -985,7 +1039,6 @@ mod tests {
                     client_kind: ClientKind::Tui,
                 },
             ],
-            control_yielded_by: Some(9),
             ..ClientState::default()
         };
         let session = state.session_mut(SESSION_ID);
@@ -1033,7 +1086,6 @@ mod tests {
         assert_eq!(model.usage.map(|usage| usage.turns), Some(2));
         assert!(!model.usage.is_some_and(|usage| usage.is_empty()));
         assert_eq!(model.presence.len(), 2);
-        assert_eq!(model.control_yielded_by, Some(9));
 
         // Metadata-only snapshots omit session state; the last known activity
         // projection is preserved instead of being cleared.
@@ -1043,7 +1095,6 @@ mod tests {
         assert_eq!(model.todos.len(), 2);
         assert_eq!(model.usage.map(|usage| usage.turns), Some(2));
         assert_eq!(model.presence.len(), 2);
-        assert_eq!(model.control_yielded_by, Some(9));
 
         // Switching conversations drops the previous session's activity.
         model.conversations = vec![ConversationItem::from(&session_info())];

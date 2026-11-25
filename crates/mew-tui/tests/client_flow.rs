@@ -64,6 +64,7 @@ fn passive_turn_streams_and_finishes_without_a_local_prompt_receiver() {
         ServerMessage::UserMessage {
             text: "from desktop".into(),
             request_id: None,
+            steered: false,
         },
     );
     apply(
@@ -72,6 +73,7 @@ fn passive_turn_streams_and_finishes_without_a_local_prompt_receiver() {
         ServerMessage::SessionActivityChanged {
             session_id: "a".into(),
             activity: SessionState::Running,
+            cancelled: false,
         },
     );
     let part_id = ulid::Ulid::new();
@@ -115,6 +117,7 @@ fn passive_turn_streams_and_finishes_without_a_local_prompt_receiver() {
         ServerMessage::SessionActivityChanged {
             session_id: "a".into(),
             activity: SessionState::Idle,
+            cancelled: false,
         },
     );
     assert!(!app.streaming);
@@ -361,6 +364,7 @@ fn returning_to_an_idle_conversation_releases_its_queue_despite_a_stale_list() {
         ServerMessage::SessionActivityChanged {
             session_id: "a".into(),
             activity: SessionState::Idle,
+            cancelled: false,
         },
     );
     apply(&mut app, &mut state, ready("a", "/tmp/a"));
@@ -525,6 +529,7 @@ fn foreign_equal_text_echo_cannot_accept_or_reformat_our_draft() {
         ServerMessage::UserMessage {
             text: "same text".into(),
             request_id: Some("theirs".into()),
+            steered: false,
         },
     );
     assert_eq!(app.input, "  same text  ");
@@ -557,6 +562,7 @@ fn matching_echo_waits_for_receipt_and_then_applies_only_its_own_display() {
         ServerMessage::UserMessage {
             text: "enriched".into(),
             request_id: Some("ours".into()),
+            steered: false,
         },
     );
     assert_eq!(app.input, "our draft");
@@ -580,6 +586,7 @@ fn matching_echo_waits_for_receipt_and_then_applies_only_its_own_display() {
         ServerMessage::UserMessage {
             text: "enriched".into(),
             request_id: Some("theirs".into()),
+            steered: false,
         },
     );
     assert!(matches!(&app.messages()[1].parts[0], Part::Text(text) if text.text == "enriched"));
@@ -608,6 +615,7 @@ fn accepted_receipt_before_echo_preserves_request_ownership() {
         ServerMessage::UserMessage {
             text: "enriched".into(),
             request_id: Some("theirs".into()),
+            steered: false,
         },
     );
     assert!(matches!(&app.messages()[0].parts[0], Part::Text(text) if text.text == "enriched"));
@@ -617,6 +625,7 @@ fn accepted_receipt_before_echo_preserves_request_ownership() {
         ServerMessage::UserMessage {
             text: "enriched".into(),
             request_id: Some("ours".into()),
+            steered: false,
         },
     );
     assert!(matches!(&app.messages()[1].parts[0], Part::Text(text) if text.text == "our display"));

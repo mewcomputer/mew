@@ -5,7 +5,7 @@ use mew_tui::{events::handle_input_event, App, Mode};
 
 fn session(id: &str) -> SessionInfo {
     serde_json::from_value(serde_json::json!({
-        "session_id": id, "created_at": 0, "message_count": 0, "summary": id,
+        "session_id": id, "created_at": 0, "message_count": 0, "title": id,
         "group_id": "default", "cwd": "/tmp/project", "state": "idle", "client_count": 0
     }))
     .unwrap()
@@ -213,6 +213,7 @@ fn failure_stays_actionable_after_reading_until_a_new_turn_starts() {
         ServerMessage::SessionActivityChanged {
             session_id: "a".into(),
             activity: mew_protocol::SessionState::Running,
+            cancelled: false,
         },
     );
     assert_eq!(app.session_attention_count(), 0);
@@ -240,6 +241,7 @@ fn closing_a_background_view_keeps_its_draft_and_daemon_running_state() {
         ServerMessage::SessionActivityChanged {
             session_id: "a".into(),
             activity: mew_protocol::SessionState::Running,
+            cancelled: false,
         },
     );
     assert!(app.close_window_conversation("a").is_none());

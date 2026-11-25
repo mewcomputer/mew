@@ -54,6 +54,7 @@ fn user_echo_request_identity_is_optional_and_round_trips() {
     let echo = ServerMessage::UserMessage {
         text: "hello".into(),
         request_id: Some("request".into()),
+        steered: false,
     };
     assert!(
         matches!(decode_json::<ServerMessage>(&encode_json(&echo).unwrap()).unwrap(),

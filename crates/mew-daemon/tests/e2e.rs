@@ -29,6 +29,417 @@ use tokio_tungstenite::{client_async, WebSocketStream};
 
 type Ws = WebSocketStream<UnixStream>;
 
+#[tokio::test]
+async fn selected_file_diff_is_scoped_and_does_not_load_unrelated_files() {
+    let (dir, socket) = spawn_daemon(make_text_agent_factory(Arc::new(|| {
+        FakeProvider::text_response("ok")
+    })))
+    .await;
+    assert!(std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap()
+        .success());
+    std::fs::write(dir.path().join("small.txt"), "hello\n").unwrap();
+    std::fs::write(dir.path().join("large.txt"), vec![b'x'; 9 * 1024 * 1024]).unwrap();
+    let mut ws = connect(&socket).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: Some(dir.path().display().to_string()),
+            client_kind: ClientKind::Desktop,
+        },
+    )
+    .await;
+    let ServerMessage::SessionReady { session_id, .. } =
+        recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await
+    else {
+        unreachable!()
+    };
+    send(
+        &mut ws,
+        ClientMessage::ReadSessionFileDiff {
+            session_id: session_id.clone(),
+            request_id: "one".into(),
+            path: "small.txt".into(),
+        },
+    )
+    .await;
+    let result = recv_one_matching(&mut ws, |m| {
+        matches!(
+            m,
+            ServerMessage::SessionDiff { .. } | ServerMessage::SessionDiffError { .. }
+        )
+    })
+    .await;
+    assert!(
+        matches!(result, ServerMessage::SessionDiff { session_id: id, request_id, files } if id == session_id && request_id == "one" && files.len() == 1 && files[0].path == "small.txt")
+    );
+    send(
+        &mut ws,
+        ClientMessage::ReadSessionFileDiff {
+            session_id: session_id.clone(),
+            request_id: "two".into(),
+            path: "../escape".into(),
+        },
+    )
+    .await;
+    let result = recv_one_matching(&mut ws, |m| {
+        matches!(m, ServerMessage::SessionDiffError { .. })
+    })
+    .await;
+    assert!(
+        matches!(result, ServerMessage::SessionDiffError { session_id: id, request_id, .. } if id == session_id && request_id == "two")
+    );
+}
+
+#[tokio::test]
+async fn git_status_lists_files_in_untracked_directories() {
+    let (dir, socket) = spawn_daemon(make_text_agent_factory(Arc::new(|| {
+        FakeProvider::text_response("ok")
+    })))
+    .await;
+    assert!(std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap()
+        .success());
+    std::fs::create_dir(dir.path().join("new-folder")).unwrap();
+    std::fs::write(dir.path().join("new-folder/note.txt"), "new").unwrap();
+    let mut ws = connect(&socket).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: Some(dir.path().display().to_string()),
+            client_kind: ClientKind::Desktop,
+        },
+    )
+    .await;
+    let ServerMessage::SessionReady { session_id, .. } =
+        recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await
+    else {
+        unreachable!()
+    };
+    send(
+        &mut ws,
+        ClientMessage::GitStatus {
+            session_id,
+            scoped_errors: true,
+        },
+    )
+    .await;
+    let ServerMessage::GitStatusResult { entries, .. } = recv_one_matching(&mut ws, |m| {
+        matches!(m, ServerMessage::GitStatusResult { .. })
+    })
+    .await
+    else {
+        unreachable!()
+    };
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.path == "new-folder/note.txt"),
+        "{entries:?}"
+    );
+}
+
+#[tokio::test]
+async fn git_status_paths_are_relative_to_the_session_workspace() {
+    let (dir, socket) = spawn_daemon(make_text_agent_factory(Arc::new(|| {
+        FakeProvider::text_response("ok")
+    })))
+    .await;
+    assert!(std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap()
+        .success());
+    std::fs::create_dir(dir.path().join("nested")).unwrap();
+    std::fs::write(dir.path().join("nested/space.txt "), "contents").unwrap();
+    std::fs::write(dir.path().join("outside.txt"), "outside").unwrap();
+    let mut ws = connect(&socket).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: Some(dir.path().join("nested").display().to_string()),
+            client_kind: ClientKind::Desktop,
+        },
+    )
+    .await;
+    let ServerMessage::SessionReady { session_id, .. } =
+        recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await
+    else {
+        unreachable!()
+    };
+    send(
+        &mut ws,
+        ClientMessage::GitStatus {
+            session_id: session_id.clone(),
+            scoped_errors: true,
+        },
+    )
+    .await;
+    let ServerMessage::GitStatusResult { entries, .. } = recv_one_matching(&mut ws, |m| {
+        matches!(m, ServerMessage::GitStatusResult { .. })
+    })
+    .await
+    else {
+        unreachable!()
+    };
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert_eq!(entries[0].path, "space.txt ");
+    send(
+        &mut ws,
+        ClientMessage::ReadFilePreview {
+            session_id,
+            path: entries[0].path.clone(),
+            max_bytes: None,
+            scoped_errors: true,
+        },
+    )
+    .await;
+    let result = recv_one_matching(&mut ws, |m| {
+        matches!(
+            m,
+            ServerMessage::FilePreview { .. } | ServerMessage::FilePreviewError { .. }
+        )
+    })
+    .await;
+    assert!(matches!(result, ServerMessage::FilePreview { content, .. } if content == "contents"));
+}
+
+#[tokio::test]
+async fn git_status_reports_scoped_errors_and_preserves_legacy_errors() {
+    let (dir, socket) = spawn_daemon(make_text_agent_factory(Arc::new(|| {
+        FakeProvider::text_response("ok")
+    })))
+    .await;
+    let mut ws = connect(&socket).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: Some(dir.path().display().to_string()),
+            client_kind: ClientKind::Desktop,
+        },
+    )
+    .await;
+    let ServerMessage::SessionReady { session_id, .. } =
+        recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await
+    else {
+        unreachable!()
+    };
+    for scoped_errors in [true, false] {
+        send(
+            &mut ws,
+            ClientMessage::GitStatus {
+                session_id: session_id.clone(),
+                scoped_errors,
+            },
+        )
+        .await;
+        let result = recv_one_matching(&mut ws, |m| {
+            matches!(
+                m,
+                ServerMessage::GitStatusError { .. } | ServerMessage::Error { .. }
+            )
+        })
+        .await;
+        match result {
+            ServerMessage::GitStatusError {
+                session_id: id,
+                error,
+            } if scoped_errors => {
+                assert_eq!(id, session_id);
+                assert!(error.contains("git status"));
+            }
+            ServerMessage::Error { message } if !scoped_errors => {
+                assert!(message.contains("git_status"))
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn directory_listing_reports_scoped_and_legacy_errors() {
+    let (dir, socket) = spawn_daemon(make_text_agent_factory(Arc::new(|| {
+        FakeProvider::text_response("ok")
+    })))
+    .await;
+    let mut ws = connect(&socket).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: Some(dir.path().display().to_string()),
+            client_kind: ClientKind::Desktop,
+        },
+    )
+    .await;
+    let ServerMessage::SessionReady { session_id, .. } =
+        recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await
+    else {
+        unreachable!()
+    };
+    for scoped_errors in [true, false] {
+        send(
+            &mut ws,
+            ClientMessage::ListDir {
+                session_id: session_id.clone(),
+                path: Some("missing".into()),
+                scoped_errors,
+            },
+        )
+        .await;
+        let result = recv_one_matching(&mut ws, |m| {
+            matches!(
+                m,
+                ServerMessage::DirListingError { .. } | ServerMessage::Error { .. }
+            )
+        })
+        .await;
+        match result {
+            ServerMessage::DirListingError {
+                session_id: id,
+                path,
+                error,
+            } if scoped_errors => {
+                assert_eq!(id, session_id);
+                assert_eq!(path, "missing");
+                assert!(!error.is_empty());
+            }
+            ServerMessage::Error { message } if !scoped_errors => {
+                assert!(message.contains("list_dir"))
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn file_previews_identify_the_session_and_report_missing_files() {
+    let (dir, socket) = spawn_daemon(make_text_agent_factory(Arc::new(|| {
+        FakeProvider::text_response("ok")
+    })))
+    .await;
+    std::fs::write(dir.path().join("large.txt"), "abcdefghij").unwrap();
+    let mut ws = connect(&socket).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: Some(dir.path().display().to_string()),
+            client_kind: ClientKind::Desktop,
+        },
+    )
+    .await;
+    let ServerMessage::SessionReady { session_id, .. } =
+        recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await
+    else {
+        unreachable!()
+    };
+    for path in ["large.txt", "missing.txt"] {
+        send(
+            &mut ws,
+            ClientMessage::ReadFilePreview {
+                session_id: session_id.clone(),
+                path: path.into(),
+                max_bytes: Some(4),
+                scoped_errors: true,
+            },
+        )
+        .await;
+        let response = recv_one_matching(&mut ws, |m| {
+            matches!(
+                m,
+                ServerMessage::FilePreview { .. } | ServerMessage::FilePreviewError { .. }
+            )
+        })
+        .await;
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(
+            value["type"],
+            if path == "large.txt" {
+                "file_preview"
+            } else {
+                "file_preview_error"
+            }
+        );
+        assert_eq!(value["session_id"], session_id);
+        assert_eq!(value["path"], path);
+        if path == "large.txt" {
+            assert_eq!(value["content"], "abcd");
+            assert_eq!(value["truncated"], true);
+        } else {
+            assert!(value["error"]
+                .as_str()
+                .is_some_and(|error| !error.is_empty()));
+        }
+    }
+    send(
+        &mut ws,
+        ClientMessage::ReadFilePreview {
+            session_id: session_id.clone(),
+            path: "missing.txt".into(),
+            max_bytes: None,
+            scoped_errors: false,
+        },
+    )
+    .await;
+    let legacy = recv_one_matching(&mut ws, |m| {
+        matches!(
+            m,
+            ServerMessage::Error { .. } | ServerMessage::FilePreviewError { .. }
+        )
+    })
+    .await;
+    assert!(matches!(legacy, ServerMessage::Error { .. }));
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("large.txt", dir.path().join("link.txt")).unwrap();
+        send(
+            &mut ws,
+            ClientMessage::ReadFilePreview {
+                session_id: session_id.clone(),
+                path: "link.txt".into(),
+                max_bytes: Some(4),
+                scoped_errors: true,
+            },
+        )
+        .await;
+        let response =
+            recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::FilePreview { .. })).await;
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["path"], "link.txt");
+        assert_eq!(value["content"], "abcd");
+        nix::unistd::mkfifo(
+            &dir.path().join("pipe"),
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .unwrap();
+        send(
+            &mut ws,
+            ClientMessage::ReadFilePreview {
+                session_id: session_id.clone(),
+                path: "pipe".into(),
+                max_bytes: None,
+                scoped_errors: true,
+            },
+        )
+        .await;
+        let response = recv_one_matching(&mut ws, |m| {
+            matches!(m, ServerMessage::FilePreviewError { .. })
+        })
+        .await;
+        let value = serde_json::to_value(response).unwrap();
+        assert!(value["error"]
+            .as_str()
+            .unwrap()
+            .contains("not a regular file"));
+    }
+}
+
 /// Spawn a daemon bound to a temp Unix socket. The server runs in a
 /// background task until the `TempDir` (and the socket path inside it) is
 /// dropped. Each connection builds a fresh agent via `agent_factory`.

@@ -94,10 +94,6 @@ impl App {
                 description: "switch theme (e.g. /theme light, /theme dark)".into(),
             },
             SlashCommand {
-                name: "/yield".into(),
-                description: "yield control to other clients".into(),
-            },
-            SlashCommand {
                 name: "/autotitle".into(),
                 description: "toggle auto session titling (e.g. /autotitle off; daemon mode)"
                     .into(),
@@ -237,7 +233,6 @@ impl App {
                     }
                 }
             }
-            "/yield" => SlashResult::YieldControl,
             "/project" => {
                 if self.daemon_mode {
                     SlashResult::OpenProjectPicker

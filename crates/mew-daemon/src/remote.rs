@@ -6,11 +6,268 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub use mew_protocol::RemoteScope;
+
+pub type RemoteFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
+
+/// Live lifecycle and invite controller for remote iroh access on a running daemon.
+pub trait RemoteAccessController: Send + Sync {
+    fn status(&self) -> mew_protocol::RemoteAccessInfo;
+    fn set_enabled(&self, enabled: bool) -> RemoteFuture<'_, mew_protocol::RemoteAccessInfo>;
+    fn create_pairing_invite(
+        &self,
+        scope: RemoteScope,
+        ttl_secs: u64,
+    ) -> RemoteFuture<'_, (String, String, u64)>;
+}
+
+#[cfg(feature = "iroh")]
+struct RunningIroh {
+    shutdown_tx: tokio::sync::watch::Sender<Option<i32>>,
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+#[cfg(feature = "iroh")]
+#[derive(Default)]
+struct IrohControllerState {
+    generation: u64,
+    running: Option<RunningIroh>,
+}
+
+#[cfg(feature = "iroh")]
+pub struct IrohRemoteController {
+    session_manager: Arc<crate::session::SessionManager>,
+    groups_store: Arc<crate::groups::GroupsStore>,
+    thinking_setter: Option<crate::ThinkingSetter>,
+    auto_summary_enabled: tokio::sync::watch::Sender<bool>,
+    store: Arc<RemoteAccessStore>,
+    secret_key: iroh::SecretKey,
+    node_id: String,
+    allowlist_path: PathBuf,
+    remote_mode: RemoteMode,
+    enabled: Arc<std::sync::atomic::AtomicBool>,
+    last_error: Arc<Mutex<Option<String>>>,
+    state: Arc<tokio::sync::Mutex<IrohControllerState>>,
+}
+
+#[cfg(feature = "iroh")]
+impl IrohRemoteController {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        session_manager: Arc<crate::session::SessionManager>,
+        groups_store: Arc<crate::groups::GroupsStore>,
+        thinking_setter: Option<crate::ThinkingSetter>,
+        auto_summary_enabled: tokio::sync::watch::Sender<bool>,
+        store: Arc<RemoteAccessStore>,
+        secret_key: iroh::SecretKey,
+        allowlist_path: PathBuf,
+        remote_mode: RemoteMode,
+    ) -> Self {
+        let node_id = secret_key.public().to_string();
+        Self {
+            session_manager,
+            groups_store,
+            thinking_setter,
+            auto_summary_enabled,
+            store,
+            secret_key,
+            node_id,
+            allowlist_path,
+            remote_mode,
+            enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_error: Arc::new(Mutex::new(None)),
+            state: Arc::new(tokio::sync::Mutex::new(IrohControllerState::default())),
+        }
+    }
+
+    /// Register an already-started external `run_iroh` listener (e.g. from `mew daemon --remote`).
+    pub fn mark_running(&self, shutdown_tx: tokio::sync::watch::Sender<Option<i32>>) {
+        self.enabled
+            .store(true, std::sync::atomic::Ordering::Release);
+        if let Ok(mut guard) = self.state.try_lock() {
+            guard.generation = guard.generation.wrapping_add(1);
+            guard.running = Some(RunningIroh {
+                shutdown_tx,
+                handle: None,
+            });
+        }
+    }
+
+    pub fn node_id(&self) -> &str {
+        &self.node_id
+    }
+}
+
+#[cfg(feature = "iroh")]
+impl RemoteAccessController for IrohRemoteController {
+    fn status(&self) -> mew_protocol::RemoteAccessInfo {
+        let enabled = self.enabled.load(std::sync::atomic::Ordering::Acquire)
+            || self.store.snapshot().enabled;
+        mew_protocol::RemoteAccessInfo {
+            supported: true,
+            enabled,
+            node_id: Some(self.node_id.clone()),
+        }
+    }
+
+    fn set_enabled(&self, enabled: bool) -> RemoteFuture<'_, mew_protocol::RemoteAccessInfo> {
+        Box::pin(async move {
+            let mut guard = self.state.lock().await;
+            if enabled {
+                if guard.running.as_ref().is_some_and(|running| {
+                    running
+                        .handle
+                        .as_ref()
+                        .is_none_or(|handle| !handle.is_finished())
+                }) {
+                    return Ok(self.status());
+                }
+                guard.running = None;
+                *self.last_error.lock().expect("iroh error mutex poisoned") = None;
+                guard.generation = guard.generation.wrapping_add(1);
+                let generation = guard.generation;
+                let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(None::<i32>);
+
+                let session_manager = self.session_manager.clone();
+                let groups_store = self.groups_store.clone();
+                let thinking_setter = self.thinking_setter.clone();
+                let auto_summary_enabled = self.auto_summary_enabled.clone();
+                let store = self.store.clone();
+                let secret_key = self.secret_key.clone();
+                let allowlist_path = self.allowlist_path.clone();
+                let remote_mode = self.remote_mode;
+                let enabled_flag = self.enabled.clone();
+                let last_error = self.last_error.clone();
+                let state = self.state.clone();
+
+                let handle = tokio::spawn(async move {
+                    let result = crate::iroh_transport::run_iroh(
+                        session_manager.clone(),
+                        groups_store,
+                        thinking_setter,
+                        auto_summary_enabled,
+                        crate::iroh_transport::IrohListenerConfig {
+                            allowlist_path,
+                            secret_key,
+                            remote_scope: Some(RemoteScope::Control),
+                            remote_token: None,
+                            remote_store: Some(store.clone()),
+                            remote_mode,
+                            shutdown: Some(shutdown_rx),
+                        },
+                    )
+                    .await;
+                    enabled_flag.store(false, std::sync::atomic::Ordering::Release);
+                    let _ = store.set_hosting(false, remote_mode, None);
+                    if let Err(error) = result {
+                        tracing::error!(%error, "iroh remote listener stopped");
+                        *last_error.lock().expect("iroh error mutex poisoned") =
+                            Some(format!("{error:#}"));
+                    }
+                    if let Ok(mut guard) = state.try_lock() {
+                        if guard.generation == generation {
+                            guard.running = None;
+                        }
+                    }
+                    session_manager.settings_changed.send_replace(());
+                });
+                guard.running = Some(RunningIroh {
+                    shutdown_tx,
+                    handle: Some(handle),
+                });
+
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(16);
+                loop {
+                    if self.store.snapshot().enabled {
+                        self.enabled
+                            .store(true, std::sync::atomic::Ordering::Release);
+                        return Ok(self.status());
+                    }
+                    if guard.running.as_ref().is_some_and(|running| {
+                        running
+                            .handle
+                            .as_ref()
+                            .is_some_and(|handle| handle.is_finished())
+                    }) {
+                        if let Some(mut running) = guard.running.take() {
+                            if let Some(handle) = running.handle.take() {
+                                let _ = handle.await;
+                            }
+                        }
+                        self.enabled
+                            .store(false, std::sync::atomic::Ordering::Release);
+                        let message = self
+                            .last_error
+                            .lock()
+                            .expect("iroh error mutex poisoned")
+                            .take()
+                            .unwrap_or_else(|| "iroh listener stopped unexpectedly".into());
+                        anyhow::bail!(message);
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        if let Some(mut running) = guard.running.take() {
+                            let _ = running.shutdown_tx.send(Some(0));
+                            if let Some(handle) = running.handle.take() {
+                                handle.abort();
+                            }
+                        }
+                        self.enabled
+                            .store(false, std::sync::atomic::Ordering::Release);
+                        anyhow::bail!("timed out starting iroh remote listener");
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            } else {
+                if let Some(mut running) = guard.running.take() {
+                    let _ = running.shutdown_tx.send(Some(0));
+                    if let Some(mut handle) = running.handle.take() {
+                        if tokio::time::timeout(Duration::from_secs(3), &mut handle)
+                            .await
+                            .is_err()
+                        {
+                            handle.abort();
+                        }
+                    }
+                }
+                self.enabled
+                    .store(false, std::sync::atomic::Ordering::Release);
+                let store = self.store.clone();
+                let mode = self.remote_mode;
+                tokio::task::spawn_blocking(move || store.set_hosting(false, mode, None)).await??;
+                Ok(self.status())
+            }
+        })
+    }
+
+    fn create_pairing_invite(
+        &self,
+        scope: RemoteScope,
+        ttl_secs: u64,
+    ) -> RemoteFuture<'_, (String, String, u64)> {
+        Box::pin(async move {
+            let store = self.store.clone();
+            let node_id = self.node_id.clone();
+            let active = self.enabled.load(std::sync::atomic::Ordering::Acquire)
+                || self.store.snapshot().enabled;
+            anyhow::ensure!(
+                active,
+                "remote access is not active; enable remote access before creating a pairing invite"
+            );
+            let ttl = ttl_secs.clamp(30, 600);
+            let now = unix_now();
+            let token = tokio::task::spawn_blocking(move || store.create_pairing(scope, now, ttl))
+                .await??;
+            let payload = format!("computer.mew.mew://{node_id}?token={token}");
+            Ok((node_id, payload, now.saturating_add(ttl)))
+        })
+    }
+}
 
 /// How the remote endpoint is being hosted.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

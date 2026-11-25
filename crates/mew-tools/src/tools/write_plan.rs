@@ -19,8 +19,12 @@ impl WritePlan {
     }
 
     pub fn generated() -> Self {
+        Self::generated_in("plans")
+    }
+
+    pub fn generated_in(plans_dir: impl Into<PathBuf>) -> Self {
         Self {
-            plan_path: "plans".into(),
+            plan_path: plans_dir.into().to_string_lossy().into_owned(),
             generated: true,
         }
     }
@@ -37,6 +41,18 @@ impl WritePlan {
     }
 }
 
+/// Choose a fresh `<word>-<word>` directory under `plans_root` for a session.
+pub fn session_plan_dir(plans_root: &std::path::Path) -> PathBuf {
+    let config = resona::Config::default();
+    if let (Ok(first), Ok(second)) = (resona::sona(&config), resona::sona(&config)) {
+        return plans_root.join(format!("{first}-{second}"));
+    }
+    plans_root.join(format!(
+        "plan-{}",
+        ulid::Ulid::new().to_string().to_lowercase()
+    ))
+}
+
 #[async_trait]
 impl Tool for WritePlan {
     fn name(&self) -> &str {
@@ -44,9 +60,9 @@ impl Tool for WritePlan {
     }
 
     fn description(&self) -> &str {
-        "Write the full plan. By default each call creates a new named file in plans/; \
-         configured fixed paths are overwritten. The result contains the path to \
-         use with edit_plan or to give to the builder."
+        "Write the full plan. By default each call creates a new named file in \
+         plans/<words>/<name>.md; configured fixed paths are overwritten. The \
+         result contains the path to use with edit_plan or to give to the builder."
     }
 
     fn schema(&self) -> &Value {
@@ -58,6 +74,10 @@ impl Tool for WritePlan {
                     "content": {
                         "type": "string",
                         "description": "The full markdown content of the plan file."
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Optional short filename slug for the plan (without .md)."
                     }
                 },
                 "required": ["content"]
@@ -74,6 +94,7 @@ impl Tool for WritePlan {
             .get("content")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidInput("missing content".into()))?;
+        let name = input.get("name").and_then(|v| v.as_str());
 
         let target = self.resolve(&ctx.cwd);
         let parent_dir = if self.generated {
@@ -100,21 +121,24 @@ impl Tool for WritePlan {
             }
         }
 
-        // A same-directory temp file keeps fixed-path renames atomic. For new
-        // plans, linking it is atomic and refuses to replace an existing name.
-        let tmp = parent_dir.join(format!(".mew-tmp-{}", ulid::Ulid::new()));
-        tokio::fs::write(&tmp, content)
-            .await
-            .map_err(|e| ToolError::Execution(format!("write failed: {e}")))?;
         let result = if self.generated {
-            async {
-                for _ in 0..16 {
-                    let config = resona::Config::default();
-                    let first = resona::sona(&config)
-                        .map_err(|e| ToolError::Execution(format!("plan name failed: {e}")))?;
-                    let second = resona::sona(&config)
-                        .map_err(|e| ToolError::Execution(format!("plan name failed: {e}")))?;
-                    let path = parent_dir.join(format!("{first}-{second}.md"));
+            let file_name = plan_filename(name, content);
+            let stem = file_name
+                .strip_suffix(".md")
+                .unwrap_or(&file_name)
+                .to_string();
+            let tmp = parent_dir.join(format!(".mew-tmp-{}", ulid::Ulid::new()));
+            tokio::fs::write(&tmp, content)
+                .await
+                .map_err(|e| ToolError::Execution(format!("write failed: {e}")))?;
+            let res = async {
+                for attempt in 1..=16 {
+                    let candidate = if attempt == 1 {
+                        format!("{stem}.md")
+                    } else {
+                        format!("{stem}-{attempt}.md")
+                    };
+                    let path = parent_dir.join(candidate);
                     match tokio::fs::hard_link(&tmp, &path).await {
                         Ok(()) => return Ok(path),
                         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -127,16 +151,24 @@ impl Tool for WritePlan {
                     "could not find an unused plan name".into(),
                 ))
             }
-            .await
+            .await;
+            let _ = tokio::fs::remove_file(&tmp).await;
+            res
         } else {
-            tokio::fs::rename(&tmp, &target)
+            // A same-directory temp file keeps fixed-path renames atomic.
+            let tmp = parent_dir.join(format!(".mew-tmp-{}", ulid::Ulid::new()));
+            tokio::fs::write(&tmp, content)
+                .await
+                .map_err(|e| ToolError::Execution(format!("write failed: {e}")))?;
+            let res = tokio::fs::rename(&tmp, &target)
                 .await
                 .map(|()| target)
-                .map_err(|e| ToolError::Execution(format!("rename failed: {e}")))
+                .map_err(|e| ToolError::Execution(format!("rename failed: {e}")));
+            if res.is_err() {
+                let _ = tokio::fs::remove_file(&tmp).await;
+            }
+            res
         };
-        if self.generated || result.is_err() {
-            let _ = tokio::fs::remove_file(&tmp).await;
-        }
         let path = result?;
 
         let diff = if let Some(ref old) = old_content {
@@ -184,6 +216,39 @@ impl Tool for WritePlan {
             ..Default::default()
         })
     }
+}
+
+fn plan_filename(name: Option<&str>, content: &str) -> String {
+    let raw = name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            content.lines().find_map(|line| {
+                line.trim_start()
+                    .strip_prefix("# ")
+                    .map(str::trim)
+                    .filter(|heading| !heading.is_empty())
+            })
+        })
+        .unwrap_or("plan");
+    let raw = raw.strip_suffix(".md").unwrap_or(raw);
+    let mut slug = String::new();
+    let mut last_dash = false;
+    for ch in raw.chars() {
+        if slug.len() >= 48 {
+            break;
+        }
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            last_dash = false;
+        } else if !slug.is_empty() && !last_dash {
+            slug.push('-');
+            last_dash = true;
+        }
+    }
+    let slug = slug.trim_matches('-');
+    let stem = if slug.is_empty() { "plan" } else { slug };
+    format!("{stem}.md")
 }
 
 #[cfg(test)]
@@ -272,24 +337,38 @@ mod tests {
     #[tokio::test]
     async fn generated_plans_do_not_overwrite_each_other() {
         let dir = tempfile::tempdir().unwrap();
-        let tool = WritePlan::generated();
-        for content in ["first", "second"] {
+        let session_dir = session_plan_dir(&dir.path().join("custom-plans"));
+        let tool = WritePlan::generated_in(&session_dir);
+        for (content, name, expected_file) in [
+            ("# Initial Plan\nfirst", None, "initial-plan.md"),
+            ("second", Some("My Custom Plan"), "my-custom-plan.md"),
+            ("plain body", None, "plan.md"),
+            ("plain body two", None, "plan-2.md"),
+        ] {
+            let input = match name {
+                Some(n) => serde_json::json!({"content": content, "name": n}),
+                None => serde_json::json!({"content": content}),
+            };
             let result = tool
-                .execute(
-                    ctx(dir.path().to_path_buf()),
-                    serde_json::json!({"content": content}),
-                )
+                .execute(ctx(dir.path().to_path_buf()), input)
                 .await
                 .unwrap();
-            assert!(result.output.contains("plans/"));
+            assert!(result.output.contains(expected_file), "{}", result.output);
         }
-        let contents: Vec<_> = std::fs::read_dir(dir.path().join("plans"))
+        let mut files: Vec<_> = std::fs::read_dir(&session_dir)
             .unwrap()
-            .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(contents.len(), 2);
-        assert!(contents.contains(&"first".to_string()));
-        assert!(contents.contains(&"second".to_string()));
+        files.sort();
+        assert_eq!(
+            files,
+            vec![
+                "initial-plan.md",
+                "my-custom-plan.md",
+                "plan-2.md",
+                "plan.md"
+            ]
+        );
     }
 
     #[tokio::test]

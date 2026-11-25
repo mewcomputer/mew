@@ -263,13 +263,6 @@ impl CommandTarget for DaemonTarget {
         )
         .await
     }
-    async fn yield_control(&mut self) -> Result<(), Unsupported> {
-        self.command(
-            ClientMessage::YieldControl {},
-            "daemon connection failed during yield",
-        )
-        .await
-    }
     async fn unflag_file(&mut self, path: &str) -> Result<(), Unsupported> {
         let id = self
             .client

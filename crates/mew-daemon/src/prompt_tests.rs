@@ -225,3 +225,207 @@ async fn failed_clear_reports_the_error_without_broadcasting_a_reset() {
     assert!(!cleared);
     assert_eq!(*session.agent.lock().await.messages.lock().await, before);
 }
+
+#[tokio::test]
+async fn queued_messages_sync_across_clients_promote_to_steer_and_remove() {
+    let directory = tempfile::Builder::new()
+        .prefix("mew-queue-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let server = server(directory.path());
+    let session = server.session_manager.create(None).await.unwrap();
+    let id = session.id.clone();
+
+    *session.is_running.lock().await = true;
+
+    let mut socket_a = connect(&server).await;
+    let mut socket_b = connect(&server).await;
+    attach(&mut socket_a, &id).await;
+    attach(&mut socket_b, &id).await;
+
+    send(
+        &mut socket_a,
+        ClientMessage::EnqueueMessage {
+            session_id: id.clone(),
+            request_id: "req-1".into(),
+            text: "first follow-up".into(),
+            attachments: Vec::new(),
+            mode: mew_protocol::QueueMode::FollowUp,
+        },
+    )
+    .await;
+    send(
+        &mut socket_a,
+        ClientMessage::EnqueueMessage {
+            session_id: id.clone(),
+            request_id: "req-2".into(),
+            text: "second follow-up".into(),
+            attachments: Vec::new(),
+            mode: mew_protocol::QueueMode::FollowUp,
+        },
+    )
+    .await;
+
+    let _ = flush(&mut socket_a).await;
+    let b_updates = flush(&mut socket_b).await;
+    let last_items = b_updates
+        .iter()
+        .rev()
+        .find_map(|msg| match msg {
+            ServerMessage::SessionQueueChanged { session_id, items } if session_id == &id => {
+                Some(items.clone())
+            }
+            _ => None,
+        })
+        .expect("second client should receive synced queue update");
+    assert_eq!(last_items.len(), 2);
+    assert_eq!(last_items[0].text, "first follow-up");
+    assert_eq!(last_items[1].text, "second follow-up");
+
+    // A newly attached client receives the queued stack immediately on attach.
+    let mut socket_c = connect(&server).await;
+    send(
+        &mut socket_c,
+        ClientMessage::AttachSession {
+            session_id: id.clone(),
+            client_kind: ClientKind::Web,
+        },
+    )
+    .await;
+    let c_replay = flush(&mut socket_c).await;
+    assert!(c_replay.iter().any(|msg| matches!(
+        msg,
+        ServerMessage::SessionQueueChanged { session_id, items }
+            if session_id == &id && items.len() == 2
+    )));
+
+    // Remove second item.
+    send(
+        &mut socket_a,
+        ClientMessage::RemoveQueuedMessage {
+            session_id: id.clone(),
+            id: last_items[1].id.clone(),
+        },
+    )
+    .await;
+    let after_remove = flush(&mut socket_a).await;
+    assert!(after_remove.iter().any(|msg| matches!(
+        msg,
+        ServerMessage::SessionQueueChanged { session_id, items }
+            if session_id == &id && items.len() == 1 && items[0].text == "first follow-up"
+    )));
+
+    // Promote remaining item to steer while busy.
+    send(
+        &mut socket_a,
+        ClientMessage::UpdateQueuedMessage {
+            session_id: id.clone(),
+            id: last_items[0].id.clone(),
+            text: None,
+            mode: Some(mew_protocol::QueueMode::Steer),
+        },
+    )
+    .await;
+    let _ = flush(&mut socket_a).await;
+    let b_steer = flush(&mut socket_b).await;
+    assert!(b_steer.iter().any(|msg| matches!(
+        msg,
+        ServerMessage::SessionQueueChanged { session_id, items }
+            if session_id == &id && items.is_empty()
+    )));
+    assert!(b_steer.iter().any(|msg| matches!(
+        msg,
+        ServerMessage::UserMessage { text, request_id: None, steered: true } if text == "first follow-up"
+    )));
+}
+
+#[tokio::test]
+async fn finish_prompt_turn_drains_queued_follow_ups_sequentially_unless_cancelled() {
+    let directory = tempfile::Builder::new()
+        .prefix("mew-drain-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let server = server(directory.path());
+    let session = server.session_manager.create(None).await.unwrap();
+    let mut socket = connect(&server).await;
+    attach(&mut socket, &session.id).await;
+
+    session
+        .queued_messages
+        .lock()
+        .await
+        .push_back(mew_protocol::QueuedMessageWire {
+            id: "q-next".into(),
+            text: "queued follow-up".into(),
+            attachments: Vec::new(),
+            mode: mew_protocol::QueueMode::FollowUp,
+            created_at: 1,
+        });
+
+    let guard = session.turn_lock.lock().await;
+    let token = register_turn(&session).await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        finish_prompt_turn(
+            &session,
+            &server.session_manager,
+            "initial prompt".into(),
+            PromptTurn::New {
+                text: "initial prompt".into(),
+                attachments: Vec::new(),
+            },
+            false,
+            guard,
+            token,
+        ),
+    )
+    .await
+    .expect("finish_prompt_turn turn1+drain timed out");
+
+    let drained = flush(&mut socket).await;
+    assert!(drained.iter().any(|msg| matches!(
+        msg,
+        ServerMessage::SessionQueueChanged { session_id, items }
+            if session_id == &session.id && items.is_empty()
+    )));
+    assert!(drained.iter().any(|msg| matches!(
+        msg,
+        ServerMessage::UserMessage { text, request_id: None, steered: false } if text == "queued follow-up"
+    )));
+    let messages = session.agent.lock().await.messages.lock().await.clone();
+    assert_eq!(messages.len(), 4);
+
+    // Cancelled turns stop auto-drain and preserve remaining queued items.
+    session
+        .queued_messages
+        .lock()
+        .await
+        .push_back(mew_protocol::QueuedMessageWire {
+            id: "q-keep".into(),
+            text: "stay queued on cancel".into(),
+            attachments: Vec::new(),
+            mode: mew_protocol::QueueMode::FollowUp,
+            created_at: 2,
+        });
+    let guard = session.turn_lock.lock().await;
+    let token = register_turn(&session).await;
+    token.cancel();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        finish_prompt_turn(
+            &session,
+            &server.session_manager,
+            "cancelled turn".into(),
+            PromptTurn::New {
+                text: "cancelled turn".into(),
+                attachments: Vec::new(),
+            },
+            false,
+            guard,
+            token,
+        ),
+    )
+    .await
+    .expect("finish_prompt_turn cancelled timed out");
+    assert_eq!(session.queued_messages.lock().await.len(), 1);
+}

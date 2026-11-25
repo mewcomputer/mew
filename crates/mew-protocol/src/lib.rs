@@ -12,11 +12,12 @@
 //! responds with `PermissionResponse` or `AskUserResponse` using the same ID.
 
 pub use mew_message::SubagentQuestionSource;
+pub use mew_session::TurnSummary;
 
 use serde::{Deserialize, Serialize};
 
 /// Wire revision required by native clients. Increment for incompatible changes.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 pub const DEFAULT_HISTORY_PAGE_LIMIT: usize = 24;
 
@@ -85,6 +86,12 @@ pub enum ClientMessage {
         limit: usize,
     },
 
+    /// Load a whole-session turn index: one summary per turn, so a minimap can
+    /// render every turn without paging through the whole transcript.
+    LoadSessionIndex {
+        session_id: String,
+    },
+
     /// List all sessions known to the daemon (active + persisted idle).
     ListSessions,
 
@@ -105,8 +112,14 @@ pub enum ClientMessage {
         title: String,
     },
 
-    /// Read this connection's title preference and the daemon's summary preference.
+    /// Read the daemon's automation preferences.
     ReadAutomationSettings,
+
+    /// Import legacy preferences only when no daemon preferences exist.
+    MigrateAutomationSettings {
+        auto_title_enabled: Option<bool>,
+        auto_summary_enabled: Option<bool>,
+    },
 
     /// Read daemon-owned defaults and authorized devices. Requires full control.
     ReadDaemonSettings {
@@ -125,8 +138,21 @@ pub enum ClientMessage {
         device_id: String,
         request_id: String,
     },
+    /// Enable or disable live iroh remote access on a running daemon.
+    SetRemoteAccess {
+        enabled: bool,
+        request_id: String,
+    },
+    /// Create a short-lived single-use QR pairing invite for the active remote endpoint.
+    CreatePairingInvite {
+        request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<RemoteScope>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ttl_secs: Option<u64>,
+    },
 
-    /// Enable or disable titles generated after prompts from this connection.
+    /// Enable or disable automatically generated titles for the daemon.
     SetAutoTitle {
         enabled: bool,
     },
@@ -200,6 +226,9 @@ pub enum ClientMessage {
     /// List available models from all configured providers.
     ListModels,
 
+    /// List skill and subagent names for the inline @ picker.
+    ListMentionCandidates,
+
     /// Switch the active session to a different model.
     SwitchModel {
         /// Provider ID (e.g. "deepseek", "anthropic").
@@ -225,10 +254,6 @@ pub enum ClientMessage {
         /// Lowercase mode id (see `mew_hooks::PermissionMode::id`).
         mode: String,
     },
-
-    /// Yield control of the session. Advisory — other clients can use this
-    /// to update their UI (e.g. switch from observer to active input).
-    YieldControl {},
 
     // -- Phase 2: groups & archive --
     CreateGroup {
@@ -269,6 +294,8 @@ pub enum ClientMessage {
         session_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
+        #[serde(default)]
+        scoped_errors: bool,
     },
     /// Browse user-accessible directories before a session exists.
     ListFilesystemDir {
@@ -279,13 +306,22 @@ pub enum ClientMessage {
         path: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_bytes: Option<u64>,
+        #[serde(default)]
+        scoped_errors: bool,
     },
     GitStatus {
         session_id: String,
+        #[serde(default)]
+        scoped_errors: bool,
     },
     ReadSessionDiff {
         session_id: String,
         request_id: String,
+    },
+    ReadSessionFileDiff {
+        session_id: String,
+        request_id: String,
+        path: String,
     },
     /// Read a bounded chunk from a job owned by the attached session.
     ReadJobOutput {
@@ -446,6 +482,48 @@ pub enum ClientMessage {
     TerminalClose {
         terminal_id: String,
     },
+
+    // -- Attachments ---------------------------------------------------------
+    /// Upload an attachment blob to the daemon's content-addressed store.
+    UploadAttachment {
+        request_id: String,
+        mime: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filename: Option<String>,
+        data_base64: String,
+    },
+    /// Fetch an attachment blob by content ID from the daemon's blob store.
+    GetAttachment {
+        request_id: String,
+        id: String,
+    },
+
+    // -- Queued messages & interruptions ------------------------------------
+    /// Submit a prompt while the session is busy (as a follow-up or steer interrupt),
+    /// or start it immediately if idle.
+    EnqueueMessage {
+        session_id: String,
+        request_id: String,
+        text: String,
+        #[serde(default)]
+        attachments: Vec<Attachment>,
+        #[serde(default)]
+        mode: QueueMode,
+    },
+    /// Edit text or promote mode on a queued message.
+    UpdateQueuedMessage {
+        session_id: String,
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<QueueMode>,
+    },
+    /// Remove a pending queued message before it runs.
+    RemoveQueuedMessage {
+        session_id: String,
+        id: String,
+    },
 }
 
 /// What kind of client is connected to a session.
@@ -489,6 +567,29 @@ pub struct PairedDeviceInfo {
     pub node_id: String,
     pub scope: Option<RemoteScope>,
     pub paired_at: Option<u64>,
+}
+
+/// Snapshot of daemon-wide automation settings included in `DaemonSettings`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutomationSettingsInfo {
+    pub auto_title_enabled: bool,
+    pub auto_summary_enabled: bool,
+}
+
+/// Snapshot of live remote-access state included in `DaemonSettings`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAccessInfo {
+    pub supported: bool,
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+}
+
+/// A skill or subagent definition offered by the inline @ picker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MentionCandidate {
+    pub name: String,
+    pub description: String,
 }
 
 /// Info about a single available model, returned by `ListModels`.
@@ -565,6 +666,11 @@ pub struct SessionInfo {
     pub created_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_message_at: Option<i64>,
+    /// Persisted title: generated from the first prompt or renamed by the user.
+    /// This is what clients show in the title slot; `summary` is a longer recap
+    /// and does not stand in for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// AI-generated summary of the conversation (if enabled and generated).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
@@ -603,10 +709,15 @@ pub struct SessionInfo {
     #[serde(default)]
     pub pending_questions: u32,
     /// First user message text (truncated), used as a display title fallback
-    /// when no AI-generated title or summary is available. Populated by the
-    /// daemon from session history.
+    /// when the session has no title. Populated by the daemon from session
+    /// history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_message: Option<String>,
+    /// Latest non-empty user or assistant message text (truncated), used as a
+    /// preview fallback when the session has no summary. Populated by the
+    /// daemon from session history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_message: Option<String>,
 }
 
 /// Wire-format usage stats for a session.
@@ -644,6 +755,27 @@ impl From<SessionUsageWire> for mew_session::SessionUsage {
             turns: u.turns,
         }
     }
+}
+
+/// Delivery mode for a queued message while a turn is running.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueMode {
+    #[default]
+    FollowUp,
+    Steer,
+}
+
+/// A pending message queued on a daemon session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedMessageWire {
+    pub id: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
+    #[serde(default)]
+    pub mode: QueueMode,
+    pub created_at: i64,
 }
 
 /// A file attachment for a prompt.
@@ -777,6 +909,8 @@ pub enum ServerMessage {
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        steered: bool,
     },
 
     /// A tool execution has started.
@@ -956,6 +1090,12 @@ pub enum ServerMessage {
         next_cursor: Option<usize>,
         replace: bool,
     },
+    /// Response to `LoadSessionIndex`: every turn in the session, oldest first.
+    /// Re-sent whenever a turn completes so the index stays current.
+    SessionIndex {
+        session_id: String,
+        turns: Vec<TurnSummary>,
+    },
     JobOutput {
         session_id: String,
         job_id: String,
@@ -994,12 +1134,21 @@ pub enum ServerMessage {
         models: Vec<ModelInfo>,
     },
 
+    /// Response to `ListMentionCandidates` for the attached session.
+    MentionCandidates {
+        skills: Vec<MentionCandidate>,
+        subagents: Vec<MentionCandidate>,
+    },
+
     /// Current values after reading or updating automation settings.
     AutomationSettings {
-        /// Applies only to prompts submitted through this connection.
+        /// Shared by every connection to this daemon.
         auto_title_enabled: bool,
         /// Shared by every connection to this daemon.
         auto_summary_enabled: bool,
+        /// Whether the daemon has saved automation preferences.
+        #[serde(default)]
+        initialized: bool,
     },
 
     DaemonSettings {
@@ -1008,6 +1157,16 @@ pub enum ServerMessage {
         defaults: Option<mew_session::SessionPolicy>,
         /// None when this daemon has no remote device manager.
         devices: Option<Vec<PairedDeviceInfo>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        automation: Option<AutomationSettingsInfo>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remote: Option<RemoteAccessInfo>,
+    },
+    PairingInvite {
+        request_id: String,
+        node_id: String,
+        payload: String,
+        expires_at: u64,
     },
     DaemonSettingsFailed {
         request_id: String,
@@ -1050,12 +1209,6 @@ pub enum ServerMessage {
         client_id: u64,
     },
 
-    /// Control was yielded. Advisory — other clients can become active.
-    ControlYielded {
-        /// The client that yielded.
-        client_id: u64,
-    },
-
     /// The daemon generated a title for the session. Frontends should update
     /// their session title display.
     SessionTitleChanged {
@@ -1074,6 +1227,8 @@ pub enum ServerMessage {
     SessionActivityChanged {
         session_id: String,
         activity: SessionState,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        cancelled: bool,
     },
     SessionStatsChanged {
         session_id: String,
@@ -1096,19 +1251,37 @@ pub enum ServerMessage {
         path: String,
         entries: Vec<DirEntry>,
     },
+    DirListingError {
+        session_id: String,
+        path: String,
+        error: String,
+    },
     FilesystemDirListing {
         path: String,
         entries: Vec<DirEntry>,
     },
     FilePreview {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
         path: String,
         content: String,
         truncated: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         language: Option<String>,
     },
+    FilePreviewError {
+        session_id: String,
+        path: String,
+        error: String,
+    },
     GitStatusResult {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
         entries: Vec<GitEntry>,
+    },
+    GitStatusError {
+        session_id: String,
+        error: String,
     },
     SessionDiff {
         session_id: String,
@@ -1263,6 +1436,37 @@ pub enum ServerMessage {
     TerminalError {
         terminal_id: Option<String>,
         message: String,
+    },
+
+    // -- Attachments ---------------------------------------------------------
+    AttachmentUploaded {
+        request_id: String,
+        id: String,
+        url: String,
+        mime: String,
+        size: u64,
+    },
+    AttachmentData {
+        request_id: String,
+        id: String,
+        data_base64: String,
+        size: u64,
+    },
+
+    // -- Queued messages -----------------------------------------------------
+    SessionQueueChanged {
+        session_id: String,
+        items: Vec<QueuedMessageWire>,
+    },
+
+    // -- Compaction status ---------------------------------------------------
+    SessionCompacting {
+        session_id: String,
+        active: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        removed: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
     },
 }
 
@@ -1818,6 +2022,31 @@ mod tests {
     fn round_trip<T: Serialize + serde::de::DeserializeOwned>(msg: &T) -> T {
         let json = encode_json(msg).unwrap();
         decode_json(&json).unwrap()
+    }
+
+    #[test]
+    fn mention_candidates_roundtrip() {
+        let decoded = round_trip(&ServerMessage::MentionCandidates {
+            skills: vec![MentionCandidate {
+                name: "audit".into(),
+                description: "Review code".into(),
+            }],
+            subagents: vec![MentionCandidate {
+                name: "researcher".into(),
+                description: "Research a topic".into(),
+            }],
+        });
+        match decoded {
+            ServerMessage::MentionCandidates { skills, subagents } => {
+                assert_eq!(skills[0].name, "audit");
+                assert_eq!(subagents[0].name, "researcher");
+            }
+            _ => panic!("wrong variant"),
+        }
+        match round_trip(&ClientMessage::ListMentionCandidates) {
+            ClientMessage::ListMentionCandidates => {}
+            _ => panic!("wrong variant"),
+        }
     }
 
     #[test]
@@ -3230,6 +3459,7 @@ mod tests {
             provider: Some("deepseek".into()),
             created_at: 1_700_000_000,
             last_message_at: Some(1_700_000_123),
+            title: Some("Fix the daemon".into()),
             summary: None,
             client_count: 2,
             cwd: None,
@@ -3244,6 +3474,7 @@ mod tests {
             pending_permissions: 0,
             pending_questions: 0,
             first_message: None,
+            last_message: Some("latest reply".into()),
         };
         let decoded = round_trip(&info);
         assert_eq!(decoded.session_id, "sess_abc");
@@ -3253,7 +3484,9 @@ mod tests {
         assert_eq!(decoded.created_at, 1_700_000_000);
         assert_eq!(decoded.last_message_at, Some(1_700_000_123));
         assert_eq!(decoded.client_count, 2);
+        assert_eq!(decoded.title.as_deref(), Some("Fix the daemon"));
         assert_eq!(decoded.context_tokens, Some(45_000));
+        assert_eq!(decoded.last_message.as_deref(), Some("latest reply"));
     }
 
     #[test]
@@ -3266,6 +3499,7 @@ mod tests {
             provider: None,
             created_at: 0,
             last_message_at: None,
+            title: None,
             summary: None,
             client_count: 0,
             cwd: None,
@@ -3280,6 +3514,7 @@ mod tests {
             pending_permissions: 0,
             pending_questions: 0,
             first_message: None,
+            last_message: None,
         };
         let json = encode_json(&info).unwrap();
         assert!(
@@ -3333,6 +3568,7 @@ mod tests {
                 provider: Some("p1".into()),
                 created_at: 100,
                 last_message_at: None,
+                title: Some("first session".into()),
                 summary: None,
                 client_count: 1,
                 cwd: None,
@@ -3347,6 +3583,7 @@ mod tests {
                 pending_permissions: 0,
                 pending_questions: 0,
                 first_message: None,
+                last_message: None,
             },
             SessionInfo {
                 session_id: "sess_b".into(),
@@ -3355,6 +3592,7 @@ mod tests {
                 provider: None,
                 created_at: 200,
                 last_message_at: Some(250),
+                title: None,
                 summary: None,
                 client_count: 0,
                 cwd: None,
@@ -3369,6 +3607,7 @@ mod tests {
                 pending_permissions: 0,
                 pending_questions: 0,
                 first_message: None,
+                last_message: None,
             },
         ];
         let m = ServerMessage::SessionList { sessions };
@@ -3378,6 +3617,7 @@ mod tests {
                 assert_eq!(sessions[0].session_id, "sess_a");
                 assert_eq!(sessions[0].state, SessionState::Active);
                 assert_eq!(sessions[0].client_count, 1);
+                assert_eq!(sessions[0].title.as_deref(), Some("first session"));
                 assert_eq!(sessions[0].context_tokens, Some(1_000));
                 assert_eq!(sessions[1].session_id, "sess_b");
                 assert_eq!(sessions[1].state, SessionState::Idle);
@@ -3517,6 +3757,54 @@ mod tests {
                 assert_eq!(messages.len(), 1);
                 assert_eq!(next_cursor, Some(12));
                 assert!(!replace);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn session_index_request_roundtrips() {
+        let decoded = round_trip(&ClientMessage::LoadSessionIndex {
+            session_id: "session-index".into(),
+        });
+        match decoded {
+            ClientMessage::LoadSessionIndex { session_id } => {
+                assert_eq!(session_id, "session-index");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn session_index_roundtrip_preserves_turn_summaries() {
+        let decoded = round_trip(&ServerMessage::SessionIndex {
+            session_id: "session-index".into(),
+            turns: vec![
+                TurnSummary {
+                    id: "message-1".into(),
+                    index: 0,
+                    message_count: 3,
+                    prompt: "why is the tape empty?".into(),
+                    reply: "history pages are 24 messages at a time.".into(),
+                },
+                TurnSummary {
+                    id: "message-4".into(),
+                    index: 1,
+                    message_count: 2,
+                    prompt: "fix it".into(),
+                    reply: String::new(),
+                },
+            ],
+        });
+        match decoded {
+            ServerMessage::SessionIndex { session_id, turns } => {
+                assert_eq!(session_id, "session-index");
+                assert_eq!(turns.len(), 2);
+                assert_eq!(turns[1].id, "message-4");
+                assert_eq!(turns[1].index, 1);
+                assert_eq!(turns[1].message_count, 2);
+                assert_eq!(turns[1].prompt, "fix it");
+                assert!(turns[1].reply.is_empty());
             }
             _ => panic!("wrong variant"),
         }
@@ -4173,6 +4461,7 @@ mod tests {
                 provider: None,
                 created_at: 1000,
                 last_message_at: Some(2000),
+                title: None,
                 summary: None,
                 client_count: 1,
                 cwd: Some("/tmp".into()),
@@ -4187,6 +4476,7 @@ mod tests {
                 pending_permissions: 0,
                 pending_questions: 0,
                 first_message: None,
+                last_message: None,
             }],
         };
         let parsed = round_trip(&msg);
@@ -4332,6 +4622,7 @@ mod automation_wire_tests {
             ServerMessage::AutomationSettings {
                 auto_title_enabled: false,
                 auto_summary_enabled: true,
+                initialized: true,
             },
             ServerMessage::AutoSummaryChanged { enabled: false },
         ] {
@@ -4360,6 +4651,15 @@ mod automation_wire_tests {
                 request_id: "revoke".into(),
                 device_id: "phone".into(),
             },
+            ClientMessage::SetRemoteAccess {
+                enabled: true,
+                request_id: "remote-on".into(),
+            },
+            ClientMessage::CreatePairingInvite {
+                request_id: "pair".into(),
+                scope: Some(RemoteScope::Control),
+                ttl_secs: Some(120),
+            },
         ] {
             let encoded = encode_json(&command).unwrap();
             assert_eq!(
@@ -4372,6 +4672,8 @@ mod automation_wire_tests {
                 request_id: None,
                 defaults: None,
                 devices: None,
+                automation: None,
+                remote: None,
             },
             ServerMessage::DaemonSettings {
                 request_id: Some("read".into()),
@@ -4389,6 +4691,21 @@ mod automation_wire_tests {
                     scope: Some(RemoteScope::Control),
                     paired_at: Some(123),
                 }]),
+                automation: Some(AutomationSettingsInfo {
+                    auto_title_enabled: true,
+                    auto_summary_enabled: false,
+                }),
+                remote: Some(RemoteAccessInfo {
+                    supported: true,
+                    enabled: true,
+                    node_id: Some("node-id".into()),
+                }),
+            },
+            ServerMessage::PairingInvite {
+                request_id: "pair".into(),
+                node_id: "node-id".into(),
+                payload: "computer.mew.mew://node-id?token=tok".into(),
+                expires_at: 999,
             },
             ServerMessage::DaemonSettingsFailed {
                 request_id: "save".into(),
@@ -4450,5 +4767,152 @@ mod review_wire_tests {
         assert!(
             matches!(message, ServerMessage::FsChanged { session_id, paths } if session_id.is_empty() && paths == ["old.txt"])
         );
+    }
+
+    #[test]
+    fn attachment_wire_messages_roundtrip() {
+        for message in [
+            ClientMessage::UploadAttachment {
+                request_id: "req-1".into(),
+                mime: "image/png".into(),
+                filename: Some("cat.png".into()),
+                data_base64: "AQID".into(),
+            },
+            ClientMessage::GetAttachment {
+                request_id: "req-2".into(),
+                id: "a".repeat(64),
+            },
+        ] {
+            let encoded = encode_json(&message).unwrap();
+            let decoded: ClientMessage = decode_json(&encoded).unwrap();
+            assert_eq!(
+                serde_json::to_value(decoded).unwrap(),
+                serde_json::to_value(message).unwrap()
+            );
+        }
+
+        for message in [
+            ServerMessage::AttachmentUploaded {
+                request_id: "req-1".into(),
+                id: "a".repeat(64),
+                url: format!("mew-blob://{}", "a".repeat(64)),
+                mime: "image/png".into(),
+                size: 3,
+            },
+            ServerMessage::AttachmentData {
+                request_id: "req-2".into(),
+                id: "a".repeat(64),
+                data_base64: "AQID".into(),
+                size: 3,
+            },
+        ] {
+            let encoded = encode_json(&message).unwrap();
+            let decoded: ServerMessage = decode_json(&encoded).unwrap();
+            assert_eq!(
+                serde_json::to_value(decoded).unwrap(),
+                serde_json::to_value(message).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn queued_message_wire_roundtrips() {
+        for message in [
+            ClientMessage::EnqueueMessage {
+                session_id: "s1".into(),
+                request_id: "req-q1".into(),
+                text: "follow up".into(),
+                attachments: vec![],
+                mode: QueueMode::FollowUp,
+            },
+            ClientMessage::UpdateQueuedMessage {
+                session_id: "s1".into(),
+                id: "q1".into(),
+                text: Some("steer instead".into()),
+                mode: Some(QueueMode::Steer),
+            },
+            ClientMessage::RemoveQueuedMessage {
+                session_id: "s1".into(),
+                id: "q1".into(),
+            },
+        ] {
+            let encoded = encode_json(&message).unwrap();
+            let decoded: ClientMessage = decode_json(&encoded).unwrap();
+            assert_eq!(
+                serde_json::to_value(decoded).unwrap(),
+                serde_json::to_value(message).unwrap()
+            );
+        }
+
+        let server = ServerMessage::SessionQueueChanged {
+            session_id: "s1".into(),
+            items: vec![QueuedMessageWire {
+                id: "q1".into(),
+                text: "follow up".into(),
+                attachments: vec![],
+                mode: QueueMode::FollowUp,
+                created_at: 1_700_000_000,
+            }],
+        };
+        let encoded = encode_json(&server).unwrap();
+        let decoded: ServerMessage = decode_json(&encoded).unwrap();
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap(),
+            serde_json::to_value(server).unwrap()
+        );
+    }
+
+    #[test]
+    fn compacting_steered_and_cancelled_roundtrips() {
+        for message in [
+            ServerMessage::SessionCompacting {
+                session_id: "s1".into(),
+                active: true,
+                removed: None,
+                summary: None,
+            },
+            ServerMessage::SessionCompacting {
+                session_id: "s1".into(),
+                active: false,
+                removed: Some(12),
+                summary: Some("## Goal & Constraints\nShip Phase 1".into()),
+            },
+            ServerMessage::UserMessage {
+                text: "steer right".into(),
+                request_id: Some("r1".into()),
+                steered: true,
+            },
+            ServerMessage::SessionActivityChanged {
+                session_id: "s1".into(),
+                activity: SessionState::Idle,
+                cancelled: true,
+            },
+        ] {
+            let encoded = encode_json(&message).unwrap();
+            let decoded: ServerMessage = decode_json(&encoded).unwrap();
+            assert_eq!(
+                serde_json::to_value(decoded).unwrap(),
+                serde_json::to_value(message).unwrap()
+            );
+        }
+
+        // Legacy payloads omit optional steered/cancelled booleans and default to false.
+        let legacy_user: ServerMessage =
+            decode_json(r#"{"type":"user_message","text":"hi"}"#).unwrap();
+        assert!(matches!(
+            legacy_user,
+            ServerMessage::UserMessage { steered: false, .. }
+        ));
+        let legacy_activity: ServerMessage = decode_json(
+            r#"{"type":"session_activity_changed","session_id":"s1","activity":"idle"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            legacy_activity,
+            ServerMessage::SessionActivityChanged {
+                cancelled: false,
+                ..
+            }
+        ));
     }
 }

@@ -9,7 +9,7 @@ use mew_tui::{
 use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
 
 fn session(id: &str, title: &str, archived: bool) -> mew_protocol::SessionInfo {
-    serde_json::from_value(serde_json::json!({"session_id":id,"state":"idle","created_at":10,"client_count":0,"summary":title,"archived":archived})).unwrap()
+    serde_json::from_value(serde_json::json!({"session_id":id,"state":"idle","created_at":10,"client_count":0,"title":title,"archived":archived})).unwrap()
 }
 fn draw(app: &mut App, width: u16, height: u16) -> Buffer {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();

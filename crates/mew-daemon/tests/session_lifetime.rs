@@ -930,7 +930,7 @@ async fn session_ready_is_followed_by_authoritative_activity_for_new_running_and
     assert!(
         matches!(
             receive(&mut first, |_| true).await,
-            ServerMessage::SessionActivityChanged { session_id: id, activity: SessionState::Idle } if id == session_id
+            ServerMessage::SessionActivityChanged { session_id: id, activity: SessionState::Idle, .. } if id == session_id
         ),
         "new session must report its idle state immediately after SessionReady"
     );
@@ -956,7 +956,7 @@ async fn session_ready_is_followed_by_authoritative_activity_for_new_running_and
     assert!(
         matches!(
             receive(&mut second, |_| true).await,
-            ServerMessage::SessionActivityChanged { session_id: id, activity: SessionState::Running } if id == session_id
+            ServerMessage::SessionActivityChanged { session_id: id, activity: SessionState::Running, .. } if id == session_id
         ),
         "attach must remain running while a tool waits for user input"
     );
@@ -990,7 +990,7 @@ async fn session_ready_is_followed_by_authoritative_activity_for_new_running_and
     assert!(
         matches!(
             receive(&mut second, |_| true).await,
-            ServerMessage::SessionActivityChanged { session_id: id, activity: SessionState::Idle } if id == session_id
+            ServerMessage::SessionActivityChanged { session_id: id, activity: SessionState::Idle, .. } if id == session_id
         ),
         "cancelled task must report idle on reattach"
     );

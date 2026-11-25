@@ -230,10 +230,6 @@ impl runtime::target::CommandTarget for RecordingTarget {
         self.record("set_auto_summary");
         self.check()
     }
-    async fn yield_control(&mut self) -> Result<(), runtime::target::Unsupported> {
-        self.record("yield_control");
-        self.check()
-    }
     async fn unflag_file(&mut self, _path: &str) -> Result<(), runtime::target::Unsupported> {
         self.record("unflag_file");
         self.check()
@@ -1009,16 +1005,15 @@ fn mk_personas(names: &[&str]) -> Vec<mew_personas::Persona> {
 }
 
 // -----------------------------------------------------------------------
-// /autotitle, /autosummary, /yield — daemon session toggles.
+// /autotitle, /autosummary — daemon session toggles.
 // -----------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_autotitle_autosummary_yield_reach_target() {
+async fn test_autotitle_autosummary_reach_target() {
     for (cmd, expected) in [
         ("/autotitle on", "set_auto_title"),
         ("/autotitle off", "set_auto_title"),
         ("/autosummary on", "set_auto_summary"),
-        ("/yield", "yield_control"),
     ] {
         let mut app = mew_tui::App::new();
         app.daemon_mode = true;
@@ -1148,6 +1143,7 @@ async fn test_session_meta_actions_reach_target() {
         provider: None,
         created_at: 0,
         last_message_at: None,
+        title: None,
         summary: None,
         client_count: 1,
         cwd: None,
@@ -1162,6 +1158,7 @@ async fn test_session_meta_actions_reach_target() {
         pending_permissions: 0,
         pending_questions: 0,
         first_message: None,
+        last_message: None,
     }];
     let mut target = RecordingTarget::new();
     let mut should_break = false;

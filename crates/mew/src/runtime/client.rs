@@ -456,7 +456,6 @@ async fn run_client(
                     previous.remote_scope = handshake.remote_scope;
                     previous.session_attention.clear();
                     previous.presence.clear();
-                    previous.control_yielded_by = None;
                     *connected.state_mut() = previous;
                     engine = connected;
                     if updates

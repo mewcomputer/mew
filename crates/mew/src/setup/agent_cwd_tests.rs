@@ -465,25 +465,30 @@ async fn default_write_plan_creates_multiple_plans_in_one_session() {
         Some(SessionId::new()),
     );
     assert!(agent.resolved_plan_path().is_none());
+    let plans_root = mew_config::data_dir().join("plans");
+    let session_plans_dir = agent
+        .workspace_roots
+        .iter()
+        .find(|p| p.starts_with(&plans_root) && *p != plans_root)
+        .cloned()
+        .expect("session plan dir in workspace_roots");
+    assert!(!agent.workspace_roots.contains(&plans_root));
     run(&agent).await;
     run(&agent).await;
-    let plans: Vec<_> = std::fs::read_dir(root.join("plans"))
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .collect();
-    assert_eq!(plans.len(), 2);
+    let flagged = agent.flagged_files.lock().await;
+    assert_eq!(flagged.len(), 2);
+    let plans: Vec<_> = flagged.iter().map(|file| file.path.clone()).collect();
+    assert!(flagged.iter().all(|file| {
+        file.path.parent() == Some(session_plans_dir.as_path())
+            && file.mode == mew_tools::tools::flag_important::FlagMode::Referenced
+    }));
     let contents: Vec<_> = plans
         .iter()
         .map(|path| std::fs::read_to_string(path).unwrap())
         .collect();
     assert!(contents.contains(&"# first plan".to_string()));
     assert!(contents.contains(&"# second plan".to_string()));
-    let flagged = agent.flagged_files.lock().await;
-    assert_eq!(flagged.len(), 2);
-    assert!(flagged.iter().all(|file| {
-        plans.contains(&file.path)
-            && file.mode == mew_tools::tools::flag_important::FlagMode::Referenced
-    }));
+    let _ = std::fs::remove_dir_all(&session_plans_dir);
     assert!(agent.system.contains("plans/"));
     assert!(!root.join("PLAN.md").exists());
 }
@@ -528,6 +533,30 @@ async fn explicit_workspace_roots_still_restrict_session_relative_tools() {
     }));
     assert_eq!(run(&agent).await, 0);
     assert!(output(&agent, "allowed").await.contains("allowed"));
+}
+
+#[tokio::test]
+async fn dangerous_mode_bypasses_the_workspace_access_prompt() {
+    // `workspace.roots` excludes the session cwd, so the test above proves
+    // Standard mode prompts for this same outside path. Full access promises
+    // no prompts, so the read must run through unprompted.
+    let (_first, first) = project("restricted");
+    let (_second, second) = project("allowed");
+    let provider = ProjectProvider::new(tool_turn(
+        "read",
+        "outside",
+        serde_json::json!({"path": second.join("input.txt")}),
+    ));
+    let mut cfg = config();
+    cfg.workspace.roots = vec![first.clone()];
+    let agent = build(&first, provider, &cfg, None, None);
+    agent.set_permission_mode(PermissionMode::Dangerous);
+    assert_eq!(
+        run(&agent).await,
+        0,
+        "dangerous mode must not ask for workspace access"
+    );
+    assert!(output(&agent, "outside").await.contains("allowed"));
 }
 
 #[tokio::test]

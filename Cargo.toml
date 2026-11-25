@@ -194,6 +194,7 @@ rand = "0.8"
 
 # P2P transport (iroh) for mobile/remote daemon access.
 iroh = "1"
+qrcode = "0.14"
 
 # UniFFI for generating Swift/Kotlin bindings from mew-mobile-core.
 uniffi = "0.32"

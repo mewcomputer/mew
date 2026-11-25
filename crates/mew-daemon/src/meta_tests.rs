@@ -122,6 +122,27 @@ async fn metadata_edits_and_cumulative_usage_survive_follow_up_turns() {
         .expect("turn never completed");
     }
 
+    // Clients rebuild their title slot from this snapshot after a restart, so
+    // the persisted title has to travel with the list.
+    send(&mut socket, ClientMessage::ListSessions).await;
+    let listed = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let frame = socket.next().await.unwrap().unwrap();
+            let reply =
+                mew_protocol::decode_json::<ServerMessage>(frame.to_text().unwrap()).unwrap();
+            if let ServerMessage::SessionList { sessions } = reply {
+                break sessions;
+            }
+        }
+    })
+    .await
+    .expect("session list never arrived");
+    let listed = listed
+        .into_iter()
+        .find(|info| info.session_id == session.id)
+        .expect("session missing from the list");
+    assert_eq!(listed.title.as_deref(), Some("Title kept across turns"));
+
     let meta = mew_session::Meta::read(directory.path(), &session.id)
         .await
         .unwrap()

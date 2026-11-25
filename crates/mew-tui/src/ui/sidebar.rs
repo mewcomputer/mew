@@ -206,7 +206,7 @@ fn draw_session_header(text: &mut Text, visual_row: &mut u16, app: &mut App, wid
             app.daemon_sessions
                 .iter()
                 .find(|s| s.session_id == active_id)
-                .and_then(|s| s.summary.clone().or_else(|| s.first_message.clone()))
+                .and_then(|s| s.title.clone().or_else(|| s.first_message.clone()))
         })
         .filter(|t| !t.is_empty());
     let max = width.saturating_sub(2) as usize;
@@ -1016,7 +1016,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sidebar_session_header_falls_back_to_summary() {
+    fn test_sidebar_session_header_falls_back_to_first_message() {
         let mut app = App::new();
         app.status.session_id = "abcdef1234567890".into();
         app.daemon_sessions.push(mew_protocol::SessionInfo {
@@ -1026,7 +1026,8 @@ mod tests {
             provider: None,
             created_at: 0,
             last_message_at: None,
-            summary: Some("summarized turn".into()),
+            title: None,
+            summary: Some("a recap of the work so far".into()),
             client_count: 0,
             cwd: None,
             workspace_path: None,
@@ -1039,10 +1040,18 @@ mod tests {
             context_tokens: None,
             pending_permissions: 0,
             pending_questions: 0,
-            first_message: None,
+            first_message: Some("fix the flaky test".into()),
+            last_message: None,
         });
         let out = render(&mut app, 32, 40);
-        assert!(out.contains("summarized turn"), "missing summary:\n{out}");
+        assert!(
+            out.contains("fix the flaky test"),
+            "missing first message:\n{out}"
+        );
+        assert!(
+            !out.contains("a recap of the work"),
+            "summary took the title slot:\n{out}"
+        );
     }
 
     #[test]

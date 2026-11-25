@@ -102,26 +102,30 @@ use crate::setup::providers::{
     find_router_provider, make_provider_builder, maybe_set_classifier_provider, MainModelResolver,
 };
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn build_tools(
+pub(crate) fn build_tools_with_plans_dir(
     skills: Arc<Vec<mew_skills::Skill>>,
     skill_filter: Arc<tokio::sync::RwLock<Option<std::collections::HashSet<String>>>>,
     template_ctx: Arc<tokio::sync::RwLock<Option<mew_prompts::template::TemplateContext>>>,
     hashline_enabled: bool,
     plan_path: String,
+    generated_plans_dir: Option<std::path::PathBuf>,
 ) -> Vec<Arc<dyn mew_tools::Tool>> {
-    let (write_plan, edit_plan): (Arc<dyn mew_tools::Tool>, Arc<dyn mew_tools::Tool>) =
-        if plan_path == mew_config::DEFAULT_PLAN_PATH {
-            (
-                Arc::new(WritePlan::generated()),
-                Arc::new(EditPlan::generated()),
-            )
-        } else {
-            (
-                Arc::new(WritePlan::new(plan_path.clone())),
-                Arc::new(EditPlan::new(plan_path)),
-            )
-        };
+    let (write_plan, edit_plan): (Arc<dyn mew_tools::Tool>, Arc<dyn mew_tools::Tool>) = if plan_path
+        == mew_config::DEFAULT_PLAN_PATH
+    {
+        let plans_dir = generated_plans_dir.unwrap_or_else(|| {
+            mew_tools::tools::write_plan::session_plan_dir(&mew_config::data_dir().join("plans"))
+        });
+        (
+            Arc::new(WritePlan::generated_in(plans_dir.clone())),
+            Arc::new(EditPlan::generated_in(plans_dir)),
+        )
+    } else {
+        (
+            Arc::new(WritePlan::new(plan_path.clone())),
+            Arc::new(EditPlan::new(plan_path)),
+        )
+    };
     let mut tools: Vec<Arc<dyn mew_tools::Tool>> = vec![
         Arc::new(Read),
         Arc::new(Write),
@@ -166,17 +170,34 @@ pub(crate) fn build_permission_engine(
     mode: mew_hooks::PermissionMode,
     cwd: &std::path::Path,
 ) -> Arc<mew_config::permissions::PermissionEngine> {
+    build_permission_engine_with_extra_roots(cfg, mode, cwd, &[])
+}
+
+pub(crate) fn build_permission_engine_with_extra_roots(
+    cfg: &Config,
+    mode: mew_hooks::PermissionMode,
+    cwd: &std::path::Path,
+    extra_roots: &[std::path::PathBuf],
+) -> Arc<mew_config::permissions::PermissionEngine> {
     let secret_globs: Vec<String> = cfg
         .secrets
         .files
         .iter()
         .flat_map(|f| f.paths.iter().cloned())
         .collect();
+    let mut roots = cfg.workspace.roots.clone();
+    if !roots.is_empty() {
+        for root in extra_roots {
+            if !roots.contains(root) {
+                roots.push(root.clone());
+            }
+        }
+    }
     Arc::new(
         mew_config::permissions::PermissionEngine::new(cfg.permissions.rules.clone())
             .with_secret_files(secret_globs)
             .with_mode(mode)
-            .with_workspace_roots(cfg.workspace.roots.clone(), cwd.to_path_buf()),
+            .with_workspace_roots(roots, cwd.to_path_buf()),
     )
 }
 
@@ -607,12 +628,16 @@ pub(crate) fn build_session_agent(
     let personas_arc = Arc::new(persona_loader.load().unwrap_or_default());
     let template_ctx: Arc<tokio::sync::RwLock<Option<mew_prompts::template::TemplateContext>>> =
         Arc::new(tokio::sync::RwLock::new(None));
-    let mut tools = build_tools(
+    let session_plans_dir = (cfg.plan_path == mew_config::DEFAULT_PLAN_PATH).then(|| {
+        mew_tools::tools::write_plan::session_plan_dir(&mew_config::data_dir().join("plans"))
+    });
+    let mut tools = build_tools_with_plans_dir(
         skills.clone(),
         skill_filter.clone(),
         template_ctx.clone(),
         crate::commands::config::hashline_enabled_for(cfg, provider_id),
         cfg.plan_path.clone(),
+        session_plans_dir.clone(),
     );
     tools.extend(mew_tools::tools::browser::tools());
     tools.extend(mcp_tools.iter().cloned());
@@ -622,7 +647,8 @@ pub(crate) fn build_session_agent(
     let mut tools = tools;
     tools.push(Arc::new(FlagImportant::new()));
 
-    let permission_engine = build_permission_engine(cfg, mode, &cwd);
+    let extra_roots: Vec<_> = session_plans_dir.iter().cloned().collect();
+    let permission_engine = build_permission_engine_with_extra_roots(cfg, mode, &cwd, &extra_roots);
 
     let subagent_registry_path = writer
         .as_ref()
@@ -675,6 +701,11 @@ pub(crate) fn build_session_agent(
         agent.workspace_roots = vec![cwd.clone()];
     } else {
         agent.workspace_roots = cfg.workspace.roots.clone();
+    }
+    if let Some(plans_dir) = session_plans_dir {
+        if !agent.workspace_roots.contains(&plans_dir) {
+            agent.workspace_roots.push(plans_dir);
+        }
     }
 
     // Wire up subagent infrastructure.
@@ -946,12 +977,13 @@ mod tests {
 
     #[test]
     fn planning_tools_do_not_offer_automatic_persona_transitions() {
-        let tools = build_tools(
+        let tools = build_tools_with_plans_dir(
             Arc::new(Vec::new()),
             Arc::new(tokio::sync::RwLock::new(None)),
             Arc::new(tokio::sync::RwLock::new(None)),
             false,
             "PLAN.md".into(),
+            None,
         );
         let names: Vec<_> = tools.iter().map(|tool| tool.name()).collect();
         assert!(names.contains(&"write_plan"));

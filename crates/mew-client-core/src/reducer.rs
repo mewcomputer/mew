@@ -287,6 +287,7 @@ pub enum ClientEvent {
         session_id: String,
     },
     ModelListChanged,
+    MentionCandidatesChanged,
     PersonaListChanged,
     SubagentsChanged {
         session_id: String,
@@ -505,6 +506,9 @@ pub struct ClientState {
     pub groups: Vec<GroupInfo>,
     pub projects: Vec<ProjectInfo>,
     pub models: Vec<ModelInfo>,
+    /// Candidates for the inline @ picker, populated on request.
+    pub mention_skills: Vec<mew_protocol::MentionCandidate>,
+    pub mention_subagents: Vec<mew_protocol::MentionCandidate>,
     pub current_model: Option<String>,
     pub current_provider: Option<String>,
     pub thinking_variant: Option<String>,
@@ -513,7 +517,6 @@ pub struct ClientState {
     pub personas: Vec<PersonaInfo>,
     pub browser: BrowserState,
     pub presence: Vec<PresenceEntry>,
-    pub control_yielded_by: Option<u64>,
     pub dir_listing_session_id: Option<String>,
     pub dir_listing_path: Option<String>,
     pub dir_listing: Vec<DirEntry>,
@@ -551,6 +554,8 @@ impl ClientState {
             groups: self.groups.clone(),
             projects: self.projects.clone(),
             models: self.models.clone(),
+            mention_skills: self.mention_skills.clone(),
+            mention_subagents: self.mention_subagents.clone(),
             current_model: self.current_model.clone(),
             current_provider: self.current_provider.clone(),
             thinking_variant: self.thinking_variant.clone(),
@@ -559,7 +564,6 @@ impl ClientState {
             personas: self.personas.clone(),
             browser: self.browser.clone(),
             presence: self.presence.clone(),
-            control_yielded_by: self.control_yielded_by,
             dir_listing_session_id: self.dir_listing_session_id.clone(),
             dir_listing_path: self.dir_listing_path.clone(),
             dir_listing: self.dir_listing.clone(),
@@ -633,7 +637,6 @@ impl ClientState {
                 self.current_provider = provider;
                 self.permission_mode = permission_mode;
                 self.presence.clear();
-                self.control_yielded_by = None;
                 vec![ClientEvent::SessionReady { session_id }]
             }
             ServerMessage::SessionList { mut sessions } => {
@@ -651,6 +654,15 @@ impl ClientState {
                         .cmp(&a.last_message_at.unwrap_or(a.created_at))
                         .then_with(|| a.session_id.cmp(&b.session_id))
                 });
+                // Titles otherwise only arrive as change broadcasts; seeding
+                // them from the list keeps a restarted client showing the
+                // persisted title instead of a first-message fallback.
+                for session in &sessions {
+                    if let Some(title) = &session.title {
+                        self.session_titles
+                            .insert(session.session_id.clone(), title.clone());
+                    }
+                }
                 self.session_list = sessions;
                 vec![ClientEvent::SessionListChanged]
             }
@@ -719,6 +731,7 @@ impl ClientState {
             ServerMessage::SessionActivityChanged {
                 session_id,
                 activity,
+                ..
             } => {
                 if let Some(session) = self
                     .session_list
@@ -837,7 +850,9 @@ impl ClientState {
                     replace,
                 }]
             }
-            ServerMessage::UserMessage { text, request_id } => {
+            ServerMessage::UserMessage {
+                text, request_id, ..
+            } => {
                 let Some(session_id) = self.attached_session.clone() else {
                     return Vec::new();
                 };
@@ -1228,10 +1243,6 @@ impl ClientState {
                 self.presence.retain(|entry| entry.client_id != client_id);
                 vec![ClientEvent::PresenceChanged]
             }
-            ServerMessage::ControlYielded { client_id } => {
-                self.control_yielded_by = Some(client_id);
-                vec![ClientEvent::PresenceChanged]
-            }
             ServerMessage::RequestResolved { request_id } => {
                 if let Some(session_id) = self.attached_session.clone() {
                     self.session_mut(&session_id)
@@ -1270,6 +1281,11 @@ impl ClientState {
             ServerMessage::ModelList { models } => {
                 self.models = models;
                 vec![ClientEvent::ModelListChanged]
+            }
+            ServerMessage::MentionCandidates { skills, subagents } => {
+                self.mention_skills = skills;
+                self.mention_subagents = subagents;
+                vec![ClientEvent::MentionCandidatesChanged]
             }
             ServerMessage::ModelSwitched { provider, model } => {
                 self.current_provider = Some(provider);
@@ -1710,6 +1726,7 @@ mod tests {
             } else {
                 mew_protocol::SessionState::Active
             },
+            cancelled: false,
         });
     }
 
@@ -1894,6 +1911,7 @@ mod tests {
         let events = state.apply_server_message(ServerMessage::UserMessage {
             text: "hello".into(),
             request_id: None,
+            steered: false,
         });
         assert!(events.iter().any(|event| matches!(
             event,
@@ -2351,7 +2369,8 @@ mod tests {
             provider: None,
             created_at: 0,
             last_message_at: None,
-            summary: Some("A session".into()),
+            title: Some("A session".into()),
+            summary: None,
             client_count: 0,
             cwd: None,
             workspace_path: None,
@@ -2365,6 +2384,7 @@ mod tests {
             pending_permissions: 0,
             pending_questions: 0,
             first_message: None,
+            last_message: None,
         });
         let events = state.apply_server_message(ServerMessage::SessionMetaChanged {
             session_id: "session-1".into(),
@@ -2534,7 +2554,7 @@ mod tests {
     }
 
     #[test]
-    fn presence_and_control_yield_are_tracked() {
+    fn presence_is_tracked() {
         let mut state = ClientState::default();
 
         let events = state.apply_server_message(ServerMessage::ClientAttached {
@@ -2544,10 +2564,6 @@ mod tests {
         assert!(matches!(events.as_slice(), [ClientEvent::PresenceChanged]));
         assert_eq!(state.presence.len(), 1);
         assert_eq!(state.presence[0].client_kind, ClientKind::Web);
-
-        let events = state.apply_server_message(ServerMessage::ControlYielded { client_id: 7 });
-        assert!(matches!(events.as_slice(), [ClientEvent::PresenceChanged]));
-        assert_eq!(state.control_yielded_by, Some(7));
 
         let events = state.apply_server_message(ServerMessage::ClientDetached { client_id: 7 });
         assert!(matches!(events.as_slice(), [ClientEvent::PresenceChanged]));
@@ -2561,7 +2577,6 @@ mod tests {
             client_id: 7,
             client_kind: ClientKind::Web,
         });
-        state.control_yielded_by = Some(7);
 
         state.apply_server_message(ServerMessage::SessionReady {
             session_id: "session-2".into(),
@@ -2572,7 +2587,6 @@ mod tests {
         });
 
         assert!(state.presence.is_empty());
-        assert_eq!(state.control_yielded_by, None);
     }
 
     #[test]
@@ -2711,6 +2725,7 @@ mod tests {
             provider: None,
             created_at: 0,
             last_message_at: None,
+            title: None,
             summary: None,
             client_count: 0,
             cwd: None,
@@ -2725,6 +2740,7 @@ mod tests {
             pending_permissions: 0,
             pending_questions: 0,
             first_message: Some("first prompt".into()),
+            last_message: None,
         });
 
         let events = state.apply_server_message(ServerMessage::SessionTitleChanged {
@@ -2744,6 +2760,7 @@ mod tests {
         state.apply_server_message(ServerMessage::SessionActivityChanged {
             session_id: "session-1".into(),
             activity: mew_protocol::SessionState::Running,
+            cancelled: false,
         });
         state.apply_server_message(ServerMessage::SessionStatsChanged {
             session_id: "session-1".into(),

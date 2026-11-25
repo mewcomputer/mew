@@ -104,10 +104,6 @@ impl ClientEngine {
         Ok(())
     }
 
-    pub async fn yield_control(&mut self) -> Result<(), TransportError> {
-        self.send(ClientMessage::YieldControl {}).await
-    }
-
     pub async fn rename_session(
         &mut self,
         session_id: String,
@@ -163,6 +159,7 @@ impl ClientEngine {
                     ServerMessage::SessionActivityChanged {
                         session_id,
                         activity,
+                        ..
                     } => {
                         let running = *activity == mew_protocol::SessionState::Running;
                         if self
@@ -487,7 +484,6 @@ mod tests {
         });
         let mut engine = ClientEngine::connect(&transport).await.unwrap();
 
-        engine.yield_control().await.unwrap();
         engine
             .rename_session("sess-1".into(), "renamed".into())
             .await
@@ -499,24 +495,23 @@ mod tests {
         let sent = transport.sent_messages();
         assert!(matches!(sent[0], ClientMessage::Ping));
         let sent = &sent[1..];
-        assert!(matches!(sent[0], ClientMessage::YieldControl {}));
         assert!(matches!(
-            &sent[1],
+            &sent[0],
             ClientMessage::RenameSession { session_id, title }
                 if session_id == "sess-1" && title == "renamed"
         ));
         assert!(matches!(
-            &sent[2],
+            &sent[1],
             ClientMessage::ArchiveSession { session_id, archived: true }
                 if session_id == "sess-1"
         ));
         assert!(matches!(
-            &sent[3],
+            &sent[2],
             ClientMessage::PinSession { session_id, pinned: false }
                 if session_id == "sess-1"
         ));
         assert!(matches!(
-            &sent[4],
+            &sent[3],
             ClientMessage::WatchWorkspace { session_id, enabled: true }
                 if session_id == "sess-1"
         ));

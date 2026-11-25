@@ -40,7 +40,7 @@ fn session_picker() -> App {
         .map(|id| {
             serde_json::from_value(serde_json::json!({
                 "session_id": id, "state": "idle", "created_at": 10,
-                "client_count": 0, "summary": format!("work {id}")
+                "client_count": 0, "title": format!("work {id}")
             }))
             .unwrap()
         })

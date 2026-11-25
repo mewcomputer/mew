@@ -23,7 +23,7 @@ fn display_row(buffer: &ratatui::buffer::Buffer, row: u16) -> String {
 fn project_conversation(id: &str, path: &std::path::Path) -> mew_protocol::SessionInfo {
     serde_json::from_value(serde_json::json!({
         "session_id": id, "state": "idle", "created_at": 10, "client_count": 0,
-        "summary": format!("work in {id}"), "cwd": path,
+        "title": format!("work in {id}"), "cwd": path,
         "last_message_at": 1_728_556_200_000_i64
     }))
     .unwrap()

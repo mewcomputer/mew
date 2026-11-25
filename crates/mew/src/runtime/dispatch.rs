@@ -15,7 +15,6 @@ use mew_tui::events::Action;
 use mew_tui::SlashResult;
 
 use crate::commands::tui::{copy_to_clipboard, read_clipboard_image};
-use crate::runtime::mentions::process_mentions;
 use crate::runtime::target::{CommandTarget, Unsupported};
 use crate::setup::personas::persona_summary;
 
@@ -356,7 +355,7 @@ pub async fn handle_action<T: CommandTarget>(cx: &mut Ctx<'_, T>, action: Action
     }
 }
 
-/// Handle `Action::Submit` — process mentions, push user message, start the turn.
+/// Handle `Action::Submit` — send raw input; the daemon resolves @mentions.
 async fn handle_submit<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: String, queued: bool) {
     if cx.app.attaching_session || cx.app.submission_pending() || !cx.app.client_connected() {
         if queued {
@@ -379,22 +378,13 @@ async fn handle_submit<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: String, queu
         return;
     }
     let text = cx.target.intercept_user_input(text).await;
-    let cwd = cx.app.project_cwd();
-    let (enriched, display, attachments) = process_mentions(
-        &text,
-        &cwd,
-        &mut cx.app.context_files,
-        &cx.app.skill_catalog,
-        &cx.app.subagent_catalog,
-    )
-    .await;
     let session_id = cx.app.status.session_id.clone();
     let request_id = ulid::Ulid::new().to_string();
     cx.app
-        .begin_submission(request_id.clone(), display, attachments.clone(), queued);
+        .begin_submission(request_id.clone(), text.clone(), Vec::new(), queued);
     match cx
         .target
-        .prompt(&session_id, &request_id, enriched, attachments)
+        .prompt(&session_id, &request_id, text, Vec::new())
         .await
     {
         Ok(()) => cx.app.resolve_submission(
@@ -668,18 +658,6 @@ async fn handle_slash_command<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: Strin
                         "auto-summary {}",
                         if enabled { "enabled" } else { "disabled" }
                     ));
-                }
-                Err(Unsupported(reason)) => {
-                    cx.app.set_alert(reason);
-                }
-            }
-            Flow::Continue
-        }
-        SlashResult::YieldControl => {
-            match cx.target.yield_control().await {
-                Ok(()) => {
-                    cx.app
-                        .push_synthetic_message("yielded control to other clients".into());
                 }
                 Err(Unsupported(reason)) => {
                     cx.app.set_alert(reason);

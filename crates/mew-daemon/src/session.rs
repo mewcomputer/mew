@@ -3,7 +3,7 @@
 //! A session is owned by the daemon, not by a connection. Multiple clients can
 //! attach to the same session; events are broadcast to all attached clients.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -88,6 +88,8 @@ pub struct Session {
     pub pending_ask_user: Mutex<HashMap<String, PendingRequest<Vec<String>>>>,
     /// Pending goal-proposal requests (from `propose_goal`).
     pub pending_goal_proposals: Mutex<HashMap<String, PendingRequest<GoalDecision>>>,
+    /// Ordered queue of pending follow-up messages owned by the daemon.
+    pub queued_messages: Mutex<VecDeque<mew_protocol::QueuedMessageWire>>,
     /// Serializes request publication, attach replay, responses and cancellation.
     pub(crate) pending_action_lock: Mutex<()>,
     /// Monotonically increasing IDs for both clients and permission requests.
@@ -101,6 +103,8 @@ pub struct Session {
     pub title_generated: Mutex<bool>,
     /// True when a turn is in progress. Used for the session-rail running indicator.
     pub is_running: Mutex<bool>,
+    /// True while context compaction is actively running on this session.
+    pub is_compacting: Mutex<bool>,
     /// Prevent duplicate background summary requests for one session.
     pub summary_running: AtomicBool,
     /// Sessions root directory (for meta persistence).
@@ -240,6 +244,13 @@ impl Session {
             todos: wire_todos(&list.items),
         });
     }
+    /// Path of the transcript this session appends to, when it is persisted.
+    pub(crate) async fn transcript_path(&self) -> Option<PathBuf> {
+        let writer = self.agent.lock().await.session.clone()?;
+        let path = writer.lock().await.path().clone();
+        Some(path)
+    }
+
     /// Snapshot transcript positions through the current stable log boundary.
     pub(crate) async fn history(&self) -> Result<HistorySnapshot> {
         let (writer, messages) = {
@@ -307,6 +318,7 @@ impl Session {
             pending_permissions: Mutex::new(HashMap::new()),
             pending_ask_user: Mutex::new(HashMap::new()),
             pending_goal_proposals: Mutex::new(HashMap::new()),
+            queued_messages: Mutex::new(VecDeque::new()),
             pending_action_lock: Mutex::new(()),
             next_id: AtomicU64::new(1),
             current_turn_cancel: Mutex::new(None),
@@ -314,6 +326,7 @@ impl Session {
             provider: Mutex::new(provider),
             title_generated: Mutex::new(false),
             is_running: Mutex::new(false),
+            is_compacting: Mutex::new(false),
             summary_running: AtomicBool::new(false),
             session_dir,
             writer_lease: None,
@@ -640,6 +653,21 @@ fn wire_todos(todos: &[mew_agent::Todo]) -> Vec<mew_protocol::Todo> {
         .collect()
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AutomationSettings {
+    auto_title_enabled: bool,
+    auto_summary_enabled: bool,
+}
+
+impl Default for AutomationSettings {
+    fn default() -> Self {
+        Self {
+            auto_title_enabled: true,
+            auto_summary_enabled: true,
+        }
+    }
+}
+
 /// Owns all active sessions.
 pub struct SessionManager {
     pub(crate) builder: AgentBuilder,
@@ -653,7 +681,13 @@ pub struct SessionManager {
     loading: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub(crate) defaults_lock: Mutex<()>,
     pub remote_devices: std::sync::OnceLock<crate::remote::RemoteDeviceManager>,
+    pub remote_controller: std::sync::OnceLock<Arc<dyn crate::remote::RemoteAccessController>>,
     pub(crate) settings_changed: tokio::sync::watch::Sender<()>,
+    pub(crate) auto_title_enabled: tokio::sync::watch::Sender<bool>,
+    pub(crate) auto_summary_enabled: tokio::sync::watch::Sender<bool>,
+    pub(crate) automation_initialized: AtomicBool,
+    automation_lock: Mutex<()>,
+    pub(crate) automation_error: Option<String>,
     #[cfg(test)]
     pub(crate) settings_operation_started: tokio::sync::Notify,
     #[cfg(test)]
@@ -661,6 +695,58 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
+    pub(crate) async fn set_automation(
+        &self,
+        title: Option<bool>,
+        summary: Option<bool>,
+        only_uninitialized: bool,
+        authorization: Option<crate::RemoteAuthorization>,
+    ) -> Result<()> {
+        let _guard = self.automation_lock.lock().await;
+        if let Some(error) = &self.automation_error {
+            anyhow::bail!("could not read saved automation settings: {error}");
+        }
+        let path = self.session_dir.join("automation-settings.json");
+        let settings = tokio::task::spawn_blocking(move || -> Result<AutomationSettings> {
+            let _file_lock = crate::remote::acquire_file_lock(&path)?;
+            if let Some(authorization) = authorization {
+                authorization.require_control()?;
+            }
+            let existing = match std::fs::read(&path) {
+                Ok(bytes) => Some(serde_json::from_slice::<AutomationSettings>(&bytes)?),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error.into()),
+            };
+            if only_uninitialized {
+                if let Some(settings) = existing {
+                    return Ok(settings);
+                }
+            }
+            let mut settings = existing.unwrap_or_default();
+            if let Some(value) = title {
+                settings.auto_title_enabled = value;
+            }
+            if let Some(value) = summary {
+                settings.auto_summary_enabled = value;
+            }
+            let temp = path.with_extension("json.tmp");
+            std::fs::write(&temp, serde_json::to_vec(&settings)?)?;
+            std::fs::rename(temp, path)?;
+            Ok(settings)
+        })
+        .await??;
+        self.automation_initialized.store(true, Ordering::Release);
+        if *self.auto_title_enabled.borrow() != settings.auto_title_enabled {
+            self.auto_title_enabled
+                .send_replace(settings.auto_title_enabled);
+        }
+        if *self.auto_summary_enabled.borrow() != settings.auto_summary_enabled {
+            self.auto_summary_enabled
+                .send_replace(settings.auto_summary_enabled);
+        }
+        self.settings_changed.send_replace(());
+        Ok(())
+    }
     async fn restore_python_session(&self, session_id: &str, agent: &mut Agent) {
         let may_use_code_mode = agent.code_mode.mode == Some(mew_config::CodeMode::Full)
             || agent
@@ -692,6 +778,26 @@ impl SessionManager {
         lister: Option<ModelLister>,
         project_pins: Arc<ProjectPinsStore>,
     ) -> Self {
+        let (automation, automation_error) =
+            match std::fs::read(session_dir.join("automation-settings.json")) {
+                Ok(data) => match serde_json::from_slice::<AutomationSettings>(&data) {
+                    Ok(settings) => (Some(settings), None),
+                    Err(error) => (None, Some(error.to_string())),
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (None, None),
+                Err(error) => (None, Some(error.to_string())),
+            };
+        let automation_initialized = automation.is_some() || automation_error.is_some();
+        let automation = automation.unwrap_or_else(|| {
+            if automation_error.is_some() {
+                AutomationSettings {
+                    auto_title_enabled: false,
+                    auto_summary_enabled: false,
+                }
+            } else {
+                AutomationSettings::default()
+            }
+        });
         Self {
             builder,
             switcher,
@@ -704,7 +810,13 @@ impl SessionManager {
             loading: Mutex::new(HashMap::new()),
             defaults_lock: Mutex::new(()),
             remote_devices: std::sync::OnceLock::new(),
+            remote_controller: std::sync::OnceLock::new(),
             settings_changed: tokio::sync::watch::channel(()).0,
+            auto_title_enabled: tokio::sync::watch::channel(automation.auto_title_enabled).0,
+            auto_summary_enabled: tokio::sync::watch::channel(automation.auto_summary_enabled).0,
+            automation_initialized: AtomicBool::new(automation_initialized),
+            automation_lock: Mutex::new(()),
+            automation_error,
             #[cfg(test)]
             settings_operation_started: tokio::sync::Notify::new(),
             #[cfg(test)]
@@ -1104,8 +1216,10 @@ impl SessionManager {
                 .as_ref()
                 .and_then(|m| m.last_message_at)
                 .or_else(|| meta.as_ref().map(|m| m.created_at));
+            let title = meta.as_ref().and_then(|m| m.custom_title.clone());
             let summary = meta.as_ref().and_then(|m| m.summary.clone());
             let first_message = first_user_message_text(&agent.messages);
+            let last_message = last_message_text(&agent.messages);
             infos.push(SessionInfo {
                 session_id: id.clone(),
                 state: if *session.is_running.lock().await {
@@ -1117,6 +1231,7 @@ impl SessionManager {
                 provider,
                 created_at,
                 last_message_at,
+                title,
                 summary,
                 client_count: session.client_count().await,
                 cwd: meta.as_ref().and_then(|m| m.cwd.clone()),
@@ -1134,6 +1249,7 @@ impl SessionManager {
                 pending_permissions: session.pending_permissions.lock().await.len() as u32,
                 pending_questions: session.pending_questions_count().await,
                 first_message,
+                last_message,
             });
         }
         // Idle sessions from disk.
@@ -1181,6 +1297,7 @@ impl SessionManager {
                             provider: policy.and_then(|policy| policy.provider),
                             created_at: meta.created_at,
                             last_message_at: meta.last_message_at.or(Some(meta.created_at)),
+                            title: meta.custom_title.clone(),
                             summary: meta.summary.clone(),
                             client_count: 0,
                             cwd: meta.cwd.clone(),
@@ -1198,6 +1315,7 @@ impl SessionManager {
                             pending_permissions: 0,
                             pending_questions: 0,
                             first_message: first_user_message_from_disk(&path).await,
+                            last_message: last_message_from_disk(&path).await,
                         });
                     }
                     _ => continue,
@@ -1222,10 +1340,21 @@ impl SessionManager {
     /// Broadcast a session activity change to all clients of that session
     /// and all other active sessions (for the rail).
     pub async fn broadcast_activity(&self, session_id: &str, activity: SessionState) {
+        self.broadcast_activity_outcome(session_id, activity, false)
+            .await;
+    }
+
+    pub async fn broadcast_activity_outcome(
+        &self,
+        session_id: &str,
+        activity: SessionState,
+        cancelled: bool,
+    ) {
         let active = self.active.lock().await;
         let msg = ServerMessage::SessionActivityChanged {
             session_id: session_id.to_string(),
             activity,
+            cancelled,
         };
         for session in active.values() {
             session.broadcast(msg.clone()).await;
@@ -1331,21 +1460,98 @@ async fn first_user_message_from_disk(session_dir: &std::path::Path) -> Option<S
     None
 }
 
+const LAST_MESSAGE_MAX_CHARS: usize = 160;
+
+fn extract_last_text(msg: &mew_message::Message) -> Option<String> {
+    if !matches!(
+        msg.role,
+        mew_message::Role::User | mew_message::Role::Assistant
+    ) {
+        return None;
+    }
+    for part in msg.parts.iter().rev() {
+        if let mew_message::Part::Text(tp) = part {
+            if !tp.synthetic && !tp.text.trim().is_empty() {
+                return Some(truncate_preview(&tp.text, LAST_MESSAGE_MAX_CHARS));
+            }
+        }
+    }
+    None
+}
+
+/// Returns the latest non-empty user or assistant text message, truncated to
+/// `LAST_MESSAGE_MAX_CHARS` chars.
+fn last_message_text(messages: &Mutex<Vec<mew_message::Message>>) -> Option<String> {
+    let msgs = messages.try_lock().ok()?;
+    msgs.iter().rev().find_map(extract_last_text)
+}
+
+/// Read the latest non-empty user or assistant text from the tail of a
+/// session's JSONL file on disk.
+async fn last_message_from_disk(session_dir: &std::path::Path) -> Option<String> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    let jsonl_path = session_dir.join("session.jsonl");
+    let mut file = tokio::fs::File::open(jsonl_path).await.ok()?;
+    let mut end = file.metadata().await.ok()?.len();
+    if end == 0 {
+        return None;
+    }
+
+    const CHUNK_SIZE: u64 = 64 * 1024;
+    let mut carry = Vec::new();
+    while end > 0 {
+        let start = end.saturating_sub(CHUNK_SIZE);
+        let len = (end - start) as usize;
+        file.seek(std::io::SeekFrom::Start(start)).await.ok()?;
+        let mut buf = vec![0u8; len];
+        file.read_exact(&mut buf).await.ok()?;
+        if !carry.is_empty() {
+            buf.extend_from_slice(&carry);
+            carry.clear();
+        }
+
+        let mut parts = buf.split(|&b| b == b'\n').peekable();
+        if start > 0 {
+            if let Some(first) = parts.next() {
+                carry.extend_from_slice(first);
+            }
+        }
+
+        let lines: Vec<&[u8]> = parts.collect();
+        for line in lines.into_iter().rev() {
+            if line.is_empty() {
+                continue;
+            }
+            if let Ok(msg) = serde_json::from_slice::<mew_message::Message>(line) {
+                if let Some(text) = extract_last_text(&msg) {
+                    return Some(text);
+                }
+            }
+        }
+        end = start;
+    }
+    None
+}
+
 /// Truncate to 60 chars, collapsing whitespace and stripping newlines.
 fn truncate_message(text: &str) -> String {
-    let cleaned: String = text
+    truncate_preview(text, 60)
+}
+
+fn truncate_preview(text: &str, max_chars: usize) -> String {
+    let collapsed: String = text
         .lines()
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
         .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(60)
-        .collect();
-    if cleaned.chars().count() == 60 && text.len() > 60 {
-        format!("{cleaned}…")
+        .join(" ");
+    let mut chars = collapsed.chars();
+    let head: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
     } else {
-        cleaned
+        head
     }
 }
 

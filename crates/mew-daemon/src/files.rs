@@ -15,12 +15,12 @@ fn resolve_scoped(cwd: &Path, relative: Option<&str>) -> Result<PathBuf, String>
     let target = match relative {
         None | Some("") | Some(".") => base.to_path_buf(),
         Some(p) => {
-            // Block obvious traversal attempts. We canonicalize afterward
-            // but the session cwd itself may not be canonical yet.
+            // Absolute paths are checked by the same containment rule below.
             if p.starts_with('/') {
-                return Err(format!("absolute paths not allowed: {p}"));
+                PathBuf::from(p)
+            } else {
+                base.join(p)
             }
-            base.join(p)
         }
     };
 
@@ -75,7 +75,11 @@ pub async fn handle_list_filesystem_dir(path: Option<String>) -> Result<ServerMe
     let mut reader = tokio::fs::read_dir(&target)
         .await
         .map_err(|e| format!("read_dir: {e}"))?;
-    while let Ok(Some(entry)) = reader.next_entry().await {
+    while let Some(entry) = reader
+        .next_entry()
+        .await
+        .map_err(|e| format!("read_dir: {e}"))?
+    {
         let name = entry.file_name().to_string_lossy().to_string();
         if name.starts_with('.') {
             continue;
@@ -123,7 +127,11 @@ pub async fn handle_list_dir(
         .await
         .map_err(|e| format!("read_dir: {e}"))?;
 
-    while let Ok(Some(entry)) = reader.next_entry().await {
+    while let Some(entry) = reader
+        .next_entry()
+        .await
+        .map_err(|e| format!("read_dir: {e}"))?
+    {
         let name = entry.file_name().to_string_lossy().to_string();
         // Skip hidden files (dotfiles).
         if name.starts_with('.') {
@@ -168,12 +176,45 @@ pub async fn handle_read_preview(
         .await
         .ok_or_else(|| "session has no cwd".to_string())?;
 
-    let target = resolve_scoped(&cwd, Some(path))?;
-    let limit = max_bytes.unwrap_or(65536) as usize;
+    let limit = max_bytes.unwrap_or(65536).min(1024 * 1024) as usize;
 
-    let bytes = tokio::fs::read(&target)
+    use tokio::io::AsyncReadExt;
+    let requested = path.to_string();
+    let read = async move {
+        let (file, target) = tokio::task::spawn_blocking(move || {
+            let target = resolve_scoped(&cwd, Some(&requested))?;
+            let mut options = std::fs::OpenOptions::new();
+            options.read(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.custom_flags(nix::libc::O_NONBLOCK);
+            }
+            let file = options
+                .open(&target)
+                .map_err(|e| format!("open file: {e}"))?;
+            if !file
+                .metadata()
+                .map_err(|e| format!("file metadata: {e}"))?
+                .is_file()
+            {
+                return Err("not a regular file".to_string());
+            }
+            Ok::<_, String>((file, target))
+        })
         .await
-        .map_err(|e| format!("read file: {e}"))?;
+        .map_err(|e| format!("open file: {e}"))??;
+        let file = tokio::fs::File::from_std(file);
+        let mut bytes = Vec::new();
+        file.take((limit as u64).saturating_add(1))
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|e| format!("read file: {e}"))?;
+        Ok::<_, String>((bytes, target))
+    };
+    let (bytes, target) = tokio::time::timeout(std::time::Duration::from_secs(5), read)
+        .await
+        .map_err(|_| "file preview timed out".to_string())??;
 
     let truncated = bytes.len() > limit;
     let content_bytes = if truncated {
@@ -191,14 +232,9 @@ pub async fn handle_read_preview(
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.to_string());
 
-    let display_path = target
-        .strip_prefix(cwd.canonicalize().unwrap_or(cwd.clone()))
-        .unwrap_or(&target)
-        .display()
-        .to_string();
-
     Ok(ServerMessage::FilePreview {
-        path: display_path,
+        session_id: Some(session_id.to_string()),
+        path: path.to_string(),
         content,
         truncated,
         language,
@@ -215,10 +251,27 @@ pub async fn handle_git_status(
         .await
         .ok_or_else(|| "session has no cwd".to_string())?;
 
+    let prefix = tokio::process::Command::new("git")
+        .args(["rev-parse", "--show-prefix"])
+        .current_dir(&cwd)
+        .output()
+        .await
+        .map_err(|e| format!("git rev-parse: {e}"))?;
+    if !prefix.status.success() {
+        return Err(format!(
+            "git status failed: {}",
+            String::from_utf8_lossy(&prefix.stderr)
+        ));
+    }
+    let prefix = String::from_utf8_lossy(&prefix.stdout);
+    let prefix = prefix.strip_suffix('\n').unwrap_or(&prefix);
+
     let output = tokio::process::Command::new("git")
         .arg("status")
         .arg("--porcelain=v2")
+        .arg("--untracked-files=all")
         .arg("-z")
+        .args(["--", "."])
         .current_dir(&cwd)
         .output()
         .await
@@ -232,9 +285,18 @@ pub async fn handle_git_status(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let entries = parse_porcelain_v2(&stdout);
+    let entries = parse_porcelain_v2(&stdout)
+        .into_iter()
+        .filter_map(|mut entry| {
+            entry.path = entry.path.strip_prefix(prefix)?.to_owned();
+            Some(entry)
+        })
+        .collect();
 
-    Ok(ServerMessage::GitStatusResult { entries })
+    Ok(ServerMessage::GitStatusResult {
+        session_id: Some(session_id.to_string()),
+        entries,
+    })
 }
 
 /// Parse `git status --porcelain=v2 -z` output.
@@ -242,8 +304,8 @@ fn parse_porcelain_v2(output: &str) -> Vec<GitEntry> {
     let mut entries = Vec::new();
 
     // -z uses NUL as separator instead of newline.
-    for line in output.split('\0') {
-        let line = line.trim();
+    let mut records = output.split('\0');
+    while let Some(line) = records.next() {
         if line.is_empty() {
             continue;
         }
@@ -270,6 +332,7 @@ fn parse_porcelain_v2(output: &str) -> Vec<GitEntry> {
                 });
             }
         } else if let Some(rest) = line.strip_prefix("2 ") {
+            let _original_path = records.next();
             let parts: Vec<&str> = rest.splitn(9, ' ').collect();
             if parts.len() >= 9 {
                 let xy = parts[0];
@@ -280,8 +343,15 @@ fn parse_porcelain_v2(output: &str) -> Vec<GitEntry> {
                     status,
                 });
             }
+        } else if let Some(rest) = line.strip_prefix("u ") {
+            let parts: Vec<&str> = rest.splitn(10, ' ').collect();
+            if parts.len() >= 10 {
+                entries.push(GitEntry {
+                    path: parts[9].to_string(),
+                    status: GitFileStatus::Modified,
+                });
+            }
         }
-        // Skip unmerged (u) entries for simplicity — rare in practice.
     }
 
     entries
@@ -339,8 +409,18 @@ pub async fn handle_open_path(
 
 #[cfg(test)]
 mod tests {
-    use super::filesystem_path_allowed;
+    use super::{filesystem_path_allowed, parse_porcelain_v2, resolve_scoped};
     use std::path::Path;
+
+    #[test]
+    fn status_parser_handles_rename_sources_and_conflicts() {
+        let status = "2 R. N... 100644 100644 100644 abc def R100 new.txt\0? ghost\0u UU N... 100644 100644 100644 100644 abc def ghi conflicted.txt\0";
+        let entries = parse_porcelain_v2(status);
+        assert_eq!(
+            entries.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(),
+            vec!["new.txt", "conflicted.txt"]
+        );
+    }
 
     #[test]
     fn filesystem_browser_stays_inside_home_and_skips_protected_roots() {
@@ -353,5 +433,19 @@ mod tests {
         assert!(!filesystem_path_allowed(Path::new("/System"), home));
         assert!(!filesystem_path_allowed(Path::new("/Library"), home));
         assert!(!filesystem_path_allowed(Path::new("/private/tmp"), home));
+    }
+
+    #[test]
+    fn absolute_paths_inside_the_cwd_resolve_but_outside_paths_do_not() {
+        let root = tempfile::tempdir().unwrap();
+        let inside = root.path().join("note.md");
+        std::fs::write(&inside, "hello").unwrap();
+        assert_eq!(
+            resolve_scoped(root.path(), Some(inside.to_str().unwrap())).unwrap(),
+            inside.canonicalize().unwrap()
+        );
+
+        let error = resolve_scoped(root.path(), Some("/etc/passwd")).unwrap_err();
+        assert!(error.contains("path escapes workspace"), "{error}");
     }
 }

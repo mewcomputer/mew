@@ -59,13 +59,14 @@ mew-raster = { path = "../mew-raster" }
 tiny-skia = "0.12"
 
 iroh = { workspace = true, optional = true }
+qrcode = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 mew-agy = { path = "../mew-agy" }
 
 [features]
 default = []
-iroh = ["dep:iroh", "mew-daemon/iroh"]
+iroh = ["dep:iroh", "dep:qrcode", "mew-daemon/iroh"]
 
 [dev-dependencies]
 serde_yaml = "0.9"
