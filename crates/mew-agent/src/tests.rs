@@ -125,6 +125,38 @@ async fn an_explicit_exit_tool_denial_beats_the_contract_exemption() {
 }
 
 #[tokio::test]
+async fn code_mode_without_python_keeps_the_terminal_tool_visible() {
+    // `tools: []` is the established "no tools" idiom, which disables python.
+    // In code mode that must not leave the model with an empty tool list, or a
+    // subagent cannot satisfy the contract's exit_tool requirement.
+    let provider = Arc::new(CapturingProvider::new(vec![FakeProvider::text_response(
+        "done",
+    )]));
+    let mut agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![Arc::new(mew_tools::tools::exit_tool::ExitTool)],
+        None,
+    );
+    agent.code_mode.mode = Some(mew_config::CodeMode::Full);
+    agent.active_tool_names = Some(std::collections::HashSet::new());
+    assert!(
+        !agent.python_available(),
+        "an empty allowlist disables python"
+    );
+    let mut events = agent.run("run".into());
+    while let Some(event) = events.recv().await {
+        if let AgentEvent::PermissionRequest { tx, .. } = event {
+            let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
+        }
+    }
+    let captured = provider.captured.lock().unwrap();
+    let names: Vec<&str> = captured[0].tools.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(names, vec!["exit_tool"], "code mode fell back to no tools");
+}
+
+#[tokio::test]
 async fn code_mode_keeps_the_exit_tool_accessible_through_python() {
     // A restricted subagent def can only reach its tools through python, and
     // `exit_tool` is part of the contract, so it must not be filtered out.

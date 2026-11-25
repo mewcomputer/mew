@@ -286,7 +286,10 @@ impl Agent {
                 tool_defs = if self.python_available() {
                     vec![self.python_tool_definition()]
                 } else {
-                    vec![]
+                    // Without python, code mode has no tool to offer. Keeping
+                    // the direct definitions leaves the contract's terminal
+                    // tool reachable instead of stranding the model with none.
+                    tool_defs
                 };
             }
 

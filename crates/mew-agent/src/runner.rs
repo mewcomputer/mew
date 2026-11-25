@@ -316,8 +316,12 @@ impl SimpleRunner {
         };
         let model = model.or(def.model.as_deref());
         // `inherit` names the parent's model rather than a model in its own
-        // right, so it must never reach the resolver as a model id.
-        let model = model.filter(|value| !value.trim().eq_ignore_ascii_case("inherit"));
+        // right, and a blank value names nothing at all, so neither may reach
+        // the resolver as a model id.
+        let model = model.filter(|value| {
+            let value = value.trim();
+            !value.is_empty() && !value.eq_ignore_ascii_case("inherit")
+        });
 
         let Some(model) = model else {
             return default();
@@ -3049,6 +3053,22 @@ mod tests {
         assert_eq!(model_id, "parent-model");
         let (_, _, model_id) = runner.resolve_provider(&def, Some("deci")).await;
         assert_eq!(model_id, "deci");
+
+        // Blank values name no model, so they must not reach the resolver
+        // either; a provider default would silently replace the parent model.
+        for blank in ["", "   "] {
+            def.model = Some(blank.to_string());
+            let (_, provider_id, model_id) = runner.resolve_provider(&def, None).await;
+            assert_eq!(provider_id, "parent-provider", "{blank:?}");
+            assert_eq!(model_id, "parent-model", "{blank:?}");
+            let (_, _, model_id) = runner.resolve_provider(&def, Some(blank)).await;
+            assert_eq!(model_id, "parent-model", "{blank:?}");
+        }
+        assert_eq!(
+            resolver.requested.lock().unwrap().as_slice(),
+            ["micro", "deci"],
+            "neither inherit nor blank values may be resolved"
+        );
     }
 
     /// Minimal named tool so an allowlist can be exercised without pulling in
