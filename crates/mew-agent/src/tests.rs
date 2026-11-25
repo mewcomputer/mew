@@ -105,6 +105,67 @@ async fn code_mode_keeps_persona_allowed_tools_accessible_through_python() {
 }
 
 #[tokio::test]
+async fn an_explicit_exit_tool_denial_beats_the_contract_exemption() {
+    let provider = Arc::new(CapturingProvider::new(vec![FakeProvider::text_response(
+        "done",
+    )]));
+    let mut agent = Agent::new(
+        provider,
+        Arc::new(NopDispatcher),
+        None,
+        vec![Arc::new(mew_tools::tools::exit_tool::ExitTool)],
+        None,
+    );
+    assert!(agent.tool_available("exit_tool"));
+    agent.denied_tool_names = std::collections::HashSet::from(["exit_tool".to_string()]);
+    assert!(
+        !agent.tool_available("exit_tool"),
+        "an explicit denial must still remove exit_tool"
+    );
+}
+
+#[tokio::test]
+async fn code_mode_keeps_the_exit_tool_accessible_through_python() {
+    // A restricted subagent def can only reach its tools through python, and
+    // `exit_tool` is part of the contract, so it must not be filtered out.
+    let provider = Arc::new(CapturingProvider::new(vec![
+        FakeProvider::tool_call(
+            "python",
+            "py",
+            serde_json::json!({"source":"text(tools.exit_tool({'final_answer':'report'})['output'])"}),
+        ),
+        FakeProvider::text_response("done"),
+    ]));
+    let mut agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![Arc::new(mew_tools::tools::exit_tool::ExitTool)],
+        None,
+    );
+    agent.code_mode.mode = Some(mew_config::CodeMode::Full);
+    agent.code_mode.isolated = false;
+    agent.active_tool_names = Some(std::collections::HashSet::from(["read".into()]));
+    let mut events = agent.run("run".into());
+    while let Some(event) = events.recv().await {
+        if let AgentEvent::PermissionRequest { tx, .. } = event {
+            let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
+        }
+    }
+    let messages = agent.messages.lock().await;
+    assert!(
+        messages
+            .iter()
+            .flat_map(|m| &m.parts)
+            .any(|part| matches!(part,
+                Part::ToolCall(call) if call.call_id == "py"
+                    && call.state.output().is_some_and(|out| out.contains("report"))
+            )),
+        "exit_tool must be callable through python despite the allowlist"
+    );
+}
+
+#[tokio::test]
 async fn code_mode_exposes_one_tool_and_keeps_python_state_between_calls() {
     let provider = Arc::new(CapturingProvider::new(vec![
         FakeProvider::tool_call("python", "py1", serde_json::json!({"source":"saved = 41"})),

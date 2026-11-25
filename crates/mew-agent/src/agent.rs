@@ -191,6 +191,11 @@ pub struct ShellJobOutput {
     pub incomplete: bool,
 }
 
+/// The tool a subagent uses to hand its result to the parent. Part of the
+/// always-rendered subagent contract, so it is exempt from a def's tool
+/// allowlist.
+pub(crate) const EXIT_TOOL: &str = "exit_tool";
+
 #[derive(Clone)]
 pub struct Agent {
     pub provider: Arc<dyn Provider>,
@@ -569,10 +574,15 @@ impl Agent {
     pub(crate) fn tool_available(&self, name: &str) -> bool {
         self.tools.contains_key(name)
             && (!name.starts_with("browser_") || self.browser_access.is_available())
-            && self
-                .active_tool_names
-                .as_ref()
-                .is_none_or(|names| names.contains(name))
+            // The subagent contract's terminal tool survives a def's allowlist:
+            // a restricted child must always be able to report its result, both
+            // directly and through the python tool in code mode. An explicit
+            // denial still wins.
+            && (name == EXIT_TOOL
+                || self
+                    .active_tool_names
+                    .as_ref()
+                    .is_none_or(|names| names.contains(name)))
             && !self.denied_tool_names.contains(name)
     }
 

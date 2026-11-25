@@ -13,11 +13,8 @@ use mew_subagents::{
 };
 use mew_tools::Tool;
 
+use crate::agent::EXIT_TOOL;
 use crate::child_guidance::ChildGuidance;
-
-/// The tool a subagent uses to hand its result to the parent. Part of the
-/// always-rendered subagent contract, not a capability a def can drop.
-const EXIT_TOOL: &str = "exit_tool";
 
 /// If the given tool state has completed successfully, return the output
 /// string. Used by the runner to pull the final answer out of an `exit_tool`
