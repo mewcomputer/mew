@@ -113,12 +113,23 @@ picker, `Ctrl+Alt+P` cycles through the model's supported variants. See
 [Providers](/docs/using-mew/providers/#thinking-variants) for supported models
 and options.
 
-## 6. Cancel a stream
+## 6. Queue, steer, and cancel
 
-Press `Esc` twice to cancel an active turn. The first `Esc` displays `"esc again
-to stop agent"` in the status bar; the second cancels the stream immediately.
+Submitting a prompt while a response is streaming queues it for the next turn.
+Press `Ctrl+Up` to inject the oldest queued message as guidance into the
+running turn, or press `Up` twice with an empty composer to cancel the active
+turn and send the queued message immediately.
 
-## 7. Review costs
+Press `Esc` twice to cancel an active turn without sending a queued message. The
+first `Esc` displays `"esc again to stop agent"` in the status bar; the second
+cancels the stream immediately.
+
+## 7. Attach images
+
+For models with vision support, paste a clipboard image with `Ctrl+V` (or
+`Cmd+V`), or reference an image file with `@path/to/image.png`.
+
+## 8. Review costs
 
 ```text
 /cost

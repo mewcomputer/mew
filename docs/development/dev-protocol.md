@@ -51,7 +51,6 @@ mode changes, client presence, browser tab registration, and PTY messages).
 | `ListModels` / `SwitchModel` | (`provider`, `model` on switch) | Inspect or switch models |
 | `SetThinkingVariant` | `variant` | Set variant, `"budget:<n>"`, `""`, or `"none"` |
 | `SetPermissionMode` | `mode` | Switch session permission mode |
-| `YieldControl` | | Emit advisory client yield notification |
 | `ListProjects` / `RegenerateTitle` | (`session_id` on title) | List known projects or regenerate session title |
 | `Ping` | | Request `Pong` with daemon version and `protocol_version` |
 
@@ -68,7 +67,7 @@ mode changes, client presence, browser tab registration, and PTY messages).
 | `SessionList` | `sessions` | Response to `ListSessions` |
 | `SessionCleared` | | Context cleared via `/clear` |
 | `SessionTitleChanged` | `session_id`, `title` | Updated conversation title |
-| `ClientAttached` / `ClientDetached` / `ControlYielded` | `client_id` (`client_kind` on attach) | Multi-client presence updates |
+| `ClientAttached` / `ClientDetached` | `client_id` (`client_kind` on attach) | Multi-client presence updates |
 
 ### Streaming events
 

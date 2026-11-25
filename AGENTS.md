@@ -70,6 +70,13 @@ for Ghostty terminal emulation, and provisions the pinned CEF SDK with
 `scripts/setup-ci-cef.sh`. Set `CEF_PATH` to a matching installed SDK when
 running full-workspace builds locally.
 
+On macOS with Xcode 26.4 or newer, the official Zig 0.15.2 binary cannot
+link against the current SDK. Homebrew's patched Zig 0.15.2_1 works with
+that SDK. If mise is selecting a different Zig, run the build with
+`MISE_DISABLE_TOOLS=zig` and ensure Homebrew's `zig` is on `PATH`. Check
+`zig env` for the selected executable; `zig version` alone does not
+distinguish the patched build.
+
 ## Repository shape
 
 The Cargo workspace is defined in `Cargo.toml`. The important boundaries are:

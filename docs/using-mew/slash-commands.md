@@ -17,9 +17,8 @@ runtime is enabled.
 | `/resume <id>` | Resume `<id>`, or open the session picker when no ID is given |
 | `/project` | Pick a project directory and start a new conversation there |
 | `/rename <title>` | Rename the active conversation |
-| `/autotitle on`, `/autotitle off` | Toggle automatic session titles for the active conversation |
-| `/autosummary on`, `/autosummary off` | Toggle automatic session summaries for the active conversation |
-| `/yield` | Yield control so another attached client can take over |
+| `/autotitle on`, `/autotitle off` | Toggle automatic session titles for the daemon |
+| `/autosummary on`, `/autosummary off` | Toggle automatic idle-session summaries for the daemon |
 
 Daemon-backed TUI sessions do not support `/rewind`. See
 [Sessions](/docs/getting-started/sessions/) for storage and resume details.

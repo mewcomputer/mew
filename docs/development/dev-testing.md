@@ -73,3 +73,21 @@ daemon behavior that does not need a compiled web bundle.
 - Enable the `test-utils` feature on `mew-tools` for `ToolCtx::test_new(cwd)`.
 - Use `FakeProvider` for scripted provider runs and `make_text_agent_factory`
   for daemon tests.
+
+## Evaluation runner
+
+`evals/run.py` runs `[[tasks]]` TOML suites through `mew run` in isolated
+temporary workspaces, saving `events.jsonl`, session transcripts, `results.json`,
+and `results.csv` (requires Python 3.11 or newer):
+
+```sh
+python3 evals/run.py evals/examples/wine/suite.toml \
+  --mew target/debug/mew \
+  --model opencode-go/hy4-flash-free \
+  --output /tmp/mew-eval-wine
+```
+
+Pass `--mode full --mode off` to compare Python code mode with direct tools,
+`--repeats <n>` for multiple runs, `--config` for custom provider settings, and
+`--auth-file` for Codex OAuth tokens. See `evals/README.md` for manifest fields
+and run `just test-evals` for runner tests.

@@ -5,7 +5,8 @@ description: Configure Mew providers, credentials, permissions, and workspace.
 
 Configure Mew with `config.toml` and environment variables. Mew stores runtime
 preferences in `state.toml`. Run `mew config show` to print the effective
-configuration, or `mew config edit` to open the file in your editor.
+configuration, `mew config edit` to open the file in your editor, or
+`mew config editor` to edit settings in the interactive TUI.
 
 ## File locations
 

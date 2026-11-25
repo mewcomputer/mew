@@ -5103,3 +5103,448 @@ before the provider error is delivered. Active tool cancellation still stops
 the owning turn. After the fix, a retained live daemon run started two distinct
 AGY-backed Mew subagents, waited for both and received both expected results.
 The earlier aborted child's original cause remains unknown.
+
+### 2026-11-21: Fold tool calls into one-line rows in the chat view
+
+Rewrote `ToolCallCard` so a settled tool call is one muted row — `Searched "pattern"`, `Edited CURRENT.md +1 -2`, `Ran <command>` — with no card border and no always-visible output block. Detail (python source, nested calls, output preview) stays open only while a call is running or failed, and folds otherwise; a replayed session must not unfold every row, and those sessions record tool calls without a terminal state. Removed `ToolCallGroup`/`groupParts` from `message-item.tsx`: consecutive calls now render as consecutive rows instead of a "N tool calls" fold that required a second click.
+
+Also fixed tool matching, which compared against names no tool has: `bash` (not `shell`), `edit_str_replace`/`edit_hashline` (not `edit`). The input view is now chosen from the payload shape, so string edits get a diff and hash-anchored patches show the target path taken from the patch header. Paths render relative to the session cwd, and output previews opt out of the `typeset` `pre` box. Pluralized the reasoning step count.
+
+Rendering a real 80-tool-call session through `mew-web` exposed two defects that the fixture hid: rows kept a live-looking elapsed time (`12632659.9s`) because history records a start and no end, and rows showed full absolute paths even with no session cwd. Duration now renders only when the tool reported an end or is still running, and paths outside the workspace keep their last two segments with the full path on the row title. Both have tests.
+
+Verified `pnpm --filter mew-web-ui exec vitest run` (254 tests), `tsc --noEmit`, `pnpm --filter mew-web-ui build`, and screenshots of the real UI served by `mew-web` against a live daemon, collapsed and expanded. Not changed: session files persist tool calls as `pending` (all 94 in that session), so replayed rows keep the pending icon; that belongs to the session writer, not the view.
+
+### 2026-11-21: Fold each turn's work into a "Worked for" line
+
+The transcript now renders turns instead of messages. `lib/turns.ts` groups a prompt with the assistant messages that answered it — the daemon stores one assistant message per provider round, so an answer spans several — and `components/turn-item.tsx` folds everything before the closing text run into one `Worked for 1m 5s` line, leaving the answer visible. Reasoning no longer has its own "Reasoning · N steps" disclosure: it renders as plain dimmed text inside the work log, and `reasoning-block.tsx` is deleted.
+
+Guardrails: a turn that is still running shows `Working for 12s` with its work open and is not a disclosure yet; a turn that ended without an answer stays open; a turn containing a failed tool reports `· 1 failed` on the collapsed line rather than hiding the failure. Durations come from `message.time.completed` for history and from `message_end` for live turns (`ChatMessage.completedAt`, new field).
+
+Both surfaces render turns: `chat-surface` maps `buildTurns(messages)`, and `virtual-chat-surface` virtualizes turns while keeping `data-index` on each turn's first message so the minimap's scroll targeting still resolves.
+
+Verified `pnpm --filter mew-web-ui exec vitest run` (268 tests, including new `turn-item` and `turns` suites), `tsc --noEmit`, `pnpm --filter mew-web-ui build`, plus screenshots of the real UI served by `mew-web` against a live daemon: a replayed session showing `Worked for 25s`, `Worked for 10s`, `Worked for 3m 19s` collapsed, and one expanded into its reasoning, narration, and tool rows. Not verified: a live streaming turn end to end (needs a provider round), and the auto-scroll behaviour when expanding the newest turn at the bottom of the viewport.
+
+### 2026-11-22: Full-bleed transcript, floating composer, context ring
+
+The chat region now scrolls the full width of the conversation panel and all the way down behind the composer. Previously the summary panel was a sibling that shortened the scroller, so the scrollbar stopped at its left edge (measured: scroller right 1235 while the panel ran 1235–1491); now the aside is an overlay and the scroller's right edge is the panel edge (1491), leaving the scrollbar in the 12-point gap right of the summary card. Content does not move: `--summary-inset` keeps the column at the same x (384 at 1500px, 293 at 1000px).
+
+`ConversationLayout` takes the composer as a `footer` prop, measures it with a ResizeObserver, and publishes `--composer-height`. The composer floats at the bottom of the region with a background gradient above it, the transcript's `padding-bottom` clears it, and the aside's bottom stops at its top. This puts messages under the chatbox (as asked) instead of ending the scroller above it.
+
+Replaced the "…" button under the composer with a context-usage ring beside the model name. `StatusFooter` became `ContextIndicator` + `YieldBanner` (`session-status.tsx`): the ring fills with context used and shifts from accent to warning to destructive at 70% and 90%, the tooltip carries `used / window · pct`, and clicking it opens the session details (connection, tokens, cost, attached clients, yield, daemon version) that previously hid behind the dots.
+
+Verified `tsc --noEmit`, `pnpm --filter mew-web-ui exec vitest run` (272 tests, new `context-indicator` suite), `pnpm --filter mew-web-ui build`, and Playwright screenshots of the real UI at 1500px and 1000px plus a zoomed ring check at 21/78/97/unknown. Not verified: Electron's own window and classic (non-overlay) scrollbars on Windows/Linux, where the bar takes layout width.
+
+### 2026-11-22: Todos in the overview, follow-scroll, and a jump-to-latest control
+
+`TodoPanel` was exported but imported nowhere, so the agent's plan never reached the UI. Its content now lives as a Todos section in the conversation overview beside Changes, with a `done/total` count, per-status icons (no emoji), two-line clamped rows, and a `+N more` cap. `todo-panel.tsx` is deleted rather than left as a second renderer.
+
+Follow-scrolling was not working: the surface set `anchorTo`/`followOnAppend`, which only react to appended rows, while streaming grows an existing row. `lib/use-follow-scroll.ts` now owns it — it tracks the distance from the bottom, re-pins after each content change only while the reader is already there, re-pins once more on the next frame so late measurement cannot win, and pins instantly on session switch. Both surfaces use it, replacing `ChatSurface`'s private `autoScroll` ref.
+
+Scrolled away from the bottom, `ScrollToLatest` floats above the composer: a circular chevron whose motion lives on the arrow rather than the button (an animated button box is unclickable for both Playwright and careful humans — that is how the first version failed).
+
+Verified `tsc --noEmit`, 275 vitest tests (three new overview-todos cases), `pnpm --filter mew-web-ui build`, plus browser probes: in a real layout, appending while pinned keeps distance 0 and appending while scrolled away leaves the reader where they were (660 → 744 with no scroll), and in the app the control appears at distance 106 and returns to distance 0 when clicked. Screenshots confirm the overview Todos section and the control sitting clear of the composer's fade.
+
+### 2026-11-22: History loading without losing the reader's place
+
+Loading an older page used to sit in a fixed strip above the transcript (stealing its height) and then yank the view, because prepending rows looked like new content to the follow logic. Three fixes:
+
+`useFollowScroll` gained `holdPosition()`: before requesting history it records the top visible row and its viewport offset, and after the prepend it shifts `scrollTop` by exactly that row's movement. Verified in a real layout — prepending six rows grew content by 504px, `scrollTop` moved 504px, the anchor row moved 0px. Anchoring keys on `data-turn-key` (the turn's first message id), not an index, because prepends shift every index.
+
+The strip is gone: `LoadEarlier` floats over the transcript like the jump control, showing "Load earlier messages" near the top and a skeleton card (three pulsing bars, `aria-live`) while the page is in flight. Reaching the top also auto-loads, but only when the list is actually scrollable, so a short transcript cannot chain-load the whole session.
+
+Found while measuring the composer: the virtualized row wrapper carried `data-index={turn.messageIndex}`, but `virtualizer.measureElement` reads `data-index` to attribute row heights — message indices are not item indices, so heights were recorded against the wrong rows and the list's total height drifted (~260px of phantom space at the end). Rows now carry `data-index` (item), `data-message-index` (minimap navigation) and `data-turn-key` (scroll anchoring).
+
+Also: `--composer-height` now feeds the follow dependencies through a `ComposerHeightContext`, and clearance is `3rem`. Measured before the fix — growing the composer to five lines left the transcript 120px away from its new bottom, with the newest lines behind the box; after, `scrollTop` tracks it and the last row ends 52px above the composer.
+
+Verified: 277 vitest tests (new `load-earlier` suite), `tsc --noEmit`, UI build, and browser probes for the bottom clearance (content ends at 733px, padding starts there, composer at 785), composer growth, and the prepend hold. Not verified: Electron's own window, and the prepend hold during an actively streaming turn.
+
+### 2026-11-22: Keep pulling history until a page is worth looking at
+
+A page of history is 24 messages, and most of them are tool results, which render nothing — one page often added zero visible pixels, so a session opened with the same tiny tail and "nothing loaded". Two rules now:
+
+- opening a session fills the viewport: while the transcript is shorter than the window and history remains, another page is requested.
+- a page that adds less than 480px of visible material triggers another request, so one gesture or one open keeps going until something shows up. Measured: cursor 125 → 29 and height 2426 → 14639 from a single scroll gesture, and the row at the top of the viewport is identical before and after.
+
+The in-flight flag is cleared by an effect that runs after the decision effect, so the follow-on request waits for `loadingCursor` to clear instead of reading it stale — that was why only one page ever arrived.
+
+Prepend compensation also moved from a per-row anchor to a scroll-height delta. The row anchor failed once the anchor was virtualized out of the DOM, leaving the reader at the top and re-triggering the load; height delta needs no mounted rows. Proven in a controlled page first: prepending six rows grew content by 504px, `scrollTop` moved 504px, anchor moved 0px.
+
+Verified: 277 vitest tests, `tsc --noEmit`, UI build, and app probes for page accumulation and the top-of-viewport anchor. Not verified: the pixel-exact anchor during a prepend inside the app (the honest check was confounded by one 8000px turn spanning the viewport) — that rests on the controlled-page proof.
+
+### 2026-11-22: Composer clearance survives session switches and growth
+
+The transcript's bottom clearance came from a `ResizeObserver` created in a mount effect. The composer subtree remounts on a session switch, which left that observer watching a detached node, so `--composer-height` froze at whatever the first session measured and later composer growth could not move the padding. It is now a callback ref that re-observes whenever the node changes.
+
+Measurement also switched from `contentRect.height` to `borderBoxSize.blockSize`: the footer's own padding is occupied space, and skipping it left the clearance 8px short. Clearance is now a constant 60px measured across four states — fresh load, after history load, after a session switch, and with the composer grown to four extra lines (`--composer-height` 118 → 194, padding 166 → 242).
+
+Verified: `tsc --noEmit`, 277 vitest tests, UI build, and app probes for those four states. Not reproduced: the reported "clearance only on first load" on the user's own screen — every state I can drive here clears correctly, so the remaining report needs the exact action that loses it.
+
+### 2026-11-22: Overview todos show open work first, then the newest finished
+
+A session accumulates every plan it ever wrote, so the overview listed the first four items forever — old finished work burying what was still running. `lib/todo-view.ts` now ranks rows: open items in plan order first, then finished ones newest-first, capped at five, with `+N earlier` for the rest and an `N open · M done` header instead of a bare `done/total`.
+
+Not changed: the todo list itself still grows for the life of a session, because clearing it is the agent's call (`todo_delete`), not the view's. A "clear finished" control would need a daemon action.
+
+Verified: 282 tests (new `todo-view` suite covering ordering, the cap, and that open work is never dropped for finished work), `tsc --noEmit`, UI build, and a screenshot of the panel on a session whose plan is fully complete.
+
+### 2026-11-22: Python cells stay folded, and thinking traces close themselves
+
+A Python cell used to open itself while running and fold when it finished, because the collapsed row said only "Python" until the nested call events arrived. The row now reads the source: `lib/python-calls.ts` extracts `tools.<name>(...)` and its first path-like argument (skipping matches inside string literals, so a message that mentions `tools.read()` is not a call), giving `Python grep desktop-electron, read AGENTS.md` before anything runs. With that, the cell never auto-opens — it is a script, not a live log, so it stays folded in every state; other tools still show their output while running or on failure.
+
+Finished thinking traces now disappear on their own. While a turn runs, the work log renders only reasoning that is still arriving; the rest is dropped from view and comes back when the line is opened by hand. When the turn settles, the whole work log folds into `Worked for …` as before.
+
+Not added: the toggle for that behaviour. There is no general preferences surface in the web UI (only theme prefs), so a real option would need one first — say the word and it is a small store plus a switch in Settings.
+
+Verified: 290 tests (new `python-calls` suite, plus a folded-cell case and a hidden-trace case), `tsc --noEmit`, UI build.
+
+
+
+
+
+
+
+
+
+### 2026-11-22: Add Electron install recipe
+
+Added `just desktop-electron-install` to build and install the Electron bundle at `/Applications/mew.app`, with a running-app guard and staged replacement. Verified recipe discovery, the dry run, and replacement and running-app behavior using temporary bundles.
+
+### 2026-11-22: Scope live work to its turn
+
+Kept completed turns collapsed while another turn runs a tool. Verified the new regression test, the turn tests, all 278 web UI tests, and TypeScript. The screenshot's overlapping transcript remains unconfirmed in the running installed build.
+
+### 2026-11-22: Preserve upward transcript scrolling
+
+Stopped following the latest message as soon as the reader wheels upward, and preserve scrolling made while an older page loads. Verified both regressions, the related turn and load-earlier tests, and TypeScript. The updated behavior has not yet been verified in a rebuilt Electron app.
+
+### 2026-11-22: The composer shares the chat column's gutters
+
+The transcript column and the composer were centred in different boxes. The transcript sat inside the chat region minus a `--summary-inset` right padding, while the composer spanned the full region, so with the summary pinned the chat ran up to 128px left of the box you type into. Both now take their horizontal gutters from one class, `.mew-conversation-gutters`, which keeps their centre line identical; the composer's own `px-4 sm:px-6` moved into that class.
+
+The inset itself is now conditional. It only buys anything while the pinned summary panel would overlap the column, so it is set only below `SUMMARY_INTRUDES_WIDTH` (46rem column + 2 × (16rem panel + 24px gap) = 1296px of chat region); on a wider pane the chat stays centred instead of being pushed off centre by a panel that is not in its way.
+
+Verified in Chromium through the bridge with a fake-provider daemon: at region widths 1534, 1234, 1134, 1034, 934, 834, and 734 the transcript and composer columns shared a centre exactly, the inset was `0px` above the threshold and `16rem` below it, and the column kept at least 71px clear of the panel. 292 web UI tests, new inset and gutter assertions included, plus `tsc --noEmit` and the UI build.
+
+### 2026-11-22: Keep selected provider for shared catalog models
+
+When the selected provider offers a model, model resolution now retains it instead of adopting another provider from the catalog's deduplicated entry. Verified 66 provider tests and reproduced new-session creation with the local configuration in an isolated daemon: the old binary failed on the missing OpenCode Zen credential, while the rebuilt binary created an OpenCode Go session.
+
+### 2026-11-22: Verify and install current Electron work
+
+Updated session-store test fixtures for the new turn-index request and verified `just test-js` plus the daemon, protocol and session Rust suites with temporary state. Built and installed the Electron release bundle, verified its signature and packaged binary, and confirmed the restarted daemon answered a protocol ping. The scrolling and transcript appearance still need a live visual check.
+
+### 2026-11-22: Add collapsed thinking previews
+
+Thinking traces now have a collapsed disclosure with their first nonempty line, and remain accessible after thinking ends while a turn is still running. Verified the turn and message tests, including streaming-to-finished expansion, and TypeScript.
+
+### 2026-11-22: Session titles, not summaries, fill the title slot
+
+Persisted titles never reached clients. `ListSessions` carried `summary` and `first_message` but not `custom_title`, and titles otherwise only arrived as `SessionTitleChanged` broadcasts, so a restarted or newly opened frontend showed the AI summary (or the first prompt) wherever the title belongs until something renamed the session. `SessionInfo` now carries `title`, the daemon fills it from the persisted `custom_title`, and every frontend seeds its title map from the list snapshot.
+
+The title chain also stopped treating the summary as a title: the TUI terminal title, TUI sidebar and session pickers, the native desktop conversation list, the web rail, header and command palette, and the mobile session list now resolve title, then first prompt, never the summary. The summary keeps its own slot as a secondary line.
+
+Verified `mew-protocol`, `mew-client-core`, `mew-ui-model`, `mew-daemon --lib`, `mew-mobile-core` and the full `mew-tui` suite (golden frames regenerated: the status footer now shows the persisted title), 296 web UI tests, the web-client node tests, `tsc --noEmit`, the rebuilt `mew-web-client/dist`, and clippy on the touched crates with the tree's existing `nonminimal_bool` lints allowed. `cargo fmt --check` still flags pre-existing hunks in `mew-daemon/src/request_tests.rs`; `cargo check -p mew-desktop` cannot run here because the pinned gpui needs a toolchain where `std::hint::cold_path` is stable.
+
+### 2026-11-22: Animate thinking disclosures
+
+Animated the thinking trace opening and closing using the existing motion timing and reduced-motion rules. The collapsed preview now disappears while the full trace is open. Verified the turn and message tests and TypeScript.
+
+### 2026-11-22: Full access bypasses the workspace-access prompt
+
+`Agent::ensure_workspace_path` asks for approval before a path-based tool touches a path outside `workspace.roots`, and it read no permission mode at all — so "Full access" (Dangerous) still popped the workspace-access prompt in every client, while the permission engine's own tiers (deny rules, bash decomposition, workspace-escape for shell paths) all short-circuit in that mode. It now returns early when the mode is Dangerous. Permissive and Auto still ask: like the secret-file guard, this tier warns about paths the user did not authorize rather than gating the tool itself. Subagent children share the parent's engine, so they inherit the bypass.
+
+Verified `cargo test -p mew --bin mew workspace`: the new `dangerous_mode_bypasses_the_workspace_access_prompt` asks once and fails without the fix, passes with it, and the four existing workspace cases (including the Standard-mode counterpart that must still prompt) pass.
+
+### 2026-11-22: Remove nested markdown code block spacing
+
+Render markdown fences through the preformatted-block handler so Shiki's pre is the only pre element. Excluded the code frame from prose typography and removed the inner Shiki margin, padding, and background. Verified highlighted and streaming fences, all 298 web UI tests, TypeScript, and browser layout for a Rust example.
+
+## 2026-11-21
+
+- Improved the Electron workspace file and changes views with Pierre's code and tree components and more compact controls. Open files persist across conversations and restarts, and selecting a changed file opens it in Files.
+- Scoped workspace replies to their sessions, added actionable preview and status errors, and restored workspace watching after reconnects. Verified with Electron, React and client tests, daemon integration tests, and protocol tests.
+
+## 2026-11-21
+
+- Documented the patched Homebrew Zig toolchain for Ghostty builds with Xcode 26.4 and later. Verified the Ghostty build and full workspace clippy with a fresh Zig cache.
+
+## 2026-11-21
+
+- Fixed workspace status scoping, rename and conflict parsing, Review loading and error states, and retryable directory failures. Preserve simultaneous directory replies and coalesce filesystem refresh bursts. Verified with Electron, UI/client tests, daemon and protocol tests, and workspace clippy.
+- Sustained workspace changes still cause repeated full untracked-file scans; the UI avoids rebuilding an unchanged tree but the watcher and Git scan remain a scaling concern.
+
+## 2026-11-21
+
+- Added a dedicated Changes workspace with a file tree and selected-file diff, including staged and unstaged changes. Files remains a separate browser. Selected diffs use scoped snapshots and bounded Git commands. Verified in Electron, UI and client tests, daemon and protocol tests, diff tests, and workspace clippy. The workspace watcher scaling concern above remains open.
+
+### 2026-11-22: Integrate Pierre workspace views
+
+Integrated the Pierre file tree, file viewer and changes workspace with the current uncommitted desktop and markdown work. Verified 339 web UI tests, the web client and Electron unit suites, production UI build, and the daemon, protocol and diff Rust suites with isolated state. The production bundle reports larger chunks from Pierre.
+
+### 2026-11-22: Tighten chat code blocks
+
+Reduced code-block margins, removed the separate header band, and tightened code padding and type size. Verified the markdown, code-block and highlighting tests, TypeScript, and a browser rendering of the reported Rust example.
+
+### 2026-11-22: Compact notification sidebar rows
+
+Moved the workspace name beside the title in the notifications view, removed the visible age and folder icon there, and allowed summaries to wrap to two lines while retaining status and attention. Verified the sidebar and attention tests, TypeScript, and a browser rendering of the notification row.
+
+### 2026-11-22: Electron browser tabs attach again
+
+Every browser tab in the Electron app opened a blank white pane. The IPC host returned a partition, the UI mounted a `<webview>`, and no guest process was ever created, so nothing reported an error.
+
+`will-attach-webview` rejected the attachment because `browser.cjs` compared the guest's `params.src` against the permit's raw `initialUrl`. `<webview src>` is a reflected URL attribute, so Electron serializes it before the event: a tab for `https://google.com` arrives as `https://google.com/` and never matched. Pages now store the serialized form through a new `canonicalUrl` in `policy.cjs`, which also keeps the bind-time reload check from firing on every attach.
+
+Verified with a new real-guest case in `tests/browser-renderer.js` (a URL whose only path is `/`) that failed with "Browser guest did not attach." before the change and passes after, the new `canonicalUrl` unit test, and all 32 Electron app unit tests plus the real-Electron security suite. The installed app still needs `just desktop-electron-install` to pick this up.
+
+### 2026-11-22: Keep notification project names visible
+
+Gave the project name space before truncating the chat title, and allowed unusually long project names to wrap. Verified the sidebar tests, TypeScript, and browser layout for both a short project name beside a long title and a long project name.
+
+### 2026-11-22: Fade notification text and reveal row actions
+
+Replaced notification title and summary ellipses with trailing fades, and hide the project label while the row actions are shown on hover or focus. Verified sidebar and attention tests, TypeScript, and browser checks for truncation, project width, and hover visibility.
+
+### 2026-11-22: Sync automation settings
+
+Persisted auto-title and auto-summary in the daemon, synchronized connected clients, and migrated existing browser preferences when no daemon preference exists. Verified daemon restart and migration tests, protocol and mobile automation tests, web client tests, settings UI tests, and TypeScript.
+
+### 2026-11-22: Separate light/dark themes and add 16 built-in themes
+
+Added explicit `mode` metadata to `mew-web-ui/src/themes.json` and `ThemeDef`, exposed `lightTheme`/`darkTheme` and `setLightTheme`/`setDarkTheme` on `ThemeContextValue`, and filtered the Appearance theme picker in `settings.tsx` by `themeMode` (Light only in `light`, Dark only in `dark`, separate Light and Dark sections in `system` without switching out of `system` on selection). Added 16 themes (8 light, 8 dark: Gruvbox Light, GitHub Light, Solarized Light/Dark, Nord Snow, Everforest Light/Dark, Alabaster, Paperback, Sakura, Vespers, Kanagawa, One Dark, Monokai Pro, Night Owl, Oxocarbon) to `theme_manifest.json` and `themes.json`, regenerated `generated-themes.css`, `theme_generated.rs`, and `theme.tmTheme`, and added `theme-codegen` to `justfile`'s `desktop-electron-dev`/`desktop-electron-build`. Verified with `theme_codegen --check`, `mew-tui` `theme::tests` (22 passed), `vitest` `theme.test.tsx` (2 passed), `tsc --noEmit`, and `vite build`.
+
+### 2026-11-22: Superseded navigations stay out of the browser error banner
+
+With the attach bug fixed, opening a tab still showed a red `(-3) loading 'https://www.google.com/'` banner over a page that had loaded correctly. `BrowserHost.bind()` emitted every `loadURL` rejection as a `browser-error` host event; the UI passed that event straight to `setBrowserError`. Electron rejects the in-flight webview navigation as `ERR_ABORTED` when bind loads the requested URL, so the banner described a navigation Chromium had already replaced.
+
+Both loadURL rejection paths now share an `isAbort` predicate that ignores `ERR_ABORTED`/`errno -3` while leaving real navigation failures visible. Verified with a unit test for both error shapes, the new real-guest attach case, and the Electron security suite. The installed Electron app needs one more reinstall before the banner change is live.
+### 2026-11-22: Update agent-browser Chrome and pin Electron 45.4.1
+
+`agent-browser install` replaced the local Chrome for Testing 151 with 158.0.8127.36, and `agent-browser doctor` now passes. That browser is separate from the Chromium embedded in the Electron shell, which is what the browser tool attaches to over CDP.
+
+Pinned `apps/mew-electron` to Electron 45.4.1 in `package.json`, the packaging guard and its tests; `pnpm install` updated only the Electron lock entries. pnpm did not download the runtime, so `electron/install.js` was run directly. Electron 45.4.1 ships Chromium 156.0.8078.100, which includes Chromium patches but is still below stable Chrome 158, so agent-browser's CVE warning remains and the pinned-input Electron test still fails on that warning. No stable Electron release ships Chrome 158.
+
+Verified 32 Electron unit tests (one pre-existing packaging skip), the real-guest security suite on the new runtime, and a successful `just desktop-electron-build` producing `target/release/bundle/macos/mew-electron.app`. The installed app has not been replaced.
+### 2026-11-22: Render attached images instead of base64 text
+
+Session history turned every `file` part into a text part formatted as `[file: ${url}]`, so an attached screenshot appeared as tens of thousands of base64 characters in the transcript. The web store now keeps file parts structured, and `PartList` renders raster data URLs as bounded inline images. SVG, remote URLs and other files get a compact name/mime chip, so no attachment URL is dumped as prose.
+
+Verified with three new tests (inline image, labelled non-image, history mapping), all 347 web UI tests, `tsc --noEmit`, and a rebuilt release Electron bundle. The installed app has not been replaced.
+### 2026-11-22: Switch chat markdown to Pierre Words
+
+`MarkdownBody` now uses `@pierre/words/react` instead of `react-markdown` and `remark-gfm`, with the `@pierre/words/highlights` plugin backed by Pierre Light/Dark themes combined through CSS `light-dark()`. Words owns fenced code blocks in chat; copy is enabled, download and line numbers are off. Tool results and file views still use the existing shiki `CodeBlock`, and the TUI renderer is unchanged.
+
+`isAnimating` follows the existing `highlight` flag so streaming text still gets incomplete-markdown repair. Verified with updated markdown tests, all 347 web UI tests, `tsc --noEmit`, a Vite preview screenshot of prose, highlighting, and copy controls, and a rebuilt release Electron bundle. The installed app has not been replaced.
+
+### 2026-11-22: Collapse running tool cards and add optional tool description
+
+Added an optional `description` string property to `Bash::schema`, `WebFetch::schema`, and `PythonTool::schema` without making it required. Updated `ToolCallCard` in `mew-web-ui` so running tool calls remain collapsed by default (keeping failed non-python calls expanded) and display `input.description` (or `input.reason` fallback) as the collapsed row summary when present while preserving the underlying detail in `title` and expanded input. Verified with `cargo test -p mew-tools --locked` (134 passed, 1 ignored; 8 integration tests passed), `cargo test -p mew-agent --locked python_schema_includes_optional_description` (1 passed), `vitest run src/__tests__/tool-call-card.test.tsx` (19 passed), and `tsc --noEmit`.
+
+### 2026-11-22: Add StoryLite component workbench in mew-web-ui
+
+Added `@storylite/storylite` and `@storylite/renderer-react` (`1.6.1`) to `mew-web-ui` with `.storylite/config.ts`, `"stories"` / `"stories:build"` scripts in `package.json`, and starter stories for `ToolCallCard` and `TurnItem`. Verified `pnpm --filter mew-web-ui run stories:build`, `tsc --noEmit`, and `vitest run src/__tests__/tool-call-card.test.tsx src/__tests__/turn-item.test.tsx` (27 passed).
+
+### 2026-11-22: Add StoryLite stories for core chat and layout components
+
+Added StoryLite stories for `MarkdownBody`, `CodeBlock`, `AskUserForm`, `PermissionToast`, `GoalCard`, and `ConnectionBanner` in `mew-web-ui/src/components/*.stories.tsx`. Verified `pnpm --filter mew-web-ui run stories:build` and `pnpm --filter mew-web-ui exec tsc --noEmit`.
+
+### 2026-11-22: Expand StoryLite coverage across chat transcript and session controls
+
+Added StoryLite stories for `MessageItem`, `LoadEarlier`, `JumpToLatest`, `CopyButton`, `ContextIndicator`, and `ConversationSummary` in `mew-web-ui/src/components/*.stories.tsx`. Verified `pnpm --filter mew-web-ui run stories:build` and `pnpm --filter mew-web-ui exec tsc --noEmit`.
+
+### 2026-11-22: Add Pixel Cat Lottie mascot for live turn activity and StoryLite
+
+Extracted the `dark-ink` and `light-ink` Lottie JSON clips and `neutral.png` assets from the Pixel Cat Harness Statuses and Playful Idles packs into `mew-web-ui/public/mascot/{status,idle}/`. Added `lottie-web`, `Mascot`, and `mascotStateForActivity` in `mew-web-ui/src/components/mascot.tsx` (with ink switching, `prefers-reduced-motion` neutral fallback, and lazy dynamic import so jsdom tests stay clean), wired `Mascot` into `TurnItem`'s live working indicator, and added StoryLite stories (`HarnessStatuses`, `PlayfulIdles`, `Neutral`) plus unit tests in `mew-web-ui/src/__tests__/mascot.test.tsx`. Verified `vitest run src/__tests__/mascot.test.tsx src/__tests__/turn-item.test.tsx` (12 passed), `pnpm --filter mew-web-ui run stories:build`, and `pnpm --filter mew-web-ui exec tsc --noEmit`.
+
+### 2026-11-22: Keep latest TurnItem working between multi-round tool calls
+
+`message_end` sets `completedAt` on each assistant round, so between a finished tool call and the next provider round `TurnItem` briefly treated the turn as completed (`Worked for ...`). Passed `isLast` from `ChatSurface` and `VirtualChatSurface`, kept `TurnItem` in `live` state while `confirmedSessionId` is `running` in `availableSessions`, and kept `endedAt` advancing with `now` while live. Verified with a new regression test in `mew-web-ui/src/__tests__/turn-item.test.tsx` (9 passed) and `tsc --noEmit`.
+
+### 2026-11-22: Make ToolCallCard manually expanded only
+
+Removed `showLiveDetail` auto-expansion on failed tool calls in `ToolCallCard` (`mew-web-ui/src/components/tool-call-card.tsx`), so all tool cards stay collapsed by default until opened by the user. Updated `mew-web-ui/src/__tests__/tool-call-card.test.tsx` (19 passed) and verified `tsc --noEmit`.
+
+### 2026-11-22: Collapse step runs in live TurnItem while keeping intermediate prose visible
+
+Added `groupWorkSegments` in `mew-web-ui/src/lib/turns.ts` and `WorkStepGroup` in `mew-web-ui/src/components/turn-item.tsx` so live turns keep intermediate prose visible inline while folding consecutive thoughts and tool calls into collapsed-by-default step-group disclosures (`N thoughts · N tool calls`), and collapse everything into `"Worked for ..."` once the turn finishes with a final answer. Added `DemoLiveStreaming` and `DemoFinalSettled` stories in `mew-web-ui/src/components/turn-item.stories.tsx`. Verified `vitest run src/__tests__/turn-item.test.tsx src/__tests__/turns.test.ts` (19 passed), `pnpm --filter mew-web-ui run stories:build`, and `tsc --noEmit`.
+
+### 2026-11-22: Show active step on live Working header and hide standalone thought groups
+
+Updated `TurnItem` (`mew-web-ui/src/components/turn-item.tsx`) to display the running tool's `description` (or fallback label / `"Thinking"`) inline on the `"Working for ..."` header and hide standalone thought-only `WorkStepGroup` rows when multiple live segments exist. Updated `mew-web-ui/src/__tests__/turn-item.test.tsx` (10 passed) and verified `tsc --noEmit` and `stories:build`.
+
+### 2026-11-22: Remove interpuncts from TurnItem and WorkStepGroup
+
+Replaced `·` separators in `TurnItem` and `WorkStepGroup` (`mew-web-ui/src/components/turn-item.tsx`) with `, ` between thought/tool counts and spacing (`gap-2`) around active step and failure labels. Updated `mew-web-ui/src/__tests__/turn-item.test.tsx` (10 passed) and verified `tsc --noEmit`.
+
+### 2026-11-22: Add status alternate Lottie clips and alternating playback
+
+Extracted the 8 `-alt` harness status Lottie JSONs (`thinking-alt`, `busy-alt`, `waiting-alt`, `retrying-alt`, `starting-alt`, `working-alt`, `searching-alt`, `queued-alt`) for `dark-ink` and `light-ink` into `mew-web-ui/public/mascot/status/`. Updated `Mascot` (`mew-web-ui/src/components/mascot.tsx`) to alternate between base and `-alt` clips on `complete` when `loop` and `alternate` are enabled, and added `StatusAlternates` in `mew-web-ui/src/components/mascot.stories.tsx`. Verified `vitest run src/__tests__/mascot.test.tsx` (4 passed), `tsc --noEmit`, and `stories:build`.
+
+### 2026-11-22: Move live TurnItem status row to bottom with entrance/exit transitions
+
+Added `.motion-presence` grid-row height + opacity/translate transitions in `mew-web-ui/src/index.css` (with `@starting-style` entrance and `prefers-reduced-motion` support) and `usePresence` in `mew-web-ui/src/components/turn-item.tsx`. Moved the live `[Mascot size={32}] Working for ...` row to the bottom of `TurnItem` while keeping the settled `"Worked for ..."` disclosure at the top, animating both rows' entrance and exit. Verified `vitest run src/__tests__/turn-item.test.tsx` (10 passed), `tsc --noEmit`, and `stories:build`.
+
+### 2026-11-23: Store and serve attachments via daemon blob store and wire protocol
+
+Added `BlobStore` (`crates/mew-session/src/blobs.rs`) storing content-addressed attachments under `<session_dir>/blobs/<sha256>` with `mew-blob://` URL helpers and a 10 MB cap. Added `upload_attachment` / `get_attachment` wire commands in `crates/mew-protocol/src/lib.rs`, daemon handlers and `data:`-URL ingestion in `crates/mew-daemon/src/lib.rs`, outbound provider blob resolution in `crates/mew-agent/src/turn.rs`, and `uploadAttachment` / `getAttachment` on `MewClient` (`mew-web-client/src/index.ts`). Updated `FilePartView` in `mew-web-ui/src/components/message-item.tsx` to fetch `mew-blob://` attachments on demand into cached object URLs with lazy raster thumbnails, a lightbox preview dialog, and non-image downloads (leaving `mew-mobile-core` / iOS UI wiring stubbed). Verified `cargo test -p mew-session -p mew-protocol --locked`, `cargo check -p mew-daemon -p mew-agent -p mew-mobile-core --locked`, `@mew/web-client` build + `tsc --noEmit`, `vitest run src/__tests__/message-item.test.tsx` (12 passed), and `mew-web-ui` `tsc --noEmit`.
+
+### 2026-11-23: Store generated plans in default data_dir/plans/<words>/<plan_name>.md
+
+Updated `WritePlan::generated_in` and `EditPlan::generated_in` (`crates/mew-tools/src/tools/{write_plan,edit_plan}.rs`) so generated plans create a `<word>-<word>` subdirectory and write `<plan_name>.md` inside it (from optional `name` param, first `# ` heading, or `plan.md`), with `EditPlan` validating the two-component `<word>-<word>/<name>.md` path and rejecting symlinks. Wired `mew_config::data_dir().join("plans")` in `crates/mew/src/setup/agent.rs` when `plan_path` is the default, and included that `plans` directory in `agent.workspace_roots` (and `PermissionEngine`'s roots when `workspace.roots` is non-empty). Verified with `cargo test -p mew-tools --locked write_plan` (6 passed), `edit_plan` (7 passed), `cargo check -p mew --locked`, and `cargo test -p mew --locked setup::`.
+
+### 2026-11-23: Scope session plans and workspace root to data_dir/plans/<word>-<word>
+
+Added `session_plan_dir` in `crates/mew-tools/src/tools/write_plan.rs` to pick one `<word>-<word>` directory per session under `<data_dir>/plans/`, deduplicating repeated filenames inside it (`-2.md`, `-3.md`, ...) and tightening `EditPlan` to direct `.md` children of that folder. Wired `crates/mew/src/setup/agent.rs` (`build_tools_with_plans_dir`, `build_permission_engine_with_extra_roots`) and `crates/mew/src/setup/agent_cwd_tests.rs` so each session adds only its own `.../plans/<word>-<word>` folder (not the shared `plans/` root) to `agent.workspace_roots` and `PermissionEngine`. Verified `cargo test -p mew-tools --locked write_plan` (6 passed) and `edit_plan` (7 passed); compiling `mew` remains blocked by the unrelated WIP `AcceptedEnriched` change in `crates/mew-agent/src/agent.rs`.
+### 2026-11-22: Clickable file chips in chat prose
+
+File-looking inline code in assistant messages (`` `package.json` ``, `` `src/mascot.tsx` ``) is rewritten outside fenced code into Words' inline `file` island and rendered as a compact chip with an extension-colored icon. Clicking it dispatches `mew:open-file`; `RightRail` reuses its existing `openChangedFile` handler to add or select the Files workbench tab, ignoring events from other sessions. Ordinary inline code and code fences are untouched.
+
+Verified with the new `file-refs` transform tests, a chip click/event test, a right-rail event test (including session filtering), all 358 web UI tests, `tsc --noEmit`, a browser screenshot of the icons, and a rebuilt release Electron bundle. The installed app has not been replaced.
+### 2026-11-22: Align file chips with surrounding prose
+
+File chips inherited their baseline from the leading svg, so their labels sat about three pixels above adjacent inline code and made the line look uneven. `vertical-align: text-top` on the chip aligns its text centre with inline code; measured in Chromium before and after, and confirmed with a magnified screenshot. All 358 web UI tests, `tsc --noEmit`, and a rebuilt release Electron bundle pass. The installed app has not been replaced.
+### 2026-11-22: Refine file chips further
+
+The `text-top` alignment from the previous entry overshot by about 4px against surrounding prose, and the chip background and monospace label made file references look heavier than the rest of the message. Chips now inherit the prose font and size, have no background until hover or focus, and use `vertical-align: -2px`. Measured in Chromium against a plain-text neighbour after the font change: -0.4px versus prose centre, with the hover background confirmed once the theme token was present.
+
+All 358 web UI tests, `tsc --noEmit`, and a rebuilt release Electron bundle pass. The installed app has not been replaced.
+### 2026-11-22: Only real files become clickable chips
+
+Checked the click path in Chromium and in the right-rail test: a chip click dispatches `mew:open-file` and the rail opens or selects a Files tab. The missing piece was validation. Any backticked path became a chip, so invented paths opened dead tabs. `fileExists` now asks the daemon for a one-byte preview per session/path, caches the result, and resolves false on preview errors, missing client, or a five-second timeout. `FileRef` renders ordinary inline code until the probe succeeds; only then does the chip mount.
+
+Verified with an updated markdown test covering both a successful and a failed preview, all 358 web UI tests, `tsc --noEmit`, and a rebuilt release Electron bundle. The installed app has not been replaced.
+### 2026-11-22: Reveal the workbench and guide file references
+
+A chip click opened or selected the Files tab but left a collapsed workbench collapsed. The `mew:open-file` handler now calls `onOpenChange(true)` before adding the tab, using a ref so the listener stays stable across renders. The right-rail test now starts closed and asserts both actions.
+
+Added `system_prompts/_file_reference_guidance` to the base prompt: inline code that names an existing file becomes a clickable chip, so only confirmed paths should use that form and hypothetical filenames should be plain text. Updated the exact transclusion list assertion in `mew-prompts`. Verified 64 prompt tests, 358 web UI tests, `tsc --noEmit`, and a rebuilt release Electron bundle. The installed app has not been replaced.
+### 2026-11-22: Emit file references as explicit directives
+
+Following Codex's model-emitted file citations, the web client no longer guesses chips from backticked inline code. The system prompt now asks the model to emit `:file[label]{path="relative/path"}` only for paths confirmed this session, and Words' existing inline island renders those directives. The backtick heuristic and its helper are removed. The one-byte preview check still gates whether a directive becomes a clickable chip.
+
+The TUI cannot render Words islands, so `mew-ui-model` replaces file directives with their label in native transcripts. Verified with a new `mew-ui-model` test, 64 prompt tests, 14 UI-model tests, 356 web UI tests, `tsc --noEmit`, and a rebuilt release Electron bundle. The installed app has not been replaced.
+### 2026-11-22: Accept absolute paths in file directives
+
+A live file chip using `/Users/natalie/code/mew/PLAN.md` stayed plain text. CDP confirmed the Words island parsed correctly and the daemon replied `absolute paths not allowed`; the same file preview succeeds with `PLAN.md`. `workspacePath` now strips the session cwd prefix from absolute paths before the preview probe and before opening the file, and the prompt requires paths relative to the session working directory. Verified with normalization tests, an integration test that probes an absolute path as relative, 359 web UI tests, `tsc --noEmit`, 64 prompt tests, and a rebuilt release bundle. The installed app has not been replaced.
+### 2026-11-22: Allow absolute workspace paths in file tools
+
+The daemon's file service rejected every absolute path before its containment check, so a file directive using `/Users/natalie/code/mew/PLAN.md` stayed plain text even though the path was inside the session cwd. `resolve_scoped` now treats absolute paths like any other target: canonicalize it, then require it to stay under the canonical cwd. Paths outside the workspace still fail, including symlinks that resolve outside it. The client-side cwd rewrite is removed, and the prompt now says both relative and absolute in-workspace paths are accepted.
+
+Verified with a new daemon boundary test, all 129 daemon lib tests, 357 web UI tests, 64 prompt tests, `tsc --noEmit`, and a rebuilt release bundle. The installed app has not been replaced.
+### 2026-11-22: Hide empty summary sections
+
+The summary popover always showed Todos, Subagents, Background processes and Sources, including placeholder text like "No todos" and "No background processes". Each is now an aria-labelled region rendered only when it has content; Changes and the workspace name remain. Two workspace-frame tests that used the empty placeholder rows as navigation now seed the relevant activity instead. Verified 358 web UI tests, `tsc --noEmit`, and a rebuilt release Electron bundle. The installed app has not been replaced.
+### 2026-11-22: Hover label for the summary trigger
+
+The summary button had only a native `title`. It now uses the existing Radix tooltip primitive to show "Open summary" or "Close summary" on hover, without a shortcut hint because none is bound. The focus handoff that moves focus into the pinned summary matched `button[title="Summary"]`; it now matches the trigger's aria-label so resizing into the wide layout keeps focus in the summary. Verified with a hover tooltip test, 359 web UI tests, `tsc --noEmit`, and a rebuilt release Electron bundle. The installed app has not been replaced.
+### 2026-11-22: Settings as a centered popover
+
+Extracted the settings page body into `SettingsPanel`, leaving `/settings` as a thin route wrapper for deep links. A new `SettingsDialog` listens for `mew:open-settings` and renders that panel in a centered Radix dialog; the rail Settings button and command palette now dispatch that event. "Manage sessions" dispatches `mew:close-settings` before navigating so the dialog does not linger over the sessions page.
+
+Verified with a dialog open/close test, 360 web UI tests, `tsc --noEmit`, a browser screenshot of the centered panel, and a rebuilt release Electron bundle. The installed app has not been replaced.
+### 2026-11-22: Declutter appearance settings
+
+The appearance section used full-size font cards with descriptions and sample sentences, separate rows for theme search and appearance mode, and tall theme cards with descriptions. Font choices are now compact name-plus-`Aa` rows with descriptions on hover, theme search and mode share one row, theme cards keep only the preview and name with the description on hover, and category labels use normal case. The settings nav label is no longer uppercase either. Verified with browser screenshots of both the font and theme parts of the panel, 361 web UI tests, `tsc --noEmit`, and a rebuilt release Electron bundle. The installed app has not been replaced.
+### 2026-11-22: Even spacing in the theme list
+
+The compact appearance pass left uneven gaps around the theme section: 8px after the search row, 12px under group headers, and 24px between light and dark themes. Category groups now use 12px, group headers 8px of bottom padding, and the light/dark split 20px, giving a consistent 20px rhythm. Verified with a browser screenshot, 361 web UI tests, `tsc --noEmit`, and a rebuilt release Electron bundle. The installed app has not been replaced.
+### 2026-11-22: Drop appearance section icons
+
+Removed the sparkle from the Theme heading and the sun/moon from the Light themes and Dark themes headings to match the plainer typographic treatment. Verified 361 web UI tests, `tsc --noEmit`, and a rebuilt release Electron bundle. The installed app has not been replaced.
+### 2026-11-22: Web @-mention parity, phase one
+
+Moved @-mention parsing and resolution from `mew-tui`/`mew` into `mew-agent::mentions`, where the daemon can use it too. The daemon now resolves mentions on both prompt paths: the visible transcript gets short `<... added to context>` notices and the agent receives inlined skill/subagent content, model markers, and file attachments. `AcceptedEnriched` and `PromptTurn::Parts` carry that split without rewriting persisted history. TUI dispatch now sends raw text instead of resolving locally.
+
+Added `ListMentionCandidates`/`MentionCandidates` to the protocol and client library, plus a grouped inline picker in the web composer for files, skills, models, subagents, and personas. Files currently come from the root directory listing, git status, and flagged files; recursive browsing is still out of scope.
+
+Verified Rust suites for protocol/daemon/client-core/agent/TUI/mew, `just test-js`, `tsc`, `just arch-check`, targeted clippy (with pre-existing unrelated lints allowed), and a rebuilt Electron bundle. The installed app has not been replaced.
+### 2026-11-22: Merge local turns into the minimap index
+
+The live minimap did have 33 ticks from the daemon's session index, so loading was working. The real gap was that a non-empty `sessionIndex` fully replaced locally derived turns, leaving a just-started turn off the ruler until the daemon reindexed. The minimap now appends local turns whose ids the index has not seen, and `session-ready` clears the previous session's index before requesting the new one so stale ticks cannot linger. Added a merge regression test; 365 web UI tests, `tsc`, and a rebuilt Electron bundle pass. A stale `sessionRunning` field in an input-area test also had to be removed for `tsc -b` to build. The installed app has not been replaced.
+### 2026-11-23: Server-side queued messages and steer interruptions for web and iOS
+
+Moved follow-up queueing and steer interruptions onto `mew-daemon` so connected web and iOS clients stay synchronized through `ServerMessage::SessionQueueChanged`. Added `QueueMode`, `QueuedMessageWire`, and `ClientMessage::{EnqueueMessage, UpdateQueuedMessage, RemoveQueuedMessage}` in `mew-protocol` and `mew-web-client`; backed each session with a FIFO `queued_messages` queue that replays on attach, broadcasts across attached clients, promotes items to live `enqueue_guidance` steer interruptions on demand, and drains sequentially after clean non-cancelled turns in `finish_prompt_turn` / `drain_queued_turns`.
+
+Wired `mew-web-ui` (`useSessionStore`, `InputArea`, and the session route) with a live queued-messages strip (promote to Steer or remove), non-blocking input while busy, and Steer/Queue composer controls; wired `mew-mobile-core` (`MobileQueuedMessage`, `CoreEvent::QueueChanged`, `enqueue_message`, `promote_queued_message`, `remove_queued_message`) and `mew-ios` (`AppStore`, `ChatView`, `ChatBar`, `MockMobileCore`, and `AppStoreEventHandlingTests`).
+
+Verified `mew-protocol` (139 tests), `mew-daemon` `prompt_tests` (6 tests) and `tests::remote_` (5 tests), `mew-mobile-core` `test_translate_session_queue_changed`, `@mew/web-client` `tsc` build and 68 client tests, `mew-web-ui` `tsc --noEmit`, and 66 `input-area`/`store` tests. Full socket/iroh tests in `mew-daemon` and `mew-mobile-core` require un-sandboxed loopback/netmon access, one pre-existing `conversation-minimap` web test fails on text matching, and `just ios-core && just ios-test` remain to regenerate UniFFI Swift bindings and run the Xcode test suite.
+### 2026-11-23: Remove control yielding for shared multi-client sessions
+
+Removed `YieldControl`, `ControlYielded`, `/yield`, `control_yielded_by`, `yieldedByClient`, and `YieldBanner` across `mew-protocol`, `mew-daemon`, `mew-client-core`, `mew-ui-model`, `mew-tui`, `mew`, `mew-mobile-core`, `apps/mew-desktop`, `mew-web-client`, `mew-web-ui`, and docs (`slash-commands.md`, `handover.md`, `dev-protocol.md`). Multiple clients already attach to the same daemon `Session` simultaneously and coordinate turns through `turn_lock`, broadcast updates, and `queued_messages`, while client presence indicators remain intact.
+
+Verified `mew-protocol` (139 tests), `mew-client-core` (73 tests across unit, `activity_parity`, `child_questions`, and `job_output`), `mew-ui-model` (14 tests), `mew-tui` `--lib` (324 tests), `mew-daemon` `prompt_tests` (6 tests) and `tests::remote_` (5 tests), `mew-mobile-core` `test_translate_session_queue_changed`, `cargo check` for `mew-daemon`, `mew-mobile-core`, `mew-tui`, and `mew`, `@mew/web-client` `tsc` and 68 client tests, `mew-web-ui` `tsc --noEmit`, and 70 web tests (`store`, `context-indicator`, `input-area`). `mew` binary test compilation (`agent_cwd_tests.rs:472`), `mew-tui --test surfaces` (`solarized-light`), and `mew-desktop` (missing `CEF_PATH` and Metal Toolchain in sandbox) did not pass.
+### 2026-11-23: Fix stuck working indicators after SSE stream errors and slow first tokens
+
+When an overloaded provider truncated an SSE stream with `SSE stream ended before the response was complete` or returned a `/compact` slash result, `useSessionStore` (`onProviderEvent` `error`, `onError`, and `onSlashResult`) left open assistant messages without `completedAt` and never cleared streaming flags on `idle`. Meanwhile `TurnItem` computed `live` without checking `isLast`, leaving historical turns stuck on `Working for ...`, and returned early without `liveRow` on a running user prompt awaiting its first assistant message.
+
+Added `finalizeOpenAssistantMessages` and `withAppendedError` in `mew-web-ui/src/stores/session.ts` to stamp `completedAt` and clear streaming flags on errors, slash results, and `idle` activity updates; updated `TurnItem` to gate `live` on `isLast` (default `true`), freeze `endedAt` when settled, and render `liveRow` on an active prompt before the first assistant chunk arrives. Verified `tsc --noEmit` and 61 tests across `store.test.ts` (48) and `turn-item.test.tsx` (13).
+### 2026-11-23: Compaction, retry, steered, cancelled status signals and web subagent identicons
+
+Added explicit lifecycle status signals from `mew-agent` and `mew-daemon` through `mew-protocol`, `@mew/web-client`, and `mew-web-ui`, along with deterministic subagent identicons:
+
+- `mew-agent` (`lib.rs`, `turn.rs`): added `AgentEvent::Compacting { active, removed }` emitted before and after auto/forced context compaction.
+- `mew-protocol` & `mew-daemon`: added `ServerMessage::SessionCompacting`, `steered: bool` on `UserMessage`, and `cancelled: bool` on `SessionActivityChanged`; replayed active compaction on attach, wrapped `/compact`, translated `AgentEvent::Compacting`, marked live steer guidance and `Steer` queue promotions as `steered: true`, and propagated cancellation state into idle broadcasts.
+- `@mew/web-client` & `mew-web-ui`: added `session-compacting`, `steered`, and `cancelled` store bindings, tracked `retryWait` and `compacting` on `useSessionStore`, excluded compaction parts from `splitTurnParts` work folds, rendered collapsible `Context compacted` dividers, `Steered` user pills, `Cancelled` turn indicators, and prioritized live status labels on `TurnItem`. Added deterministic 5×5 FNV-1a `<SubagentIdenticon />` wired into `ConversationSummary`, `RightRail`, `SubagentConversation`, and child `AskUserForm`.
+
+Verified `mew-protocol` (140 tests), `mew-client-core` (73 tests), `mew-daemon` `--lib prompt_tests` (6 tests), `cargo check` across `mew-agent`, `mew-daemon`, `mew-mobile-core`, `mew-tui`, and `mew`, `@mew/web-client` `tsc` and 69 tests, and `mew-web-ui` `tsc --noEmit` and 101 Vitest tests (`turns`, `store`, `subagent-identicon`, `input-area`, `turn-item`). `mew-mobile-core` and `mew-ios` UI parity + identicons remain next.
+### 2026-11-23: iOS status lifecycle, compaction/steered/cancelled UI, and subagent identicons
+
+Extended `mew-mobile-core` and `mew-ios` with lifecycle signals, compaction dividers, and deterministic subagent identicons matching the web client:
+
+- `mew-mobile-core` (`events.rs`, `state.rs`, `lib.rs`): added `cancelled: bool` to `CoreEvent::SessionActivityChanged`, added `CoreEvent::{SessionCompacting, RetryWait}`, added `PartKind::Compaction`, `ChatMessage.{steered, cancelled}`, and `MessagePart.compaction_removed`, preserved `Part::Compaction` markers plus `steered`/`cancelled`/live compactions across canonical syncs, and added state/translation tests.
+- `mew-ios`: created `SubagentIdenticonView.swift` (same 32-bit FNV-1a 5×5 horizontally symmetric grid and 8-color palette as web) registered in `mew.xcodeproj/project.pbxproj` and wired into `ActivityView` and `AskUserSheet`; updated `AppStore`, `ConversationActivity`, `MessageItemView`, `ChatView`, and `MewTests` for `isCompacting`, `retryWait`, prioritized live status banners, collapsible `Context compacted` dividers (with `/compact` slash-result deduplication), `Steered` user badges, and `Cancelled` turn indicators.
+
+Verified `cargo check -p mew-mobile-core --locked`, non-network unit tests (`state::tests` 10, `test_translate` 6, `registry::tests` 5), and `swiftc -parse` across the 9 edited/created Swift files. Socket/iroh tests in `mew-mobile-core` (`netmon`), `just ios-core` (to regenerate UniFFI Swift bindings/XCFramework), and `just ios-test` remain to be run outside the sandbox.
+### 2026-11-23: Anchored LLM compaction summaries, deterministic artifact trails, and live propagation
+
+Implemented Phase 1 of LLM-generated context compaction summaries across `mew-agent`, `mew-protocol`, `mew-daemon`, `@mew/web-client`, `mew-web-ui`, `mew-mobile-core`, and `mew-ios`:
+
+- `crates/mew-agent/src/compaction.rs`, `agent.rs`, `turn.rs`, `lib.rs`: added `compaction_summarize_with_llm` (default `true` on `Agent::new`), anchored iterative summarization via a tool-free `Request` with structured headings (`Goal & Constraints`, `Key Decisions & Rejected Approaches`, `Progress`, `Active Errors / Blockers`, `Next Steps`), opening-task head retention, `/compact [instructions]` support via `compact_context_with_instructions`, 45s provider stream timeout with `CARRIED_USER_MESSAGES` fallback on error/empty output, and deterministic extraction of `<modified-files>`, `<read-files>` (carrying over prior compactions and excluding modified paths), and up to 5 `<failed-commands>`. Updated `render_compaction_summary` to inject any non-empty compaction summary and propagated `summary: Option<String>` on `AgentEvent::Compacting`. Opted 6 `CapturingProvider` request-count/CARRIED_USER_MESSAGES tests out of LLM summarization and added unit tests covering LLM summary + artifact blocks and fallback behavior.
+- Protocol & clients (`mew-protocol`, `mew-daemon`, `@mew/web-client`, `mew-web-ui`, `mew-mobile-core`, `mew-ios`): added optional `summary` to `ServerMessage::SessionCompacting`, parsed `/compact [instructions]` arguments in `mew-daemon`, and propagated live summaries into `useSessionStore`, `mew-mobile-core` `CoreEvent::SessionCompacting` / `live_compactions`, and `mew-ios` `AppStore` compaction dividers.
+
+Verified `mew-agent` `--lib -- compact` (21 tests), `mew-protocol` (140 tests), `mew-client-core` (73 tests), `mew-daemon` `--lib prompt_tests` (6 tests), `mew-mobile-core` `--lib` `state::tests` (10) & `test_translate` (6), `cargo check` across `mew-agent`, `mew-daemon`, `mew-mobile-core`, `mew-tui`, and `mew`, `@mew/web-client` `tsc` & 69 tests, `mew-web-ui` `tsc --noEmit` & 68 tests (`store`, `turn-item`), and `swiftc -parse` on `AppStore.swift` & `AppStoreEventHandlingTests.swift`. Full `mew-agent --lib` (non-compaction filter), socket/iroh tests, `just ios-core`, and `just ios-test` were not run in this pass.
+
+### 2026-11-23: Cache-safe stale tool pruning and ingestion-time output offloading (Phase 2)
+
+Implemented Phase 2 context efficiency controls in `crates/mew-agent` without busting warm provider prompt caches:
+
+- `crates/mew-agent/src/prompt_cache.rs` & `agent.rs`: exposed `PromptCacheState::is_prefix_mutation_safe` and `Agent::is_prefix_mutation_safe` delegating to `refresh_is_safe` (true only before the first request, after `set_model_info` resets cache state, or once `PromptCacheRetention::Known` expires; false when warm with `Unknown` retention), plus `Agent::session_dir`.
+- `crates/mew-agent/src/compaction.rs`, `turn.rs`: added `prune_stale_tool_outputs` (replaces completed `ToolCall` outputs `> 2_000` bytes older than `compaction_start(messages, keep_turns)` with compact stubs while keeping `ToolCall`/`ToolResult` parts and `call_id` pairing intact) and `sync_pruned_tool_outputs` (syncs pruned stubs into in-memory `self.messages` so subsequent warm turns stay byte-stable without rewriting JSONL history). Wired pre-turn pruning in `turn_loop` only when `!force && self.is_prefix_mutation_safe()`, plus threshold-boundary pruning inside `fit_request_context_with_events` right before full auto-compaction so requests brought back within threshold skip full LLM summarization.
+- `crates/mew-agent/src/compaction.rs`, `tools.rs`: added `offload_large_tool_output` in `execute_tool_calls` before tool outputs enter history — spills outputs `> 48_000` bytes to `<session_dir>/tool_outputs/<sanitized_call_id>.txt` and returns a 6,000-char head + 4,000-char tail preview with file path (or head/tail truncation fallback when no session directory is attached or writing fails).
+
+Verified after formatting (`cargo fmt -p mew-agent -- --check`) with `RUSTC_WRAPPER=""`: `mew-agent --lib` `-- compact` (24 passed), `-- prompt_cache` (2 passed), `-- prune` (3 passed), `-- offload` (2 passed), `cargo clippy -p mew-agent --locked --all-targets -- -D warnings`, and `cargo check -p mew-agent -p mew-daemon -p mew --locked`. Note: running the unfiltered `mew-agent --lib` suite inside the sandbox failed on 11 pre-existing Seatbelt/process-group isolation tests (`sandbox_apply: Operation not permitted`) prior to the formatting pass (337 passed).
+
+### 2026-11-23: Move compaction prompt and handoff prefix to mew-prompts VFS
+
+Moved the checkpoint compaction prompt and handoff wrapper out of inline strings in `mew-agent` into `crates/mew-prompts/resources/compact/` (`prompt.md` and `summary_prefix.md`), blending Codex's domain-agnostic `CONTEXT CHECKPOINT COMPACTION` / `summary_prefix.md` handoff framing with Mew's anchored `Previous Summary` merge rules, fixed markdown headings, artifact-tag rules, and `Focus Instructions`. Exposed `mew_prompts::compact::{prompt, summary_prefix}`, registered `"compact_prompt"` and `"compact_summary_prefix"` in `mew_prompts::inventory`, and wired them into `build_summarization_request` and `render_compaction_summary` (leaving `CARRIED_USER_MESSAGES` fallback summaries unwrapped and persisted `CompactionPart.summary` unchanged for UI display). Verified with `cargo fmt`, `cargo test -p mew-prompts --locked` (66 passed), `cargo test -p mew-agent --locked --lib -- compact` (24 passed), and `cargo clippy -p mew-prompts -p mew-agent --locked --all-targets -- -D warnings`.
+
+### 2026-11-24: Fall back to last_message when session summary is missing
+
+Added `last_message?: string` to `SessionInfo` (`mew-protocol` and `@mew/web-client`), populated it in `mew-daemon` from active `agent.messages` and from the tail of idle `session.jsonl` logs (latest non-empty, non-synthetic user or assistant text, truncated to 160 chars), and wired `mew-web-ui` (`session-rail.tsx`, `session-search.ts`) to fall back to `last_message` when no session summary exists (skipping it when it matches the title). Verified with `cargo test -p mew-protocol`, `cargo test -p mew-daemon listing_`, `cargo clippy -p mew-protocol -p mew-daemon --all-targets -- -D warnings`, `just build-js`, `@mew/web-client` and `mew-web-ui` `tsc --noEmit`, and `mew-web-ui` vitest (49 files, 407 tests).
+
+### 2026-11-24: Marquee overflowing session titles and use sentence case for generated titles
+
+Added `SessionTitle` in `mew-web-ui/src/components/session-rail.tsx` to pan overflowing conversation titles back and forth on row hover at a constant `40px/s` linear speed (with `700ms` end pauses, a `200ms` ease-out reset on mouse leave, and `prefers-reduced-motion: reduce` support), and updated `generate_session_title` in `crates/mew-daemon/src/lib.rs` to request sentence case. Verified with `cargo test -p mew-daemon automatic_title_and_summary_use_auxiliary_provider_requests`, `cargo clippy -p mew-daemon --all-targets -- -D warnings`, `mew-web-ui` `tsc --noEmit`, and `mew-web-ui` vitest (50 files, 410 tests).
+
+### 2026-11-24: Animate composer steer/queue/stop action buttons
+
+Added `.mew-action-slot` in `mew-web-ui/src/index.css` and `ActionSlot` in `mew-web-ui/src/components/input-area.tsx` so the composer's `Steer`, `Queue`/`Send`, and `Cancel` buttons smoothly expand and collapse horizontally (`grid-template-columns: 0fr -> 1fr`, `scale`, `opacity`, and `margin-left` using `--motion-menu` and `--ease-out`, with a `35ms` stagger on `Steer` and `prefers-reduced-motion: reduce` support) while keeping `aria-hidden` and `tabIndex` clean during exit. Verified with `mew-web-ui` `tsc --noEmit` and vitest (50 files, 411 tests).
+
+### 2026-11-24: Fix Antigravity provider hijack, premature UI reset on new chat failure, and replay text cap
+
+- `crates/mew/src/setup/providers.rs` (`resolve_model`): resolved explicit `known_provider/model` prefixes directly regardless of `provider_flag` and restricted `Catalog::lookup` bare-model reassignment to the built-in `"opencode-zen"` fallback default (removing the duplicated `/` branch and preventing `antigravity`, custom, or non-catalog providers from being hijacked by colliding `models.dev` IDs such as `opencode/gemini-4-hydrogen`). Expanded `resolve_model_keeps_antigravity_when_catalog_lists_same_model_id`.
+- `crates/mew-agent` (`turn.rs`, `tests.rs`): normalized `replay_improved` comparison across differing `(size, limit)` scales via `u128` cross-multiplication so compaction is accepted when switching from text-dominated (`384 KiB`) to frame-dominated (`16 MiB`) limits, and checked `fallback_provider.replay_budget(&fallback_request)` before calling `stream()` on fallback models. Added `replay_budget_compaction_accepts_ratio_improvement_across_limit_scales` and `fallback_provider_respects_replay_budget_before_streaming`.
+- `crates/mew-agy` (`transcript.rs`, `provider.rs`, `tests/provider.rs`, `tests/transcript.rs`): exported `MAX_REPLAY_TEXT` (`384 * 1024`), added `build_prompt_blocks` and a borrowing `PromptFrame` serializer to avoid cloning `prompt` blocks, added a text-only `CountWriter` fast path in `replay_budget`, enforced `text_size <= MAX_REPLAY_TEXT` with `tracing` size diagnostics in `AgyProvider::stream` (covering `stream` and `stream_auxiliary`), and skipped duplicate `ReplayPart::Compaction` emission when a compaction message already carries a synthetic prefix-rendered `Part::Text` summary. Added `stream_and_auxiliary_reject_oversized_text_replay_before_spawning` and `prefixed_rendered_compaction_summary_is_not_duplicated`.
+- `mew-web-ui`: unified `transientSessionState()` / `resetSessionState()` / `clearSession()` in `stores/session.ts` so `session-ready` applies resets atomically in one `setState` without wiping daemon-global `projects`, removed the leftover premature `store.reset()` in `lib/hooks.ts` (`useSessionAttach`), updated `routes/settings.sessions.tsx` to use `clearSession()`, and extracted `createAndOpenSession` (`lib/session-actions.ts`) across `session-rail.tsx`, `chat-surface.tsx`, `command-palette.tsx`, and `routes/__root.tsx` using `sonner` toast error reporting and stale-location guards. Updated/added tests in `store.test.ts`, `session-rail-collapse.test.tsx`, and `session-reconnect.test.tsx`.
+
+Verified `cargo test --locked -p mew-agent --lib -- replay_budget` (7 passed), `cargo test --locked -p mew-agent --lib -- fallback` (7 passed), `cargo test --locked -p mew-agy -- --test-threads=1` (all 9 binaries passed: 22 unit + 80 integration passed, 6 ignored), `cargo clippy --locked -p mew-agy -p mew-agent -- -D warnings`, `cargo fmt --check -p mew-agy`, `rustfmt --edition 2021 --check` on `crates/mew/src/setup/providers.rs` and `crates/mew-agent/src/tests.rs`, `cargo build --locked -p mew`, and `mew-web-ui` `tsc --noEmit`, vitest (50 files, 413 tests), and `tsc -b && vite build`. Note: `cargo test --locked -p mew --bin mew` remains blocked by an unrelated pre-existing compile error at `crates/mew/src/setup/agent_cwd_tests.rs:472`.
+
+### 2026-11-24: Track active session running state directly in web UI store
+
+Added `sessionActivity` to `useSessionStore` (`mew-web-ui/src/stores/session.ts`) so `onSessionActivityChanged` updates the active session's live running/idle state directly even before `listSessions()` populates `availableSessions`, `setAvailableSessions` preserves live `sessionActivity` on the confirmed session entry instead of letting an in-flight `listSessions()` response overwrite `"running"` with `"idle"`, and `sessionActivity` clears to `null` on `close`, `resetSessionState()`, and `clearSession()`. Switched `InputArea` (`mew-web-ui/src/components/input-area.tsx`) onto `selectSessionRunning`, and added coverage in `store.test.ts` and `turn-item.test.tsx`. Verified with `mew-web-ui` `tsc --noEmit`, vitest (50 files, 415 tests), and `tsc -b && vite build`.
+
+### 2026-11-24: Abandon pending AGY tool handoffs when an agent turn exits
+
+Fixed `Error: provider stream: provider error: AGY continuation contract or history changed` on follow-up prompts sent immediately after `max turns exceeded (100 turns)` (or other early `turn_loop` exits / fallback switches following a `Finish::ToolUse` handoff). Added `Provider::abandon_pending` (`mew-provider`), implemented `Session::abandon` and `AgyProvider::abandon_pending` (`mew-agy`) to cancel the handoff watcher and shut down the idle subprocess without cancelling the caller's turn token or relaxing `continuation` integrity checks, forwarded `abandon_pending` in `LocalAgyProvider`, `Router`/`Routed`, and `AgyFixtureProvider`, and invoked it at the end of `Agent::run_loop` (keeping `ev_tx` open until cleanup completes) and on fallback provider swaps in `Agent::turn_loop`. Added `abandon_pending_cleans_up_handoff_without_cancelling_turn_token_and_allows_next_turn` (`crates/mew-agy/tests/provider.rs`), `test_router_and_routed_forward_abandon_pending_to_all_tiers` (`crates/mew-provider-router/src/lib.rs`), and `max_turns_after_tool_handoff_abandons_pending_provider_state_for_next_turn` (`crates/mew-agent/src/tests.rs`).
+
+Verified `cargo test --locked -p mew-agy -- --test-threads=1` (103 passed across 9 binaries, 6 ignored), `cargo test --locked -p mew-provider-router` (8 passed), `cargo test --locked -p mew-agent --lib` targeted tests (`max_turns_after_tool_handoff_abandons_pending_provider_state_for_next_turn`, `cancelling_a_child_provider_request_does_not_cancel_a_sibling_turn`, `provider_cancellation_closes_workspace_approval_without_writing`: 3 passed), `cargo clippy --locked -p mew-provider -p mew-agy -p mew-provider-router -p mew-agent -- -D warnings`, `cargo fmt --check -p mew-provider -p mew-agy -p mew-provider-router`, `rustfmt --edition 2021 --check crates/mew-agent/src/tests.rs crates/mew/src/setup/antigravity.rs`, and `cargo build --locked -p mew`. Note: `rustfmt --check` on `crates/mew-agent/src/turn.rs` only reports pre-existing unedited formatting at line 1273.

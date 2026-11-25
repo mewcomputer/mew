@@ -24,17 +24,14 @@ the daemon stores conversation history and policy and runs each turn.
 - **From iOS or a remote profile**: connect to the daemon started with
   `mew daemon --remote` and select the session from the combined chat list.
 
-Run `/yield` in the TUI to emit an advisory `YieldControl` signal so other
-attached clients can take over cleanly.
-
 ## Attach and detach lifecycle
 
 - `AttachSession` loads an idle session from disk if needed; the daemon sends
   `SessionReady`, `SessionHistoryPage`, and any pending permission or question
   requests to the new client.
-- `ClientAttached`, `ClientDetached`, and `ControlYielded` (`YieldControl`)
-  broadcast client presence to attached peers while `turn_lock` serializes
-  turns across all clients.
+- `ClientAttached` and `ClientDetached` broadcast client presence to attached
+  peers while `turn_lock` and `queued_messages` coordinate turns across all
+  clients.
 - Detached sessions with active turns or background shell jobs continue
   running; the daemon checks detached sessions every 30 seconds and unloads
   idle runtimes while leaving transcripts on disk.

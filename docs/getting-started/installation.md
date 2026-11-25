@@ -96,6 +96,15 @@ This prints the installed version. If the shell cannot find `mew`, add your
 install directory (`~/.local/bin`, `~/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`,
 or `/usr/local/bin`) to `PATH`.
 
+### Shell completions
+
+Generate completion scripts for `bash`, `zsh`, `fish`, `elvish`, or
+`powershell` (omitting the shell detects `$SHELL`):
+
+```sh
+mew completions zsh > ~/.zfunc/_mew
+```
+
 ## What gets installed
 
 | Binary | Source crate | Purpose |
