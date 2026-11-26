@@ -46,6 +46,53 @@ impl Agent {
         }
     }
 
+    pub(crate) async fn emit_artifact_part(
+        &self,
+        artifact: mew_tools::tools::present_artifact::ArtifactMetadata,
+        assistant_id: mew_message::MessageId,
+        assistant_msg: &mut Option<Message>,
+        ev_tx: &mpsc::Sender<AgentEvent>,
+    ) {
+        let mode = match artifact.mode {
+            mew_tools::tools::present_artifact::ArtifactModeWire::Inline => {
+                mew_message::ArtifactMode::Inline
+            }
+            mew_tools::tools::present_artifact::ArtifactModeWire::Panel => {
+                mew_message::ArtifactMode::Panel
+            }
+        };
+        let artifact_part_id = ulid::Ulid::new();
+        let artifact_part = Part::Artifact(mew_message::ArtifactPart {
+            base: PartBase {
+                id: artifact_part_id,
+                message_id: assistant_id,
+                session_id: self.session_id,
+            },
+            artifact_id: artifact.artifact_id,
+            title: artifact.title,
+            url: artifact.url,
+            mode,
+            height: artifact.height,
+            source_path: artifact.source_path,
+            version: artifact.version,
+        });
+        if let Some(ref mut msg) = assistant_msg {
+            msg.parts.push(artifact_part.clone());
+        }
+        let _ = ev_tx
+            .send(AgentEvent::Provider(
+                mew_provider::ProviderEvent::PartStart {
+                    part: artifact_part,
+                },
+            ))
+            .await;
+        let _ = ev_tx
+            .send(AgentEvent::Provider(mew_provider::ProviderEvent::PartEnd {
+                part_id: artifact_part_id,
+            }))
+            .await;
+    }
+
     /// Resolve the effective permission decision for a tool call.
     ///
     /// Runs the full permission pipeline: permission engine (including the
@@ -644,7 +691,10 @@ impl Agent {
                 }
             });
 
-            let flagged_files_path = self.flagged_files_path().await;
+            let session_dir = self.session_dir().await;
+            let flagged_files_path = session_dir
+                .as_ref()
+                .map(|dir| dir.join("flagged-files.json"));
             let ctx = ToolCtx::new(
                 std::sync::Arc::new(mew_tools::ToolCtxShared {
                     session_id: self.session_id,
@@ -655,6 +705,7 @@ impl Agent {
                     snapshot_store: self.snapshot_store.clone(),
                     browser_access: self.browser_access.clone(),
                     supports_vision: self.supports_vision,
+                    session_dir,
                     flagged_files_path,
                     flagged_files: self.flagged_files.clone(),
                 }),
@@ -667,7 +718,10 @@ impl Agent {
             let tool_cwd = ctx.cwd.clone();
             if let Some(arg_path) = self.workspace_path_for_tool(&tc.tool_name, &input) {
                 let resolved = tool_cwd.join(&arg_path);
-                if let Err(msg) = self.ensure_workspace_path(&resolved, ev_tx).await {
+                if let Err(msg) = self
+                    .ensure_workspace_path(&tc.tool_name, &resolved, ev_tx)
+                    .await
+                {
                     let error_msg = msg.clone();
                     let error_state = ToolState::Error(ToolStateError {
                         input: input.clone(),
@@ -716,6 +770,7 @@ impl Agent {
             }
             tracing::info!(tool = %tc.tool_name, call_id = %call_id, input = %input, "executing tool");
             let mut nested_calls = Vec::new();
+            let mut nested_artifacts = Vec::new();
             let exec_result = if is_python {
                 self.execute_python_with_guard(
                     &ctx,
@@ -723,6 +778,7 @@ impl Agent {
                     ev_tx,
                     python_guard.expect("Python session checked out"),
                     &mut nested_calls,
+                    &mut nested_artifacts,
                 )
                 .await
             } else {
@@ -840,6 +896,25 @@ impl Agent {
                     success,
                 })
                 .await;
+            for artifact in nested_artifacts {
+                self.emit_artifact_part(artifact, assistant_id, assistant_msg, ev_tx)
+                    .await;
+            }
+            if success && tc.tool_name == "present_artifact" {
+                if let Some(raw) = output
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.get(mew_tools::tools::present_artifact::ARTIFACT_METADATA_KEY))
+                {
+                    if let Ok(artifact) = serde_json::from_value::<
+                        mew_tools::tools::present_artifact::ArtifactMetadata,
+                    >(raw.clone())
+                    {
+                        self.emit_artifact_part(artifact, assistant_id, assistant_msg, ev_tx)
+                            .await;
+                    }
+                }
+            }
             // If the tool produced a file delta, emit it so the daemon can
             // accumulate per-session change stats.
             if let Some(delta) = &output.file_delta {

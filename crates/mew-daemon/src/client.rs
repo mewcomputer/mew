@@ -390,6 +390,7 @@ impl DaemonClient {
     pub async fn new_session(&self) -> Result<()> {
         let msg = ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Tui,
         };
         let json = mew_protocol::encode_json(&msg)?;
@@ -527,6 +528,7 @@ impl DaemonClient {
     pub async fn new_session_in(&self, cwd: &str) -> Result<()> {
         let msg = ClientMessage::NewSession {
             cwd: Some(cwd.to_string()),
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Tui,
         };
         let json = mew_protocol::encode_json(&msg)?;
@@ -1073,6 +1075,7 @@ async fn translate_server_message(
         | ServerMessage::TerminalError { .. }
         | ServerMessage::AttachmentUploaded { .. }
         | ServerMessage::AttachmentData { .. }
+        | ServerMessage::ArtifactFile { .. }
         | ServerMessage::SessionQueueChanged { .. }
         | ServerMessage::SessionCompacting { .. } => {
             // Forward to the notification channel for the TUI's daemon
@@ -1358,7 +1361,7 @@ mod tests {
                     let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
                     accept_current_handshake(&mut ws).await;
                     ws.send(Message::Text(mew_protocol::encode_json(&ServerMessage::SessionReady {
-                        session_id: "active".into(), cwd: None, model: None, provider: None, permission_mode: None,
+                        session_id: "active".into(), cwd: None, scratch: false, model: None, provider: None, permission_mode: None,
                     }).unwrap())).await.unwrap();
                     if active_prompt {
                         assert!(matches!(ws.next().await.unwrap().unwrap(), Message::Text(text) if text.contains("prompt")));
@@ -1440,6 +1443,7 @@ mod tests {
                     ServerMessage::SessionReady {
                         session_id: "active".into(),
                         cwd: None,
+                        scratch: false,
                         model: None,
                         provider: None,
                         permission_mode: None,
@@ -1535,6 +1539,7 @@ mod tests {
                 let ready = ServerMessage::SessionReady {
                     session_id: "active".into(),
                     cwd: None,
+                    scratch: false,
                     provider: Some("codex".into()),
                     model: Some("test".into()),
                     permission_mode: None,
@@ -1622,6 +1627,7 @@ mod tests {
                 let ready = ServerMessage::SessionReady {
                     session_id: "active".into(),
                     cwd: None,
+                    scratch: false,
                     provider: None,
                     model: None,
                     permission_mode: None,

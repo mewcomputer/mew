@@ -51,6 +51,7 @@ struct BrowserRegistration {
 }
 
 mod activity;
+mod attachments;
 pub mod browser;
 #[cfg(test)]
 mod browser_tests;
@@ -83,8 +84,47 @@ pub struct AgentBuildParams {
     pub session_id: String,
     pub writer: mew_session::Writer,
     pub cwd: Option<std::path::PathBuf>,
+    pub scratch: bool,
     /// Complete saved runtime choices; None uses startup defaults for legacy sessions.
     pub policy: Option<mew_session::SessionPolicy>,
+    /// The daemon's live `[web_search]` settings. Evaluated per build so a
+    /// change applies to the next session created or resumed.
+    pub web_search: mew_config::WebSearchConfig,
+    /// Live router model-size tiers for this build.
+    pub router: mew_protocol::RouterInfo,
+}
+
+/// Summarize the configured router provider for frontends. Prefers a provider
+/// literally named `router`, matching `mew`'s `find_router_provider`.
+pub fn router_info_from_config(cfg: &mew_config::Config) -> mew_protocol::RouterInfo {
+    let chosen = cfg
+        .providers
+        .get("router")
+        .filter(|pc| pc.kind == "router")
+        .map(|pc| ("router".to_owned(), pc))
+        .or_else(|| {
+            cfg.providers
+                .iter()
+                .find(|(_, pc)| pc.kind == "router")
+                .map(|(id, pc)| (id.clone(), pc))
+        });
+    let Some((provider, pc)) = chosen else {
+        return mew_protocol::RouterInfo::default();
+    };
+    mew_protocol::RouterInfo {
+        provider,
+        tiers: [
+            ("nano", pc.nano.clone()),
+            ("micro", pc.micro_model().to_owned()),
+            ("deci", pc.deci_model().to_owned()),
+        ]
+        .into_iter()
+        .map(|(id, model)| mew_protocol::RouterTierInfo {
+            id: id.into(),
+            model,
+        })
+        .collect(),
+    }
 }
 
 /// Type alias for the agent-builder closure. The daemon calls this once
@@ -259,11 +299,16 @@ impl DaemonServer {
                 self.groups_store.clone(),
                 self.thinking_setter.clone(),
                 self.auto_summary_enabled.clone(),
-                store,
+                store.clone(),
                 secret_key,
                 allowlist_path,
                 remote::RemoteMode::Desktop,
             ));
+            let restore_store = store.clone();
+            let restore_controller = controller.clone();
+            tokio::spawn(async move {
+                remote::restore_auto_start(&restore_store, restore_controller.as_ref()).await;
+            });
             let _ = self.session_manager.remote_controller.set(controller);
         }
     }
@@ -340,7 +385,7 @@ impl DaemonServer {
             }
         }
         if let Some(controller) = session_manager.remote_controller.get() {
-            let _ = controller.set_enabled(false).await;
+            let _ = controller.stop().await;
         }
         Ok(())
     }
@@ -424,7 +469,7 @@ impl DaemonServer {
             }
         }
         if let Some(controller) = session_manager.remote_controller.get() {
-            let _ = controller.set_enabled(false).await;
+            let _ = controller.stop().await;
         }
         Ok(())
     }
@@ -482,6 +527,8 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
                 | ClientMessage::ResetSessionDefaults { .. }
                 | ClientMessage::RevokeDevice { .. }
                 | ClientMessage::SetRemoteAccess { .. }
+                | ClientMessage::SetWebSearchSettings { .. }
+                | ClientMessage::SetRouterTiers { .. }
                 | ClientMessage::CreatePairingInvite { .. }
                 | ClientMessage::SetAutoTitle { .. }
                 | ClientMessage::SetAutoSummary { .. }
@@ -537,6 +584,7 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
                 | ClientMessage::TerminalClose { .. }
                 | ClientMessage::UploadAttachment { .. }
                 | ClientMessage::GetAttachment { .. }
+                | ClientMessage::ReadArtifact { .. }
                 | ClientMessage::EnqueueMessage { .. }
                 | ClientMessage::UpdateQueuedMessage { .. }
                 | ClientMessage::RemoveQueuedMessage { .. }
@@ -567,6 +615,7 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
             | ClientMessage::ReadPromptReceipt { .. }
             | ClientMessage::WatchWorkspace { .. }
             | ClientMessage::GetAttachment { .. }
+            | ClientMessage::ReadArtifact { .. }
     );
     if observe {
         return true;
@@ -896,6 +945,32 @@ where
     .await
 }
 
+/// Whether a history page skips turn manifests, which are the token accounting
+/// trees for each turn. They dominate a page: on a 550-message session the
+/// newest 24 messages serialize to 1.58 MB with manifests and 25 KB without.
+/// Only the web UI renders the breakdown (`message-inspector.tsx`), so it is the
+/// one client that keeps receiving trees with its pages.
+fn history_omits_manifests(client_kind: ClientKind) -> bool {
+    matches!(client_kind, ClientKind::Mobile | ClientKind::Desktop)
+}
+
+/// Page size for a history request. The phone folds a turn into one row, so it
+/// asks for pages that cover more than a message or two of transcript.
+fn history_page_limit(client_kind: ClientKind) -> usize {
+    match client_kind {
+        ClientKind::Mobile => mew_protocol::MOBILE_HISTORY_PAGE_LIMIT,
+        _ => mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT,
+    }
+}
+
+fn drop_manifests(messages: &mut [mew_message::Message]) {
+    for message in messages {
+        if let Some(assistant) = message.assistant.as_mut() {
+            assistant.manifest = None;
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_websocket<S>(
     ws_stream: tokio_tungstenite::WebSocketStream<S>,
@@ -917,6 +992,9 @@ where
     let (client_tx, ClientFrames(mut client_rx)) =
         ClientSender::channel(connection_lifetime.clone());
     let mut attached_session: Option<Arc<Session>> = None;
+    // Client kind is fixed for a connection; remembering it keeps later history
+    // requests the same shape as the attach replay.
+    let mut attached_client_kind: Option<ClientKind> = None;
     let browser_owner = ulid::Ulid::new().to_string();
     let mut confirmed_desktop_sessions = std::collections::HashSet::new();
     let browser_pages = Arc::new(std::sync::Mutex::new(
@@ -1198,6 +1276,8 @@ where
                     | ClientMessage::ResetSessionDefaults { request_id }
                     | ClientMessage::RevokeDevice { request_id, .. }
                     | ClientMessage::SetRemoteAccess { request_id, .. }
+                    | ClientMessage::SetWebSearchSettings { request_id, .. }
+                    | ClientMessage::SetRouterTiers { request_id, .. }
                     | ClientMessage::CreatePairingInvite { request_id, .. } => {
                         reply(ServerMessage::DaemonSettingsFailed {
                             request_id: request_id.clone(),
@@ -1230,18 +1310,6 @@ where
                     }
                     _ => reply(ServerMessage::Error { message }),
                 }
-                continue;
-            }
-            if matches!(
-                &client_msg,
-                ClientMessage::NewSession { client_kind, .. }
-                | ClientMessage::NewSessionInGroup { client_kind, .. }
-                | ClientMessage::AttachSession { client_kind, .. }
-                    if *client_kind != ClientKind::Remote
-            ) {
-                reply(ServerMessage::Error {
-                    message: "remote connections must identify as client_kind=remote".into(),
-                });
                 continue;
             }
         } else if legacy_iroh
@@ -1281,16 +1349,34 @@ where
                     message: "remote authentication is only available over iroh".into(),
                 });
             }
-            ClientMessage::NewSession { cwd, client_kind }
+            ClientMessage::NewSession {
+                cwd,
+                scratch,
+                client_kind,
+            }
             | ClientMessage::NewSessionInGroup {
-                cwd, client_kind, ..
+                cwd,
+                scratch,
+                client_kind,
+                ..
             } => {
+                if scratch && cwd.is_some() {
+                    session_failure(
+                        mew_protocol::SessionOperation::Create,
+                        None,
+                        "cannot specify both cwd and scratch".into(),
+                    );
+                    continue;
+                }
                 // A web client may not know the host's filesystem cwd. Keep
                 // the session useful for workspace tools by binding it to the
-                // daemon's launch directory in that case.
-                let cwd = cwd
-                    .map(PathBuf::from)
-                    .or_else(|| std::env::current_dir().ok());
+                // daemon's launch directory in that case (unless `scratch: true`).
+                let cwd = if scratch {
+                    None
+                } else {
+                    cwd.map(PathBuf::from)
+                        .or_else(|| std::env::current_dir().ok())
+                };
                 // Validate cwd if provided: must exist and be a directory.
                 if let Some(ref cwd_str) = cwd {
                     if !cwd_str.exists() {
@@ -1320,7 +1406,7 @@ where
                         continue;
                     }
                 }
-                match session_manager.create(cwd.clone()).await {
+                match session_manager.create_with_mode(cwd.clone(), scratch).await {
                     Ok(session) => {
                         if let Some(group_id) = requested_group_id.as_deref() {
                             let group = group_id.to_owned();
@@ -1381,6 +1467,7 @@ where
                                 ServerMessage::SessionReady {
                                     session_id: session_id.clone(),
                                     cwd: cwd.map(|path| path.to_string_lossy().into_owned()),
+                                    scratch,
                                     model,
                                     provider,
                                     permission_mode,
@@ -1389,6 +1476,7 @@ where
                             .await;
                         client_id = Some(cid);
                         attached_session = Some(session.clone());
+                        attached_client_kind = Some(client_kind);
                         if client_kind == ClientKind::Desktop
                             && !legacy_iroh
                             && remote_scope.is_none()
@@ -1488,10 +1576,15 @@ where
                             let agent = session.agent.lock().await;
                             agent.active_thinking_variant().map(str::to_owned)
                         };
-                        let cwd = session_manager
-                            .session_cwd(&session_id)
-                            .await
-                            .map(|path| path.to_string_lossy().into_owned());
+                        let scratch = session.scratch;
+                        let cwd = if scratch {
+                            None
+                        } else {
+                            session_manager
+                                .session_cwd(&session_id)
+                                .await
+                                .map(|path| path.to_string_lossy().into_owned())
+                        };
                         // Register and queue history plus the in-flight prefix
                         // before the provider can publish another delta.
                         let provider_replay = session.provider_replay.lock().await;
@@ -1502,6 +1595,7 @@ where
                                 ServerMessage::SessionReady {
                                     session_id: session_id.clone(),
                                     cwd,
+                                    scratch,
                                     model,
                                     provider,
                                     permission_mode,
@@ -1511,6 +1605,7 @@ where
                         let existing_clients = session.client_presence_except(cid).await;
                         client_id = Some(cid);
                         attached_session = Some(session.clone());
+                        attached_client_kind = Some(client_kind);
                         if client_kind == ClientKind::Desktop
                             && !legacy_iroh
                             && remote_scope.is_none()
@@ -1561,9 +1656,12 @@ where
 
                         let initial_history = async {
                             let mut history = session.history().await?;
-                            let (messages, next_cursor) = history
-                                .page(usize::MAX, mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT)
+                            let (mut messages, next_cursor) = history
+                                .page(usize::MAX, history_page_limit(client_kind))
                                 .await?;
+                            if history_omits_manifests(client_kind) {
+                                drop_manifests(&mut messages);
+                            }
                             let already_in_history = provider_replay.present_in(&messages);
                             client_tx
                                 .send_history_page(ServerMessage::SessionHistoryPage {
@@ -1743,12 +1841,11 @@ where
                 }
                 let page = async {
                     let mut history = session.history().await?;
-                    history
-                        .page(before, limit.min(mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT))
-                        .await
+                    let cap = history_page_limit(attached_client_kind.unwrap_or(ClientKind::Tui));
+                    history.page(before, limit.min(cap)).await
                 }
                 .await;
-                let (messages, next_cursor) = match page {
+                let (mut messages, next_cursor) = match page {
                     Ok(page) => page,
                     Err(error) => {
                         reply(ServerMessage::Error {
@@ -1757,6 +1854,9 @@ where
                         continue;
                     }
                 };
+                if attached_client_kind.is_some_and(history_omits_manifests) {
+                    drop_manifests(&mut messages);
+                }
                 let _ = client_tx
                     .send_history_page(ServerMessage::SessionHistoryPage {
                         session_id,
@@ -2074,6 +2174,8 @@ where
             | ClientMessage::ResetSessionDefaults { .. }
             | ClientMessage::RevokeDevice { .. }
             | ClientMessage::SetRemoteAccess { .. }
+            | ClientMessage::SetWebSearchSettings { .. }
+            | ClientMessage::SetRouterTiers { .. }
             | ClientMessage::CreatePairingInvite { .. }) => {
                 observes_daemon_settings = true;
                 let request_id = match &message {
@@ -2082,6 +2184,8 @@ where
                     | ClientMessage::ResetSessionDefaults { request_id }
                     | ClientMessage::RevokeDevice { request_id, .. }
                     | ClientMessage::SetRemoteAccess { request_id, .. }
+                    | ClientMessage::SetWebSearchSettings { request_id, .. }
+                    | ClientMessage::SetRouterTiers { request_id, .. }
                     | ClientMessage::CreatePairingInvite { request_id, .. } => request_id.clone(),
                     _ => unreachable!(),
                 };
@@ -2122,8 +2226,42 @@ where
                                 .context(
                                     "iroh remote access is unavailable (build mew with --features iroh)",
                                 )?;
+                            controller.set_auto_start(enabled).await?;
                             controller.set_enabled(enabled).await?;
                             session_manager.settings_changed.send_replace(());
+                        }
+                        ClientMessage::SetWebSearchSettings {
+                            enabled, provider, ..
+                        } => {
+                            let provider = match provider.as_deref() {
+                                None => None,
+                                Some(id) => Some(
+                                    mew_tools::tools::web_search::SearchProvider::parse_id(id)
+                                        .ok_or_else(|| {
+                                            anyhow::anyhow!("unknown web search provider `{id}`")
+                                        })?,
+                                ),
+                            };
+                            session_manager
+                                .apply_web_search_settings(enabled, provider, authorization.clone())
+                                .await?;
+                        }
+                        ClientMessage::SetRouterTiers {
+                            provider,
+                            nano,
+                            micro,
+                            deci,
+                            ..
+                        } => {
+                            session_manager
+                                .apply_router_tiers(
+                                    provider.clone(),
+                                    nano.clone(),
+                                    micro.clone(),
+                                    deci.clone(),
+                                    authorization.clone(),
+                                )
+                                .await?;
                         }
                         ClientMessage::CreatePairingInvite {
                             scope, ttl_secs, ..
@@ -2409,8 +2547,8 @@ where
                     }
                     let guard = guard.expect("validated turn lock");
                     let token = register_turn(&session).await;
-                    let (enriched, display, mention_parts) =
-                        resolve_mentions(&session, &text).await;
+                    let (enriched, display, attach_parts, mention_parts) =
+                        attachments::prepare_prompt_input(&session, &text, attachments).await;
                     // Attach registers and queues its history under the same lock.
                     // A new peer sees this message in history or in the live echo.
                     let projection = session.provider_replay.lock().await;
@@ -2418,7 +2556,7 @@ where
                         .agent
                         .lock()
                         .await
-                        .accept_prompt(display.clone(), attachment_parts(attachments), &request_id)
+                        .accept_prompt(display.clone(), attach_parts, &request_id)
                         .await;
                     let prompt = match admitted {
                         Ok(prompt) => prompt,
@@ -2501,9 +2639,8 @@ where
                         return;
                     }
                     let token = register_turn(&session).await;
-                    let (enriched, display, mention_parts) =
-                        resolve_mentions(&session, &text).await;
-                    let mut parts = attachment_parts(attachments);
+                    let (enriched, display, mut parts, mention_parts) =
+                        attachments::prepare_prompt_input(&session, &text, attachments).await;
                     parts.extend(mention_parts);
                     session
                         .broadcast(ServerMessage::UserMessage {
@@ -2580,9 +2717,10 @@ where
                     || session.current_turn_cancel.lock().await.is_some();
                 if running {
                     if mode == mew_protocol::QueueMode::Steer {
-                        let (_, display, _) = resolve_mentions(&session, &text).await;
+                        let (enriched, display, _, _) =
+                            attachments::prepare_prompt_input(&session, &text, attachments).await;
                         let agent = session.agent.lock().await;
-                        agent.enqueue_guidance(display.clone()).await;
+                        agent.enqueue_guidance(enriched).await;
                         drop(agent);
                         session
                             .broadcast(ServerMessage::UserMessage {
@@ -2626,7 +2764,7 @@ where
                 let Ok(session) = session_manager.attach(&session_id).await else {
                     continue;
                 };
-                let mut promoted_text: Option<String> = None;
+                let mut promoted_item: Option<(String, Vec<mew_protocol::Attachment>)> = None;
                 {
                     let mut queue = session.queued_messages.lock().await;
                     if let Some(pos) = queue.iter().position(|item| item.id == id) {
@@ -2638,7 +2776,7 @@ where
                                 || session.current_turn_cancel.lock().await.is_some();
                             if running {
                                 if let Some(removed) = queue.remove(pos) {
-                                    promoted_text = Some(removed.text);
+                                    promoted_item = Some((removed.text, removed.attachments));
                                 }
                             } else {
                                 queue[pos].mode = mew_protocol::QueueMode::Steer;
@@ -2649,10 +2787,12 @@ where
                     }
                 }
                 broadcast_queue(&session).await;
-                if let Some(steer_text) = promoted_text {
-                    let (_, display, _) = resolve_mentions(&session, &steer_text).await;
+                if let Some((steer_text, steer_attachments)) = promoted_item {
+                    let (enriched, display, _, _) =
+                        attachments::prepare_prompt_input(&session, &steer_text, steer_attachments)
+                            .await;
                     let agent = session.agent.lock().await;
-                    agent.enqueue_guidance(display.clone()).await;
+                    agent.enqueue_guidance(enriched).await;
                     drop(agent);
                     session
                         .broadcast(ServerMessage::UserMessage {
@@ -2843,6 +2983,22 @@ where
                         message: format!("attachment read failed: {error}"),
                     }),
                 }
+            }
+            ClientMessage::ReadArtifact {
+                request_id,
+                session_id,
+                artifact_id,
+                path,
+            } => {
+                let msg = crate::attachments::read_session_artifact_file(
+                    &session_manager.session_dir,
+                    request_id,
+                    &session_id,
+                    &artifact_id,
+                    &path,
+                )
+                .await;
+                reply(msg);
             }
             ClientMessage::Ping => {
                 reply(ServerMessage::Pong {
@@ -4085,12 +4241,16 @@ async fn daemon_settings_message(
                 node_id: None,
             }),
     );
+    let web_search = Some(manager.web_search_info());
+    let router = Some(manager.router_info());
     Ok(ServerMessage::DaemonSettings {
         request_id,
         defaults,
         devices,
         automation,
         remote,
+        web_search,
+        router,
     })
 }
 
@@ -4279,8 +4439,8 @@ async fn drain_queued_turns(
         broadcast_queue(session).await;
         let guard = session.turn_lock.lock().await;
         let token = register_turn(session).await;
-        let (enriched, display, mention_parts) = resolve_mentions(session, &next.text).await;
-        let mut parts = attachment_parts(next.attachments);
+        let (enriched, display, mut parts, mention_parts) =
+            attachments::prepare_prompt_input(session, &next.text, next.attachments).await;
         parts.extend(mention_parts);
         session
             .broadcast(ServerMessage::UserMessage {
@@ -4341,8 +4501,8 @@ async fn run_submitted_turn(
 ) {
     let guard = session.turn_lock.lock().await;
     let token = register_turn(&session).await;
-    let (enriched, display, mention_parts) = resolve_mentions(&session, &text).await;
-    let mut parts = attachment_parts(attachments);
+    let (enriched, display, mut parts, mention_parts) =
+        attachments::prepare_prompt_input(&session, &text, attachments).await;
     parts.extend(mention_parts);
     session
         .broadcast(ServerMessage::UserMessage {
@@ -4384,44 +4544,6 @@ async fn resolve_mentions(
     mew_agent::mentions::process_mentions(text, &cwd, &mut context_files, &skills, &subagents).await
 }
 
-fn attachment_parts(attachments: Vec<mew_protocol::Attachment>) -> Vec<mew_message::Part> {
-    let store = mew_session::BlobStore::default_store();
-    attachments
-        .into_iter()
-        .map(|attachment| {
-            let mut mime = attachment.mime.unwrap_or_default();
-            let (url, filename) = match mew_session::decode_data_url(&attachment.path) {
-                Some((detected_mime, bytes)) => {
-                    if mime.is_empty() {
-                        mime = detected_mime;
-                    }
-                    match store.put(&bytes) {
-                        Ok(id) => (mew_session::blob_url(&id), None),
-                        Err(_) => (attachment.path, None),
-                    }
-                }
-                None if mew_session::parse_blob_id(&attachment.path).is_some() => {
-                    (attachment.path, None)
-                }
-                None => {
-                    let filename = attachment.path.rsplit('/').next().map(str::to_owned);
-                    (attachment.path, filename)
-                }
-            };
-            mew_message::Part::File(mew_message::FilePart {
-                base: mew_message::PartBase {
-                    id: ulid::Ulid::new(),
-                    message_id: ulid::Ulid::new(),
-                    session_id: ulid::Ulid::new(),
-                },
-                mime,
-                filename,
-                url,
-            })
-        })
-        .collect()
-}
-
 fn reconcile_usage(
     meta: &mut mew_session::Meta,
     cached: Option<&mew_protocol::SessionUsageWire>,
@@ -4452,9 +4574,11 @@ async fn run_turn(
         .await;
 
     let rx = match prompt {
-        PromptTurn::New { text, attachments } => {
-            agent.run_with_parts(text, attachment_parts(attachments), Some(token.clone()))
-        }
+        PromptTurn::New { text, attachments } => agent.run_with_parts(
+            text,
+            attachments::attachment_parts(attachments),
+            Some(token.clone()),
+        ),
         PromptTurn::Parts { text, parts } => agent.run_with_parts(text, parts, Some(token.clone())),
         PromptTurn::AcceptedEnriched {
             prompt,
@@ -5638,6 +5762,7 @@ mod tests {
             RemoteScope::Observe,
             &ClientMessage::NewSession {
                 cwd: None,
+                scratch: false,
                 client_kind: ClientKind::Remote,
             }
         ));

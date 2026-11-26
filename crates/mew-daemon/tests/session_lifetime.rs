@@ -453,6 +453,7 @@ async fn new_session(socket: &mut Ws, cwd: Option<String>) -> String {
         socket,
         ClientMessage::NewSession {
             cwd,
+            scratch: false,
             client_kind: ClientKind::Desktop,
         },
     )

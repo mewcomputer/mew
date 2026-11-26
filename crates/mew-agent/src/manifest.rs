@@ -362,6 +362,11 @@ fn token_fingerprint(message: &Message, model_id: &str) -> u64 {
                 }
             }
             Part::ToolResult(_) => {}
+            Part::Artifact(artifact) => {
+                artifact.artifact_id.hash(&mut hash);
+                artifact.title.hash(&mut hash);
+                artifact.url.hash(&mut hash);
+            }
             Part::Compaction(compaction) => compaction.summary.hash(&mut hash),
         }
     }
@@ -374,6 +379,7 @@ fn part_label_kind(part: &Part) -> (String, SegmentKind) {
         Part::Text(_) => ("text".to_string(), SegmentKind::Part),
         Part::Reasoning(_) => ("reasoning".to_string(), SegmentKind::Part),
         Part::File(_) => ("file".to_string(), SegmentKind::Part),
+        Part::Artifact(artifact) => (format!("artifact: {}", artifact.title), SegmentKind::Part),
         Part::ToolCall(tc) => (tool_call_label(tc), SegmentKind::Part),
         Part::ToolResult(_) => ("tool result".to_string(), SegmentKind::Part),
         Part::Compaction(_) => ("compaction".to_string(), SegmentKind::CompactionSummary),
@@ -405,6 +411,7 @@ fn build_part_segment(part: &Part, model_id: &str) -> Segment {
         Part::Reasoning(reasoning) => count_tokens(&reasoning.text, model_id),
         Part::File(file) if file.mime.starts_with("image/") => 1024,
         Part::File(file) => count_tokens(file.filename.as_deref().unwrap_or(&file.url), model_id),
+        Part::Artifact(artifact) => count_tokens(&artifact.title, model_id),
         Part::ToolCall(call) => {
             let input = serde_json::to_string(call.state.input()).unwrap_or_default();
             let output_tokens = match &call.state {

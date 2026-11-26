@@ -96,6 +96,27 @@ where
     }
 }
 
+/// Connect a client endpoint to the daemon, open a bidirectional stream, and
+/// complete the WebSocket upgrade over it.
+async fn connect_ws(client: &iroh::Endpoint, daemon: &iroh::Endpoint) -> Ws {
+    let conn = client
+        .connect(daemon.addr(), MEW_ALPN)
+        .await
+        .expect("connect to daemon");
+    let (send_stream, recv_stream) = conn.open_bi().await.expect("open bi stream");
+    let iroh_stream = IrohStream::new(send_stream, recv_stream);
+    let req = ClientRequestBuilder::new("ws://iroh/".parse().unwrap())
+        .with_header("Host", "iroh")
+        .with_header("Connection", "Upgrade")
+        .with_header("Upgrade", "websocket")
+        .with_header("Sec-WebSocket-Version", "13")
+        .with_header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==");
+    client_async(req, iroh_stream)
+        .await
+        .expect("websocket handshake over iroh")
+        .0
+}
+
 #[tokio::test]
 async fn iroh_peer_connects_and_exchanges_protocol() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -145,27 +166,8 @@ async fn iroh_peer_connects_and_exchanges_protocol() -> Result<()> {
     // Give the daemon endpoint a moment to be ready.
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Client connects to the daemon.
-    let daemon_addr = daemon_endpoint.addr();
-    let conn = client_endpoint
-        .connect(daemon_addr, MEW_ALPN)
-        .await
-        .expect("connect to daemon");
-
-    // Open a bidirectional stream.
-    let (send_stream, recv_stream) = conn.open_bi().await.expect("open bi stream");
-    let iroh_stream = IrohStream::new(send_stream, recv_stream);
-
-    // WebSocket upgrade over the QUIC stream.
-    let req = ClientRequestBuilder::new("ws://iroh/".parse().unwrap())
-        .with_header("Host", "iroh")
-        .with_header("Connection", "Upgrade")
-        .with_header("Upgrade", "websocket")
-        .with_header("Sec-WebSocket-Version", "13")
-        .with_header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==");
-    let (mut ws, _resp) = client_async(req, iroh_stream)
-        .await
-        .expect("websocket handshake over iroh");
+    // Client connects to the daemon and completes the WebSocket upgrade.
+    let mut ws = connect_ws(&client_endpoint, &daemon_endpoint).await;
 
     send(
         &mut ws,
@@ -321,6 +323,129 @@ async fn iroh_unauthorized_peer_is_rejected() -> Result<()> {
 
     let _ = router.shutdown().await;
     let _ = client_endpoint.close().await;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn iroh_pairing_token_is_single_use_but_the_paired_device_reconnects() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let allowlist = Arc::new(NodeIdAllowlist::new(
+        dir.path().join("authorized_nodes.json"),
+    ));
+    let server = DaemonServer::with_session_dir(fake_builder(), dir.path().join("sessions"));
+
+    let store = Arc::new(mew_daemon::remote::RemoteAccessStore::new(
+        dir.path().join("remote.json"),
+    ));
+    store.set_hosting(true, mew_daemon::remote::RemoteMode::Daemon, None)?;
+    let invite = store.create_pairing(
+        mew_protocol::RemoteScope::Control,
+        mew_daemon::remote::unix_now(),
+        300,
+    )?;
+
+    let handler = MewIrohHandler {
+        allowlist,
+        session_manager: server.session_manager.clone(),
+        groups_store: server.groups_store.clone(),
+        thinking_setter: None,
+        auto_summary_enabled: server.auto_summary_enabled.clone(),
+        remote_scope: Some(mew_protocol::RemoteScope::Control),
+        remote_token: None,
+        remote_store: Some(store),
+    };
+
+    let daemon_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
+        .alpns(vec![MEW_ALPN.to_vec()])
+        .bind()
+        .await?;
+    let _ = tokio::time::timeout(Duration::from_secs(15), daemon_endpoint.online()).await;
+    let router = iroh::protocol::Router::builder(daemon_endpoint.clone())
+        .accept(MEW_ALPN, handler)
+        .spawn();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let client_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
+        .bind()
+        .await?;
+    let _ = tokio::time::timeout(Duration::from_secs(15), client_endpoint.online()).await;
+
+    // The invite is redeemed once and consumed.
+    let mut ws = connect_ws(&client_endpoint, &daemon_endpoint).await;
+    send(
+        &mut ws,
+        ClientMessage::RemoteHello {
+            token: Some(invite.clone()),
+            device_name: "paired phone".into(),
+        },
+    )
+    .await;
+    let msgs = recv_until(&mut ws, |m| {
+        matches!(
+            m,
+            ServerMessage::RemoteReady { .. } | ServerMessage::Error { .. }
+        )
+    })
+    .await;
+    assert!(matches!(
+        msgs.last(),
+        Some(ServerMessage::RemoteReady { .. })
+    ));
+
+    // A client that kept its invite replays the dead token. The device record
+    // it created is what authorizes the reconnect, so it must still be ready.
+    let mut ws = connect_ws(&client_endpoint, &daemon_endpoint).await;
+    send(
+        &mut ws,
+        ClientMessage::RemoteHello {
+            token: Some(invite.clone()),
+            device_name: "paired phone".into(),
+        },
+    )
+    .await;
+    let msgs = recv_until(&mut ws, |m| {
+        matches!(
+            m,
+            ServerMessage::RemoteReady { .. } | ServerMessage::Error { .. }
+        )
+    })
+    .await;
+    assert!(matches!(
+        msgs.last(),
+        Some(ServerMessage::RemoteReady { .. })
+    ));
+
+    // The token stays single use: another node cannot redeem it.
+    let other_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
+        .bind()
+        .await?;
+    let _ = tokio::time::timeout(Duration::from_secs(15), other_endpoint.online()).await;
+    let mut ws = connect_ws(&other_endpoint, &daemon_endpoint).await;
+    send(
+        &mut ws,
+        ClientMessage::RemoteHello {
+            token: Some(invite),
+            device_name: "intruder".into(),
+        },
+    )
+    .await;
+    let msgs = recv_until(&mut ws, |m| {
+        matches!(
+            m,
+            ServerMessage::RemoteReady { .. } | ServerMessage::Error { .. }
+        )
+    })
+    .await;
+    assert!(matches!(
+        msgs.last(),
+        Some(ServerMessage::Error { message })
+            if message == "remote pairing credentials were rejected"
+    ));
+
+    let _ = router.shutdown().await;
+    let _ = client_endpoint.close().await;
+    let _ = other_endpoint.close().await;
 
     Ok(())
 }

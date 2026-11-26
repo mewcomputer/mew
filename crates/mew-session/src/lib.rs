@@ -81,6 +81,9 @@ pub struct Meta {
     /// Working directory for the session. Set at creation time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// True if this session uses an isolated per-session scratch workspace.
+    #[serde(default)]
+    pub scratch: bool,
     /// True if the last turn ended with an error (provider error or
     /// tool hard-failure). Cleared on the next successful turn.
     #[serde(default)]
@@ -183,6 +186,7 @@ impl Meta {
             custom_title: None,
             summary: None,
             cwd: None,
+            scratch: false,
             last_turn_failed: false,
             archived: false,
             group_id: None,
@@ -211,6 +215,7 @@ impl Meta {
             custom_title: None,
             summary: None,
             cwd: None,
+            scratch: false,
             last_turn_failed: false,
             archived: false,
             group_id: None,
@@ -620,6 +625,11 @@ pub fn session_dir() -> PathBuf {
     }
     // Sessions are persistent user data — use the data directory.
     mew_config::data_dir().join("sessions")
+}
+
+/// Returns the isolated workspace directory for a scratch (no-base-folder) session.
+pub fn scratch_workspace_dir(root: &Path, session_id: &str) -> PathBuf {
+    root.join(session_id).join("workspace")
 }
 
 /// Exclusive ownership of a top-level session writer.

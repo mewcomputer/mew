@@ -65,7 +65,13 @@ async fn params(root: &Path, policy: Option<SessionPolicy>) -> mew_daemon::Agent
             .unwrap(),
         session_id: id,
         cwd: Some(root.to_path_buf()),
+        scratch: false,
         policy,
+        web_search: mew_config::WebSearchConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        router: mew_protocol::RouterInfo::default(),
     }
 }
 

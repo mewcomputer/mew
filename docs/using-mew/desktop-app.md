@@ -64,5 +64,12 @@ bundles `mew` (running `mew desktop-host`) along with `agent-browser` (version
 Run `just desktop-electron-build` to build without launching. The packager
 writes the bundle to `target/release/bundle/macos/mew-electron.app`.
 
+### Remote access
+
+In **Settings → Remote & Mobile**, **Allow iOS & remote connections** starts the
+iroh listener and is remembered by the daemon. It starts again when the Electron
+app or daemon restarts; switch it off to stop future launches. Pairing a new
+device still needs a fresh single-use invite from the same panel.
+
 See [Guide a running subagent](/docs/using-mew/subagents/#guide-a-running-subagent)
 for steering child agents from the Web UI or Electron.

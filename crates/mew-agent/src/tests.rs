@@ -1620,6 +1620,13 @@ impl Provider for AgyFixtureProvider {
     async fn abandon_pending(&self, session_id: mew_message::SessionId) {
         self.0.abandon_pending(session_id).await
     }
+    async fn allows_readonly_spill_path(
+        &self,
+        session_id: mew_message::SessionId,
+        path: &std::path::Path,
+    ) -> bool {
+        self.0.allows_readonly_spill_path(session_id, path).await
+    }
 }
 
 #[cfg(unix)]
@@ -9027,14 +9034,15 @@ def post(body,sid=None):
  h={{'Content-Type':'application/json'}}
  if sid: h['mcp-session-id']=sid
  with urllib.request.urlopen(urllib.request.Request(url,data=json.dumps(body).encode(),headers=h)) as r: return r.headers, r.read()
-# Turn 1: call read tool via MCP, then finish end_turn
+# Turn 1: call read tool 12 times via MCP (12 * 39KB = 468KB > 384KB AGY cap), then finish end_turn
 p1=read_msg()
 with open(prompts_path,'a') as f: f.write(json.dumps(p1['params']['prompt'])+'\n')
 h,_=post({{'jsonrpc':'2.0','id':1,'method':'initialize','params':{{'protocolVersion':'2025-11-25','capabilities':{{}},'clientInfo':{{'name':'fake','version':'1'}}}}}})
 sid=h['mcp-session-id']
 post({{'jsonrpc':'2.0','method':'notifications/initialized'}},sid)
-_,b=post({{'jsonrpc':'2.0','id':2,'method':'tools/call','params':{{'name':'read','arguments':{{'path':'src/lib.rs'}}}}}},sid)
-assert json.loads(b)['result'].get('isError') is not True, b
+for call_id in range(2, 14):
+ _,b=post({{'jsonrpc':'2.0','id':call_id,'method':'tools/call','params':{{'name':'read','arguments':{{'path':'sample.rs'}}}}}},sid)
+ assert json.loads(b)['result'].get('isError') is not True, b
 print(json.dumps({{'jsonrpc':'2.0','method':'session/update','params':{{'sessionId':'s-agent','update':{{'sessionUpdate':'agent_message_chunk','content':{{'type':'text','text':'read completed'}}}}}}}}),flush=True)
 print(json.dumps({{'jsonrpc':'2.0','id':p1['id'],'result':{{'stopReason':'end_turn'}}}}),flush=True)
 # Turn 2: delta prompt on SAME process
@@ -9048,7 +9056,9 @@ read_msg()
         ),
     )
     .unwrap();
-    let large_payload = "fn item() {}\n".repeat(32_000);
+    let large_payload = "fn item() {}\n".repeat(3_000);
+    assert!(large_payload.len() < crate::compaction::OFFLOAD_TOOL_OUTPUT_BYTES);
+    assert!(large_payload.len() * 12 > mew_agy::transcript::MAX_REPLAY_TEXT);
     let provider = Arc::new(AgyFixtureProvider(mew_agy::provider::AgyProvider::new(
         mew_agy::provider::Config {
             executable: "/usr/bin/python3".into(),
@@ -9058,6 +9068,7 @@ read_msg()
         },
         AgyFixtureBoundary(script),
     )));
+    std::fs::write(directory.path().join("sample.rs"), "fn main() {}\n").unwrap();
     let mut agent = Agent::new(
         provider,
         Arc::new(NopDispatcher),
@@ -9072,6 +9083,8 @@ read_msg()
         })],
         None,
     );
+    agent.cwd = directory.path().to_path_buf();
+    agent.workspace_roots = vec![directory.path().to_path_buf()];
     agent.set_permission_engine(Arc::new(mew_config::permissions::PermissionEngine::new(
         vec![],
     )));
@@ -9079,7 +9092,8 @@ read_msg()
     let mut rx = agent.run("inspect src/lib.rs".into());
     while let Some(ev) = rx.recv().await {
         match ev {
-            AgentEvent::PermissionRequest { tx, .. } => {
+            AgentEvent::PermissionRequest { tx, .. }
+            | AgentEvent::WorkspacePermissionRequest { tx, .. } => {
                 let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
             }
             AgentEvent::Error(msg) => panic!("unexpected turn 1 error: {msg}"),
@@ -9118,18 +9132,153 @@ read_msg()
     assert_eq!(prompts[1][0]["text"], "follow up question");
 
     let messages = agent.messages.lock().await;
-    let stored_tool_output = messages.iter().find_map(|m| {
-        m.parts.iter().find_map(|p| match p {
+    let stored_tool_outputs: Vec<String> = messages
+        .iter()
+        .flat_map(|m| m.parts.iter())
+        .filter_map(|p| match p {
             Part::ToolCall(tc) if tc.tool_name == "read" => match &tc.state {
                 ToolState::Completed(done) => Some(done.output.clone()),
                 _ => None,
             },
             _ => None,
         })
-    });
-    assert_eq!(
-        stored_tool_output.as_deref(),
-        Some(large_payload.as_str()),
-        "Turn 2 must not prune Turn 1's large tool output when reusing the live ACP session"
+        .collect();
+    assert_eq!(stored_tool_outputs.len(), 12);
+    for stored in stored_tool_outputs {
+        assert_eq!(
+            stored, large_payload,
+            "Turn 2 must not prune Turn 1's large tool outputs when reusing the live ACP session"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn agy_session_allows_readonly_spill_reads_without_prompt_while_blocking_writes_and_other_sessions(
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let app_data = tempfile::tempdir().unwrap();
+    let active_spill = app_data
+        .path()
+        .join("brain/s-spill/.system_generated/steps/5/output.txt");
+    let other_spill = app_data
+        .path()
+        .join("brain/other-session/.system_generated/steps/5/output.txt");
+    std::fs::create_dir_all(active_spill.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(other_spill.parent().unwrap()).unwrap();
+
+    let large_spill = (1..=450)
+        .map(|i| format!("spill line {i:04} padding text to reach twenty kilobytes"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(large_spill.len() > 20_000);
+    std::fs::write(&active_spill, &large_spill).unwrap();
+    std::fs::write(&other_spill, "other session secret\n").unwrap();
+
+    let script = directory.path().join("agy-spill.py");
+    std::fs::write(
+        &script,
+        format!(
+            r#"import sys,json,urllib.request
+def read_msg():
+ line=sys.stdin.readline()
+ if not line: sys.exit(0)
+ return json.loads(line)
+for i,r in [(1,{{'protocolVersion':1}}),(2,{{}}),(3,{{'sessionId':'s-spill'}}),(4,{{}})]:
+ m=read_msg()
+ print(json.dumps({{'jsonrpc':'2.0','id':m['id'],'result':r}}),flush=True)
+p1=read_msg()
+with open('.agents/mcp_config.json') as f: url=json.load(f)['mcpServers']['mew']['serverUrl']
+def post(body,sid=None):
+ h={{'Content-Type':'application/json'}}
+ if sid: h['mcp-session-id']=sid
+ with urllib.request.urlopen(urllib.request.Request(url,data=json.dumps(body).encode(),headers=h)) as r: return r.headers,r.read()
+h,_=post({{'jsonrpc':'2.0','id':1,'method':'initialize','params':{{'protocolVersion':'2025-11-25','capabilities':{{}},'clientInfo':{{'name':'fake','version':'1'}}}}}})
+sid=h['mcp-session-id']
+post({{'jsonrpc':'2.0','method':'notifications/initialized'}},sid)
+
+_,b1=post({{'jsonrpc':'2.0','id':2,'method':'tools/call','params':{{'name':'read','arguments':{{'path':{active_spill:?}}}}}}},sid)
+r1=json.loads(b1)['result']
+assert r1.get('isError') is not True, r1
+t1=r1['content'][0]['text']
+assert len(t1.encode('utf-8')) <= 8000, len(t1)
+assert 'offset=' in t1, t1
+
+_,b2=post({{'jsonrpc':'2.0','id':3,'method':'tools/call','params':{{'name':'write','arguments':{{'path':{active_spill:?},'content':'overwritten'}}}}}},sid)
+r2=json.loads(b2)['result']
+assert r2.get('isError') is True, r2
+
+_,b3=post({{'jsonrpc':'2.0','id':4,'method':'tools/call','params':{{'name':'read','arguments':{{'path':{other_spill:?}}}}}}},sid)
+r3=json.loads(b3)['result']
+assert r3.get('isError') is True, r3
+
+print(json.dumps({{'jsonrpc':'2.0','method':'session/update','params':{{'sessionId':'s-spill','update':{{'sessionUpdate':'agent_message_chunk','content':{{'type':'text','text':'spill checks passed'}}}}}}}}),flush=True)
+print(json.dumps({{'jsonrpc':'2.0','id':p1['id'],'result':{{'stopReason':'end_turn'}}}}),flush=True)
+read_msg()
+"#,
+            active_spill = active_spill,
+            other_spill = other_spill,
+        ),
+    )
+    .unwrap();
+
+    let provider = Arc::new(AgyFixtureProvider(mew_agy::provider::AgyProvider::new(
+        mew_agy::provider::Config {
+            executable: "/usr/bin/python3".into(),
+            workspace_parent: directory.path().into(),
+            environment: vec![("ANTIGRAVITY_APP_DATA_DIR".into(), app_data.path().into())],
+            lifetime: std::time::Duration::from_secs(20),
+        },
+        AgyFixtureBoundary(script),
+    )));
+    let workspace = directory.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let mut agent = Agent::new(
+        provider,
+        Arc::new(NopDispatcher),
+        None,
+        vec![
+            Arc::new(mew_tools::tools::read::Read),
+            Arc::new(mew_tools::tools::write::Write),
+        ],
+        None,
     );
+    agent.cwd = workspace.clone();
+    agent.workspace_roots = vec![workspace];
+    agent.set_permission_engine(Arc::new(mew_config::permissions::PermissionEngine::new(
+        vec![],
+    )));
+
+    let mut rx = agent.run("inspect spill output".into());
+    let mut workspace_prompts = Vec::new();
+    let mut final_text = String::new();
+    while let Some(ev) = rx.recv().await {
+        match ev {
+            AgentEvent::WorkspacePermissionRequest { path, tx } => {
+                workspace_prompts.push(path);
+                let _ = tx.send(mew_hooks::PermissionDecision::Deny);
+            }
+            AgentEvent::PermissionRequest { tx, .. } => {
+                let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
+            }
+            AgentEvent::Provider(ProviderEvent::PartDelta {
+                field: "text",
+                delta,
+                ..
+            }) => final_text.push_str(&delta),
+            AgentEvent::Error(msg) => panic!("unexpected agent error: {msg}"),
+            _ => {}
+        }
+    }
+
+    assert_eq!(final_text, "spill checks passed");
+    assert_eq!(
+        workspace_prompts,
+        vec![
+            active_spill.parent().unwrap().to_path_buf(),
+            other_spill.parent().unwrap().to_path_buf(),
+        ],
+        "active spill read must not prompt, while write on active spill and read on other session must prompt"
+    );
+    assert_eq!(std::fs::read_to_string(&active_spill).unwrap(), large_spill);
 }

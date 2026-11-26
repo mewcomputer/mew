@@ -193,15 +193,29 @@ fn validate_name(name: &str) -> Result<(), SkillError> {
 ///
 /// - **mew-docs** — documentation sitemap so the agent can `web_fetch` the
 ///   right docs page at mew.computer instead of guessing from memory.
+/// - **artifacts** — reference for `present_artifact` (inline vs panel, CSS
+///   theme variables, utility classes, Preact runtime, staging rules).
 pub fn builtin_skills() -> Vec<Skill> {
-    let content = include_str!("../../mew-prompts/resources/skills/mew-docs/SKILL.md");
-    match load_skill_from_str(content) {
-        Ok(skill) => vec![skill],
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to load built-in skill mew-docs");
-            vec![]
+    let sources = [
+        (
+            "mew-docs",
+            include_str!("../../mew-prompts/resources/skills/mew-docs/SKILL.md"),
+        ),
+        (
+            "artifacts",
+            include_str!("../../mew-prompts/resources/skills/artifacts/SKILL.md"),
+        ),
+    ];
+    let mut skills = Vec::with_capacity(sources.len());
+    for (name, content) in sources {
+        match load_skill_from_str(content) {
+            Ok(skill) => skills.push(skill),
+            Err(e) => {
+                tracing::warn!(skill = name, error = %e, "failed to load built-in skill");
+            }
         }
     }
+    skills
 }
 
 /// Parse a SKILL.md from a string (used for built-in skills that are

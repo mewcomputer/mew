@@ -157,6 +157,7 @@ pub enum Part {
     Text(TextPart),
     Reasoning(ReasoningPart),
     File(FilePart),
+    Artifact(ArtifactPart),
     ToolCall(ToolCallPart),
     ToolResult(ToolResultPart),
     Compaction(CompactionPart),
@@ -168,11 +169,35 @@ impl Part {
             Part::Text(p) => p.base.id,
             Part::Reasoning(p) => p.base.id,
             Part::File(p) => p.base.id,
+            Part::Artifact(p) => p.base.id,
             Part::ToolCall(p) => p.base.id,
             Part::ToolResult(p) => p.base.id,
             Part::Compaction(p) => p.base.id,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactMode {
+    Panel,
+    Inline,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ArtifactPart {
+    #[serde(flatten)]
+    pub base: PartBase,
+    pub artifact_id: String,
+    pub title: String,
+    pub url: String,
+    pub mode: ArtifactMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

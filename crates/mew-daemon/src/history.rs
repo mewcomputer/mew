@@ -20,6 +20,24 @@ struct Record {
     id: MessageId,
     offset: u64,
     len: usize,
+    /// Whether this message opens a turn, recorded during the scan so page
+    /// selection can avoid splitting a turn without re-reading the log.
+    starts_turn: bool,
+}
+
+/// Whether a message opens a turn. Mirrors the transcript fold clients do: a
+/// prompt with something to render starts a turn, while tool results (user
+/// messages whose parts clients drop) stay inside the turn that produced them.
+fn starts_turn(message: &Message) -> bool {
+    if message.role == mew_message::Role::Assistant {
+        return false;
+    }
+    message.parts.iter().any(|part| match part {
+        mew_message::Part::Text(text) => !text.text.trim().is_empty(),
+        mew_message::Part::Reasoning(reasoning) => !reasoning.text.trim().is_empty(),
+        mew_message::Part::ToolResult(_) => false,
+        _ => true,
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -139,6 +157,7 @@ impl HistoryIndex {
                     id,
                     offset: self.offset,
                     len,
+                    starts_turn: starts_turn(&stored.message),
                 };
                 let position = *self.positions.entry(id).or_insert(self.rows.len());
                 if position == self.rows.len() {
@@ -190,6 +209,36 @@ impl HistorySnapshot {
             pending,
         }
     }
+    /// Where a page that ends at `end` should begin. A page that starts inside a
+    /// turn splits a fold: the row the reader already sees is re-labeled when
+    /// the turn's earlier messages page in, so extend back to the turn's first
+    /// message. `floor` bounds the extension, keeping a pathological turn from
+    /// making a page unbounded.
+    fn page_start(&self, first: usize, end: usize, floor: usize) -> usize {
+        let floor = end.saturating_sub(floor);
+        let mut position = first;
+        loop {
+            if self.starts_turn_at(position) {
+                return position;
+            }
+            // No turn boundary inside the bound: keep the requested window
+            // rather than inventing a start the transcript does not have.
+            if position == floor || position == 0 {
+                return first;
+            }
+            position -= 1;
+        }
+    }
+
+    fn starts_turn_at(&self, position: usize) -> bool {
+        match self.index.rows.get(position) {
+            Some(row) => row.starts_turn,
+            None => self
+                .pending
+                .get(position.saturating_sub(self.index.rows.len()))
+                .is_some_and(starts_turn),
+        }
+    }
 
     pub(crate) async fn page(
         &mut self,
@@ -197,7 +246,8 @@ impl HistorySnapshot {
         limit: usize,
     ) -> Result<(Vec<Message>, Option<usize>)> {
         let end = before.min(self.index.rows.len() + self.pending.len());
-        let first_candidate = end.saturating_sub(limit.max(1));
+        let limit = limit.max(1);
+        let first_candidate = self.page_start(end.saturating_sub(limit), end, limit * 4);
         let mut selected = Vec::with_capacity(end - first_candidate);
         let mut bytes: usize = 0;
         {
@@ -216,6 +266,8 @@ impl HistorySnapshot {
                     Some(message) => serde_json::to_vec(message)?.len(),
                     None => row.expect("missing disk row").len,
                 };
+                // The byte cap is the only thing that can still cut a turn, and
+                // it sits far above any page a normal turn produces.
                 if !selected.is_empty() && bytes.saturating_add(len) > crate::HISTORY_PAGE_MAX_BYTES
                 {
                     break;

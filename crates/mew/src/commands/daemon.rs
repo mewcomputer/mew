@@ -118,6 +118,10 @@ fn build_daemon_server_with_config(
     let mcp_tools = Arc::new(mcp_tools);
     let shutdown_tools = mcp_tools.clone();
     let cfg = Arc::new(cfg);
+    let server_router = mew_daemon::router_info_from_config(&cfg);
+    // Keep the startup [web_search] settings outside the builder closure,
+    // which moves `cfg`, so they can seed the manager's live watch below.
+    let server_web_search = cfg.web_search.clone();
     let cat = Arc::new(cat);
 
     // Clone Arcs for the model switcher/lister before the builder closure
@@ -232,19 +236,32 @@ fn build_daemon_server_with_config(
                 mcp_tools.as_ref().clone(),
                 session_id,
             );
+            let mut extra_roots = Vec::new();
+            if params.scratch {
+                extra_roots.push(cwd.clone());
+            }
+            if let Some(dir) = todos_path.as_ref().and_then(|p| p.parent()) {
+                let uploads_dir = dir.join("uploads");
+                if !extra_roots.contains(&uploads_dir) {
+                    extra_roots.push(uploads_dir);
+                }
+            }
             agent.cwd = cwd.clone();
-            agent.workspace_roots = if session_cfg.workspace.roots.is_empty() {
-                vec![cwd.clone()]
-            } else {
-                session_cfg.workspace.roots.clone()
-            };
+            agent.workspace_roots = crate::setup::agent::resolve_workspace_roots(
+                &session_cfg.workspace.roots,
+                &cwd,
+                &extra_roots,
+            );
             agent.set_model_info(&model_id, &provider_id);
             agent.todos_path = todos_path;
-            agent.set_permission_engine(crate::setup::agent::build_permission_engine(
-                &session_cfg,
-                permission_mode,
-                &cwd,
-            ));
+            agent.set_permission_engine(
+                crate::setup::agent::build_permission_engine_with_extra_roots(
+                    &session_cfg,
+                    permission_mode,
+                    &cwd,
+                    &extra_roots,
+                ),
+            );
             agent.set_personas(personas.clone());
             if let Some(persona) = persona {
                 agent.apply_persona(persona);
@@ -276,6 +293,9 @@ fn build_daemon_server_with_config(
                 todos_path,
                 &[],
                 mcp_tools.as_slice(),
+                &params.web_search,
+                &params.router,
+                params.scratch,
             )?
         };
         let variant = params
@@ -298,6 +318,12 @@ fn build_daemon_server_with_config(
     // letting both servers share the same one.
     let mut server = mew_daemon::DaemonServer::new(builder);
     server.shutdown_tools = shutdown_tools;
+    // The builder holds a Config snapshot; the live [web_search] settings
+    // come from the manager's watch, so seed it from config.toml here.
+    server
+        .session_manager
+        .set_web_search_config(server_web_search);
+    server.session_manager.set_router_config(server_router);
 
     // Enable model switching for non-fake providers.
     if fake_provider {

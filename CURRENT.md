@@ -5559,4 +5559,757 @@ Replaced the one-shot `agy` CLI stream with the CLI's `acp` JSON-RPC mode across
 - `provider.rs`: implements `Provider::abandon_pending`, tearing down the handoff watcher and idle subprocess without cancelling the caller's turn token; `mew-provider-router` forwards it and `mew-agent` calls it when a turn loop exits or switches to a fallback provider.
 - `setup/antigravity.rs` and `setup/providers.rs`: discover effort variants from the CLI, group them into one model with thinking variants, resolve `agy_effort`, build the local provider, and locate `agy` through PATH and the standard install dirs. Antigravity is vision-capable now that prompts carry image resources, `mew auth status` reports the CLI when it is installed, and `resolve_model` keeps an explicitly named provider that offers the model.
 
+### 2026-11-24: Persistent multi-turn ACP sessions, `session/resume`, and delta replay budgets in `mew-agy`
+
+Switched `mew-agy` from tearing down the ACP process and replaying full `mew_transcript_v1` JSON on every turn to persistent ACP sessions (`mcp.rs`, `transcript.rs`, `session.rs`, `provider.rs`):
+
+- Added `McpServer::unquiesce` (`mcp.rs`) and `PersistentOptions` / `Session::new_persistent` / `Session::prompt` / `Phase::Ready` (`session.rs`) so a live `agy acp` subprocess stays open across user turns, sends delta prompts via `session/prompt`, switches models mid-session via `session/set_model`, sends `session/close` on clean idle shutdown, and reattaches across idle exit or `abandon_pending` via `session/resume` with in-process fallback to `session/new` plus replay when `session/resume` is rejected.
+- Added `Continuity` tracking (`acp_session_id`, non-model `session_contract`, `history`, `after_abandon`) and `build_delta_prompt_blocks` / `delta_replay_budget` (`transcript.rs`, `provider.rs`) so `replay_budget` measures only the unseen delta when history is a pure continuation and falls back to full `mew_transcript_v1` replay when `system`/`tools`/`supports_vision` or the prior prefix changes.
+- Added tests: `persistent_session_handles_multiple_prompt_turns_and_model_switch` and `resume_falls_back_to_session_new_with_replay_when_resume_is_rejected` (`crates/mew-agy/src/session.rs`), `persistent_session_reuses_process_and_sends_delta_prompt_across_turns` and `persistent_session_resumes_after_idle_exit_and_after_abandon_pending` (`crates/mew-agy/tests/provider.rs`), and `multi_turn_agy_with_large_tool_outputs_skips_pruning_and_reuses_process` (`crates/mew-agent/src/tests.rs`).
+
+Verified `cargo test --locked -p mew-agy -- --test-threads=1` (107 passed across 9 binaries, 6 ignored), `cargo test --locked -p mew-agent --lib` targeted tests (`max_turns_after_tool_handoff_abandons_pending_provider_state_for_next_turn`, `multi_turn_agy_with_large_tool_outputs_skips_pruning_and_reuses_process`, `replay_budget` [7 passed], `cancelling_a_child_provider_request_does_not_cancel_a_sibling_turn`: 10 passed), `cargo clippy --locked -p mew-provider -p mew-agy -p mew-provider-router -p mew-agent -- -D warnings`, `cargo fmt --check -p mew-agy`, `rustfmt --edition 2021 --check crates/mew-agent/src/tests.rs`, and `cargo build --locked -p mew`. Note: this `CURRENT.md` entry supersedes nothing in the earlier `2026-11-24` ACP/abandon notes; remember the local `/Applications/mew.app` bundle was last built earlier and would need a rebuild (`just desktop-electron-install` etc.) if testing the installed app directly.
+
+### 2026-11-25: Map `--color-blue-fg` in `@theme inline` so sidebar running dots render
+
+Added `--color-blue-fg: var(--blue-fg);` inside `@theme inline` in `mew-web-ui/src/index.css` so Tailwind v4 emits `.bg-blue-fg` for the pulsing running indicator (`StatusDot`) and blue group swatch in `mew-web-ui/src/components/session-rail.tsx`. Verified with `mew-web-ui` `tsc --noEmit`, vitest (50 files, 415 tests), `tsc -b && vite build`, and confirmed `.bg-blue-fg{background-color:var(--blue-fg)}` in `mew-web-ui/dist/assets/index-qjjtHIA3.css`.
+
 Verified with `cargo clippy --all -- -D warnings` (with `CEF_PATH` set), `cargo test -p mew-agy -- --test-threads=1` (107 passed, 6 ignored), `cargo test -p mew-session -p mew-protocol` (179 passed), `cargo fmt --check`, and `just arch-check` on rustc 1.100.0.
+
+### 2026-11-24: Keep a paired remote device authorized after its invite is consumed
+
+`remote pairing credentials were rejected` came back on every connection after the first successful pairing. Pairing tokens are single use: `RemoteAccessStore::authorize_token` deletes the record it matches, and both clients kept replaying the same credential, so the daemon had nothing left to match and never consulted the device record the invite had created.
+
+- `RemoteAccessStore::authorize_peer` (`crates/mew-daemon/src/remote.rs`) tries the supplied token and then falls back to the paired-device record, so an already paired node reconnects instead of being rejected. The token still bootstraps registration only and stays single use: a different node, an unknown token, and a revoked device are all still refused. `MewIrohHandler::accept` and the `policy_tests` authorizer closure now call it instead of each branching on the token themselves.
+- `mew-mobile-core` forgets the consumed credential. `MobileCore.registry` is now `Arc<Mutex<DaemonRegistry>>` so a connection task can reach it, `DaemonRegistry::clear_pairing_token` persists the removal with the same rollback-on-save-failure shape as `rename`, and `connect_and_run` clears the token in place once the handshake succeeds so the reconnect loop stops replaying it.
+
+Tests: `a_paired_device_reconnecting_with_a_consumed_token_stays_authorized`, `a_consumed_token_does_not_authorize_an_unpaired_node`, and `a_revoked_device_cannot_return_with_a_stale_token` (`crates/mew-daemon/src/remote.rs`); `iroh_pairing_token_is_single_use_but_the_paired_device_reconnects` (`crates/mew-daemon/tests/iroh.rs`, which also folds the two existing iroh tests onto a shared `connect_ws` helper); `clearing_a_consumed_pairing_token_persists`, `a_failed_token_clear_keeps_the_saved_credential`, and `clearing_a_token_for_an_unknown_daemon_fails` (`crates/mew-mobile-core/src/registry.rs`); `pairing_with_an_invite_clears_the_consumed_credential` (`crates/mew-mobile-core/tests/m1_integration.rs`). Both new integration tests were confirmed to fail with the fix reverted.
+
+Verified `cargo test -p mew-daemon --features iroh --lib` (145 passed, 1 ignored), `cargo test -p mew-daemon --features iroh --test iroh` (3 passed), `cargo test -p mew-mobile-core --lib` (81 passed), `cargo test -p mew-mobile-core --features test-harness --test m1_integration pairing_with_an_invite` (1 passed), `rustfmt --edition 2021 --check` on every touched file, `cargo clippy -p mew-mobile-core --features test-harness --lib --test m1_integration --no-deps -- -D warnings`, and `cargo clippy -p mew-daemon --features iroh --all-targets --no-deps -- -D warnings -A clippy::nonminimal_bool`. Pre-existing and left alone: `clippy::nonminimal_bool` in `crates/mew-daemon/src/session.rs` and `crates/mew-tools/src/browser.rs`, and `crates/mew-mobile-core/tests/m0_spike.rs` does not compile under the opt-in `test-harness` feature (its `DaemonSettings` pattern predates the `automation`/`remote` fields added in `4a5d3abc`).
+
+### 2026-11-24: Move the top-level turn cap out of `MEW_MAX_TURNS` and into `config.toml`
+
+The agent's per-prompt turn cap was the only agent-loop limit with no config
+counterpart: `Agent::new` parsed `MEW_MAX_TURNS` directly, defaulting to 250.
+That made it process-wide, invisible to the config layering, and impossible to
+set per project or per session.
+
+- `mew-config`: `Config::max_turns` (default 250, `0` removes the cap). Being a
+  top-level key it also keeps `MEW_MAX_TURNS` working through the standard `MEW_`
+  environment layer, so existing setups and eval scripts are unaffected.
+- `mew-agent`: `Agent::new` no longer reads the environment and defaults the
+  field to `None` (unlimited). Callers own the policy: `setup::agent` applies
+  the configured value, the subagent runner applies the def's own `max_turns`.
+- `crates/mew/src/setup/agent.rs`: `agent.max_turns = (cfg.max_turns > 0)
+  .then_some(cfg.max_turns)` next to the orchestration wiring, which covers
+  both `mew run` and daemon sessions.
+- `evals/run.py`: `--max-turns` now writes `max_turns` into the generated
+  `config.toml` instead of exporting an env var, so evals exercise the same
+  path users do.
+- `docs/getting-started/configuration.md` (and the site copy): documented the
+  field. `MEW_MAX_TURNS` was never documented and is gone.
+
+Also fixed a pre-existing compile error that blocked `cargo test -p mew --bins`
+at this commit: `crates/mew/src/setup/agent_cwd_tests.rs:472` compared
+`&PathBuf` with `PathBuf` (`*p != plans_root`); now `**p != plans_root`.
+
+Tests: `test_max_turns_default_and_override` and
+`test_env_var_overrides_max_turns` (`crates/mew-config/src/lib.rs`),
+`configured_max_turns_reaches_the_agent_and_zero_disables_the_cap`
+(`crates/mew/src/setup/agent_cwd_tests.rs`), and
+`test_turn_limit_lands_before_the_first_table` (`evals/tests/test_runner.py`).
+
+Verified `cargo test -p mew-config` (141 passed), `cargo test -p mew --bins`
+(231 passed, 1 ignored), the three new tests, `cargo test -p mew-agent --lib`
+(367 passed; the 3 failures are environment-only and unrelated: one needs the
+`mew-python-helper` binary and two AGY fixture tests fail identically with the
+old `max_turns` default restored), `cargo fmt --check`, and the evals suite
+(`python3.14 -m unittest discover`, 15 passed). Pointed `MEW_CONFIG_DIR`,
+`MEW_DATA_DIR`, `MEW_CACHE_DIR`, and `MEW_SESSION_DIR` at a temp dir for the
+Rust runs; without that three `setup::providers` tests read the real
+`~/.config/mew` and fail. Left `MEW_GOAL_MAX_CONTINUATIONS`
+(`crates/mew-agent/src/turn.rs`) alone; it has the same shape and deserves its
+own change.
+
+### 2026-11-24: Restore the iOS core build (netdev 0.46.3 does not compile for iOS)
+
+`just ios-core` failed on `aarch64-apple-ios` with `cannot find type in6_ifreq in crate libc`. netdev 0.46.3 (pulled by netwatch 0.19.3, itself required by iroh 1.4.1) declares `src/os/darwin/ipv6_addr_flags.rs` for every apple target, but that file uses `libc::in6_ifreq`, which libc defines only under `#[cfg(target_os = "macos")]`. netdev 0.47.0 gates the module with `#[cfg(target_os = "macos")]`, and netwatch 0.19.3 requires `netdev ^0.46.1` with no 0.19.x release reaching 0.47, so the fix is the iroh bump: 1.5.0 requires netwatch 0.20.2, which requires `netdev ^0.47.0`.
+
+`cargo update -p iroh --precise 1.5.0` also moved iroh-base/iroh-dns/iroh-relay to 1.5.0, netwatch and portmapper to 0.20.2, noq to 1.5.0, and collapsed the two netdev pins (0.45.1 and 0.46.3) into a single 0.47.0.
+
+Verified `IPHONEOS_DEPLOYMENT_TARGET=17.0 cargo check -p mew-mobile-core --target aarch64-apple-ios` and `--target aarch64-apple-ios-sim`, `cargo check -p mew`, `cargo check -p mew-client-iroh -p mew-daemon --features mew-daemon/iroh --tests`, `cargo test -p mew-daemon --features iroh --test iroh` (3 passed), and `cargo test -p mew-mobile-core --features test-harness --test m1_integration pairing_with_an_invite` (1 passed). Not verified here: `mew-desktop` needs a newer toolchain (gpui uses the unstable `cold_path` feature on 1.94.0), and a full workspace check needs `CEF_PATH` for `cef-dll-sys`. Pre-existing at HEAD and untouched: `crates/mew-tui/tests/client_flow.rs` does not compile because its `ServerMessage` literal predates the `steered` field added in `4a5d3abc`.
+
+### 2026-11-24: Link libresolv in the iOS app
+
+With the core compiling again, the iOS app failed to link with `Undefined symbol: _res_9_getservers`. netdev 0.47.0 gained `src/os/ios/dns.rs` (behind its `gateway` feature, which netwatch enables), which resolves system DNS through libresolv's `res_9_ninit` / `res_9_getservers` / `res_9_ndestroy`. netdev declares `#[link(name = "resolv")]`, but that only guides rustc-driven links: `mew-mobile-core` ships as a staticlib, so the app's linker has to name the library itself.
+
+Added `.linkedLibrary("resolv")` to the `MewMobileCore` target's `linkerSettings` in `mew-ios/MewMobileCore/Package.swift`, beside the existing `z` and `iconv` entries that follow the same rule.
+
+Verified that `nm -u` on both release archives lists exactly `_res_9_ninit`, `_res_9_getservers`, and `_res_9_ndestroy` as undefined, that all three are exported by `libresolv.tbd` in the iPhoneOS SDK, that `-lresolv` reaches the app link line, and that `xcodebuild -project mew-ios/mew.xcodeproj -scheme mew -sdk iphoneos -destination generic/platform=iOS` and the arm64 simulator equivalent both report BUILD SUCCEEDED with no undefined symbols. Running the `ios-core` steps also regenerated `mew_mobile_core.swift` and `mew_mobile_coreFFI.h`, which had drifted: the checked-in bindings predated the queue/steer APIs (`enqueue_message`, `promote_queued_message`, `remove_queued_message`, ...).
+
+Known limitation left alone: the recipe only builds arm64 slices, so a simulator build that also targets x86_64 (for example `generic/platform=iOS Simulator` without `ARCHS=arm64`) fails with undefined uniffi symbols, since ld discards the arm64 archive.
+
+### 2026-11-25: Inherit login shell environment in supervised daemon and launch login shells in `mew-pty`
+
+When desktop shells launch from Finder or Spotlight, the inherited OS environment lacks shell startup additions (`~/.zprofile`, `~/.zshrc`, `mise`, Homebrew, `~/.cargo/bin`). Added `crates/mew-desktop-supervisor/src/shell_env.rs` and wired `resolve_daemon_env` into `spawn_daemon` so supervised local daemons capture the user's login interactive shell environment (`$SHELL -l -i -c` with NUL-delimited sentinel markers and a 4s timeout), merge `PATH` with shell entries first, drop ephemeral shell variables (`PWD`, `OLDPWD`, `SHLVL`, `_`, `TERM`), and preserve explicit `MEW_*` overrides (with `MEW_SKIP_LOGIN_SHELL_ENV=1` opt-out). Also updated `PtySession::spawn` in `crates/mew-pty/src/lib.rs` to pass `-l` for POSIX and Fish login-capable shells.
+
+Verified `cargo fmt --check -p mew-desktop-supervisor -p mew-pty`, `cargo test --locked -p mew-desktop-supervisor -p mew-pty` (21 and 7 passed), `cargo clippy --locked -p mew-desktop-supervisor -p mew-pty -- -D warnings`, and `cargo build --locked -p mew`.
+
+### 2026-11-25: Let remote clients report their real client kind
+
+Starting a chat from the iOS app failed with `remote connections must identify as client_kind=remote`. The daemon rejected any `NewSession` / `NewSessionInGroup` / `AttachSession` whose `client_kind` was not exactly `ClientKind::Remote` on a scoped remote connection, but `mew-mobile-core` sends `ClientKind::Mobile`, and a phone only ever connects over the remote transport, so the `Mobile` variant was unreachable in practice and presence could never show a phone as a phone.
+
+The guard added nothing: the capability it protects is already transport-derived. Both attach branches only add a session to `confirmed_desktop_sessions` when `client_kind == ClientKind::Desktop && !legacy_iroh && remote_scope.is_none() && remote_authorizer.is_none()`, which a remote connection can never satisfy. Removed the blanket kind check from `handle_connection_with_authorizer`; the client's declared kind now stays descriptive, so presence reports the device that actually attached. The legacy-iroh `Desktop` rejection is untouched.
+
+Test: `policy_tests::a_phone_over_the_remote_transport_keeps_its_own_client_kind` attaches with `ClientKind::Mobile` over a paired scoped connection, expects `SessionReady`, and asserts presence reports `Mobile`. Restoring the guard makes it fail with the original message. `docs/using-mew/ios-app.md` drops the two now-fixed limits (replayed invite, client kind) and documents the single-use, 120-second invite instead.
+
+Verified `cargo test -p mew-daemon --features iroh --lib` (146 passed, 1 ignored), `rustfmt --edition 2021 --check` on both touched files, and `cargo clippy -p mew-daemon --features iroh --all-targets --no-deps -- -D warnings -A clippy::nonminimal_bool`.
+
+### 2026-11-25: Interactive web/Electron terminal using `ghostty-web`
+
+Wired the daemon's existing PTY terminal protocol (`terminal_open`, `terminal_input`, `terminal_resize`, `terminal_close` -> `terminal_opened`, `terminal_output`, `terminal_exited`, `terminal_error`) into `mew-web-client/src/index.ts` and added protocol unit tests in `mew-web-client/src/__tests__/client.test.ts`.
+
+Added `ghostty-web` (`0.4.0`) to `mew-web-ui`, created `mew-web-ui/src/components/terminal-panel.tsx` (lazy WASM init, `FitAddon` + `ResizeObserver` sizing, live CSS-token theme sync via `MutationObserver`, UTF-8 input/output forwarding, session-scoped restart/close lifecycle, and collapsible background jobs drawer), and replaced the `TerminalWorkbenchPanel` placeholder in `mew-web-ui/src/components/right-rail.tsx`. Added component tests in `mew-web-ui/src/__tests__/terminal-panel.test.tsx`.
+
+Verified `pnpm --filter @mew/web-client test` (70 passed), `pnpm --filter @mew/web-client build`, `pnpm --filter @mew/web-client exec tsc --noEmit`, `pnpm --filter mew-web-ui test` (51 files, 418 passed), and `pnpm --filter mew-web-ui build`.
+
+
+### 2026-11-25: iOS Phase 1 UI polish and simplified font stack
+
+Replaced the bundled iOS font stack with `InstrumentSans-VF.ttf` (`InstrumentSans-Regular`) alongside `IoskeleyMono-Regular.ttf` and `IoskeleyMono-Medium.ttf`, dropping the unused MiSans, Banga, Junicode, OFL Goudy, and Garamontio font files from `mew-ios/mew/Fonts/`, `Info.plist`, `project.yml`, and `mew.xcodeproj/project.pbxproj`. Simplified `MewFontChoice` in `mew-ios/mew/AppStore.swift` to `Instrument Sans` (default), `SF` (system), and `New York` (system serif), updated `MewMarkdownTheme.swift` to use `fontChoice.uiFont(_:)` so `New York` applies to `SwiftStreamingMarkdown` prose/headings too, and removed the dead `MewFontChoice.apply()` helper.
+
+Completed Phase 1 visual polish and bug fixes across `mew-ios/mew/`:
+- Removed the bubble background from `StreamingBubble` and replaced fixed `320`/`360` message widths with adaptive layout in `MessageItemView.swift` so streaming and committed assistant messages share the same flat editorial layout.
+- Unified monospace rendering on `Ioskeley-Mono` (`Font.mewMono(_:)`) across `ToolCallRow`, `ReviewDiffView`, `PermissionSheet`, `FileBrowserSheet`, and `ActivityView`/`JobOutputView`, and added `.monospacedDigit()` on cost, context %, diff delta, and badge counters.
+- Updated `RootView.alertBanner` from hardcoded `.black.opacity(0.85)` to `.regularMaterial` with semantic foreground colors and a subtle hairline border; removed unused bubble/permission color tokens from `Theme.swift`.
+- Cleaned up `ChatView.swift` and `ChatBar`: removed dead `sendOrCancelButton` and `modelPicker` properties on `ChatView`, wrapped `ChatBar` row 2 metadata/control chips in a horizontal `ScrollView` so `Steer`/`Queue`/`Stop` don't crowd narrow screens, added active state tinting on `permissionModeChip` and `personaChip`, added a floating glass jump-to-bottom button when scrolled up, and unified `PermissionSheet`, `AskUserSheet`, and `GoalProposalSheet` under a single `ActivePromptSheet` `.sheet(item:)` modifier.
+
+Updated `PhoneSettingsTests.swift` for the simplified `MewFontChoice` cases and verified `xcodebuild -project mew-ios/mew.xcodeproj -scheme mew -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 17 Pro' test` (140 tests passed, 0 failures).
+
+### 2026-11-25: iOS Phase 2 polish, Lottie mascot, work folding, and streamlined Settings
+
+Applied Apple Fluid Interfaces and material hierarchy polish across `ChatView`, `TodoPanelView`, `MessageItemView`, and `SettingsView`:
+- **`TodoPanelView.swift`**: defaulted `isExpanded` to `false` as a compact pill showing the active `in_progress` task title (or `"Tasks"`) and `done/total` count with `.monospacedDigit()`; switched from translucent `.opacity(0.7)` to `.regularMaterial` (with `Color(.secondarySystemBackground)` fallback under Reduce Transparency), a `0.5pt` hairline border, and a critically damped spring (`response: 0.3, dampingFraction: 1.0`).
+- **Work folding & message actions (`ConversationActivity.swift`, `MessageItemView.swift`)**: updated `ConversationItem.grouped` so consecutive assistant `.reasoning` and `.toolCall` parts collapse together into `WorkGroupRow` (summarized via `ToolActivity.workSummary`, e.g., `"2 thoughts · 2 tool calls"`), revealing nested reasoning and tool calls along a `1.5pt` hairline rail when expanded; added a quiet `Copy` button and context menu on settled assistant text messages.
+- **Lottie Mascot (`MascotView.swift`, `mew-ios/mew/Mascot/`)**: bundled the `dark-ink` and `light-ink` status Lottie animations (`thinking`, `working`, `searching`, `waiting`, `reading-files`, `editing-code`, `shell-command`, `running-tests`, `retrying`, `python`, `neutral.png`) and added `airbnb/lottie-spm` (`4.6.1` resolved). Replaced generic `ProgressView` / `TypingDot` / `cat.fill` placeholders in `ChatView.liveStatusBanner`, `StreamingBubble`, and `ChatView.emptyState` (`"What can we work on?"`) with `MascotView` (falling back to static `neutral.png` when Reduce Motion is enabled).
+- **Bottom scroll edge fade & composer contrast (`ChatView.swift`)**: added a bottom `LinearGradient` behind the floating glass `ChatBar` inset so scrolled transcript content fades cleanly before reaching the bar's bottom edge, and rendered `ChatBar.modelPickerLabel` in `.primary` with a `.secondary` chevron.
+- **`SettingsView.swift`**: consolidated into 4 sections (`Appearance`, `Feedback & Review`, `Machines`, `About`) with SF Symbol labels, inline segmented theme picker, inline chat font picker with live typography preview, and tap-to-copy `Phone identity` in `Machines`.
+
+Updated `ConversationActivityTests.swift` and verified `xcodebuild -project mew-ios/mew.xcodeproj -scheme mew -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 17 Pro' test` (140 tests passed, 0 failures).
+
+### 2026-11-25: Streamline iOS Chats list and enable inline markdown selection
+
+- **`MessageItemView.swift`**: removed `.contextMenu` from `assistantContent` (which intercepted long-presses from `SwiftStreamingMarkdown`'s selectable `UITextView`) and added `.textSelection(.enabled)` to `MarkdownView` and `StreamedMarkdownView` so inline text and code blocks can be selected directly while keeping the one-tap `Copy` button.
+- **`SessionRailView.swift`**:
+  - Hid the top machine filter bar when `store.daemons.count <= 1`.
+  - Moved `"Show archived"` / `"Hide archived"` from a full-width top toggle row into a quiet button at the bottom of the list so `Today` starts at the top.
+  - Replaced the icon-heavy metadata row (folder icon, dollar/memory icons, wrapped cost/context numbers, `"Idle"` label, and hollow idle circles) with a single quiet subtitle line (`folder · machine · non-idle state`), showing status dots and state words only for `running`, `active`, or `offline` sessions while preserving pending permission/question badges.
+
+Verified `xcodebuild -project mew-ios/mew.xcodeproj -scheme mew -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -derivedDataPath /tmp/mew-sim-dd test` (`140` tests passed, `0` failures).
+
+### 2026-11-25: Full-turn work folding on iOS, inline namespace mentions, and `@` autocomplete
+
+- **Full-turn work folding (`ConversationActivity.swift`, `MessageItemView.swift`, `ConversationActivityTests.swift`)**: updated `ConversationItem.grouped` to skip whitespace-only `.text`/`.reasoning` parts and fold all parts of an assistant turn run up through its last `.toolCall` or `.reasoning` part (including intermediate narration between tool calls) into a single `WorkGroupRow`, keeping only the trailing answer outside the fold. Added `.text` narration rendering inside `WorkGroupRow`.
+- **Keep `@skill:` / `@model:` / `@subagent:` inline (`crates/mew-agent/src/mentions.rs`)**: stopped stripping valid `@skill:`, `@model:`, and `@subagent:` tokens from `display` and `enriched` and stopped appending `<... added to context>` / `<... referenced>` lines to `display`, while continuing to append the full resolved blocks to `enriched` for the model.
+- **iOS `@` mention autocomplete & `@file` insertion (`mew-ios/mew/ChatView.swift`)**: added a floating `.regularMaterial` `@` mention suggestion popover above `ChatBar` matching workspace files/folders (fetched lazily from `store.directoryListings`) and `@model:<provider>/<model>`, and updated `FileBrowserSheet` file picks to insert `@<relative-or-full-path> `.
+
+Verified `RUSTC_WRAPPER="" cargo test -p mew-agent mentions` (`13` passed, `0` failed) and `xcodebuild -project mew-ios/mew.xcodeproj -scheme mew -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -derivedDataPath /tmp/mew-sim-dd test` (`140` passed, `0` failed).
+
+### 2026-11-25: Fix Rust mention stripping and iOS UX paper cuts
+
+- **`crates/mew-agent/src/mentions.rs`**: preserved unknown `@skill:` and `@subagent:` tokens as literal text instead of deleting them, kept `@image` file mentions inline in `display`, and stopped appending `<path added to context>` lines to `display` (while keeping `enriched` and image `FilePart` attachments intact).
+- **`mew-ios/mew/SessionRailView.swift`**: added `.searchable(text:prompt:)` filtering across session title, session ID, folder name, and machine name with `ContentUnavailableView.search` when empty.
+- **`mew-ios/mew/ChatView.swift`**:
+  - Removed `.interactiveDismissDisabled()` from permission, ask-user, and goal sheets and enabled `.presentationBackgroundInteraction(.enabled(upThrough: .medium))` so users can dismiss or scroll the transcript behind medium sheets; tapping the status banner re-opens a dismissed prompt.
+  - Upgraded `@` mention autocomplete to drill down into subdirectories (`@dir/` omits trailing space and fetches nested `DirListing`s on demand).
+- **`mew-ios/mew/MessageItemView.swift`**: rendered inline monospaced red/green diffs in `ToolCallRow` for `edit` / `edit_str_replace` (`old_str`/`new_str`) and `edit_hashline` (`patch`) instead of raw JSON.
+- **`mew-ios/project.yml` & `mew-ios/mew/Info.plist`**: enabled landscape left/right orientations alongside portrait.
+
+Verified `RUSTC_WRAPPER="" cargo test -p mew-agent mentions` (`13` passed, `0` failed) and `xcodebuild -project mew-ios/mew.xcodeproj -scheme mew -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -derivedDataPath /tmp/mew-sim-dd test` (`140` passed, `0` failed).
+
+### 2026-11-25: Phase 3 — Shared `theme_manifest.json` codegen for iOS
+
+- **`crates/mew-tui/src/bin/theme_codegen.rs` & `mew-ios/mew/ThemeGenerated.swift`**: extended `theme_codegen` (including `--check`) to generate `MewThemePalette` and `MewThemes` (`41` light/dark palettes from `crates/mew-tui/resources/theme_manifest.json`, defaulting to `codex-light` and `codex-dark`).
+- **`PhoneSettings.swift`, `Theme.swift`, `RootView.swift`, `SettingsView.swift`**: added persisted `lightThemeId` and `darkThemeId` settings with fallback validation, injected `.environment(\.mewTheme, activeTheme)` and `.tint(activeTheme.textAccent)` from `RootView`, and added inline Light/Dark theme pickers plus color swatches in `SettingsView`.
+- **`ChatView.swift`, `MessageItemView.swift`, `SessionRailView.swift`**: applied `theme.background` across the chat transcript, bottom scroll-edge fade gradient, and Chats list; wired `theme.userBubble`, `theme.toolBackground`/`theme.toolBorder`, and `theme.textAccent`/`theme.textSuccess`/`theme.textError` while keeping Liquid Glass for floating chrome.
+- **Queued next (`mew-mobile-core` protocol slice)**: `list_skills` / `list_subagents` RPCs for `@skill:`/`@subagent:` autocomplete, `read_file` RPC for file viewing, and `FilePart` attachment upload/rendering.
+
+Updated `PhoneSettingsTests.swift` and verified `RUSTC_WRAPPER="" cargo run -p mew-tui --bin theme_codegen -- --check` and `xcodebuild -project mew-ios/mew.xcodeproj -scheme mew -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -derivedDataPath /tmp/mew-sim-dd test` (`140` tests passed, `0` failures).
+
+### 2026-11-25: Apply `mewTheme` across all iOS screens, lists, forms, and sheets
+
+- **`Theme.swift`**: added `.mewThemedForm(_:)` and `.mewThemedPlainList(_:)` helpers (hiding `scrollContentBackground` and filling `theme.background`).
+- **`SessionRailView.swift`**: added `.listRowBackground(Color.clear)` across `connectionNotice`, empty/search states, session rows, and the `"Show archived"` button so plain list rows no longer render solid black bands above `theme.background`; themed `ProjectPickerSheet`.
+- **`SettingsView.swift`, `DaemonListView.swift`, `DaemonDetailsView.swift`, `DaemonManagementView.swift`, `DaemonSwitcherView.swift`**: applied `.mewThemedForm(theme)` and `.listRowBackground(theme.card)` across all settings, machine management, pairing, and switcher forms.
+- **`ReviewView.swift`, `ActivityView.swift`, `MessageItemView.swift`, `ChatView.swift`**: themed `ReviewView` / `FileReviewView`, `ActivityView` / `WorkerHistoryView` / `JobOutputView`, `ToolHistoryView`, `PermissionSheet`, `GoalProposalSheet`, `AskUserSheet`, and `FileBrowserSheet`.
+- **Theme naming (`theme_codegen.rs`, `ThemeGenerated.swift`)**: mapped `codex-dark` / `codex-light` display names to `Argenteus Dark` / `Argenteus Light`.
+
+Verified `xcodebuild -project mew-ios/mew.xcodeproj -scheme mew -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -derivedDataPath /tmp/mew-sim-dd test` (`140` tests passed, `0` failures).
+
+### 2026-11-25: Model pill provider icon and bottom-sheet thinking slider on iOS
+
+- **`mew-ios/mew/ChatView.swift`**:
+  - Added `ProviderIconView` mapping provider IDs to distinct SF Symbols, and updated `ChatBar.modelPickerLabel` to display the provider icon, short model name, active thinking variant (when non-`"none"`), and chevron.
+  - Replaced the `Menu` picker with `ModelPickerSheet` (`.medium` / `.large` detents, themed with `mewTheme`) featuring a searchable model list with provider icons and context windows, plus a tactile discrete `ThinkingEffortSlider` card at the top (`Off` + `model.thinkingVariants`) with 1:1 drag/tap tracking, critically damped spring snapping, and selection haptics.
+
+Verified `xcodebuild -project mew-ios/mew.xcodeproj -scheme mew -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -derivedDataPath /tmp/mew-sim-dd test` (`140` tests passed, `0` failures).
+
+
+### 2026-11-25: Compact iOS ChatView nav bar and animating 1-to-2-row ChatBar
+
+- **`mew-ios/mew/ChatView.swift`**:
+  - Removed the inline session title and `.principal` `DaemonSwitcherButton` from `ChatView` so the navigation bar keeps only the leading back control and trailing `Review changes` / `...` menu buttons, with a `"Switch machine"` action inside the `...` menu presenting `DaemonSwitcherView`.
+  - Updated `ChatBar` to animate between a compact single-line capsule (`+`, `textField`, `sendOrCancelButton`) when unfocused, empty, and idle and the two-row composer (`textField` above `+`, scrollable chips, `sendOrCancelButton`) when `isExpanded` (`localFocus || !text.isEmpty || isBusy`), using a single preserved `TextField` identity and `Theme.Motion.value(.spring(response: 0.3, dampingFraction: 1.0), reduced: reduceMotion)` so keyboard focus stays intact.
+
+Verified `xcodebuild -project mew-ios/mew.xcodeproj -scheme mew -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -derivedDataPath /tmp/mew-sim-dd test` (`140` tests passed, `0` failures).
+
+
+### 2026-11-25: Mobile-core mentions, file previews, model display names, and file uploads
+
+- **`crates/mew-mobile-core/src/events.rs`, `crates/mew-mobile-core/src/state.rs`, `crates/mew-mobile-core/src/lib.rs`**:
+  - Added `display_name: Option<String>` to `ModelSummary` and `state::ModelInfo`, populated from `ServerMessage::ModelList`.
+  - Exposed `list_mention_candidates` (`ClientMessage::ListMentionCandidates` -> `CoreEvent::MentionCandidates`), `read_file_preview` (`ClientMessage::ReadFilePreview` with `scoped_errors: true` -> `CoreEvent::FilePreviewLoaded` / `CoreEvent::FilePreviewFailed`), and `send_prompt_with_attachments` (`ClientMessage::Prompt { text, attachments }`, recording optimistic `PartKind::File` parts locally alongside `Part::Text`).
+  - Added `PartKind::File`, `MessagePart.file_name`, `MessagePart.file_mime`, and `mew_message::Part::File` translation in `to_mobile_part` and `apply_provider_event`.
+- **Bindings (`mew-ios/MewMobileCore`)**: rebuilt release device/simulator static libraries, regenerated `mew_mobile_core.swift`, and repackaged `mew_mobile_core.xcframework`.
+- **iOS (`AppStore.swift`, `ChatView.swift`, `MessageItemView.swift`, `ConversationActivity.swift`, `mewTests/`)**:
+  - Wired `listMentionCandidates()`, `readFilePreview(sessionId:path:)`, and `sendPrompt(_:attachments:)` into `AppStore`.
+  - Added `@skill:<name>` and `@subagent:<name>` autocomplete candidates to `ChatBar`, switched `ModelPickerSheet` and `ChatBar` model labels to prefer `displayName`, turned `FileBrowserSheet` file taps into a themed `FilePreviewSheet` (keeping an inline `+` button to insert `@path`), changed `+` in `ChatBar` into a menu with workspace files / `PhotosPicker` / `.fileImporter` (10 MB per-file cap, data-URL encoding, removable attachment chips, attachment-only send support), and rendered `.file` parts in `MessageItemView`.
+
+Verified `RUSTC_WRAPPER="" cargo test -p mew-mobile-core` (`82` tests passed, `0` failures), `RUSTC_WRAPPER="" cargo clippy -p mew-mobile-core --all-targets -- -D warnings` (clean), and `xcodebuild -project mew-ios/mew.xcodeproj -scheme mew -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -derivedDataPath /tmp/mew-sim-dd test` (`141` tests passed, `0` failures).
+
+
+### 2026-11-25: Prevent iOS streaming indicator from flashing between turns
+
+- **`mew-ios/mew/ChatView.swift` & `mew-ios/mew/MessageItemView.swift`**:
+  - Updated `showsStreamingBubble` to `!store.streamingText.isEmpty` and removed the empty-text `MascotView(state: .thinking)` branch from `StreamingBubble`, so completed text parts followed by tool calls or another provider turn no longer mount and unmount an empty mascot bubble in the transcript.
+  - Updated `liveStatusText` and `liveMascotState` to stay steadily mounted (`"Working…"` / `.working`) for the full duration of `store.isStreaming` instead of disappearing while text deltas arrive.
+
+Verified `xcodebuild -project mew-ios/mew.xcodeproj -scheme mew -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -derivedDataPath /tmp/mew-sim-dd test` (`141` tests passed, `0` failures).
+
+
+### 2026-11-25: Bundle LobeHub provider SVGs and simplify lower iOS ChatBar
+
+- **`mew-ios/mew/Assets.xcassets/` & `mew-ios/mew.xcodeproj/project.pbxproj`**:
+  - Copied the 7 LobeHub monochrome provider SVGs (`alibabacloud`, `antigravity`, `codex`, `deepseek`, `kimi`, `opencode`, `zai`) from `mew-web-ui/src/assets/providers/` as vector template `.imageset`s (`preserves-vector-representation: true`, `template-rendering-intent: "template"`, explicit `24x24` / `#000000` fill) and registered `Assets.xcassets` in `mew.xcodeproj`.
+- **`mew-ios/mew/ChatView.swift`**:
+  - Updated `ProviderIconView` to render the bundled provider SVGs matching `mew-web-ui/src/components/provider-icon.tsx` (`antigravity`/`google`/`gemini`, `codex`/`openai`, `deepseek`, `kimi-for-coding`/`kimi`, `alibaba-token-plan`/`alibaba-token-plan-cn`, `opencode-zen`/`opencode-go`, `z-ai`/`zai`) with SF Symbol `cpu` fallback.
+  - Removed all nested `.glassEffect(...)` styles from inner controls inside `ChatBar`, keeping liquid glass strictly on the outer composer container.
+  - Replaced the horizontal chip `ScrollView` with a non-scrolling icon bar: `+` (`attachmentsButton`), `shield` (`permissionModeChip`), and `personaChip` on the left; a circular context `usageRing` (`Menu` showing `% context used`, cost, turns), `modelPickerChip` (`ProviderIconView` with a compact bottom-right speedometer badge `gauge.with.dots.needle.bottom.*` when thinking is active), and `sendOrCancelButton` on the right.
+
+Verified `xcodebuild -project mew-ios/mew.xcodeproj -scheme mew -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -derivedDataPath /tmp/mew-sim-dd test` (`141` tests passed, `0` failures).
+
+### 2026-11-25: Remember remote access across daemon restarts
+
+The Electron/Web **Remote & Mobile** toggle now persists like auto-title settings. `RemoteAccessState` gained `auto_start` in `remote.json`, written by `RemoteAccessController::set_auto_start` when the client calls `SetRemoteAccess`. The daemon restores the iroh listener on `run`/`run_tcp` startup, while a new `stop` method ends the live listener on shutdown without clearing the remembered choice. `enabled` still means a listener is actually running, so pairing and authorization keep their existing live-state checks.
+
+Updated the setting's description and added a Desktop App docs note. Tests cover the store roundtrip (shutdown does not clear `auto_start`), restore with a recording controller, and the request flow toggling the preference on and off.
+
+Verified `rustfmt --check`, `cargo test -p mew-daemon --features iroh --lib` (148 passed, 1 ignored), `cargo test -p mew-daemon --features iroh --test iroh` (3 passed), `cargo clippy -p mew-daemon --features iroh --all-targets --no-deps -- -D warnings`, `cargo check -p mew --features iroh`, `pnpm --filter mew-web-ui test` (51 files, 418 passed), and `pnpm --filter mew-web-ui exec tsc --noEmit`.
+
+### 2026-11-25: Render file directives in the iOS app
+
+The iOS chat left `:file[label]{path="..."}` directives as raw text because `MarkdownView` had no island renderer. `FileDirective` now rewrites them into SwiftStreamingMarkdown citation links with a mew-specific marker and coder, and the mew render configs opt into that citation format so they render as inline pills. Committed messages and the streaming bubble both use the rewrite. Tapping a pill overrides `openURL` for the custom scheme and opens the existing `FilePreviewSheet`; other links still use the system action. Straight and typographic quotes are both accepted.
+
+Added XCTests for directive parsing, URL roundtripping, malformed directives, and an actual inline attachment produced by the markdown renderer.
+
+Verified `xcodebuild -project mew-ios/mew.xcodeproj -scheme mew -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -derivedDataPath /tmp/mew-sim-dd test` (144 tests passed, 0 failures).
+
+### 2026-11-25: Fold a whole iOS turn into one work row
+
+- **`mew-ios/mew/ConversationActivity.swift`**:
+  - `ConversationItem.grouped` now closes a turn only at a real boundary (`ConversationItem.startsTurn`: a prompt with renderable content, an error, or a compaction part). Tool results reach the phone as user messages whose parts the mirror drops, so they used to split the work fold once per provider round; they now stay inside the turn that produced them. A multi-round turn therefore renders as one work row plus its answer instead of one row per round.
+  - `ToolActivity.workSummary` describes a folded turn by tool activity (`Edited 1 file and ran 2 commands`) instead of `N thoughts · N tool calls`, which carried no information once rounds were folded.
+- **`mew-ios/mewTests/`**: replaced `testInvisibleUserTurnsStillSeparateToolActivity` with `testToolResultCarriersStayInsideTheirTurn`, added `testMultiRoundTurnFoldsIntoOneWorkRowPlusItsAnswer` and `testFoldedTurnRendersAsOneRowUntilOpened` (ten rounds of work must render in a single collapsed row and expand when opened), and updated the error/prompt boundary test.
+- **`docs/using-mew/ios-app.md`**: chat view bullets now describe the folded turn row.
+
+Verified `xcodebuild -project mew-ios/mew.xcodeproj -scheme mew -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 17 Pro' test` (145 tests passed, 0 failures).
+
+### 2026-11-25: iOS thinking-effort speedometer
+
+`ChatView` drew the thinking level as one of three fixed SF Symbols
+(`gauge.with.dots.needle.bottom.*`), so the indicator could never sit between
+levels. Added `mew-ios/mew/ThinkingGauge.swift`: a 240° dial with an arc, level
+ticks, and a needle. The needle reads a fixed canonical effort order
+(`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`, matching the
+catalog), so it is absolute rather than "stop 3 of 5", and sweeps with a
+`response: 0.4, dampingFraction: 0.8` spring (no animation under Reduce Motion).
+It renders in the chatbar badge at 13pt and as a 52pt dial inside the model
+picker's thinking card. `thinkingGaugeSymbol` is gone.
+
+A first pass rotated the needle from a different origin than the arc, leaving it
+90° behind the fill. Rendering the dial to PNG through a temporary `ImageRenderer`
+test caught it; the same harness confirmed the small badge reads at 13pt. The
+temporary test was removed before the final run.
+
+Also repaired `mew-ios/mew.xcodeproj/project.pbxproj` by hand: regenerating it with
+`xcodegen` (which `docs/development/dev-mobile.md` says not to do) dropped the
+`mewTests` target and the committed project state. Restored the hand-maintained
+entries: the test target and scheme, `MascotView.swift`, `ThemeGenerated.swift`,
+`Assets.xcassets`, the `Mascot` folder resource, the Lottie package, and the
+font references matching the current `mew/Fonts` contents.
+
+Added `mew-ios/mewTests/ThinkingGaugeTests.swift` for the scale mapping (monotonic,
+one position per level, unknown levels read as engaged) and the dial's fit inside
+its frame.
+
+Verified `xcodebuild -project mew-ios/mew.xcodeproj -scheme mew -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 17 Pro' test` (149 tests passed, 0 failures).
+
+### 2026-11-25: iOS app icon
+
+`Assets.xcassets/AppIcon.appiconset` had only the empty 1024 slot Xcode creates,
+so the app installed with the blank default icon. Added `AppIcon.png`: the
+in-app pixel mascot (`mew/Mascot/light-ink/neutral.png`, trimmed to its 18x14
+glyph box) scaled 42x with nearest-neighbour resampling onto a 1024 gradient of
+the theme background (`#26262c` to `#17171a`) over a faint `#00ffff` radial
+glow, flattened to opaque 8-bit RGB. `Contents.json` now names the file for the
+single universal 1024 slot, so iOS derives the dark and tinted appearance
+variants itself.
+
+Reproduce with:
+
+```
+magick -size 1024x1024 gradient:'#26262c'-'#17171a' base.png
+magick -size 1024x1024 radial-gradient:white-black -colorspace gray -alpha off mask.png
+magick -size 1024x1024 xc:'#00ffff' mask.png -alpha off \
+  -compose CopyOpacity -composite -channel A -evaluate multiply 0.12 +channel glow.png
+magick base.png glow.png -compose over -composite bg.png
+magick mew/Mascot/light-ink/neutral.png -trim +repage -filter point -resize 756x588! cat.png
+magick bg.png cat.png -gravity center -compose over -composite \
+  -background '#1e1e21' -alpha remove -alpha off -depth 8 PNG24:AppIcon.png
+```
+
+`ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon` was already set in both
+configurations, so no project change beyond the catalog entry was needed.
+
+Verified the built bundle carries `Assets.car`, `AppIcon60x60@2x.png`, and
+`CFBundleIcons.CFBundlePrimaryIcon.CFBundleIconName = AppIcon`; actool's
+rendered 120px icon was inspected by eye, and the app installed on the
+simulator. `xcodebuild ... test` still passes (149 tests, 0 failures).
+
+### 2026-11-25: iOS app icon via an Icon Composer document
+
+Replaced the flat `Assets.xcassets/AppIcon.appiconset` with a layered Icon
+Composer document at `mew-ios/mew/AppIcon.icon`: `icon.json` with an
+`automatic-gradient` fill from the theme background (`srgb:0.118,0.118,0.129`)
+and one foreground layer (`Assets/foreground.png`, the 756x588 pixel cat with a
+neutral shadow and specular). iOS 26 derives the light, dark, and tinted
+appearances from that stack; the deployment target is already 26.0, so no legacy
+icon set is needed.
+
+Notes for the next change here:
+
+- Icon Composer itself is GUI-only (Xcode 26.4 ships `Icon Composer.app` with
+  private `IconComposerKit`/`IconComposerFoundation` frameworks and no CLI), so
+  the document is hand-authored JSON. Keys come from the framework's parser
+  strings: `fill` (`automatic-gradient`, `solid`), `groups[].layers[].image-name`,
+  `shadow`, `specular`, `translucency` (`{enabled, value}`; `enabled: false`
+  crashes actool, so omit the key to disable it), `supported-platforms` (optional).
+- actool takes the document as an extra input next to the catalog. Reproduce the
+  catalog compile outside Xcode with:
+
+```
+xcrun actool Assets.xcassets AppIcon.icon --compile out \
+  --platform iphonesimulator --minimum-deployment-target 26.0 \
+  --app-icon AppIcon --output-partial-info-plist out/partial.plist
+```
+
+- In the project, `AppIcon.icon` is a `folder.iconcomposer.icon` file reference in
+  the `mew` group and a member of the Resources build phase; the build system
+  feeds it to the catalog compile because the Asset Catalog Kit plug-in declares
+  that UTI. `ASSETCATALOG_COMPILER_APPICON_NAME` stays `AppIcon`, and the name
+  must match the document's basename.
+
+Verified: the built bundle now carries three icon renditions in `Assets.car`
+(`UIAppearanceAny`, `UIAppearanceDark`, and a monochrome `ISAppearanceTintable`)
+instead of the single flat rendition the appiconset produced, the loose
+`AppIcon60x60@2x.png` fallback matches the design, and `xcodebuild ... test`
+passes (149 tests, 0 failures). The live Liquid Glass shading is applied by
+CoreUI at display time, so it is not observable from the compiled catalog; a
+home screen check on the simulator or device is the remaining confirmation.
+
+### 2026-11-25: Mobile history pages stop shipping turn manifests
+
+Opening a session on the phone was slow, and the cause was not tool output. A
+`mew_message::Message` carries `assistant.manifest`, the whole token accounting
+tree for its turn, and that tree dwarfs the message: on a real 550-message
+session the newest 24 messages serialized to 1.58 MB with manifests and 25 KB
+without (64x), and the whole session to 17.8 MB versus 598 KB (30x). Tool calls
+and results were 1.5% and 0.3% of that session's bytes.
+
+`SessionHistoryPage` is built by the daemon, so the fix is there:
+`history_omits_manifests(client_kind)` is true for `ClientKind::Mobile` and
+`ClientKind::Desktop`, and both page paths (`AttachSession`'s replay page and
+`LoadSessionHistory`) run `drop_manifests` on the page before sending. The
+connection remembers its client kind so later pages match the replay. The web UI
+is the only client that renders the breakdown (`message-inspector.tsx`), so `Web`
+keeps trees; the native desktop app has no `manifest` reader at all and the TUI
+never showed segments, but `Tui` keeps them for now.
+
+A protocol-level `include_manifests` flag on `AttachSession` and
+`LoadSessionHistory` was written first and discarded: both variants are
+constructed in 113 places across the workspace, so a field would have edited the
+whole test fleet to express a client policy the daemon already knows.
+
+`crates/mew-daemon/src/request_tests.rs::history_pages_omit_manifests_for_clients_without_an_inspector`
+covers it: a 26-message session with manifests on every assistant message, then
+Mobile, Desktop, Tui, and Web clients attached, asserting manifest presence on
+both the attach page and an older page request. The 1.58 MB/25 KB figures were
+measured against
+`~/Library/Application Support/computer.mew.mew/sessions/01KXY2XBZ0Q536KMAX4JWSGCZB`.
+
+Verified `cargo test -p mew-daemon --lib` (144 passed, 1 ignored),
+`cargo test -p mew-mobile-core --lib` (82 passed), `cargo fmt`, and
+`cargo clippy -p mew-daemon -p mew-mobile-core --all-targets -- -D warnings`.
+Not verified end to end over iroh with the real app.
+
+### 2026-11-25: History pages start at turn boundaries, and the phone pages wider
+
+Backfilling a phone transcript was tap-heavy: on a measured 550-message session a
+24-message page holds less than one turn (30.6 messages per turn), so the whole
+session took ~22 page loads. It also re-labeled rows already on screen, because a
+page boundary could fall inside a turn and the fold grew when the rest of the
+turn arrived.
+
+- `crates/mew-daemon/src/history.rs`: `Record` now carries `starts_turn`, computed
+  during the session-log scan with the same rule clients fold by (a non-assistant
+  message with something to render; tool results do not start turns).
+  `HistorySnapshot::page_start` extends a page back to the turn's first message,
+  bounded at 4x the requested size, and leaves the window alone when the
+  transcript has no boundary inside that bound (synthetic histories without
+  prompts, and the `history_page_reads_backwards_and_returns_a_cursor` fixtures).
+  The byte cap can still cut a turn, which is noted at the break.
+- `crates/mew-protocol`: `MOBILE_HISTORY_PAGE_LIMIT` (80). The phone folds a turn
+  into one row, so 24 messages never filled a screen. `history_page_limit` in the
+  daemon picks it for `ClientKind::Mobile` on both the attach replay and
+  `LoadSessionHistory`; the mobile core requests it for older pages.
+- `mew-ios/mew/AppStore.swift`: on `sessionReloaded` the app prefills one older
+  page, so the first scroll back does not hit the daemon.
+
+The idea of skipping intermediate steps in historical pages and fetching them on
+expand was measured and deferred: after manifests are stripped, work parts are
+73% of the bytes (410 KB of 559 KB) but a page is only 25 KB, so the remaining
+cost is tap count, not transfer. Skipping parts would also need the fold's label
+logic to move server-side or a compact projection to keep a single labeler.
+
+Tests: `history_pages_start_at_a_turn_boundary` (a 24-message window over
+5-message turns returns 25 messages starting at the prompt) and
+`mobile_history_pages_use_the_larger_page_limit` (Mobile 80, Web 25 on a
+100-message session). iOS tests updated for the open-time prefetch.
+
+Verified `cargo test -p mew-daemon --lib` (146 passed, 1 ignored),
+`cargo test -p mew-daemon --tests`, `cargo test -p mew-mobile-core --lib`
+(82 passed), clippy with `-D warnings`, and `xcodebuild ... test` (149 tests).
+
+### 2026-11-25: iOS backfills history when the reader pulls up
+
+The transcript only loaded older history from the **Load older messages**
+button. Pulling up to the top of what was loaded now requests the next page
+by itself.
+
+- `mew-ios/mew/ChatView.swift`: `HistoryAutoLoad` is a small, testable state
+  machine over "distance from the top of the content". It reports that a page
+  should load when the reader moves up inside a 320pt trigger zone, then stays
+  disarmed until they leave the zone, so one flick cannot page a whole session.
+  `rearm()` runs when the store refuses a request, so a transient disconnect
+  does not leave backfill dead. Scroll position is held by the existing
+  `historyAnchor` path, now shared with the button through
+  `loadOlderHistory(anchoredAt:)`.
+- The trigger reads `ScrollGeometry.contentOffset.y + contentInsets.top` via
+  `onScrollGeometryChange`, so "top" is measured in the units UIKit reports
+  regardless of safe-area insets, and rubber-banding above the top counts as
+  pulling up.
+
+Tests: `mew-ios/mewTests/HistoryAutoLoadTests.swift` covers the first pull, one
+pull loading one page, re-arming after leaving the zone, downward scrolling
+never loading, no movement inside the zone, rubber-banding, and re-arming after
+a refused request.
+
+Verified `xcodebuild ... test` (156 tests, 0 failures).
+
+### 2026-11-25: `web_search` exists now, with a web-client toggle; subagent `tag!ALL_MCP` expands
+
+Agents reported web search was unavailable. It was never built: `mew-tools` had
+only `web_fetch`, while the built-in `code-reviewer` subagent allowlisted
+`web_search`. The subagent runner resolves allowlist entries with a plain
+registry lookup and dropped the unknown name silently, so the child was
+promised a tool it never received. The same lookup meant `tag!ALL_MCP` in a
+subagent `tools` list was a no-op; only the persona path expanded tags.
+
+- `crates/mew-tools/src/tools/web_search.rs`: a `web_search` tool backed by
+  Tavily (`POST /search`, bearer auth, `search_depth` pinned to `basic` so a
+  call costs one credit). Inputs are `query`, optional `max_results` (clamped
+  1-20), `time_range`, and the usual `description`. The key resolves through
+  the standard chain under the `tavily` credential ref (`MEW_CRED_TAVILY`,
+  keyring, `credentials.json`). `mew-tools` cannot depend on `mew-config`
+  (cycle), so the key is resolved in `mew`'s setup and passed in.
+- The tool is registered only when the daemon's toggle is on **and** a key
+  resolves; otherwise the model never sees it. The toggle lives in
+  `session_dir/web-search-settings.json` (default on), is broadcast on a
+  `watch` channel, and reaches the builder through
+  `AgentBuildParams.web_search_enabled`, so it applies to the next session
+  built rather than to agents already running. `mew run` has no toggle and
+  defaults to on.
+- Wire: `DaemonSettings` gains `web_search: Option<WebSearchInfo { enabled,
+  configured }>` and a new `SetWebSearchEnabled` request, authorized like
+  `SetRemoteAccess` (control scope for remote peers). The web client exposes
+  `setWebSearchEnabled`, and the web UI gets a **Web search** group under
+  General with the toggle and a Ready/Missing key badge that explains how to
+  supply the key. No key-entry field: no credential write path exists for any
+  provider today, and adding one is a separate decision.
+- `crates/mew-agent/src/runner.rs`: subagent allowlists now go through
+  `expand_tool_tags` (made `pub(crate)`) before `child_tools`, and the expanded
+  names feed `active_tool_names` too. A plain name that matches no registered
+  tool logs a warning instead of vanishing.
+
+Tests: tool schema/body/formatting/status mapping (8); registration gate in
+`setup/agent.rs`; protocol roundtrip for the new request and field; daemon
+read/set/observer-broadcast/restart-persistence/corrupt-file fallback and the
+remote-scope rejection; runner tag expansion with an unknown name dropped; TS
+client wire and `web_search` re-emission; 4 web UI tests. Rebuilt
+`mew-web-client/dist` (`just build-js`), which the UI consumes.
+
+Verified `cargo test` for `mew-tools`, `mew-protocol`, `mew-agent`
+(`runner::tests`, 48), and `mew-daemon`; `cargo clippy --locked -D warnings`
+on the touched crates; `just arch-check`; `tsc --noEmit` for both web packages;
+`@mew/web-client` (70) and `mew-web-ui` (423) suites. Not run: `mew`'s
+`setup::agent` tests and `mew-mobile-core`, whose test targets are currently
+broken by the in-flight `scratch` workspace protocol change (missing `scratch`
+field initializers), unrelated to this work.
+
+### 2026-11-25: `web_search` gets exa, a provider picker, and `config.toml` settings
+
+Second pass on the web-search work. `config.toml` `[web_search]` is now the
+single source of truth and the ui writes it directly; the daemon-owned
+`web-search-settings.json` is gone. keys still stay outside the ui under the
+provider's credential ref, exactly like model keys.
+
+- `crates/mew-tools/src/tools/web_search.rs`: a `SearchProvider` enum
+  (`tavily` / `exa`) sits behind the one `web_search` tool. the exa backend
+  uses `x-api-key`, `numResults`, `type: "auto"`, requested page text capped
+  at 4000 chars per result, and `startPublishedDate` derived from
+  `time_range`. request building, response parsing, and status mapping are
+  pure per-provider functions with tests.
+- `crates/mew-config/src/lib.rs`: `WebSearchConfig { enabled, provider,
+  max_results }` with defaults (on, tavily, 5). `update_web_search_at` edits
+  `[web_search]` with `toml_edit`, preserving comments and unrelated tables,
+  and writes through the same atomic/symlink-safe helper as `save_state_to`.
+  `toml_edit` was already in the lockfile via `toml`.
+- daemon: `SessionManager` holds a `watch<WebSearchConfig>` seeded from
+  `config.toml` at startup and replaced after each ui write; it reaches the
+  builder via `AgentBuildParams`. `SetWebSearchSettings` takes optional
+  `enabled` and `provider` fields so one ui action is one file write. the
+  settings snapshot carries every provider with its key status, so the ui
+  does not hardcode the list.
+- web ui: the settings group has a provider radio row alongside the toggle,
+  and a `WebSearchPill` in the composer mirrors the model pill. both report
+  Ready/Missing per provider. changes are daemon-wide and apply to the next
+  session built, which the popover states. `mew run` reads `[web_search]`
+  directly.
+
+Tests: per-provider request/parse/status mapping (11), config defaults plus
+comment-preserving partial writes (5), protocol roundtrip for the new request
+and snapshot, daemon read/write/broadcast/restart-seed/rejection, web-client
+wire (70), web-ui settings and pill (428 total). rebuilt the web-client dist.
+
+Verified `cargo check --locked` on all touched crates, the crate tests above,
+`cargo clippy --locked -D warnings`, `just arch-check`, `tsc --noEmit` on both
+web packages. Not runnable: `mew` and `mew-agent` test binaries, still blocked
+by in-flight work (missing `scratch` initializers and an `execute_python_with_guard`
+arity change); the production bins compile.
+
+### 2026-11-25: `web_search` fails over to the other provider
+
+Each call now tries an ordered chain instead of a single backend: the
+configured provider first, then the other one when its credential resolves.
+`WebSearch` holds `ProviderAuth { provider, api_key }` entries in that order;
+`run_chain` is a small generic loop so failover is testable without network.
+When every provider fails, the tool error names each provider's failure. The
+result header says which provider answered (`via exa`). Failover is not
+sticky: the next call starts from the configured provider again.
+
+`mew`'s setup builds the chain from `config.toml` plus both credentials, so
+the tool is registered when *either* provider has a key. The settings ui now
+shows `Fallback: <id>` when the selected provider has no key but the other
+does, and the provider row explains the failover. Bad input still fails
+before any request is attempted.
+
+Tests: chain order, first-success stop, all-failure reporting, and the
+setup's credential-based chain construction. Verified `cargo test -p mew-tools
+web_search` (14), `mew-web-ui` (429), `tsc --noEmit`, `cargo clippy --locked
+-D warnings` on touched crates, and `just arch-check`.
+
+### 2026-11-25: Finished tasks and jobs clear themselves on iOS
+
+A fully checked-off **Tasks** panel and completed background jobs sat on screen
+for the rest of the session: nothing ever removed them, because the daemon keeps
+terminal jobs in its activity map and replays them, and the phone only ever
+added to its lists.
+
+- `mew-ios/mew/CompletedLinger.swift`: records when work was first seen
+  finished and answers whether it is still inside a 20-second grace window, so
+  finished work is visible long enough to notice and then gone. A restarted job
+  or a checklist with new work drops out of the record and reappears at once.
+- `mew-ios/mew/AppStore.swift`: `noteFinishedWork()` runs whenever jobs or todos
+  arrive, marks terminal jobs (`state != "running"`, so failures and
+  cancellations clear too) and fully-complete checklists, then prunes what has
+  waited out the window. One `Task` waits the window and re-prunes, so no view
+  runs its own clock, and it stops once nothing is waiting. Pruning on arrival
+  also keeps a snapshot replaying the same finished job from resurrecting it.
+  `now` is injectable so tests pin the clock.
+
+Not changed: the daemon still retains terminal jobs in its activity map and
+replays them to every client. The phone is clean now, but the TUI and web job
+lists still accumulate; a `JobEnded` message symmetrical with `SubagentEnd`
+would fix that at the source.
+
+Tests: `CompletedLingerTests` covers the grace window, running work staying
+visible, a restart resetting the window, per-job independence, and the
+prune-scheduling predicate; two store tests cover a finished job and checklist
+leaving after the window and a live checklist returning.
+
+Verified `xcodebuild ... test` (164 tests, 0 failures).
+
+### 2026-11-25: model size tiers (nano/micro/deci) are editable in the web ui
+
+"model size config" means the router tiers: `[providers.<id>]` maps `nano`,
+`micro`, and `deci` to `provider/model` ids that subagents pin and the
+permission classifier uses. none of that was on the wire before.
+
+- `crates/mew-config/src/lib.rs`: `RouterTiers` plus `update_router_tiers_at`,
+  which edits `[providers.<id>]` with `toml_edit` through the same
+  comment-preserving atomic writer as `[web_search]`. empty values remove the
+  key, and tier values are validated as `provider/model` before writing.
+- protocol: `RouterInfo`/`RouterTierInfo` on `DaemonSettings` and a
+  `SetRouterTiers` request carrying all three values in one write. the daemon
+  keeps a live `watch<RouterInfo>` seeded from `config.toml`, requires control
+  scope for remote peers, and passes the tiers through `AgentBuildParams` to
+  each session build. `build_session_agent` overrides the target provider's
+  fields on its per-session `Config` clone, so the router and classifier see
+  the new tiers without a restart.
+- web ui: a "Model sizes" group with three model pickers sourced from
+  `availableModels`, showing the router provider and "(unset)" for empty
+  tiers. changes apply to new and resumed sessions, as the group says.
+
+Tests: config writer (comment preservation, key removal, validation), protocol
+roundtrip, daemon write/broadcast/restart-seed, client wire, and three ui
+tests. Verified crate tests, `mew-web-ui` (432), both `tsc --noEmit`,
+`cargo clippy --locked -D warnings`, `just arch-check`. `mew` and
+`mew-mobile-core` test targets still have only the in-flight `scratch`
+initializer errors; nothing new from this work.
+
+### 2026-11-25: web search selection stays in settings; drop config-file copy
+
+Removed the composer `WebSearchPill` and its test. provider selection lives
+only in the Web search settings group, which already had the same picker. the
+two `input-area` accommodations for the pill (the import/render and the extra
+`setClient` mock export) went with it.
+
+Also removed "Saved to [web_search] in config.toml." and the equivalent
+"Saved to [providers] in config.toml" phrasing from the settings descriptions.
+the actionable hints (which `MEW_CRED_*` to set, and what to put in config to
+create a router provider when none exists) stay.
+
+Verified `tsc --noEmit` and the web-ui suite (53 files, 429 tests).
+
+### 2026-11-25: tell the agy boundary agent that search lives behind `call_mcp_tool`
+
+an agy session reported it had no web search tool even though search was
+configured and registered (`tools_registered: 40` versus 38 in older sessions).
+the cause is the agy boundary: `launch.rs` starts a `mew-boundary` agent with
+`tools: []` and all mew tools are put on MCP server `mew`, so the model only
+sees the four bridge tools (`call_mcp_tool`, `list_resources`,
+`read_resource`, `manage_task`). the full tool list is advertised by the MCP
+`tools/list` handler, but agy lazy-loads those descriptions and the boundary
+instruction named no specific tools, so the model concluded search was absent.
+
+the boundary instruction now names `web_search` and `web_fetch`, says they are
+not native tools here, and gives the exact `call_mcp_tool` shape
+(`ServerName: "mew"`, `ToolName: "web_search"`, `{"query": "..."}`). the
+existing byte-exact marker stays the last static line, so the test that
+asserts only the system prompt follows it still passes; a new assertion covers
+the search guidance.
+
+Verified `cargo test -p mew-agy` (all suites), `rustfmt --check`, and
+`cargo clippy --locked -D warnings`. takes effect for boundary agents written
+at the next agy launch, so the current session needs a restart after rebuild.
+
+### 2026-11-25: put the real MCP tool roster in the agy boundary context
+
+the model still could not enumerate tools after the earlier instruction fix:
+`list_resources` returns no resources (it lists MCP resources, not tools),
+and agy exposes no tool-listing operation to the model. `call_mcp_tool` needs
+a `ToolName`, so the model had no way to discover what to call.
+
+`launch::prepare_with_tools` now writes the actual tool names from
+`request.tools` into the boundary agent file as one `Available tools on \`mew\``
+line, sorted and deduplicated, before the fixed marker. `prepare` stays a thin
+wrapper for callers without a tool set, so model discovery and existing tests
+are unchanged. `mcp::Tool::name()` exposes the alias the model must use.
+the instruction also says plainly not to use `list_resources` for tool
+discovery and that availability is decided by the call itself.
+
+Tests: the roster is in context, deduplicated, and the system prompt still
+follows the marker verbatim. Verified all `mew-agy` suites, `rustfmt --check`,
+and `cargo clippy --locked -D warnings`. needs a rebuild and a new agy launch.
+
+
+### 2026-11-26: Fix AGY MCP tool discovery, schema validation, and ACP conformance
+
+- **`crates/mew-agy/src/launch.rs` & `crates/mew-agy/src/provider.rs`**:
+  - Removed the unconditional hardcoded `web_search` / `web_fetch` claims from `AGENT_HEAD` and added `prepare_with_tool_aliases`, writing an explicit empty-tool notice when no tools are registered or listing each registered MCP tool (with `(alias for <original>)` when aliased) plus guidance for both `mcp_mew_<name>` and `call_mcp_tool`.
+  - Marked all registered `mew` MCP tools `"eager": true` under `mcpServers.mew.tools` in `.agents/mcp_config.json` when tools are present so AGY exposes their full descriptions and schemas directly without relying on disk-based lazy schema reads.
+- **`crates/mew-agy/src/mcp.rs`**:
+  - Exposed `Tool::original_name`, defaulted omitted or `null` `params.arguments` on `tools/call` to `{}` per MCP spec, and included truncated `jsonschema` validation details in `-32602` `"invalid arguments: ..."` errors.
+- **`crates/mew-agy/src/sandbox.rs` & `crates/mew-agy/src/session.rs`**:
+  - Raised `SeatbeltBoundary`'s `mcp_config.json` read limit from 8 KiB to 64 KiB and allowed either `serverUrl` or `url`.
+  - Accepted standard ACP `ToolCallUpdate.rawInput` alongside `args` in `tool_call_allowed`, and attached a JSON-RPC `"id"` to `session/close`.
+
+Verified `RUSTC_WRAPPER="" cargo test --locked -p mew-agy` (outside sandbox: `115` passed across unit + 8 integration suites, `0` failed, `6` ignored requiring live binary/network), `RUSTC_WRAPPER="" cargo clippy --locked -p mew-agy --all-targets -- -D warnings`, and `RUSTC_WRAPPER="" cargo fmt -p mew-agy -- --check`.
+
+### 2026-11-26: Lock root viewport overflow and overscroll in `mew-web-ui`
+
+- **`mew-web-ui/src/index.css`**:
+  - Locked `html`, `body`, and `#root` to `height: 100%` with `overflow: hidden` and `overscroll-behavior: none` on `html, body` so Chromium/Electron on macOS cannot rubber-band or scroll the root page past window boundaries horizontally or vertically.
+  - Added `overscroll-behavior-x: none` and `overscroll-behavior-y: contain` to `.chat-scroll-container` to stop horizontal and boundary scroll chaining from the transcript pane.
+- **`mew-web-ui/src/main.tsx`**:
+  - Wrapped `HostStartupError` in an `h-full overflow-y-auto` container with `min-h-full` on `<main>` so startup errors stay scrollable in small windows when `#root` is viewport-locked.
+
+Verified `pnpm --filter mew-web-ui test` (53 files, 429 passed), `pnpm --filter mew-web-ui build`, and `pnpm --filter @mew/electron test:unit` (33 passed, 1 skipped real-package test).
+
+### 2026-11-26: Scoped read-only allowlist and anti-loop pagination for AGY spill files
+
+- **`crates/mew-provider/src/lib.rs`, `crates/mew-provider-router/src/lib.rs`, `crates/mew/src/setup/antigravity.rs`**:
+  - Added `Provider::allows_readonly_spill_path(session_id, path)` (default `false`) and forwarded it through `Router`, `Routed`, and `LocalAgyProvider`.
+- **`crates/mew-agy/src/mcp.rs`, `crates/mew-agy/src/session.rs`, `crates/mew-agy/src/provider.rs`, `crates/mew-agy/src/launch.rs`**:
+  - Captured validated `_meta["antigravity.google/root_conversation_id"]` on MCP `tools/call` alongside `Session::acp_session_id` so `AgyProvider::allows_readonly_spill_path` allows read-only access strictly to regular files matching `<app_data>/brain/<active_conv_id>/.system_generated/steps/<digits>/output.txt` (blocking symlinks, traversal, unrelated sessions, and non-step files).
+  - Kept MCP `McpServer::resolve` / `bounded_tool_output` 1 MiB boundaries intact, while bounding `read` and `grep` MCP results targeting `.system_generated/steps/<digits>/output.txt` in `continuation()` to `<= 8_000` bytes with clean line-boundary truncation (including `offload_large_tool_output` head extraction and ultra-long single lines) and explicit `offset=<next>` guidance to stop AGY's recursive spill loop.
+  - Updated `mew-boundary`'s `AGENT_HEAD` to direct truncated `read` retries back to workspace `offset`/`limit` reads and paginated reads or `grep` on spilled `output.txt` files.
+- **`crates/mew-agent/src/workspace.rs`, `crates/mew-agent/src/tools.rs`, `crates/mew-agent/src/tests.rs`**:
+  - Updated `Agent::ensure_workspace_path` so `read` and `grep` bypass `WorkspacePermissionRequest` only when `self.provider.allows_readonly_spill_path(self.session_id, tool_path).await` returns `true` (without mutating `workspace_allowances`), leaving `write`/`edit`/`glob` and other sessions blocked.
+
+Verified `RUSTC_WRAPPER="" cargo test --locked -p mew-provider -p mew-provider-router` (22 passed), `RUSTC_WRAPPER="" cargo test --locked -p mew-agy` (outside sandbox: 117 passed, 0 failed, 6 ignored across unit and 8 integration suites including new spill-scope and pagination tests), `RUSTC_WRAPPER="" cargo clippy --locked -p mew-provider -p mew-provider-router -p mew-agy --all-targets -- -D warnings`, `RUSTC_WRAPPER="" cargo clippy --locked -p mew-agent -p mew --lib --bins -- -D warnings`, and `RUSTC_WRAPPER="" cargo fmt -p mew-provider -p mew-provider-router -p mew-agy -- --check`. `cargo test -p mew-agent` (including the new end-to-end test in `crates/mew-agent/src/tests.rs`) is currently blocked from compiling `(lib test)` by unrelated pre-existing worktree edits in `crates/mew-agent/src/python.rs` and `crates/mew-agent/src/runner.rs`.
+
+### 2026-11-26: Add `argenteus-dim` and `jianghu-dim` dark themes
+
+- **`crates/mew-tui/resources/theme_manifest.json` & `mew-web-ui/src/themes.json`**:
+  - Added `argenteus-dim` (neutral charcoal `#2a2a2a` canvas, `#404040` card, `#383838` muted, `#313131` sidebar, `#f0f0f0` foreground) and `jianghu-dim` (lifted slate-jade `#242b2e` canvas, `#2d3539` card, `#2e373a` muted, `#2b3336` sidebar, `#e9e6df` foreground, `#7fbba6` jade primary) as brighter dark variants, along with Web UI metadata under category `mew`.
+- **Generated assets (`just theme-codegen`)**:
+  - Regenerated `mew-web-ui/src/generated-themes.css`, `crates/mew-tui/src/theme_generated.rs`, `crates/ratatui-mdstream/resources/theme.tmTheme`, and `mew-ios/mew/ThemeGenerated.swift` (`Argenteus Dim` / `Jianghu Dim`).
+- **Tests (`crates/mew-tui/src/theme.rs`, `crates/mew-tui/tests/surfaces.rs`, `mew-web-ui/src/__tests__/theme.test.tsx`)**:
+  - Added tests confirming `argenteus-dim` and `jianghu-dim` load as dark themes, have brighter backgrounds than `codex-dark` / `jianghu-dark`, keep distinct popover/user surfaces with >= 4.5 WCAG contrast, and appear in Web UI `THEMES`.
+
+Verified `just theme-codegen-check`, `cargo test -p mew-tui --test surfaces dim_variants`, `cargo clippy -p mew-tui --lib -- -D warnings`, `pnpm --filter mew-web-ui test` (53 files, 430 passed), and `pnpm --filter mew-web-ui build`. `cargo test -p mew-tui` (lib/unit test target) is currently blocked from compiling by unrelated pre-existing worktree edits missing the `scratch` field on `ServerMessage::SessionReady` and `SessionInfo`.
+
+### 2026-11-26: render markdown files as documents
+
+the files workbench renders markdown with pierre words and document typography. a markdown file link that creates a files tab starts with its explorer closed; existing files tabs and files selected in the explorer retain their sidebar state. explorer visibility is saved with the files tab. verified all 436 web ui tests and a production ui build; the build reports dependency eval and large-chunk warnings. relative links and images in documents are not workspace-resolved.
+
+### 2026-11-26: fix bridge production dependency
+
+moved `serde_json` from development to regular dependencies because artifact manifest handling uses it in the bridge library. verified locked bridge library and binary checks and both artifact unit tests.
+
+# 2026-11-26 — web composer mention picker
+
+replaced the separate mention panels with one grouped, scrollable picker with
+icons and a file attachment action. keyboard selection follows the visible
+order, and attachment and persona actions preserve surrounding draft text.
+verified the input-area tests (24 passed) and `pnpm --filter mew-web-ui build`.

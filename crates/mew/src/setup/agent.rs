@@ -94,6 +94,7 @@ use mew_tools::tools::read::Read;
 use mew_tools::tools::skill::Skill;
 use mew_tools::tools::todo::{TodoComplete, TodoCreate, TodoDelete, TodoListTool, TodoUpdate};
 use mew_tools::tools::web_fetch::WebFetch;
+use mew_tools::tools::web_search::WebSearch;
 use mew_tools::tools::write::Write;
 use mew_tools::tools::write_plan::WritePlan;
 use mew_tools::SecretSet;
@@ -109,6 +110,7 @@ pub(crate) fn build_tools_with_plans_dir(
     hashline_enabled: bool,
     plan_path: String,
     generated_plans_dir: Option<std::path::PathBuf>,
+    web_search: Option<WebSearch>,
 ) -> Vec<Arc<dyn mew_tools::Tool>> {
     let (write_plan, edit_plan): (Arc<dyn mew_tools::Tool>, Arc<dyn mew_tools::Tool>) = if plan_path
         == mew_config::DEFAULT_PLAN_PATH
@@ -148,6 +150,7 @@ pub(crate) fn build_tools_with_plans_dir(
         Arc::new(TodoDelete),
         Arc::new(TodoListTool),
         Arc::new(WebFetch),
+        Arc::new(mew_tools::tools::present_artifact::PresentArtifact),
         // Plan-workflow tools. Registered unconditionally; nothing enforces
         // planner-only use — persona allowlists gate access when set.
         write_plan,
@@ -158,6 +161,11 @@ pub(crate) fn build_tools_with_plans_dir(
     ];
     if hashline_enabled {
         tools.insert(3, Arc::new(EditHashline));
+    }
+    // Only present when enabled and the selected provider's key resolves, so
+    // the model is never presented a search tool that cannot run.
+    if let Some(web_search) = web_search {
+        tools.push(Arc::new(web_search));
     }
     if !skills.is_empty() {
         tools.push(Arc::new(Skill::new(skills, skill_filter, template_ctx)));
@@ -582,6 +590,51 @@ pub(crate) fn switch_session_model(
     rebuild_session_system(agent, &context);
 }
 
+pub(crate) fn resolve_workspace_roots(
+    configured: &[std::path::PathBuf],
+    cwd: &std::path::Path,
+    extra: &[std::path::PathBuf],
+) -> Vec<std::path::PathBuf> {
+    let mut roots = if configured.is_empty() {
+        vec![cwd.to_path_buf()]
+    } else {
+        configured.to_vec()
+    };
+    for path in extra {
+        if !roots.contains(path) {
+            roots.push(path.clone());
+        }
+    }
+    roots
+}
+
+/// Build the `web_search` tool from `[web_search]` settings, or `None` when it
+/// is disabled or neither provider has a key. The configured provider is
+/// first in the chain; the other is appended as a fallback when it has a key.
+fn web_search_tool(config: &mew_config::WebSearchConfig) -> Option<WebSearch> {
+    use mew_tools::tools::web_search::{ProviderAuth, SearchProvider};
+
+    if !config.enabled {
+        return None;
+    }
+    let mut chain = Vec::new();
+    if let Ok(key) = mew_config::get_credential(config.provider.credential_ref()) {
+        chain.push(ProviderAuth::new(config.provider, key));
+    }
+    for provider in SearchProvider::ALL {
+        if provider == config.provider {
+            continue;
+        }
+        if let Ok(key) = mew_config::get_credential(provider.credential_ref()) {
+            chain.push(ProviderAuth::new(provider, key));
+        }
+    }
+    if chain.is_empty() {
+        return None;
+    }
+    Some(WebSearch::new(chain, config.max_results))
+}
+
 /// Build a full agent for a session. Used by the daemon builder.
 /// The session manager supplies its writer, identity, and project directory.
 #[allow(clippy::too_many_arguments)]
@@ -600,7 +653,30 @@ pub(crate) fn build_session_agent(
     todos_path: Option<std::path::PathBuf>,
     discovered_extensions: &[mew_ext_broker::DiscoveredExtension],
     mcp_tools: &[Arc<dyn mew_tools::Tool>],
+    web_search: &mew_config::WebSearchConfig,
+    router: &mew_protocol::RouterInfo,
+    scratch: bool,
 ) -> Result<Agent> {
+    // A ui change to the model-size tiers must reach this build even though
+    // the builder closure captured a Config snapshot at daemon startup.
+    let mut session_cfg = cfg.clone();
+    if !router.provider.is_empty() {
+        if let Some(pc) = session_cfg.providers.get_mut(&router.provider) {
+            for (id, value) in [
+                ("nano", &mut pc.nano),
+                ("micro", &mut pc.micro),
+                ("deci", &mut pc.deci),
+            ] {
+                *value = router
+                    .tiers
+                    .iter()
+                    .find(|tier| tier.id == id)
+                    .map(|tier| tier.model.clone())
+                    .unwrap_or_default();
+            }
+        }
+    }
+    let cfg = &session_cfg;
     let cwd = session_cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
     // Collect [provides] paths from discovered extensions.
@@ -638,6 +714,7 @@ pub(crate) fn build_session_agent(
         crate::commands::config::hashline_enabled_for(cfg, provider_id),
         cfg.plan_path.clone(),
         session_plans_dir.clone(),
+        web_search_tool(web_search),
     );
     tools.extend(mew_tools::tools::browser::tools());
     tools.extend(mcp_tools.iter().cloned());
@@ -647,12 +724,22 @@ pub(crate) fn build_session_agent(
     let mut tools = tools;
     tools.push(Arc::new(FlagImportant::new()));
 
-    let extra_roots: Vec<_> = session_plans_dir.iter().cloned().collect();
+    let session_dir = writer
+        .as_ref()
+        .and_then(|w| w.path().parent().map(std::path::Path::to_path_buf));
+    let mut extra_roots: Vec<std::path::PathBuf> = session_plans_dir.iter().cloned().collect();
+    if scratch && !extra_roots.contains(&cwd) {
+        extra_roots.push(cwd.clone());
+    }
+    if let Some(dir) = &session_dir {
+        let uploads_dir = dir.join("uploads");
+        if !extra_roots.contains(&uploads_dir) {
+            extra_roots.push(uploads_dir);
+        }
+    }
     let permission_engine = build_permission_engine_with_extra_roots(cfg, mode, &cwd, &extra_roots);
 
-    let subagent_registry_path = writer
-        .as_ref()
-        .and_then(|w| w.path().parent().map(|p| p.join("subagent_tasks.json")));
+    let subagent_registry_path = session_dir.map(|p| p.join("subagent_tasks.json"));
     let mut agent = Agent::new(provider, dispatcher.clone(), writer, tools, session_id);
     agent.code_mode = cfg.code_mode.clone();
     if cfg.code_mode.max_idle_workers != mew_config::CodeModeConfig::default().max_idle_workers {
@@ -668,6 +755,7 @@ pub(crate) fn build_session_agent(
     agent.flagged_files = flagged_files;
     agent.secrets = build_secret_set(cfg);
     agent.todos_path = todos_path;
+    agent.max_turns = (cfg.max_turns > 0).then_some(cfg.max_turns);
     agent.leak_reminder = cfg.orchestration.leak_reminder;
     agent.leak_reminder_max = cfg.orchestration.leak_reminder_max;
     agent.max_concurrent_subagents = cfg.orchestration.max_concurrent_subagents;
@@ -697,16 +785,7 @@ pub(crate) fn build_session_agent(
     // the call is safe. When a real dispatcher is wired, this will need to
     // become async — at which point the AgentBuilder type should change.
     // agent.register_plugin_tools().await;
-    if cfg.workspace.roots.is_empty() {
-        agent.workspace_roots = vec![cwd.clone()];
-    } else {
-        agent.workspace_roots = cfg.workspace.roots.clone();
-    }
-    if let Some(plans_dir) = session_plans_dir {
-        if !agent.workspace_roots.contains(&plans_dir) {
-            agent.workspace_roots.push(plans_dir);
-        }
-    }
+    agent.workspace_roots = resolve_workspace_roots(&cfg.workspace.roots, &cwd, &extra_roots);
 
     // Wire up subagent infrastructure.
     wire_subagents(
@@ -849,6 +928,12 @@ pub(crate) fn build_system_prompt_snapshot(
             None,
             &discovered,
             &[],
+            &mew_config::WebSearchConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            &mew_protocol::RouterInfo::default(),
+            false,
         )
     });
     let agent = agent?;
@@ -984,12 +1069,88 @@ mod tests {
             false,
             "PLAN.md".into(),
             None,
+            None,
         );
         let names: Vec<_> = tools.iter().map(|tool| tool.name()).collect();
         assert!(names.contains(&"write_plan"));
         assert!(names.contains(&"edit_plan"));
         assert!(!names.contains(&"handoff_plan"));
         assert!(!names.contains(&"switch_persona"));
+    }
+
+    #[test]
+    fn web_search_is_registered_only_when_a_tool_is_built() {
+        let build = |tool: Option<WebSearch>| {
+            build_tools_with_plans_dir(
+                Arc::new(Vec::new()),
+                Arc::new(tokio::sync::RwLock::new(None)),
+                Arc::new(tokio::sync::RwLock::new(None)),
+                false,
+                "PLAN.md".into(),
+                None,
+                tool,
+            )
+        };
+        let has = |tools: Vec<Arc<dyn mew_tools::Tool>>| {
+            tools.iter().any(|tool| tool.name() == "web_search")
+        };
+        assert!(!has(build(None)));
+        assert!(has(build(Some(WebSearch::new(
+            vec![mew_tools::tools::web_search::ProviderAuth::new(
+                mew_tools::tools::web_search::SearchProvider::Tavily,
+                "k".into(),
+            )],
+            5,
+        )))));
+    }
+
+    #[test]
+    fn web_search_tool_builds_an_ordered_chain_with_fallback() {
+        use mew_tools::tools::web_search::SearchProvider;
+        std::env::set_var("MEW_CRED_EXA", "exa-test-key");
+        std::env::remove_var("MEW_CRED_TAVILY");
+
+        let exa = mew_config::WebSearchConfig {
+            provider: SearchProvider::Exa,
+            max_results: 3,
+            ..Default::default()
+        };
+        let tool = web_search_tool(&exa).expect("exa key resolves");
+        assert_eq!(tool.primary(), SearchProvider::Exa);
+
+        // The selected provider has no key, so the other becomes the primary.
+        let tavily = mew_config::WebSearchConfig::default();
+        let tool = web_search_tool(&tavily).expect("exa is a usable fallback");
+        assert_eq!(tool.primary(), SearchProvider::Exa);
+
+        // With both keys, selection decides the order and the other is appended.
+        std::env::set_var("MEW_CRED_TAVILY", "tavily-test-key");
+        let tool = web_search_tool(&exa).expect("exa key resolves");
+        assert_eq!(tool.primary(), SearchProvider::Exa);
+        assert_eq!(
+            tool.chain()
+                .iter()
+                .map(|auth| auth.provider)
+                .collect::<Vec<_>>(),
+            vec![SearchProvider::Exa, SearchProvider::Tavily]
+        );
+        let tool = web_search_tool(&tavily).expect("tavily key resolves");
+        assert_eq!(tool.primary(), SearchProvider::Tavily);
+        assert_eq!(
+            tool.chain()
+                .iter()
+                .map(|auth| auth.provider)
+                .collect::<Vec<_>>(),
+            vec![SearchProvider::Tavily, SearchProvider::Exa]
+        );
+
+        let disabled = mew_config::WebSearchConfig {
+            enabled: false,
+            ..exa.clone()
+        };
+        assert!(web_search_tool(&disabled).is_none());
+        std::env::remove_var("MEW_CRED_EXA");
+        std::env::remove_var("MEW_CRED_TAVILY");
     }
 
     #[test]

@@ -43,6 +43,8 @@ pub struct ToolCtxShared {
     /// gate vision-specific behavior (e.g. returning image data vs. a text
     /// fallback message).
     pub supports_vision: bool,
+    /// Persistent session directory (`<sessions_root>/<session_id>`), absent for non-session contexts.
+    pub session_dir: Option<PathBuf>,
     /// Persistent session flag state, absent for non-session tool contexts.
     pub flagged_files_path: Option<PathBuf>,
     pub flagged_files: Arc<tokio::sync::Mutex<Vec<crate::tools::flag_important::FlaggedFile>>>,
@@ -59,6 +61,7 @@ impl Default for ToolCtxShared {
             snapshot_store: std::sync::Arc::new(mew_hashline::InMemorySnapshotStore::new()),
             browser_access: Default::default(),
             supports_vision: false,
+            session_dir: None,
             flagged_files_path: None,
             flagged_files: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         }

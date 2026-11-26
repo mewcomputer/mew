@@ -38,6 +38,8 @@ environment when you open or resume a conversation.
 default_model = "deepseek-v4-flash"
 default_persona = "builder"
 plan_path = "plans/"
+max_turns = 250
+max_turns = 250
 
 [workspace]
 roots = ["~/code"]
@@ -51,6 +53,8 @@ sidebar_finished_ttl_secs = 180
 | `default_model` | string | `""` | Fallback model ID when no `--model` flag or `state.toml` entry applies |
 | `default_persona` | string | `"builder"` | Startup persona. Set `"none"` or `"default"` to start without one |
 | `plan_path` | string | `"plans/"` | Directory or fixed file path for `write_plan`. A directory gets generated names such as `plans/vale-nori.md` for use with `edit_plan` |
+| `max_turns` | integer | `250` | Assistant turns allowed in one prompt before the agent stops with a turn-limit error. `0` removes the cap |
+| `max_turns` | integer | `250` | Assistant turns allowed in one prompt before the agent stops with a turn-limit error. `0` removes the cap |
 | `providers` | table | (built-in) | Provider definitions keyed by provider ID |
 | `models` | array | `[]` | Custom model entries that override or extend the catalog |
 | `code_mode` | table | (model default) | Run tools through a persistent Python session. See [Python code mode](#python-code-mode) |
@@ -274,6 +278,8 @@ for persistent setups, and `credentials.json` when no keyring is available.
 |----------|-------------|
 | `MEW_CRED_<NAME>` | Credential value (non-alphanumeric characters become `_`) |
 | `MEW_DEFAULT_MODEL` | Override `default_model` |
+| `MEW_MAX_TURNS` | Override `max_turns` |
+| `MEW_MAX_TURNS` | Override `max_turns` |
 | `MEW_SESSION_DIR` | Override session storage directory |
 | `MEW_DATA_DIR` | Override data directory (default: `~/.local/share/mew`) |
 | `MEW_CACHE_DIR` | Override cache directory (default: `~/.cache/mew`) |

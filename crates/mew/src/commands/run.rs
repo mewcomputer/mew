@@ -184,6 +184,10 @@ async fn build_and_run(
             todos_path.clone(),
             &discovered,
             &mcp_tools,
+            // `mew run` has no daemon-owned toggle; `config.toml` decides.
+            &cfg.web_search,
+            &mew_daemon::router_info_from_config(cfg),
+            false,
         )?;
 
         // Register plugin-discovered tools (no-op for NopDispatcher).

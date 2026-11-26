@@ -81,6 +81,7 @@ async fn chat_with_daemon_until_signal(
                             .to_string_lossy()
                             .into_owned(),
                     ),
+                    scratch: false,
                     client_kind: mew_protocol::ClientKind::Tui,
                 })
                 .await?;

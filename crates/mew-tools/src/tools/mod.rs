@@ -11,6 +11,7 @@ pub mod glob;
 pub mod goal;
 pub mod grep;
 pub mod jobs;
+pub mod present_artifact;
 pub mod progress_update;
 pub mod read;
 pub mod shell_session;
@@ -20,6 +21,7 @@ pub mod subagent_start;
 pub mod subagent_wait;
 pub mod todo;
 pub mod web_fetch;
+pub mod web_search;
 pub mod write;
 pub mod write_plan;
 

@@ -268,10 +268,7 @@ impl ProtocolHandler for MewIrohHandler {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
-                match token {
-                    Some(token) => store.authorize_token(token, &node_id, device_name, now),
-                    None => store.authorize_device(&node_id, now),
-                }
+                store.authorize_peer(token, &node_id, device_name, now)
             });
             handle_connection_with_authorizer(
                 stream,

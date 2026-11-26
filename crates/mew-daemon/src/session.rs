@@ -109,6 +109,8 @@ pub struct Session {
     pub summary_running: AtomicBool,
     /// Sessions root directory (for meta persistence).
     pub session_dir: PathBuf,
+    /// True if this session uses an isolated per-session scratch workspace.
+    pub scratch: bool,
     // Keep the lease until the runtime and its current operations release it.
     writer_lease: Option<mew_session::WriterLease>,
 }
@@ -329,6 +331,7 @@ impl Session {
             is_compacting: Mutex::new(false),
             summary_running: AtomicBool::new(false),
             session_dir,
+            scratch: false,
             writer_lease: None,
         }
     }
@@ -575,7 +578,9 @@ impl ProviderReplay {
                 self.provider.clear()
             }
             ProviderEventWire::RetryWait { .. } => {}
-            ProviderEventWire::PartStart { .. } if self.provider.is_empty() => {
+            ProviderEventWire::PartStart { part }
+                if self.provider.is_empty() && !matches!(part, mew_message::Part::Artifact(_)) =>
+            {
                 // The previous tool batch is already in session history.
                 self.tool_updates.clear();
                 self.nested.clear();
@@ -688,6 +693,10 @@ pub struct SessionManager {
     pub(crate) automation_initialized: AtomicBool,
     automation_lock: Mutex<()>,
     pub(crate) automation_error: Option<String>,
+    pub(crate) web_search: tokio::sync::watch::Sender<mew_config::WebSearchConfig>,
+    web_search_lock: Mutex<()>,
+    pub(crate) router: tokio::sync::watch::Sender<mew_protocol::RouterInfo>,
+    router_lock: Mutex<()>,
     #[cfg(test)]
     pub(crate) settings_operation_started: tokio::sync::Notify,
     #[cfg(test)]
@@ -747,6 +756,155 @@ impl SessionManager {
         self.settings_changed.send_replace(());
         Ok(())
     }
+
+    /// Current `[web_search]` settings as the daemon sees them, plus whether
+    /// each provider's api key resolves right now. `configured` is computed
+    /// live so the UI can explain a missing tool without a daemon restart
+    /// after a key is added.
+    pub(crate) fn web_search_info(&self) -> mew_protocol::WebSearchInfo {
+        use mew_tools::tools::web_search::SearchProvider;
+        mew_protocol::WebSearchInfo {
+            enabled: self.web_search.borrow().enabled,
+            provider: self.web_search.borrow().provider.id().to_owned(),
+            providers: SearchProvider::ALL
+                .iter()
+                .map(|provider| mew_protocol::WebSearchProviderInfo {
+                    id: provider.id().to_owned(),
+                    configured: mew_config::get_credential(provider.credential_ref()).is_ok(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Seed or replace the live `[web_search]` settings. Called once at
+    /// startup from `config.toml` and again after the UI writes a change.
+    /// Applies to sessions built afterwards; existing agents keep the tool
+    /// set they were built with.
+    pub fn set_web_search_config(&self, config: mew_config::WebSearchConfig) {
+        self.web_search.send_replace(config);
+    }
+
+    /// Apply a partial `[web_search]` update to `config.toml` and make it live.
+    /// Remote peers need control scope. The returned snapshot reflects the
+    /// file after the write.
+    pub(crate) async fn apply_web_search_settings(
+        &self,
+        enabled: Option<bool>,
+        provider: Option<mew_tools::tools::web_search::SearchProvider>,
+        authorization: Option<crate::RemoteAuthorization>,
+    ) -> Result<mew_protocol::WebSearchInfo> {
+        self.apply_web_search_settings_at(
+            &mew_config::config_file_path(),
+            enabled,
+            provider,
+            authorization,
+        )
+        .await
+    }
+
+    pub(crate) async fn apply_web_search_settings_at(
+        &self,
+        config_path: &std::path::Path,
+        enabled: Option<bool>,
+        provider: Option<mew_tools::tools::web_search::SearchProvider>,
+        authorization: Option<crate::RemoteAuthorization>,
+    ) -> Result<mew_protocol::WebSearchInfo> {
+        let _guard = self.web_search_lock.lock().await;
+        let config_path = config_path.to_path_buf();
+        let config = tokio::task::spawn_blocking(move || -> Result<mew_config::WebSearchConfig> {
+            if let Some(authorization) = authorization {
+                authorization.require_control()?;
+            }
+            Ok(mew_config::update_web_search_at(
+                &config_path,
+                enabled,
+                provider,
+            )?)
+        })
+        .await??;
+        self.web_search.send_replace(config);
+        self.settings_changed.send_replace(());
+        Ok(self.web_search_info())
+    }
+
+    /// Current router model-size tiers.
+    pub(crate) fn router_info(&self) -> mew_protocol::RouterInfo {
+        self.router.borrow().clone()
+    }
+
+    /// Seed or replace the live router settings. Called at startup from
+    /// `config.toml` and after each ui write. Applies to sessions built
+    /// afterwards, like the web-search settings.
+    pub fn set_router_config(&self, router: mew_protocol::RouterInfo) {
+        self.router.send_replace(router);
+    }
+
+    /// Write the three model-size tiers to `config.toml` and make them live.
+    pub(crate) async fn apply_router_tiers(
+        &self,
+        provider: String,
+        nano: String,
+        micro: String,
+        deci: String,
+        authorization: Option<crate::RemoteAuthorization>,
+    ) -> Result<mew_protocol::RouterInfo> {
+        self.apply_router_tiers_at(
+            &mew_config::config_file_path(),
+            provider,
+            nano,
+            micro,
+            deci,
+            authorization,
+        )
+        .await
+    }
+
+    pub(crate) async fn apply_router_tiers_at(
+        &self,
+        config_path: &std::path::Path,
+        provider: String,
+        nano: String,
+        micro: String,
+        deci: String,
+        authorization: Option<crate::RemoteAuthorization>,
+    ) -> Result<mew_protocol::RouterInfo> {
+        let _guard = self.router_lock.lock().await;
+        let config_path = config_path.to_path_buf();
+        let next_tiers = mew_config::RouterTiers {
+            nano: nano.clone(),
+            micro: micro.clone(),
+            deci: deci.clone(),
+        };
+        let write_provider = provider.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            if let Some(authorization) = authorization {
+                authorization.require_control()?;
+            }
+            Ok(mew_config::update_router_tiers_at(
+                &config_path,
+                &write_provider,
+                &next_tiers,
+            )?)
+        })
+        .await??;
+        // The watch is the live copy of the file, so apply the values just
+        // written instead of re-reading the whole config.
+        let mut next = self.router_info();
+        next.provider = provider;
+        for (id, model) in [("nano", nano), ("micro", micro), ("deci", deci)] {
+            if let Some(tier) = next.tiers.iter_mut().find(|tier| tier.id == id) {
+                tier.model = model;
+            } else {
+                next.tiers.push(mew_protocol::RouterTierInfo {
+                    id: id.into(),
+                    model,
+                });
+            }
+        }
+        self.router.send_replace(next);
+        self.settings_changed.send_replace(());
+        Ok(self.router_info())
+    }
     async fn restore_python_session(&self, session_id: &str, agent: &mut Agent) {
         let may_use_code_mode = agent.code_mode.mode == Some(mew_config::CodeMode::Full)
             || agent
@@ -798,6 +956,7 @@ impl SessionManager {
                 AutomationSettings::default()
             }
         });
+
         Self {
             builder,
             switcher,
@@ -817,6 +976,11 @@ impl SessionManager {
             automation_initialized: AtomicBool::new(automation_initialized),
             automation_lock: Mutex::new(()),
             automation_error,
+            // Seeded from `config.toml` by the caller right after construction.
+            web_search: tokio::sync::watch::channel(mew_config::WebSearchConfig::default()).0,
+            web_search_lock: Mutex::new(()),
+            router: tokio::sync::watch::channel(mew_protocol::RouterInfo::default()).0,
+            router_lock: Mutex::new(()),
             #[cfg(test)]
             settings_operation_started: tokio::sync::Notify::new(),
             #[cfg(test)]
@@ -826,6 +990,14 @@ impl SessionManager {
 
     /// Create a brand-new session.
     pub async fn create(&self, cwd: Option<PathBuf>) -> Result<Arc<Session>> {
+        self.create_with_mode(cwd, false).await
+    }
+
+    pub async fn create_with_mode(
+        &self,
+        cwd: Option<PathBuf>,
+        scratch: bool,
+    ) -> Result<Arc<Session>> {
         let policy = self.read_session_defaults().await?;
         let session_id = format!("sess_{}", ulid::Ulid::new());
         let lease = mew_session::try_writer_lease(&self.session_dir, &session_id)
@@ -833,15 +1005,29 @@ impl SessionManager {
             .context("acquire session writer")?
             .context("session is open in another daemon")?;
         let mut meta = mew_session::Meta::new(&session_id);
-        meta.cwd = cwd.as_ref().map(|path| path.to_string_lossy().into_owned());
+        let agent_cwd = if scratch {
+            let dir = mew_session::scratch_workspace_dir(&self.session_dir, &session_id);
+            tokio::fs::create_dir_all(&dir)
+                .await
+                .context("create scratch workspace")?;
+            meta.scratch = true;
+            meta.cwd = None;
+            Some(dir)
+        } else {
+            meta.cwd = cwd.as_ref().map(|path| path.to_string_lossy().into_owned());
+            cwd
+        };
         let writer = mew_session::Writer::open_at_with_meta(&self.session_dir, &session_id, meta)
             .await
             .context("open session writer")?;
         let (mut agent, model, provider) = (self.builder)(AgentBuildParams {
             session_id: session_id.clone(),
             writer,
-            cwd,
+            cwd: agent_cwd,
+            scratch,
             policy,
+            web_search: self.web_search.borrow().clone(),
+            router: self.router.borrow().clone(),
         })?;
         self.restore_python_session(&session_id, &mut agent).await;
         load_todos(&agent).await?;
@@ -852,6 +1038,7 @@ impl SessionManager {
             provider.clone(),
             self.session_dir.clone(),
         );
+        session.scratch = scratch;
         session.writer_lease = Some(lease);
         let session = Arc::new(session);
         session
@@ -994,7 +1181,17 @@ impl SessionManager {
 
         let initial_usage = meta.usage.as_ref().map(Into::into);
         let initial_context_tokens = meta.context_tokens;
-        let cwd = meta.cwd.clone().map(PathBuf::from);
+        let is_scratch = meta.scratch;
+        let cwd = if meta.scratch {
+            let dir = mew_session::scratch_workspace_dir(&self.session_dir, session_id);
+            tokio::fs::create_dir_all(&dir)
+                .await
+                .context("create scratch workspace")
+                .map_err(AttachError::BuildAgent)?;
+            Some(dir)
+        } else {
+            meta.cwd.clone().map(PathBuf::from)
+        };
         let policy = mew_session::SessionPolicy::read(&self.session_dir, session_id)
             .await
             .context("read session policy")
@@ -1008,7 +1205,10 @@ impl SessionManager {
             session_id: session_id.to_string(),
             writer,
             cwd,
+            scratch: is_scratch,
             policy,
+            web_search: self.web_search.borrow().clone(),
+            router: self.router.borrow().clone(),
         })
         .context("build agent for resume")
         .map_err(AttachError::BuildAgent)?;
@@ -1040,8 +1240,10 @@ impl SessionManager {
             provider.clone(),
             self.session_dir.clone(),
         );
+        session.scratch = is_scratch;
         *session.last_usage.get_mut() = initial_usage;
         *session.last_context_tokens.get_mut() = initial_context_tokens;
+        session.scratch = is_scratch;
         session.writer_lease = Some(lease);
         *session.history_index.get_mut() = Arc::new(history_index);
         session.prompt_receipts.get_mut().extend(
@@ -1235,6 +1437,7 @@ impl SessionManager {
                 summary,
                 client_count: session.client_count().await,
                 cwd: meta.as_ref().and_then(|m| m.cwd.clone()),
+                scratch: meta.as_ref().map(|m| m.scratch).unwrap_or(false),
                 workspace_path: crate::workspace::resolve_workspace_path(
                     meta.as_ref().and_then(|m| m.cwd.as_deref()),
                     &workspace_roots,
@@ -1301,6 +1504,7 @@ impl SessionManager {
                             summary: meta.summary.clone(),
                             client_count: 0,
                             cwd: meta.cwd.clone(),
+                            scratch: meta.scratch,
                             workspace_path: crate::workspace::resolve_workspace_path(
                                 meta.cwd.as_deref(),
                                 &workspace_roots,
@@ -1402,6 +1606,10 @@ impl SessionManager {
     /// Get the cwd for a session (from active agent's meta or disk).
     pub async fn session_cwd(&self, session_id: &str) -> Option<PathBuf> {
         match mew_session::Meta::read(&self.session_dir, session_id).await {
+            Ok(Some(meta)) if meta.scratch => Some(mew_session::scratch_workspace_dir(
+                &self.session_dir,
+                session_id,
+            )),
             Ok(Some(meta)) => meta.cwd.map(PathBuf::from),
             _ => None,
         }

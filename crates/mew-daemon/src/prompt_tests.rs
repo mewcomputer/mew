@@ -72,6 +72,7 @@ async fn accepted_prompt_is_persisted_before_reply_and_deduplicated_after_reload
         &mut socket,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: ClientKind::Tui,
         },
     )

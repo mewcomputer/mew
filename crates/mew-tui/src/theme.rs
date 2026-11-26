@@ -670,6 +670,7 @@ mod tests {
     fn codex_palettes_keep_neutral_chrome_and_inherited_semantic_colors() {
         for (name, mode, background) in [
             ("codex-dark", ThemeMode::Dark, Color::Rgb(24, 24, 24)),
+            ("argenteus-dim", ThemeMode::Dark, Color::Rgb(42, 42, 42)),
             ("codex-light", ThemeMode::Light, Color::Rgb(255, 255, 255)),
         ] {
             let theme = Theme::load(name);
@@ -684,6 +685,34 @@ mod tests {
             assert!(theme.css_variables().contains("--sidebar:"));
         }
         assert_eq!(Theme::dark().resolve("primary"), Color::Rgb(0, 255, 255));
+    }
+
+    #[test]
+    fn dim_variants_are_brighter_dark_themes_with_distinct_surfaces() {
+        for (dim_name, dark_name) in [
+            ("argenteus-dim", "codex-dark"),
+            ("jianghu-dim", "jianghu-dark"),
+        ] {
+            let dim = Theme::load(dim_name);
+            let dark = Theme::load(dark_name);
+            assert_eq!(dim.name, dim_name);
+            assert_eq!(dim.mode, ThemeMode::Dark);
+
+            let (Color::Rgb(dr, dg, db), Color::Rgb(kr, kg, kb)) =
+                (dim.resolve("background"), dark.resolve("background"))
+            else {
+                panic!("expected RGB backgrounds");
+            };
+            assert!(
+                (dr, dg, db) > (kr, kg, kb),
+                "{dim_name} background should be brighter than {dark_name}"
+            );
+            assert_ne!(dim.resolve("popover"), dim.resolve("background"));
+            assert_ne!(
+                dim.resolve("chat.user.background"),
+                dim.resolve("chat.surface.background")
+            );
+        }
     }
 
     #[test]

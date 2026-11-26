@@ -164,6 +164,7 @@ async fn tcp_listener_serves_session_ready() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )
@@ -206,6 +207,7 @@ async fn new_session_reports_active_thinking_variant() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )
@@ -235,6 +237,7 @@ async fn tcp_listener_streams_text_response() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )
@@ -300,6 +303,7 @@ async fn tcp_listener_supports_concurrent_connections() {
         &mut a,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )
@@ -308,6 +312,7 @@ async fn tcp_listener_supports_concurrent_connections() {
         &mut b,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )
@@ -374,6 +379,7 @@ async fn tcp_listener_accepts_tool_call_shaped_response() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )

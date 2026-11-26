@@ -28,6 +28,8 @@ pub struct Config {
     #[serde(default)]
     pub antigravity: AntigravityConfig,
     #[serde(default)]
+    pub web_search: WebSearchConfig,
+    #[serde(default)]
     pub permissions: PermissionsConfig,
     #[serde(default)]
     pub secrets: SecretsConfig,
@@ -45,6 +47,11 @@ pub struct Config {
     /// Other relative or absolute paths name a fixed file.
     #[serde(default = "default_plan_path")]
     pub plan_path: String,
+    /// Maximum assistant turns within a single user prompt. When the loop
+    /// reaches it, the agent stops with a "max turns exceeded" error. 0
+    /// disables the cap. Subagents keep their own def-level `max_turns`.
+    #[serde(default = "default_max_turns")]
+    pub max_turns: u32,
     /// TUI configuration (theme, etc.).
     #[serde(default)]
     pub tui: TuiConfig,
@@ -60,6 +67,46 @@ pub struct AntigravityConfig {
     /// Restrict the CLI using an OS sandbox. Disabling this permits AGY to access local files.
     #[serde(default)]
     pub isolated: bool,
+}
+
+/// `[web_search]` settings: the single source of truth for the `web_search`
+/// tool. The web UI edits this section through [`update_web_search`]; keys
+/// are resolved separately through the credential chain under the provider's
+/// id (`MEW_CRED_TAVILY`, `MEW_CRED_EXA`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebSearchConfig {
+    /// When false the tool is not registered at all, so the model never sees it.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub provider: mew_tools::tools::web_search::SearchProvider,
+    /// Results per call unless the model asks for fewer. Clamped to the
+    /// tool's limit at use time, so any u8 is accepted here.
+    #[serde(default = "default_web_search_max_results")]
+    pub max_results: u8,
+}
+
+impl Default for WebSearchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            provider: mew_tools::tools::web_search::SearchProvider::Tavily,
+            max_results: default_web_search_max_results(),
+        }
+    }
+}
+
+fn default_web_search_max_results() -> u8 {
+    5
+}
+
+/// The three capability tiers a router provider maps to concrete models.
+/// An empty value means "unset" and is removed from `config.toml`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouterTiers {
+    pub nano: String,
+    pub micro: String,
+    pub deci: String,
 }
 
 /// Whether the model invokes mew tools through a persistent Python session.
@@ -207,6 +254,10 @@ fn default_plan_path() -> String {
 
 pub const DEFAULT_PLAN_PATH: &str = "plans/";
 
+fn default_max_turns() -> u32 {
+    250
+}
+
 impl Default for Config {
     fn default() -> Self {
         let mut providers = HashMap::new();
@@ -325,12 +376,14 @@ impl Default for Config {
             models: Vec::new(),
             code_mode: CodeModeConfig::default(),
             antigravity: AntigravityConfig::default(),
+            web_search: WebSearchConfig::default(),
             permissions: PermissionsConfig::default(),
             secrets: SecretsConfig::default(),
             plugins: HashMap::new(),
             workspace: WorkspaceConfig::default(),
             default_persona: default_persona(),
             plan_path: default_plan_path(),
+            max_turns: default_max_turns(),
             tui: TuiConfig::default(),
             orchestration: OrchestrationConfig::default(),
         }
@@ -771,6 +824,18 @@ pub fn save_state(state: &State) -> Result<(), ConfigError> {
 
 /// Writes state to an arbitrary path (useful for tests).
 pub fn save_state_to(path: &std::path::Path, state: &State) -> Result<(), ConfigError> {
+    let data =
+        toml::to_string_pretty(state).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    atomic_write(path, data.as_bytes())?;
+    debug!(?path, "state saved");
+    Ok(())
+}
+
+/// Replace `path` with `data` in one step. The temporary file is created in
+/// the destination directory so `persist` is a same-filesystem rename, the
+/// existing file's permissions are kept, and a symlinked destination is
+/// followed so the real file is replaced rather than the link.
+fn atomic_write(path: &std::path::Path, data: &[u8]) -> io::Result<()> {
     use std::io::Write;
 
     let mut destination = path.to_path_buf();
@@ -778,7 +843,7 @@ pub fn save_state_to(path: &std::path::Path, state: &State) -> Result<(), Config
         match std::fs::symlink_metadata(&destination) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 if depth == 40 {
-                    return Err(io::Error::other("too many state file symlinks").into());
+                    return Err(io::Error::other("too many file symlinks"));
                 }
                 let target = std::fs::read_link(&destination)?;
                 destination = if target.is_absolute() {
@@ -792,7 +857,7 @@ pub fn save_state_to(path: &std::path::Path, state: &State) -> Result<(), Config
             }
             Ok(_) => break,
             Err(error) if error.kind() == io::ErrorKind::NotFound => break,
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(error),
         }
     }
     let path = destination.as_path();
@@ -801,8 +866,6 @@ pub fn save_state_to(path: &std::path::Path, state: &State) -> Result<(), Config
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| std::path::Path::new("."));
     std::fs::create_dir_all(parent)?;
-    let data =
-        toml::to_string_pretty(state).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     let mut file = tempfile::NamedTempFile::new_in(parent)?;
     match std::fs::metadata(path) {
         Ok(metadata) => {
@@ -810,11 +873,137 @@ pub fn save_state_to(path: &std::path::Path, state: &State) -> Result<(), Config
             file.as_file().set_permissions(metadata.permissions())?;
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
+        Err(error) => return Err(error),
     }
-    file.write_all(data.as_bytes())?;
+    file.write_all(data)?;
     file.persist(path).map_err(|error| error.error)?;
-    debug!(?path, "state saved");
+    Ok(())
+}
+
+/// Path of the `config.toml` that [`load`] reads and [`update_web_search`]
+/// writes.
+pub fn config_file_path() -> PathBuf {
+    config_dir().join("config.toml")
+}
+
+/// Change the `[web_search]` section of `config.toml` in place and return the
+/// resulting settings. See [`update_web_search_at`].
+pub fn update_web_search(
+    enabled: Option<bool>,
+    provider: Option<mew_tools::tools::web_search::SearchProvider>,
+) -> Result<WebSearchConfig, ConfigError> {
+    update_web_search_at(&config_file_path(), enabled, provider)
+}
+
+/// Rewrite only the `[web_search]` table of the TOML file at `path`. Only the
+/// fields passed as `Some` are written; the rest of the file, including
+/// comments and unrelated tables, is preserved. With both fields `None`
+/// nothing is written and the current value is returned.
+pub fn update_web_search_at(
+    path: &std::path::Path,
+    enabled: Option<bool>,
+    provider: Option<mew_tools::tools::web_search::SearchProvider>,
+) -> Result<WebSearchConfig, ConfigError> {
+    use toml_edit::{value, Item, Table};
+
+    let mut document = match std::fs::read_to_string(path) {
+        Ok(text) => text
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|e: toml_edit::TomlError| ConfigError::Build(e.to_string()))?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => toml_edit::DocumentMut::new(),
+        Err(error) => return Err(error.into()),
+    };
+
+    if enabled.is_some() || provider.is_some() {
+        if !document.contains_key("web_search") {
+            document["web_search"] = Item::Table(Table::new());
+        }
+        let section = &mut document["web_search"];
+        if let Some(enabled) = enabled {
+            section["enabled"] = value(enabled);
+        }
+        if let Some(provider) = provider {
+            section["provider"] = value(provider.id());
+        }
+        atomic_write(path, document.to_string().as_bytes())?;
+        debug!(?path, "web_search settings saved");
+    }
+
+    let document_text = document.to_string();
+    let parsed: toml::Value =
+        toml::from_str(&document_text).map_err(|e: toml::de::Error| ConfigError::Parse(e))?;
+    let section = parsed
+        .get("web_search")
+        .cloned()
+        .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
+    let config: WebSearchConfig = section
+        .try_into()
+        .map_err(|e: toml::de::Error| ConfigError::Parse(e))?;
+    Ok(config)
+}
+
+/// Update the `nano`/`micro`/`deci` tiers of `[providers.<id>]` in place.
+/// Empty values remove the corresponding key, so the tier falls back to the
+/// provider's existing resolution rules. Tier values must be `provider/model`.
+pub fn update_router_tiers_at(
+    path: &std::path::Path,
+    provider_id: &str,
+    tiers: &RouterTiers,
+) -> Result<(), ConfigError> {
+    use toml_edit::{value, Item, Table};
+
+    if provider_id.trim().is_empty() {
+        return Err(ConfigError::Build("router provider id is empty".into()));
+    }
+    for (name, model) in [
+        ("nano", &tiers.nano),
+        ("micro", &tiers.micro),
+        ("deci", &tiers.deci),
+    ] {
+        if !model.is_empty() && !model.contains('/') {
+            return Err(ConfigError::Build(format!(
+                "router tier `{name}` must be provider/model, got `{model}`"
+            )));
+        }
+        if model.starts_with('/') || model.ends_with('/') {
+            return Err(ConfigError::Build(format!(
+                "router tier `{name}` must be provider/model, got `{model}`"
+            )));
+        }
+    }
+
+    let mut document = match std::fs::read_to_string(path) {
+        Ok(text) => text
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|e: toml_edit::TomlError| ConfigError::Build(e.to_string()))?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => toml_edit::DocumentMut::new(),
+        Err(error) => return Err(error.into()),
+    };
+    if !document.contains_key("providers") {
+        document["providers"] = Item::Table(Table::new());
+    }
+    let providers = document["providers"]
+        .as_table_mut()
+        .ok_or_else(|| ConfigError::Build("`providers` is not a table".into()))?;
+    if !providers.contains_key(provider_id) {
+        providers.insert(provider_id, Item::Table(Table::new()));
+    }
+    let section = providers[provider_id]
+        .as_table_mut()
+        .ok_or_else(|| ConfigError::Build(format!("`providers.{provider_id}` is not a table")))?;
+    for (name, model) in [
+        ("nano", &tiers.nano),
+        ("micro", &tiers.micro),
+        ("deci", &tiers.deci),
+    ] {
+        if model.is_empty() {
+            section.remove(name);
+        } else {
+            section[name] = value(model.as_str());
+        }
+    }
+    atomic_write(path, document.to_string().as_bytes())?;
+    debug!(?path, provider_id, "router tiers saved");
     Ok(())
 }
 
@@ -1157,6 +1346,19 @@ responses_lite = true
     }
 
     #[test]
+    fn test_max_turns_default_and_override() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.max_turns, 250);
+
+        let cfg: Config = toml::from_str("max_turns = 12\n").unwrap();
+        assert_eq!(cfg.max_turns, 12);
+
+        // 0 means "no cap"; the builder turns it into `None`.
+        let cfg: Config = toml::from_str("max_turns = 0\n").unwrap();
+        assert_eq!(cfg.max_turns, 0);
+    }
+
+    #[test]
     fn test_orchestration_defaults() {
         let cfg: Config = toml::from_str("").unwrap();
         assert_eq!(cfg.orchestration.max_concurrent_subagents, 4);
@@ -1260,6 +1462,162 @@ values = ["sk_test_deadbeef"]
         std::env::remove_var("MEW_CRED_OPENCODE_ZEN");
     }
 
+    #[test]
+    fn test_web_search_defaults_and_section_parsing() {
+        use mew_tools::tools::web_search::SearchProvider;
+
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.web_search, WebSearchConfig::default());
+        assert!(cfg.web_search.enabled);
+        assert_eq!(cfg.web_search.provider, SearchProvider::Tavily);
+        assert_eq!(cfg.web_search.max_results, 5);
+
+        let cfg: Config =
+            toml::from_str("[web_search]\nprovider = \"exa\"\nmax_results = 8\n").unwrap();
+        assert!(cfg.web_search.enabled);
+        assert_eq!(cfg.web_search.provider, SearchProvider::Exa);
+        assert_eq!(cfg.web_search.max_results, 8);
+
+        assert!(toml::from_str::<Config>("[web_search]\nprovider = \"brave\"\n").is_err());
+    }
+
+    #[test]
+    fn test_web_search_env_override_selects_provider() {
+        use mew_tools::tools::web_search::SearchProvider;
+        std::env::set_var("MEW_WEB_SEARCH__PROVIDER", "exa");
+        let cfg = load().expect("load should succeed");
+        std::env::remove_var("MEW_WEB_SEARCH__PROVIDER");
+        assert_eq!(cfg.web_search.provider, SearchProvider::Exa);
+    }
+
+    #[test]
+    fn test_update_web_search_preserves_other_content_and_comments() {
+        use mew_tools::tools::web_search::SearchProvider;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "# my comment\n\n[providers.custom]\nshape = \"openai\"\n\n[web_search]\n# keep result count\nmax_results = 7\n",
+        )
+        .unwrap();
+
+        let updated = update_web_search_at(&path, Some(false), Some(SearchProvider::Exa)).unwrap();
+        assert!(!updated.enabled);
+        assert_eq!(updated.provider, SearchProvider::Exa);
+        assert_eq!(updated.max_results, 7);
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("# my comment\n"), "got {text}");
+        assert!(text.contains("[providers.custom]\nshape = \"openai\""));
+        assert!(text.contains("# keep result count\nmax_results = 7"));
+        assert!(text.contains("enabled = false"));
+        assert!(text.contains("provider = \"exa\""));
+
+        // Only the requested field changes on a later partial update.
+        let updated = update_web_search_at(&path, Some(true), None).unwrap();
+        assert!(updated.enabled);
+        assert_eq!(updated.provider, SearchProvider::Exa);
+        assert_eq!(updated.max_results, 7);
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("enabled = false"));
+    }
+
+    #[test]
+    fn test_update_web_search_creates_section_and_file_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        // Nothing to write and no file: returns defaults without creating it.
+        let current = update_web_search_at(&path, None, None).unwrap();
+        assert_eq!(current, WebSearchConfig::default());
+        assert!(!path.exists());
+
+        let updated = update_web_search_at(&path, Some(true), None).unwrap();
+        assert_eq!(updated, WebSearchConfig::default());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[web_search]"), "got {text}");
+        assert!(text.contains("enabled = true"), "got {text}");
+        assert!(
+            !text.contains("provider"),
+            "unrequested fields must not be written: {text}"
+        );
+    }
+
+    #[test]
+    fn test_update_web_search_with_no_fields_leaves_file_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let original = "[web_search]\nenabled = false\n";
+        std::fs::write(&path, original).unwrap();
+        let current = update_web_search_at(&path, None, None).unwrap();
+        assert!(!current.enabled);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn test_update_router_tiers_preserves_file_and_removes_empty_tiers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "# keep me\n\n[providers.router]\nshape = \"openai\"\nkind = \"router\"\nmicro = \"old/micro\"\n\n[other]\nkey = 1\n",
+        )
+        .unwrap();
+        let tiers = RouterTiers {
+            nano: "deepseek/deepseek-v4-flash".into(),
+            micro: "deepseek/deepseek-v4-pro".into(),
+            deci: String::new(),
+        };
+        update_router_tiers_at(&path, "router", &tiers).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("# keep me\n"), "got {text}");
+        assert!(text.contains("[other]\nkey = 1"), "got {text}");
+        assert!(
+            text.contains("nano = \"deepseek/deepseek-v4-flash\""),
+            "got {text}"
+        );
+        assert!(
+            text.contains("micro = \"deepseek/deepseek-v4-pro\""),
+            "got {text}"
+        );
+        assert!(!text.contains("deci"), "empty tier must be removed: {text}");
+        assert!(!text.contains("old/micro"), "got {text}");
+
+        let cfg: Config = toml::from_str(&text).unwrap();
+        assert_eq!(cfg.providers["router"].nano, tiers.nano);
+        assert_eq!(cfg.providers["router"].micro, tiers.micro);
+        assert!(cfg.providers["router"].deci.is_empty());
+    }
+
+    #[test]
+    fn test_update_router_tiers_creates_table_and_rejects_bad_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let tiers = RouterTiers {
+            nano: String::new(),
+            micro: "openai/gpt-5".into(),
+            deci: String::new(),
+        };
+        update_router_tiers_at(&path, "my-router", &tiers).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[providers.my-router]"), "got {text}");
+        assert!(text.contains("micro = \"openai/gpt-5\""), "got {text}");
+        assert!(!text.contains("nano"), "got {text}");
+
+        assert!(update_router_tiers_at(&path, " ", &tiers).is_err());
+        assert!(update_router_tiers_at(
+            &path,
+            "router",
+            &RouterTiers {
+                micro: "not-a-model-id".into(),
+                ..Default::default()
+            }
+        )
+        .is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn test_macos_config_dir_uses_xdg_style_location() {
@@ -1292,6 +1650,16 @@ values = ["sk_test_deadbeef"]
         let cfg = load().expect("load should succeed");
         assert_eq!(cfg.default_model, "test-model-from-env");
         std::env::remove_var("MEW_DEFAULT_MODEL");
+    }
+
+    /// A top-level `max_turns` keeps the old `MEW_MAX_TURNS` spelling working
+    /// through the standard environment layer.
+    #[test]
+    fn test_env_var_overrides_max_turns() {
+        std::env::set_var("MEW_MAX_TURNS", "42");
+        let cfg = load().expect("load should succeed");
+        assert_eq!(cfg.max_turns, 42);
+        std::env::remove_var("MEW_MAX_TURNS");
     }
 
     #[test]

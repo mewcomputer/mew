@@ -78,11 +78,13 @@ impl SessionRequests {
         let command = match group_id {
             Some(group_id) => ClientMessage::NewSessionInGroup {
                 cwd,
+                scratch: false,
                 group_id,
                 client_kind: ClientKind::Desktop,
             },
             None => ClientMessage::NewSession {
                 cwd,
+                scratch: false,
                 client_kind: ClientKind::Desktop,
             },
         };

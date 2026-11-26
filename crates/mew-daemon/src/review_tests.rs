@@ -199,6 +199,7 @@ async fn create_session(server: &DaemonServer, root: &std::path::Path) -> Arc<Se
         &mut socket,
         ClientMessage::NewSession {
             cwd: Some(root.to_string_lossy().into_owned()),
+            scratch: false,
             client_kind: ClientKind::Unknown,
         },
     )

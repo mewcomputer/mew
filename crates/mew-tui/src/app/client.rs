@@ -48,6 +48,7 @@ impl App {
                     self.apply_daemon_notification(&ServerMessage::SessionReady {
                         session_id: session_id.clone(),
                         cwd: session.cwd.clone(),
+                        scratch: false,
                         model: session.model.clone(),
                         provider: session.provider.clone(),
                         permission_mode: session.permission_mode.clone(),

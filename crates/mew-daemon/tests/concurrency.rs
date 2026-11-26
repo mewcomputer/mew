@@ -224,6 +224,7 @@ async fn five_concurrent_connections_all_get_distinct_sessions() {
                 &mut ws,
                 ClientMessage::NewSession {
                     cwd: None,
+                    scratch: false,
                     client_kind: mew_protocol::ClientKind::Unknown,
                 },
             )
@@ -272,6 +273,7 @@ async fn concurrent_prompts_on_same_connection_serialize() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )
@@ -337,6 +339,7 @@ async fn concurrent_prompts_across_connections_do_not_cross_contaminate() {
         &mut ws_a,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )
@@ -345,6 +348,7 @@ async fn concurrent_prompts_across_connections_do_not_cross_contaminate() {
         &mut ws_b,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )
@@ -472,6 +476,7 @@ async fn prompt_during_in_flight_turn_is_serialized() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )
@@ -573,6 +578,7 @@ async fn rapid_fire_cancel_does_not_crash_daemon() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )
@@ -617,6 +623,7 @@ async fn slash_command_during_in_flight_turn_does_not_block_stream() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )

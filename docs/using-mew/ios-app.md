@@ -41,14 +41,11 @@ Run these commands with `./target/debug/mew`:
 5. Tap **Add** and wait for **Connected** in the **Machines** list. The daemon
    authorizes the phone's identity and consumes the invite.
 
-:::caution[Current limits with remote pairing]
-After invite-based pairing, relaunching the app can stick on **Reconnecting**
-because it resends the consumed invite. Remove the machine from **Machines** and
-add it again with the daemon's Node ID. Local removal keeps the daemon's device
-authorization intact and restores the connection.
-
-Starting a chat from iOS still fails with
-`remote connections must identify as client_kind=remote` in the current build.
+:::caution[Pairing invites]
+An invite authorizes one device and expires after 120 seconds, so run `mew pair`
+right before scanning. The daemon remembers the phone's node ID afterwards, so
+relaunching the app reconnects without replaying the invite, and re-adding a
+removed machine only needs its node ID.
 :::
 
 ### Pairing formats
@@ -95,18 +92,25 @@ days**, **Previous 30 days**, and **Older**.
 
 ### Chat view
 
-- **Messages and tool batches**: streaming Markdown renders with theme support
+- **Messages and folded work**: streaming Markdown renders with theme support
   for headings, lists, code blocks, blockquotes, inline formatting, and
-  reasoning blocks. Consecutive calls to the same tool batch into one row, and
-  text streams with smooth autoscroll.
-- **History pagination**: tap **Load older messages** above the transcript to
-  load earlier pages while preserving scroll position and live turns. Failed
-  loads offer a retry without clearing the visible transcript.
+  reasoning blocks. Everything a turn did before its answer (reasoning, tool
+  calls, and the narration between rounds) folds into one row that summarizes
+  the work by tool, so a long multi-round turn reads as one line until tapped
+  open.
+- **History pagination**: opening a session fetches its newest page and prefills
+  one more in the background. Scrolling to the top of the transcript requests
+  the next page automatically, one page per upward pull, and **Load older
+  messages** stays above the transcript for a deliberate load. Pages start at a
+  turn boundary, so rows already on screen keep their label. Failed loads offer a
+  retry without clearing the visible transcript.
 - **File browser**: tap **+** on the chatbar to browse the session's working
   directory and append file paths to the composer.
 - **Chatbar and model picker**: the two-row liquid glass chatbar places the text
   input above controls for the model picker, thinking variant, permission mode,
-  and session usage.
+  and session usage. The thinking level shows as a speedometer badge on the
+  model icon and as a full dial in the model sheet, where the needle sweeps to
+  the selected effort.
 - **Composer and alerts**: a working indicator appears on send before the first
   provider event arrives, the send button becomes a cancel button while active,
   and slash commands (`/clear`, `/compact`, etc.) forward to the daemon.
@@ -140,7 +144,9 @@ commands.
   without disconnecting the chat.
 - **Background jobs**: tap a job to read its captured output. **Load more
   output** fetches another chunk, **Reload output** restarts from byte zero, and
-  **End of output** marks the end of stream.
+  **End of output** marks the end of stream. Jobs that finish leave the list
+  after about twenty seconds, and a fully checked-off **Tasks** panel clears
+  itself on the same delay.
 
 ### Settings
 

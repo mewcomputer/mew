@@ -289,6 +289,7 @@ impl CommandTarget for DaemonTarget {
         self.command(
             ClientMessage::NewSession {
                 cwd: Some(path.into()),
+                scratch: false,
                 client_kind: ClientKind::Tui,
             },
             "failed to create daemon session",

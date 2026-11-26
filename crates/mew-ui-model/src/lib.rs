@@ -387,6 +387,7 @@ impl UiModel {
         self.clear_activity();
         ClientMessage::NewSession {
             cwd,
+            scratch: false,
             client_kind: ClientKind::Desktop,
         }
     }
@@ -414,6 +415,7 @@ impl UiModel {
         self.clear_activity();
         ClientMessage::NewSessionInGroup {
             cwd,
+            scratch: false,
             group_id,
             client_kind: ClientKind::Desktop,
         }
@@ -526,6 +528,10 @@ impl TranscriptItem {
                         Some(label.clone()),
                         Some(TranscriptPart::File { label, attachment }),
                     )
+                }
+                Part::Artifact(part) => {
+                    let label = format!("[Artifact: {} ({})]", part.title, part.url);
+                    (Some(label.clone()), Some(TranscriptPart::Text(label)))
                 }
                 Part::ToolCall(part) => {
                     let (status, output, error, diff) = match &part.state {
@@ -642,6 +648,7 @@ mod tests {
             summary: None,
             client_count: 0,
             cwd: Some("/tmp/mew-project".into()),
+            scratch: false,
             workspace_path: Some("/tmp/mew-project".into()),
             last_turn_failed: false,
             archived: false,
@@ -1136,6 +1143,7 @@ mod tests {
         state.apply_server_message(ServerMessage::SessionReady {
             session_id: SESSION_ID.into(),
             cwd: Some("/tmp/mew-project".into()),
+            scratch: false,
             model: Some("model".into()),
             provider: Some("provider".into()),
             permission_mode: Some("standard".into()),
@@ -1158,6 +1166,7 @@ mod tests {
         state.apply_server_message(ServerMessage::SessionReady {
             session_id: SESSION_ID.into(),
             cwd: Some("/tmp/mew-project".into()),
+            scratch: false,
             model: Some("model".into()),
             provider: Some("provider".into()),
             permission_mode: Some("standard".into()),

@@ -21,6 +21,11 @@ pub const PROTOCOL_VERSION: u32 = 5;
 
 pub const DEFAULT_HISTORY_PAGE_LIMIT: usize = 24;
 
+/// History page size for the phone. It folds a whole turn into one collapsed
+/// row, so a page of 24 messages does not fill a screen. These pages carry no
+/// turn manifests, which keeps them cheap.
+pub const MOBILE_HISTORY_PAGE_LIMIT: usize = 80;
+
 fn default_history_page_limit() -> usize {
     DEFAULT_HISTORY_PAGE_LIMIT
 }
@@ -49,6 +54,9 @@ pub enum ClientMessage {
     NewSession {
         /// Working directory for the session. Defaults to the daemon's cwd.
         cwd: Option<String>,
+        /// Create an isolated scratch workspace with no base project folder.
+        #[serde(default)]
+        scratch: bool,
         /// What kind of client is connecting (TUI, Web, etc.).
         #[serde(default)]
         client_kind: ClientKind,
@@ -59,6 +67,9 @@ pub enum ClientMessage {
     NewSessionInGroup {
         /// Working directory for the session. Defaults to the daemon's cwd.
         cwd: Option<String>,
+        /// Create an isolated scratch workspace with no base project folder.
+        #[serde(default)]
+        scratch: bool,
         group_id: String,
         /// What kind of client is connecting (TUI, Web, etc.).
         #[serde(default)]
@@ -141,6 +152,25 @@ pub enum ClientMessage {
     /// Enable or disable live iroh remote access on a running daemon.
     SetRemoteAccess {
         enabled: bool,
+        request_id: String,
+    },
+    /// Change the daemon's `[web_search]` settings. Only the fields present are
+    /// written to `config.toml`; the reply carries the full `WebSearchInfo`.
+    /// Requires the same authorization as `SetRemoteAccess`.
+    SetWebSearchSettings {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enabled: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+        request_id: String,
+    },
+    /// Replace the router's nano/micro/deci models in `config.toml`. Empty
+    /// strings clear the corresponding tier.
+    SetRouterTiers {
+        provider: String,
+        nano: String,
+        micro: String,
+        deci: String,
         request_id: String,
     },
     /// Create a short-lived single-use QR pairing invite for the active remote endpoint.
@@ -497,6 +527,13 @@ pub enum ClientMessage {
         request_id: String,
         id: String,
     },
+    /// Fetch a staged artifact file for a session (used by remote/mobile clients).
+    ReadArtifact {
+        request_id: String,
+        session_id: String,
+        artifact_id: String,
+        path: String,
+    },
 
     // -- Queued messages & interruptions ------------------------------------
     /// Submit a prompt while the session is busy (as a follow-up or steer interrupt),
@@ -583,6 +620,41 @@ pub struct RemoteAccessInfo {
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
+}
+
+/// Snapshot of the `web_search` tool's configuration, included in
+/// `DaemonSettings`. Mirrors `config.toml`'s `[web_search]` section plus
+/// whether each provider's api key currently resolves; the tool is registered
+/// only when `enabled` and the selected provider is `configured`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebSearchInfo {
+    pub enabled: bool,
+    /// Selected provider id (`"tavily"` or `"exa"`).
+    pub provider: String,
+    /// Every supported provider, so a client can render the choices without
+    /// hardcoding them.
+    pub providers: Vec<WebSearchProviderInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebSearchProviderInfo {
+    pub id: String,
+    pub configured: bool,
+}
+
+/// Current router model-size tiers from `config.toml`, included in `DaemonSettings`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouterInfo {
+    /// The designated router provider id.
+    pub provider: String,
+    /// Tiers in display order. Empty `model` means unset (falls back).
+    pub tiers: Vec<RouterTierInfo>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouterTierInfo {
+    pub id: String,
+    pub model: String,
 }
 
 /// A skill or subagent definition offered by the inline @ picker.
@@ -678,6 +750,9 @@ pub struct SessionInfo {
     /// Working directory for the session, if set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// True if this session uses an isolated per-session scratch workspace.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub scratch: bool,
     /// Canonical workspace identity used for client-side grouping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_path: Option<String>,
@@ -867,6 +942,9 @@ pub enum ServerMessage {
         /// The session's workspace, when one is available.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
+        /// True if this session uses an isolated per-session scratch workspace.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        scratch: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1161,6 +1239,10 @@ pub enum ServerMessage {
         automation: Option<AutomationSettingsInfo>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         remote: Option<RemoteAccessInfo>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        web_search: Option<WebSearchInfo>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        router: Option<RouterInfo>,
     },
     PairingInvite {
         request_id: String,
@@ -1451,6 +1533,13 @@ pub enum ServerMessage {
         id: String,
         data_base64: String,
         size: u64,
+    },
+    ArtifactFile {
+        request_id: String,
+        mime: String,
+        data_base64: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
 
     // -- Queued messages -----------------------------------------------------
@@ -2347,6 +2436,7 @@ mod tests {
     fn test_client_kind_mobile_roundtrip() {
         let msg = ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: ClientKind::Mobile,
         };
         match round_trip(&msg) {
@@ -2361,6 +2451,7 @@ mod tests {
     fn test_client_kind_desktop_roundtrip() {
         let message = ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: ClientKind::Desktop,
         };
         let encoded = encode_json(&message).unwrap();
@@ -2378,16 +2469,19 @@ mod tests {
     fn new_session_in_group_roundtrip() {
         let message = ClientMessage::NewSessionInGroup {
             cwd: Some("/tmp/project".into()),
+            scratch: false,
             group_id: "grp_1".into(),
             client_kind: ClientKind::Desktop,
         };
         match round_trip(&message) {
             ClientMessage::NewSessionInGroup {
                 cwd,
+                scratch,
                 group_id,
                 client_kind,
             } => {
                 assert_eq!(cwd.as_deref(), Some("/tmp/project"));
+                assert!(!scratch);
                 assert_eq!(group_id, "grp_1");
                 assert_eq!(client_kind, ClientKind::Desktop);
             }
@@ -2401,6 +2495,7 @@ mod tests {
     fn client_message_new_session_cwd_none_roundtrip() {
         let m = ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: ClientKind::Unknown,
         };
         match round_trip(&m) {
@@ -2413,6 +2508,7 @@ mod tests {
     fn client_message_new_session_cwd_some_roundtrip() {
         let m = ClientMessage::NewSession {
             cwd: Some("/tmp/work".into()),
+            scratch: false,
             client_kind: ClientKind::Unknown,
         };
         match round_trip(&m) {
@@ -2569,6 +2665,7 @@ mod tests {
         let m = ServerMessage::SessionReady {
             session_id: "01H".into(),
             cwd: Some("/tmp/workspace".into()),
+            scratch: false,
             model: Some("deepseek-v4-flash".into()),
             provider: Some("deepseek".into()),
             permission_mode: None,
@@ -2577,12 +2674,14 @@ mod tests {
             ServerMessage::SessionReady {
                 session_id,
                 cwd,
+                scratch,
                 model,
                 provider,
                 permission_mode,
             } => {
                 assert_eq!(session_id, "01H");
                 assert_eq!(cwd.as_deref(), Some("/tmp/workspace"));
+                assert!(!scratch);
                 assert_eq!(model.as_deref(), Some("deepseek-v4-flash"));
                 assert_eq!(provider.as_deref(), Some("deepseek"));
                 assert!(permission_mode.is_none());
@@ -3270,6 +3369,7 @@ mod tests {
                 "new_session",
                 ClientMessage::NewSession {
                     cwd: None,
+                    scratch: false,
                     client_kind: ClientKind::Unknown,
                 },
             ),
@@ -3463,6 +3563,7 @@ mod tests {
             summary: None,
             client_count: 2,
             cwd: None,
+            scratch: false,
             workspace_path: None,
             last_turn_failed: false,
             archived: false,
@@ -3503,6 +3604,7 @@ mod tests {
             summary: None,
             client_count: 0,
             cwd: None,
+            scratch: false,
             workspace_path: None,
             last_turn_failed: false,
             archived: false,
@@ -3572,6 +3674,7 @@ mod tests {
                 summary: None,
                 client_count: 1,
                 cwd: None,
+                scratch: false,
                 workspace_path: None,
                 last_turn_failed: false,
                 archived: false,
@@ -3596,6 +3699,7 @@ mod tests {
                 summary: None,
                 client_count: 0,
                 cwd: None,
+                scratch: false,
                 workspace_path: None,
                 last_turn_failed: false,
                 archived: false,
@@ -4101,6 +4205,7 @@ mod tests {
         let m = ServerMessage::SessionReady {
             session_id: "s1".into(),
             cwd: None,
+            scratch: false,
             model: Some("test/model".into()),
             provider: Some("test".into()),
             permission_mode: Some("permissive".into()),
@@ -4109,12 +4214,14 @@ mod tests {
             ServerMessage::SessionReady {
                 session_id,
                 cwd,
+                scratch,
                 model,
                 provider,
                 permission_mode,
             } => {
                 assert_eq!(session_id, "s1");
                 assert!(cwd.is_none());
+                assert!(!scratch);
                 assert_eq!(model.as_deref(), Some("test/model"));
                 assert_eq!(provider.as_deref(), Some("test"));
                 assert_eq!(permission_mode.as_deref(), Some("permissive"));
@@ -4128,6 +4235,7 @@ mod tests {
         let m = ServerMessage::SessionReady {
             session_id: "s1".into(),
             cwd: None,
+            scratch: false,
             model: None,
             provider: None,
             permission_mode: None,
@@ -4465,6 +4573,7 @@ mod tests {
                 summary: None,
                 client_count: 1,
                 cwd: Some("/tmp".into()),
+                scratch: false,
                 workspace_path: Some("/tmp".into()),
                 last_turn_failed: false,
                 archived: false,
@@ -4655,6 +4764,18 @@ mod automation_wire_tests {
                 enabled: true,
                 request_id: "remote-on".into(),
             },
+            ClientMessage::SetWebSearchSettings {
+                enabled: None,
+                provider: Some("exa".into()),
+                request_id: "search-exa".into(),
+            },
+            ClientMessage::SetRouterTiers {
+                provider: "router".into(),
+                nano: "deepseek/flash".into(),
+                micro: "deepseek/pro".into(),
+                deci: String::new(),
+                request_id: "tiers".into(),
+            },
             ClientMessage::CreatePairingInvite {
                 request_id: "pair".into(),
                 scope: Some(RemoteScope::Control),
@@ -4674,6 +4795,8 @@ mod automation_wire_tests {
                 devices: None,
                 automation: None,
                 remote: None,
+                web_search: None,
+                router: None,
             },
             ServerMessage::DaemonSettings {
                 request_id: Some("read".into()),
@@ -4700,6 +4823,33 @@ mod automation_wire_tests {
                     enabled: true,
                     node_id: Some("node-id".into()),
                 }),
+                web_search: Some(WebSearchInfo {
+                    enabled: true,
+                    provider: "tavily".into(),
+                    providers: vec![
+                        WebSearchProviderInfo {
+                            id: "tavily".into(),
+                            configured: true,
+                        },
+                        WebSearchProviderInfo {
+                            id: "exa".into(),
+                            configured: false,
+                        },
+                    ],
+                }),
+                router: Some(RouterInfo {
+                    provider: "router".into(),
+                    tiers: vec![
+                        RouterTierInfo {
+                            id: "nano".into(),
+                            model: "deepseek/flash".into(),
+                        },
+                        RouterTierInfo {
+                            id: "micro".into(),
+                            model: String::new(),
+                        },
+                    ],
+                }),
             },
             ServerMessage::PairingInvite {
                 request_id: "pair".into(),
@@ -4718,6 +4868,29 @@ mod automation_wire_tests {
                 encode_json(&decode_json::<ServerMessage>(&encoded).unwrap()).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn web_search_settings_request_omits_absent_fields() {
+        let encoded = encode_json(&ClientMessage::SetWebSearchSettings {
+            enabled: None,
+            provider: None,
+            request_id: "r".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            encoded,
+            r#"{"type":"set_web_search_settings","request_id":"r"}"#
+        );
+        let decoded = decode_json::<ClientMessage>(&encoded).unwrap();
+        assert!(matches!(
+            decoded,
+            ClientMessage::SetWebSearchSettings {
+                enabled: None,
+                provider: None,
+                request_id
+            } if request_id == "r"
+        ));
     }
 }
 

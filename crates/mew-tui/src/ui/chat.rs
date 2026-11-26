@@ -940,6 +940,20 @@ pub(crate) fn build_chat_lines(
                     ]));
                     message_had_content = true;
                 }
+                Part::Artifact(artifact) => {
+                    sel_ctx.push_line(Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(
+                            "[artifact]  ",
+                            Style::default().fg(app.theme.resolve("text.muted")),
+                        ),
+                        Span::styled(
+                            artifact.title.clone(),
+                            Style::default().fg(app.theme.resolve("text.accent")),
+                        ),
+                    ]));
+                    message_had_content = true;
+                }
                 Part::ToolResult(_) => {}
                 _ => {}
             }

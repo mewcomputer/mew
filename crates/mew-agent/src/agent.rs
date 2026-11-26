@@ -240,6 +240,9 @@ pub struct Agent {
     pub keep_turns: usize,
     /// When true, context compaction summarizes dropped turns with `provider`.
     pub compaction_summarize_with_llm: bool,
+    /// Hard cap on assistant turns within a single user prompt. `None` means
+    /// unlimited; `mew`'s agent builder applies `Config::max_turns`, and the
+    /// subagent runner applies the def's `max_turns`.
     pub max_turns: Option<u32>,
     /// Maximum allowed nesting depth for subagent spawning. Top-level sessions
     /// are depth 0; a subagent of a depth-N session would be depth N+1. The
@@ -453,12 +456,7 @@ impl Agent {
             compaction_threshold: 0.95,
             keep_turns: 4,
             compaction_summarize_with_llm: true,
-            max_turns: Some(
-                std::env::var("MEW_MAX_TURNS")
-                    .ok()
-                    .and_then(|v| v.parse::<u32>().ok())
-                    .unwrap_or(100),
-            ),
+            max_turns: None,
             max_subagent_depth: 1,
             max_concurrent_subagents: 4,
             leak_reminder: true,
@@ -2400,7 +2398,7 @@ fn build_skills_xml(skills: &[&mew_skills::Skill]) -> String {
     mew_prompts::skills::build_xml(skills)
 }
 
-/// Expand persona tool-list tag entries into actual tool names.
+/// Expand persona and subagent tool-list tag entries into actual tool names.
 ///
 /// Supported tags:
 /// - `tag!ALL` — every registered tool
@@ -2410,7 +2408,7 @@ fn build_skills_xml(skills: &[&mew_skills::Skill]) -> String {
 /// Plain tool names (e.g. `read`, `bash`) pass through unchanged. Tag
 /// expansion is additive: the result is the union of all expanded tags
 /// plus any plain names. Duplicates are deduplicated.
-fn expand_tool_tags(
+pub(crate) fn expand_tool_tags(
     tools: &[String],
     registry: &HashMap<String, Arc<dyn mew_tools::Tool>>,
 ) -> Vec<String> {

@@ -30,7 +30,11 @@ impl PtySession {
             .context("open pseudo-terminal")?;
 
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".into());
-        let mut command = CommandBuilder::new(shell);
+        let mut command = CommandBuilder::new(&shell);
+        #[cfg(unix)]
+        if supports_login_flag(&shell) {
+            command.arg("-l");
+        }
         command.cwd(cwd);
         command.env("TERM", "xterm-256color");
         let child = pair
@@ -82,11 +86,30 @@ impl PtySession {
     }
 }
 
+#[cfg(unix)]
+fn supports_login_flag(shell: &str) -> bool {
+    matches!(
+        Path::new(shell).file_name().and_then(|name| name.to_str()),
+        Some("zsh" | "bash" | "fish" | "ksh" | "mksh" | "sh")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::{Read, Write};
     use tempfile::tempdir;
+
+    #[cfg(unix)]
+    #[test]
+    fn supports_login_flag_matches_posix_and_fish_shells() {
+        assert!(supports_login_flag("/bin/zsh"));
+        assert!(supports_login_flag("bash"));
+        assert!(supports_login_flag("/opt/homebrew/bin/fish"));
+        assert!(supports_login_flag("/bin/sh"));
+        assert!(!supports_login_flag("/usr/local/bin/nu"));
+        assert!(!supports_login_flag("pwsh"));
+    }
 
     #[test]
     fn spawns_shell_reads_output_and_accepts_input() {

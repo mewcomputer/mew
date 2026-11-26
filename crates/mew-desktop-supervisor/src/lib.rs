@@ -14,6 +14,8 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use tungstenite::{client, Message};
 
+mod shell_env;
+
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
@@ -313,6 +315,9 @@ fn spawn_daemon(
     cancellation: Option<&DaemonStartupCancellation>,
 ) -> Result<()> {
     let mut command = Command::new(binary);
+    if let Some(env) = shell_env::resolve_daemon_env() {
+        command.envs(env);
+    }
     let port_arg = format!("127.0.0.1:{}", address.port());
     command.args(["daemon", "--port", &port_arg]);
     if remote_enabled {

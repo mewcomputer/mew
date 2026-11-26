@@ -374,6 +374,7 @@ async fn bin_e2e_daemon_plus_bridge_full_round_trip() -> Result<()> {
         &mut ws,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )

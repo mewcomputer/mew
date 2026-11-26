@@ -154,6 +154,60 @@ fn builtin_user_surfaces_are_distinct_and_readable() {
 }
 
 #[test]
+fn dim_variants_are_brighter_dark_themes_with_distinct_readable_surfaces() {
+    fn luminance(color: Color) -> f64 {
+        let Color::Rgb(r, g, b) = color else {
+            panic!("expected RGB theme color");
+        };
+        [r, g, b]
+            .into_iter()
+            .zip([0.2126, 0.7152, 0.0722])
+            .map(|(channel, weight)| {
+                let value = f64::from(channel) / 255.0;
+                weight
+                    * if value <= 0.04045 {
+                        value / 12.92
+                    } else {
+                        ((value + 0.055) / 1.055).powf(2.4)
+                    }
+            })
+            .sum()
+    }
+
+    let available = Theme::list_available();
+    for (dim_name, dark_name) in [
+        ("argenteus-dim", "codex-dark"),
+        ("jianghu-dim", "jianghu-dark"),
+    ] {
+        assert!(available.contains(&dim_name.to_string()), "{dim_name}");
+        let dim = Theme::load(dim_name);
+        let dark = Theme::load(dark_name);
+        assert_eq!(dim.name, dim_name);
+        assert_eq!(dim.mode, mew_tui::theme::ThemeMode::Dark);
+        assert!(
+            luminance(dim.resolve("background")) > luminance(dark.resolve("background")),
+            "{dim_name} background should be brighter than {dark_name}"
+        );
+        assert_ne!(
+            dim.resolve("popover"),
+            dim.resolve("background"),
+            "{dim_name}"
+        );
+        let user_bg = dim.resolve("chat.user.background");
+        assert_ne!(
+            user_bg,
+            dim.resolve("chat.surface.background"),
+            "{dim_name}"
+        );
+        let fg_lum = luminance(dim.resolve("foreground"));
+        for surface_lum in [luminance(dim.resolve("background")), luminance(user_bg)] {
+            let contrast = (fg_lum.max(surface_lum) + 0.05) / (fg_lum.min(surface_lum) + 0.05);
+            assert!(contrast >= 4.5, "{dim_name}: {contrast}");
+        }
+    }
+}
+
+#[test]
 fn conversation_and_tool_edges_keep_an_opaque_canvas() {
     for (width, height) in [(40, 24), (80, 30), (160, 36)] {
         let mut harness = Harness::new(width, height);

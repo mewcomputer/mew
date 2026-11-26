@@ -94,68 +94,34 @@ pub async fn process_mentions(
     subagents: &[mew_subagents::SubagentDef],
 ) -> (String, String, Vec<Part>) {
     // --- Phase 1: Resolve namespace references ---
-    // Namespace refs (@skill:, @model:, @subagent:) are resolved and stripped
-    // FIRST so that the file-mention pass below never sees them.
-    //
-    // To prevent inlined content (skill bodies, descriptions) from being
-    // corrupted by subsequent token replacements, we strip ALL tokens from
-    // the text first, then append the inlined content afterward.
+    // Namespace refs (@skill:, @model:, @subagent:) stay inline in both
+    // `display` and `enriched`, while their resolved context blocks are
+    // appended to `enriched_tail` for the model. `parse_file_mentions` skips
+    // known namespace prefixes so inline tokens never trigger file resolution.
     let refs = parse_namespace_refs(text);
     let mut enriched = text.to_string();
     let mut display = text.to_string();
     let mut enriched_tail = String::new();
-    let mut display_tail = String::new();
 
     for nr in &refs {
         match nr.kind.as_str() {
             "skill" => {
-                let skill = skills.iter().find(|s| s.name == nr.value);
-                match skill {
-                    Some(skill) => {
-                        enriched = enriched.replace(&nr.raw, "");
-                        display = display.replace(&nr.raw, "");
-                        enriched_tail.push_str(&format!(
-                            "\n\n--- skill: {} ---\n{}",
-                            skill.name, skill.body
-                        ));
-                        display_tail
-                            .push_str(&format!("\n<skill '{}' added to context>", skill.name));
-                    }
-                    None => {
-                        // Unknown skill: strip the token silently. The user
-                        // asked us to keep references in their input and skip
-                        // missing ones rather than surfacing an error.
-                        enriched = enriched.replace(&nr.raw, "");
-                        display = display.replace(&nr.raw, "");
-                    }
+                if let Some(skill) = skills.iter().find(|s| s.name == nr.value) {
+                    enriched_tail.push_str(&format!(
+                        "\n\n--- skill: {} ---\n{}",
+                        skill.name, skill.body
+                    ));
                 }
             }
             "model" => {
-                enriched = enriched.replace(&nr.raw, "");
-                display = display.replace(&nr.raw, "");
                 enriched_tail.push_str(&format!("\n\n[model reference: {}]", nr.value));
-                display_tail.push_str(&format!("\n<model '{}' referenced>", nr.value));
             }
             "subagent" => {
-                let subagent = subagents.iter().find(|s| s.name == nr.value);
-                match subagent {
-                    Some(sa) => {
-                        enriched = enriched.replace(&nr.raw, "");
-                        display = display.replace(&nr.raw, "");
-                        enriched_tail.push_str(&format!(
-                            "\n\n--- subagent: {} ---\n{}",
-                            sa.name, sa.description
-                        ));
-                        display_tail
-                            .push_str(&format!("\n<subagent '{}' added to context>", sa.name));
-                    }
-                    None => {
-                        // Unknown subagent: strip the token silently. The user
-                        // asked us to keep references in their input and skip
-                        // missing ones rather than surfacing an error.
-                        enriched = enriched.replace(&nr.raw, "");
-                        display = display.replace(&nr.raw, "");
-                    }
+                if let Some(sa) = subagents.iter().find(|s| s.name == nr.value) {
+                    enriched_tail.push_str(&format!(
+                        "\n\n--- subagent: {} ---\n{}",
+                        sa.name, sa.description
+                    ));
                 }
             }
             _ => {}
@@ -163,7 +129,6 @@ pub async fn process_mentions(
     }
 
     enriched.push_str(&enriched_tail);
-    display.push_str(&display_tail);
 
     // --- Phase 2: Resolve file @mentions (existing logic) ---
     let mentions = parse_file_mentions(&enriched);
@@ -174,7 +139,6 @@ pub async fn process_mentions(
         if let Some(mime) = image_mime(path_str) {
             let mention = format!("@{}", path_str);
             enriched = enriched.replace(&mention, "");
-            display = display.replace(&mention, "");
             if path.exists() {
                 let abs = path.canonicalize().unwrap_or(path.clone());
                 let filename = std::path::Path::new(path_str)
@@ -195,7 +159,6 @@ pub async fn process_mentions(
                 if !context_files.contains(path_str) {
                     context_files.push(path_str.clone());
                 }
-                display.push_str(&format!("\n<{} added to context>", path_str));
             } else {
                 let err = format!("\n\n[error reading {}: file not found]", path_str);
                 enriched.push_str(&err);
@@ -208,7 +171,6 @@ pub async fn process_mentions(
                     if !context_files.contains(path_str) {
                         context_files.push(path_str.clone());
                     }
-                    display.push_str(&format!("\n<{} added to context>", path_str));
                 }
                 Err(e) => {
                     let err = format!("\n\n[error reading {}: {}]", path_str, e);
@@ -297,9 +259,8 @@ mod tests {
         let (enriched, display, _atts) =
             process_mentions("@skill:clarify fix this", cwd, &mut ctx, &skills, &[]).await;
         assert!(enriched.contains("Be clear and concise."));
-        assert!(display.contains("<skill 'clarify' added to context>"));
-        // The raw token should be stripped from enriched text.
-        assert!(!enriched.contains("@skill:clarify"));
+        assert!(enriched.starts_with("@skill:clarify fix this"));
+        assert_eq!(display, "@skill:clarify fix this");
     }
 
     #[tokio::test]
@@ -309,8 +270,8 @@ mod tests {
         let (enriched, display, _atts) =
             process_mentions("@model:openai/gpt-4o review this", cwd, &mut ctx, &[], &[]).await;
         assert!(enriched.contains("[model reference: openai/gpt-4o]"));
-        assert!(display.contains("<model 'openai/gpt-4o' referenced>"));
-        assert!(!enriched.contains("@model:openai/gpt-4o"));
+        assert!(enriched.starts_with("@model:openai/gpt-4o review this"));
+        assert_eq!(display, "@model:openai/gpt-4o review this");
     }
 
     #[tokio::test]
@@ -331,8 +292,8 @@ mod tests {
         .await;
         assert!(enriched.contains("--- subagent: researcher ---"));
         assert!(enriched.contains("Investigate research questions."));
-        assert!(display.contains("<subagent 'researcher' added to context>"));
-        assert!(!enriched.contains("@subagent:researcher"));
+        assert!(enriched.starts_with("@subagent:researcher look into this"));
+        assert_eq!(display, "@subagent:researcher look into this");
     }
 
     #[tokio::test]
@@ -341,11 +302,9 @@ mod tests {
         let cwd = std::path::Path::new(".");
         let (enriched, display, _atts) =
             process_mentions("@subagent:nonexistent", cwd, &mut ctx, &[], &[]).await;
-        // Unknown subagent refs are stripped silently — no error surfaces.
-        assert!(!enriched.contains("@subagent:nonexistent"));
-        assert!(!enriched.contains("error"));
-        assert!(!display.contains("@subagent:nonexistent"));
-        assert!(!display.contains("error"));
+        // Unknown subagent refs stay as literal text without errors.
+        assert_eq!(enriched, "@subagent:nonexistent");
+        assert_eq!(display, "@subagent:nonexistent");
     }
 
     #[tokio::test]
@@ -355,12 +314,9 @@ mod tests {
         let cwd = std::path::Path::new(".");
         let (enriched, display, _atts) =
             process_mentions("@skill:nonexistent fix this", cwd, &mut ctx, &skills, &[]).await;
-        // Unknown skill refs are stripped silently — no error surfaces.
-        assert!(enriched.contains("fix this"));
-        assert!(!enriched.contains("@skill:nonexistent"));
-        assert!(!enriched.contains("error"));
-        assert!(!display.contains("@skill:nonexistent"));
-        assert!(!display.contains("error"));
+        // Unknown skill refs stay as literal text without errors.
+        assert_eq!(enriched, "@skill:nonexistent fix this");
+        assert_eq!(display, "@skill:nonexistent fix this");
     }
 
     #[tokio::test]
@@ -379,12 +335,11 @@ mod tests {
             &[],
         )
         .await;
-        // Skill body inlined.
+        // Skill body inlined and tokens preserved inline without context tails.
         assert!(enriched.contains("Be clear."));
-        assert!(display.contains("<skill 'clarify' added to context>"));
-        // File content inlined.
+        assert_eq!(display, "@skill:clarify review @main.rs");
+        // File content inlined for model.
         assert!(enriched.contains("fn main() {}"));
-        assert!(display.contains("<main.rs added to context>"));
     }
 
     #[tokio::test]

@@ -110,6 +110,12 @@ fn build(
         None,
         &[],
         &[],
+        &mew_config::WebSearchConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        &mew_protocol::RouterInfo::default(),
+        false,
     )
     .unwrap()
 }
@@ -277,6 +283,12 @@ for line in sys.stdin:
             None,
             &[],
             &tools,
+            &mew_config::WebSearchConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            &mew_protocol::RouterInfo::default(),
+            false,
         )
         .unwrap();
         for deny in [true, false] {
@@ -469,7 +481,7 @@ async fn default_write_plan_creates_multiple_plans_in_one_session() {
     let session_plans_dir = agent
         .workspace_roots
         .iter()
-        .find(|p| p.starts_with(&plans_root) && *p != plans_root)
+        .find(|p| p.starts_with(&plans_root) && **p != plans_root)
         .cloned()
         .expect("session plan dir in workspace_roots");
     assert!(!agent.workspace_roots.contains(&plans_root));
@@ -743,6 +755,12 @@ async fn model_switch_refreshes_project_templates_and_the_child_provider() {
         None,
         &[],
         &[],
+        &mew_config::WebSearchConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        &mew_protocol::RouterInfo::default(),
+        false,
     )
     .unwrap();
     let persona_prompt = agent.persona_prompt.as_deref().unwrap();
@@ -1071,6 +1089,20 @@ async fn permission_classifier_describes_the_session_project() {
         .any(|part| {
             matches!(part, Part::Text(text) if text.text.contains(&root.display().to_string()))
         }));
+}
+
+#[test]
+fn configured_max_turns_reaches_the_agent_and_zero_disables_the_cap() {
+    let (_project, root) = project("max-turns");
+    let mut cfg = config();
+    cfg.max_turns = 12;
+
+    let agent = build(&root, ProjectProvider::new(vec![]), &cfg, None, None);
+    assert_eq!(agent.max_turns, Some(12));
+
+    cfg.max_turns = 0;
+    let agent = build(&root, ProjectProvider::new(vec![]), &cfg, None, None);
+    assert_eq!(agent.max_turns, None, "0 disables the turn cap");
 }
 
 fn shell_stdout(output: &str) -> &str {

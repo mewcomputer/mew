@@ -621,6 +621,7 @@ impl ClientState {
             ServerMessage::SessionReady {
                 session_id,
                 cwd,
+                scratch: _,
                 model,
                 provider,
                 permission_mode,
@@ -1562,6 +1563,7 @@ impl ClientState {
                     Part::Text(part) => part.base.message_id,
                     Part::Reasoning(part) => part.base.message_id,
                     Part::File(part) => part.base.message_id,
+                    Part::Artifact(part) => part.base.message_id,
                     Part::ToolCall(part) => part.base.message_id,
                     Part::ToolResult(part) => part.base.message_id,
                     Part::Compaction(part) => part.base.message_id,

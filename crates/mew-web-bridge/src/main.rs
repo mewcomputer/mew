@@ -21,7 +21,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::Parser;
 use futures::{SinkExt, StreamExt};
-use mew_web_bridge::serve_http;
+use mew_web_bridge::serve_http_with_session_dir;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UnixStream};
 use tokio_tungstenite::tungstenite::{
@@ -54,6 +54,11 @@ struct Args {
     /// disable — useful when you've started the daemon yourself.
     #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
     spawn: bool,
+
+    /// Session storage root used to serve `/artifacts/*`. Defaults to `MEW_SESSION_DIR`
+    /// or the platform session directory.
+    #[arg(long, env = "MEW_SESSION_DIR")]
+    session_dir: Option<PathBuf>,
 }
 
 fn default_daemon_socket() -> PathBuf {
@@ -147,6 +152,7 @@ async fn handle_connection(
     peer: SocketAddr,
     daemon_socket: Arc<String>,
     ingress: Arc<BrowserIngress>,
+    session_dir: Arc<PathBuf>,
 ) -> Result<()> {
     let mut buf: BufReader<TcpStream> = BufReader::with_capacity(8192, stream);
 
@@ -214,7 +220,7 @@ async fn handle_connection(
     let peeked_len = peeked.len().min(8192);
     buf.consume(peeked_len);
     let stream = buf.into_inner();
-    serve_http(stream, method, path).await
+    serve_http_with_session_dir(stream, method, path, &session_dir).await
 }
 
 /// Peek the request line + headers from the BufReader. Returns the
@@ -438,6 +444,7 @@ async fn main() -> Result<()> {
     );
 
     let daemon_socket = Arc::new(daemon_socket_str);
+    let session_dir = Arc::new(args.session_dir.unwrap_or_else(mew_session::session_dir));
     loop {
         let (stream, peer) = match listener.accept().await {
             Ok(p) => p,
@@ -448,8 +455,11 @@ async fn main() -> Result<()> {
         };
         let daemon_socket = Arc::clone(&daemon_socket);
         let ingress = Arc::clone(&ingress);
+        let session_dir = Arc::clone(&session_dir);
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, peer, daemon_socket, ingress).await {
+            if let Err(e) =
+                handle_connection(stream, peer, daemon_socket, ingress, session_dir).await
+            {
                 warn!(%peer, error = %e, "connection ended with error");
             }
         });

@@ -223,6 +223,7 @@ async fn bridge_relays_session_ready_to_browser() {
         &mut browser,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )
@@ -247,6 +248,7 @@ async fn bridge_relays_streaming_text_from_daemon() {
         &mut browser,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )
@@ -294,6 +296,7 @@ async fn bridge_proxies_concurrent_browser_sessions_independently() {
         &mut a,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )
@@ -302,6 +305,7 @@ async fn bridge_proxies_concurrent_browser_sessions_independently() {
         &mut b,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )
@@ -384,6 +388,7 @@ async fn bridge_handles_tool_use_finish_end_to_end() {
         &mut browser,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )

@@ -317,6 +317,7 @@ async fn confirmed_sessions_publish_persisted_todos_and_empty_new_snapshots() {
         &mut socket,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: ClientKind::Tui,
         },
     )
@@ -408,6 +409,7 @@ async fn effective_policy_and_todos_survive_runtime_reload() {
         &mut socket,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: ClientKind::Tui,
         },
     )
@@ -757,6 +759,7 @@ async fn explicit_default_persona_clears_runtime_and_survives_reload() {
         &mut socket,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: ClientKind::Tui,
         },
     )
@@ -1007,9 +1010,8 @@ async fn paired_connection_task(
     let token = store.create_pairing(scope, remote::unix_now(), 60).unwrap();
     let peer = peer.to_string();
     let node_id = peer.clone();
-    let authorizer: RemoteAuthorizer = Arc::new(move |token, name| match token {
-        Some(token) => store.authorize_token(token, &node_id, name, remote::unix_now()),
-        None => store.authorize_device(&node_id, remote::unix_now()),
+    let authorizer: RemoteAuthorizer = Arc::new(move |token, name| {
+        store.authorize_peer(token, &node_id, name, remote::unix_now())
     });
     let (client, stream) = tokio::io::duplex(capacity);
     let manager = server.session_manager.clone();
@@ -1050,6 +1052,51 @@ async fn paired_connection_task(
 }
 
 #[tokio::test]
+async fn a_phone_over_the_remote_transport_keeps_its_own_client_kind() {
+    let root = tempfile::tempdir().unwrap();
+    let server = policy_server(root.path().into());
+    let session = server.session_manager.create(None).await.unwrap();
+    let store = Arc::new(remote::RemoteAccessStore::new(
+        root.path().join("remote.json"),
+    ));
+    store
+        .set_hosting(true, remote::RemoteMode::Daemon, None)
+        .unwrap();
+    server
+        .session_manager
+        .remote_devices
+        .set(remote::RemoteDeviceManager::Scoped(store.clone()))
+        .unwrap();
+    let mut phone = paired_connection(&server, store.clone(), "phone", RemoteScope::Control).await;
+
+    send(
+        &mut phone,
+        ClientMessage::AttachSession {
+            session_id: session.id.clone(),
+            client_kind: ClientKind::Mobile,
+        },
+    )
+    .await;
+    let replies = flush(&mut phone).await;
+
+    assert!(
+        replies
+            .iter()
+            .any(|m| matches!(m, ServerMessage::SessionReady { .. })),
+        "a phone must attach over the remote transport, got {replies:?}"
+    );
+    assert!(
+        !replies
+            .iter()
+            .any(|m| matches!(m, ServerMessage::Error { .. })),
+        "the client kind must not be policed by the transport, got {replies:?}"
+    );
+    let presence = session.client_presence_except(u64::MAX).await;
+    assert_eq!(presence.len(), 1);
+    assert_eq!(presence[0].1, ClientKind::Mobile);
+}
+
+#[tokio::test]
 async fn only_full_control_connections_can_manage_daemon_defaults_or_devices() {
     let root = tempfile::tempdir().unwrap();
     let server = policy_server(root.path().into());
@@ -1082,6 +1129,11 @@ async fn only_full_control_connections_can_manage_daemon_defaults_or_devices() {
             },
             ClientMessage::RevokeDevice {
                 device_id: "unused".into(),
+                request_id: "denied".into(),
+            },
+            ClientMessage::SetWebSearchSettings {
+                enabled: Some(false),
+                provider: None,
                 request_id: "denied".into(),
             },
         ] {

@@ -48,6 +48,7 @@ async fn selected_file_diff_is_scoped_and_does_not_load_unrelated_files() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: Some(dir.path().display().to_string()),
+            scratch: false,
             client_kind: ClientKind::Desktop,
         },
     )
@@ -113,6 +114,7 @@ async fn git_status_lists_files_in_untracked_directories() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: Some(dir.path().display().to_string()),
+            scratch: false,
             client_kind: ClientKind::Desktop,
         },
     )
@@ -165,6 +167,7 @@ async fn git_status_paths_are_relative_to_the_session_workspace() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: Some(dir.path().join("nested").display().to_string()),
+            scratch: false,
             client_kind: ClientKind::Desktop,
         },
     )
@@ -222,6 +225,7 @@ async fn git_status_reports_scoped_errors_and_preserves_legacy_errors() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: Some(dir.path().display().to_string()),
+            scratch: false,
             client_kind: ClientKind::Desktop,
         },
     )
@@ -274,6 +278,7 @@ async fn directory_listing_reports_scoped_and_legacy_errors() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: Some(dir.path().display().to_string()),
+            scratch: false,
             client_kind: ClientKind::Desktop,
         },
     )
@@ -330,6 +335,7 @@ async fn file_previews_identify_the_session_and_report_missing_files() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: Some(dir.path().display().to_string()),
+            scratch: false,
             client_kind: ClientKind::Desktop,
         },
     )
@@ -577,6 +583,7 @@ async fn new_session_returns_session_ready() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )
@@ -621,6 +628,7 @@ async fn client_presence_contains_only_other_attached_connections() {
         &mut first,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: ClientKind::Desktop,
         },
     )
@@ -714,6 +722,7 @@ async fn switching_sessions_detaches_the_previous_session_client() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: ClientKind::Desktop,
         },
     )
@@ -729,6 +738,7 @@ async fn switching_sessions_detaches_the_previous_session_client() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: ClientKind::Desktop,
         },
     )
@@ -756,6 +766,7 @@ async fn new_session_in_group_persists_group_membership_before_attach() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )
@@ -783,6 +794,7 @@ async fn new_session_in_group_persists_group_membership_before_attach() {
         &mut ws,
         ClientMessage::NewSessionInGroup {
             cwd: None,
+            scratch: false,
             group_id: group_id.clone(),
             client_kind: mew_protocol::ClientKind::Unknown,
         },
@@ -816,6 +828,7 @@ async fn desktop_terminal_is_owned_by_daemon_and_streams_bytes() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Desktop,
         },
     )
@@ -876,6 +889,7 @@ async fn desktop_new_session_is_allowed_on_local_transport() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Desktop,
         },
     )
@@ -906,6 +920,7 @@ async fn prompt_streams_text_response_events() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )
@@ -1018,6 +1033,7 @@ async fn setting_permissive_mode_keeps_the_session_connection_alive() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: ClientKind::Desktop,
         },
     )
@@ -1057,6 +1073,7 @@ async fn setting_permissive_mode_does_not_wait_for_an_active_turn() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: ClientKind::Desktop,
         },
     )
@@ -1139,6 +1156,7 @@ async fn slash_command_clear_returns_slash_result() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )
@@ -1174,6 +1192,7 @@ async fn slash_command_compact_returns_slash_result() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )
@@ -1219,6 +1238,7 @@ async fn slash_command_compacts_and_persists_without_another_prompt() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: ClientKind::Tui,
         },
     )
@@ -1323,6 +1343,7 @@ async fn compaction_clears_context_meter_when_metadata_is_unavailable() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: ClientKind::Tui,
         },
     )
@@ -1389,6 +1410,7 @@ async fn compaction_clears_context_meter_when_metadata_failed_during_turn() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: ClientKind::Tui,
         },
     )
@@ -1459,6 +1481,7 @@ async fn queued_compaction_result_follows_its_session_after_switch() {
         &mut first,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: ClientKind::Tui,
         },
     )
@@ -1511,6 +1534,7 @@ async fn queued_compaction_result_follows_its_session_after_switch() {
         &mut first,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: ClientKind::Tui,
         },
     )
@@ -1548,6 +1572,7 @@ async fn compaction_does_not_answer_another_clients_slash_command() {
         &mut first,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: ClientKind::Tui,
         },
     )
@@ -1625,6 +1650,7 @@ async fn cancel_during_stream_does_not_panic() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )
@@ -1671,6 +1697,7 @@ async fn tool_call_response_emits_tool_use_finish() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )
@@ -1729,6 +1756,7 @@ async fn multiple_sequential_prompts_each_get_session() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )
@@ -1798,6 +1826,7 @@ async fn concurrent_connections_are_independent() {
         &mut ws_a,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )
@@ -1806,6 +1835,7 @@ async fn concurrent_connections_are_independent() {
         &mut ws_b,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )
@@ -1847,6 +1877,7 @@ async fn part_id_consistent_across_part_start_and_part_end() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )
@@ -1902,6 +1933,7 @@ async fn fresh_agent_per_connection() {
         &mut ws1,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )
@@ -1944,6 +1976,7 @@ async fn fresh_agent_per_connection() {
         &mut ws2,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )
@@ -2036,6 +2069,7 @@ async fn list_projects_returns_project_list() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: Some("/tmp".into()),
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )
@@ -2065,6 +2099,7 @@ async fn new_session_with_bad_cwd_returns_error() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: Some("/nonexistent/path/that/does/not/exist".into()),
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )
@@ -2095,6 +2130,7 @@ async fn regenerate_title_returns_title_changed() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: mew_protocol::ClientKind::Unknown,
         },
     )
@@ -2176,6 +2212,7 @@ async fn usage_broadcast_and_session_list_carry_context_tokens() {
         &mut ws,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: ClientKind::Unknown,
         },
     )

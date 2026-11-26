@@ -272,10 +272,37 @@ impl SimpleRunner {
         def.can_spawn && parent_depth + 2 <= self.max_subagent_depth && !self.defs.is_empty()
     }
 
-    /// Tool set for a child agent: the def's allowlist (or everything), with
-    /// the spawn tools stripped unless the child may itself spawn.
-    fn child_tools(&self, def: &SubagentDef, parent_depth: u32) -> Vec<Arc<dyn Tool>> {
-        let mut tools: Vec<Arc<dyn Tool>> = if let Some(ref allowed) = def.tools {
+    /// Resolve a def's `tools` allowlist against the registry. Tags such as
+    /// `tag!ALL_MCP` expand here the same way persona allowlists do; a plain
+    /// name that matches no registered tool is dropped with a warning so a
+    /// dangling reference is visible instead of silently revoking access.
+    fn expand_def_tools(&self, def: &SubagentDef) -> Option<Vec<String>> {
+        def.tools.as_ref().map(|allowed| {
+            for entry in allowed {
+                let is_tag = entry.starts_with("tag!")
+                    || (entry.starts_with("mcp__") && entry.matches("__").count() == 1);
+                if !is_tag && !self.tools.contains_key(entry) {
+                    tracing::warn!(
+                        subagent = %def.name,
+                        tool = %entry,
+                        "allowlisted tool is not registered; dropping it"
+                    );
+                }
+            }
+            crate::agent::expand_tool_tags(allowed, &self.tools)
+        })
+    }
+
+    /// Tool set for a child agent: the def's expanded allowlist (or
+    /// everything), with the spawn tools stripped unless the child may itself
+    /// spawn.
+    fn child_tools(
+        &self,
+        def: &SubagentDef,
+        allowed: Option<&[String]>,
+        parent_depth: u32,
+    ) -> Vec<Arc<dyn Tool>> {
+        let mut tools: Vec<Arc<dyn Tool>> = if let Some(allowed) = allowed {
             allowed
                 .iter()
                 .filter_map(|name| self.tools.get(name).cloned())
@@ -417,7 +444,8 @@ impl SubagentRunner for SimpleRunner {
         let session_id = SessionId::new();
 
         let child_can_spawn = self.child_can_spawn(def, opts.parent_depth);
-        let tools = self.child_tools(def, opts.parent_depth);
+        let allowed_tools = self.expand_def_tools(def);
+        let tools = self.child_tools(def, allowed_tools.as_deref(), opts.parent_depth);
 
         // Open a subagent session file nested under the parent. If this fails
         // the subagent still runs, but we surface the failure via
@@ -465,10 +493,7 @@ impl SubagentRunner for SimpleRunner {
         );
 
         agent.code_mode = self.code_mode.clone();
-        agent.active_tool_names = def
-            .tools
-            .as_ref()
-            .map(|names| names.iter().cloned().collect());
+        agent.active_tool_names = allowed_tools.map(|names| names.into_iter().collect());
         agent.codex_code_mode_models = self.codex_code_mode_models.clone();
         agent.secrets = self.secrets.clone();
         agent.set_model_info(&model_id, &provider_id);
@@ -2494,11 +2519,18 @@ mod tests {
         names
     }
 
+    /// Same two steps the spawner performs: expand the def's allowlist, then
+    /// build the child tool set from it.
+    fn def_child_tools(runner: &SimpleRunner, def: &SubagentDef, depth: u32) -> Vec<Arc<dyn Tool>> {
+        let allowed = runner.expand_def_tools(def);
+        runner.child_tools(def, allowed.as_deref(), depth)
+    }
+
     #[test]
     fn child_tools_strip_spawn_tools_when_def_does_not_opt_in() {
         let def = make_def(None, None); // can_spawn: false
         let runner = policy_runner(vec![def.clone()], 3);
-        let names = tool_names(runner.child_tools(&def, 0));
+        let names = tool_names(def_child_tools(&runner, &def, 0));
         assert!(!names.contains(&"subagent_start".to_string()));
         assert!(!names.contains(&"subagent_wait".to_string()));
         assert!(names.contains(&"exit_tool".to_string()));
@@ -2511,7 +2543,7 @@ mod tests {
             ..make_def(None, None)
         };
         let runner = policy_runner(vec![def.clone()], 3);
-        let names = tool_names(runner.child_tools(&def, 0));
+        let names = tool_names(def_child_tools(&runner, &def, 0));
         assert!(names.contains(&"subagent_start".to_string()));
         assert!(names.contains(&"subagent_wait".to_string()));
     }
@@ -2524,10 +2556,10 @@ mod tests {
         };
         let runner = policy_runner(vec![def.clone()], 2);
         // Child of a depth-1 session sits at depth 2 == cap; it cannot spawn.
-        let names = tool_names(runner.child_tools(&def, 1));
+        let names = tool_names(def_child_tools(&runner, &def, 1));
         assert!(!names.contains(&"subagent_start".to_string()));
         // ...but a depth-0 session's child (depth 1 < cap 2) can.
-        let names = tool_names(runner.child_tools(&def, 0));
+        let names = tool_names(def_child_tools(&runner, &def, 0));
         assert!(names.contains(&"subagent_start".to_string()));
     }
 
@@ -2538,7 +2570,7 @@ mod tests {
             ..make_def(None, None)
         };
         let runner = policy_runner(vec![], 3);
-        let names = tool_names(runner.child_tools(&def, 0));
+        let names = tool_names(def_child_tools(&runner, &def, 0));
         assert!(!names.contains(&"subagent_start".to_string()));
     }
 
@@ -2552,7 +2584,7 @@ mod tests {
             ..make_def(None, None)
         };
         let runner = policy_runner(vec![def.clone()], 3);
-        let names = tool_names(runner.child_tools(&def, 0));
+        let names = tool_names(def_child_tools(&runner, &def, 0));
         assert_eq!(names, vec!["exit_tool".to_string()]);
     }
 
@@ -3130,8 +3162,7 @@ mod tests {
         // The contract renders for this def and tells it to report through
         // exit_tool, so restricting tools must not remove it.
         def.tools = Some(vec![echo_name.to_string()]);
-        let names: Vec<String> = runner
-            .child_tools(&def, 0)
+        let names: Vec<String> = def_child_tools(&runner, &def, 0)
             .iter()
             .map(|tool| tool.name().to_string())
             .collect();
@@ -3141,12 +3172,41 @@ mod tests {
 
         // Everything else still follows the allowlist.
         def.tools = Some(vec![]);
-        let names: Vec<String> = runner
-            .child_tools(&def, 0)
+        let names: Vec<String> = def_child_tools(&runner, &def, 0)
             .iter()
             .map(|tool| tool.name().to_string())
             .collect();
         assert_eq!(names, vec!["exit_tool".to_string()]);
+    }
+
+    #[test]
+    fn subagent_tool_allowlist_expands_tags_and_drops_unknown_names() {
+        let def = SubagentDef {
+            tools: Some(vec![
+                "exit_tool".into(),
+                "tag!ALL_MCP".into(),
+                "web_search".into(),
+            ]),
+            ..make_def(None, None)
+        };
+        let runner = SimpleRunner::new(
+            Arc::new(ScriptedProvider::new(vec![])),
+            vec![
+                exit_tool(),
+                Arc::new(NamedTool("mcp__docs__search")),
+                Arc::new(NamedTool("subagent_start")),
+            ],
+            Arc::new(mew_hooks::NopDispatcher),
+        );
+
+        let allowed = runner.expand_def_tools(&def).unwrap();
+        assert!(allowed.contains(&"mcp__docs__search".to_string()));
+
+        // Only registered, allowlisted tools reach the child: the unknown
+        // plain name fails the registry lookup and the untagged registry
+        // entry stays out.
+        let names = tool_names(def_child_tools(&runner, &def, 0));
+        assert_eq!(names, vec!["exit_tool", "mcp__docs__search"]);
     }
     #[tokio::test]
     async fn subagent_model_inherit_reaches_the_provider_as_the_parent_model() {

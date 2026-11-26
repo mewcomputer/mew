@@ -206,6 +206,7 @@ async fn session_operation_errors_keep_the_requested_identity_and_legacy_error()
                     .to_string_lossy()
                     .into_owned(),
             ),
+            scratch: false,
             client_kind: ClientKind::Mobile,
         },
     )
@@ -269,6 +270,7 @@ async fn session_deletion_waits_for_other_attached_clients_to_leave() {
         &mut other,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: ClientKind::Tui,
         },
     )
@@ -754,6 +756,197 @@ async fn automation_settings_are_readable_before_attachment_and_acknowledge_upda
 }
 
 #[tokio::test]
+async fn web_search_settings_are_readable_and_persist_to_config_toml() {
+    use mew_tools::tools::web_search::SearchProvider;
+
+    let directory = tempfile::tempdir().unwrap();
+    let config_path = directory.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        "# keep this comment\n\n[some_other_section]\nkey = \"value\"\n",
+    )
+    .unwrap();
+    let server = test_server(directory.path().to_path_buf());
+    let mut socket = connect(&server).await;
+    send(
+        &mut socket,
+        ClientMessage::ReadDaemonSettings {
+            request_id: "read".into(),
+        },
+    )
+    .await;
+    assert!(flush(&mut socket).await.iter().any(|message| matches!(
+        message,
+        ServerMessage::DaemonSettings {
+            request_id: Some(id),
+            web_search: Some(mew_protocol::WebSearchInfo {
+                providers,
+                ..
+            }),
+            ..
+        } if id == "read" && providers.iter().map(|p| p.id.as_str()).collect::<Vec<_>>() == vec!["tavily", "exa"]
+    )));
+
+    // The wire handler applies the same manager method with the real config
+    // path; here we inject the temp path so a single test cannot touch a
+    // developer's config.toml.
+    let info = server
+        .session_manager
+        .apply_web_search_settings_at(&config_path, Some(false), Some(SearchProvider::Exa), None)
+        .await
+        .unwrap();
+    assert!(!info.enabled);
+    assert_eq!(info.provider, "exa");
+    assert!(!server.session_manager.web_search.borrow().enabled);
+
+    let text = std::fs::read_to_string(&config_path).unwrap();
+    assert!(text.starts_with("# keep this comment"), "got {text}");
+    assert!(text.contains("[some_other_section]"), "got {text}");
+    assert!(text.contains("enabled = false"), "got {text}");
+    assert!(text.contains("provider = \"exa\""), "got {text}");
+
+    // A second interested client observes changes without a request id.
+    let mut observer = connect(&server).await;
+    send(
+        &mut observer,
+        ClientMessage::ReadDaemonSettings {
+            request_id: "obs".into(),
+        },
+    )
+    .await;
+    flush(&mut observer).await;
+    server
+        .session_manager
+        .apply_web_search_settings_at(&config_path, Some(true), None, None)
+        .await
+        .unwrap();
+    assert!(flush(&mut observer).await.iter().any(|message| matches!(
+        message,
+        ServerMessage::DaemonSettings {
+            request_id: None,
+            web_search: Some(mew_protocol::WebSearchInfo { enabled: true, .. }),
+            ..
+        }
+    )));
+
+    // A fresh daemon seeded from the file (as `mew daemon` does) restores it.
+    let persisted = mew_config::update_web_search_at(&config_path, None, None).unwrap();
+    let restarted = test_server(directory.path().to_path_buf());
+    restarted
+        .session_manager
+        .set_web_search_config(persisted.clone());
+    assert_eq!(*restarted.session_manager.web_search.borrow(), persisted);
+    assert!(persisted.enabled);
+    assert_eq!(persisted.provider, SearchProvider::Exa);
+
+    // An unknown provider over the wire fails without writing the file.
+    let text_before = std::fs::read_to_string(&config_path).unwrap();
+    send(
+        &mut socket,
+        ClientMessage::SetWebSearchSettings {
+            enabled: None,
+            provider: Some("brave".into()),
+            request_id: "bad".into(),
+        },
+    )
+    .await;
+    assert!(flush(&mut socket).await.iter().any(|message| matches!(
+        message,
+        ServerMessage::DaemonSettingsFailed { request_id, message }
+            if request_id == "bad" && message.contains("unknown web search provider")
+    )));
+    assert_eq!(std::fs::read_to_string(&config_path).unwrap(), text_before);
+}
+
+#[tokio::test]
+async fn router_tiers_are_written_to_config_and_broadcast() {
+    let directory = tempfile::tempdir().unwrap();
+    let config_path = directory.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        "# keep me\n\n[providers.router]\nshape = \"openai\"\nkind = \"router\"\nmicro = \"old/micro\"\n",
+    )
+    .unwrap();
+    let server = test_server(directory.path().to_path_buf());
+
+    // Simulate the startup seed done by `mew daemon`.
+    let cfg: mew_config::Config =
+        toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    let seeded = crate::router_info_from_config(&cfg);
+    server.session_manager.set_router_config(seeded.clone());
+    assert_eq!(seeded.provider, "router");
+    assert_eq!(seeded.tiers.len(), 3);
+
+    let mut observer = connect(&server).await;
+    send(
+        &mut observer,
+        ClientMessage::ReadDaemonSettings {
+            request_id: "obs".into(),
+        },
+    )
+    .await;
+    assert!(flush(&mut observer).await.iter().any(|message| matches!(
+        message,
+        ServerMessage::DaemonSettings {
+            router: Some(mew_protocol::RouterInfo { provider, .. }),
+            ..
+        } if provider == "router"
+    )));
+
+    let info = server
+        .session_manager
+        .apply_router_tiers_at(
+            &config_path,
+            "router".into(),
+            "deepseek/flash".into(),
+            "deepseek/pro".into(),
+            String::new(),
+            None,
+        )
+        .await
+        .unwrap();
+    let tiers: std::collections::HashMap<_, _> = info
+        .tiers
+        .iter()
+        .map(|tier| (tier.id.as_str(), tier.model.as_str()))
+        .collect();
+    assert_eq!(tiers["nano"], "deepseek/flash");
+    assert_eq!(tiers["micro"], "deepseek/pro");
+    assert_eq!(tiers["deci"], "");
+
+    let text = std::fs::read_to_string(&config_path).unwrap();
+    assert!(text.starts_with("# keep me"), "got {text}");
+    assert!(text.contains("nano = \"deepseek/flash\""), "got {text}");
+    assert!(!text.contains("deci"), "empty tier must be removed: {text}");
+    assert!(!text.contains("old/micro"), "got {text}");
+
+    assert!(flush(&mut observer).await.iter().any(|message| matches!(
+        message,
+        ServerMessage::DaemonSettings {
+            request_id: None,
+            ..
+        }
+    )));
+
+    // A fresh daemon seeded from the file sees the new tiers.
+    let restarted = test_server(directory.path().to_path_buf());
+    let cfg: mew_config::Config =
+        toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    restarted
+        .session_manager
+        .set_router_config(crate::router_info_from_config(&cfg));
+    let restored = restarted.session_manager.router_info();
+    let restored_tiers: std::collections::HashMap<_, _> = restored
+        .tiers
+        .iter()
+        .map(|tier| (tier.id.as_str(), tier.model.as_str()))
+        .collect();
+    assert_eq!(restored_tiers["nano"], "deepseek/flash");
+    assert_eq!(restored_tiers["micro"], "deepseek/pro");
+    assert_eq!(restored_tiers["deci"], "");
+}
+
+#[tokio::test]
 async fn shared_summary_changes_notify_other_clients_without_changing_their_title_preference() {
     let directory = tempfile::tempdir().unwrap();
     let server = test_server(directory.path().to_path_buf());
@@ -763,6 +956,7 @@ async fn shared_summary_changes_notify_other_clients_without_changing_their_titl
         &mut observer,
         ClientMessage::NewSession {
             cwd: None,
+            scratch: false,
             client_kind: ClientKind::Mobile,
         },
     )
@@ -833,6 +1027,274 @@ async fn summary_changes_reach_settings_observers_that_never_attach_to_a_session
             [ServerMessage::AutomationSettings { auto_title_enabled: false, auto_summary_enabled, .. }] if *auto_summary_enabled == enabled));
     }
     assert!(server.session_manager.active.lock().await.is_empty());
+}
+
+fn turn_messages(turns: usize, messages_per_turn: usize) -> Vec<mew_message::Message> {
+    let session_id = mew_message::SessionId::new();
+    let mut messages = Vec::new();
+    for turn in 0..turns {
+        let prompt_id = mew_message::MessageId::new();
+        messages.push(mew_message::Message {
+            id: prompt_id,
+            session_id,
+            role: mew_message::Role::User,
+            parts: vec![mew_message::Part::Text(mew_message::TextPart {
+                base: mew_message::PartBase {
+                    id: mew_message::PartId::new(),
+                    message_id: prompt_id,
+                    session_id,
+                },
+                text: format!("prompt {turn}"),
+                synthetic: false,
+            })],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        });
+        for round in 1..messages_per_turn {
+            let id = mew_message::MessageId::new();
+            messages.push(mew_message::Message {
+                id,
+                session_id,
+                role: mew_message::Role::Assistant,
+                parts: vec![mew_message::Part::Text(mew_message::TextPart {
+                    base: mew_message::PartBase {
+                        id: mew_message::PartId::new(),
+                        message_id: id,
+                        session_id,
+                    },
+                    text: format!("turn {turn} round {round}"),
+                    synthetic: false,
+                })],
+                time: mew_message::Time {
+                    created: 0,
+                    completed: None,
+                },
+                assistant: None,
+            });
+        }
+    }
+    messages
+}
+
+#[tokio::test]
+async fn history_pages_start_at_a_turn_boundary() {
+    let directory = tempfile::tempdir().unwrap();
+    let server = test_server(directory.path().to_path_buf());
+    let session = server.session_manager.create(None).await.unwrap();
+    let attach_id = session.id.clone();
+    // Five messages per turn, so a 24-message window ends mid-turn.
+    let messages = turn_messages(10, 5);
+    {
+        let agent = session.agent.lock().await;
+        let mut writer = agent.session.as_ref().unwrap().lock().await;
+        for message in &messages {
+            writer.write_message(message).await.unwrap();
+        }
+        drop(writer);
+        agent.load_messages(messages.clone()).await;
+    }
+    drop(session);
+
+    let mut socket = connect(&server).await;
+    send(
+        &mut socket,
+        ClientMessage::AttachSession {
+            session_id: attach_id,
+            client_kind: ClientKind::Web,
+        },
+    )
+    .await;
+    let page = first_history_page(&mut socket).await;
+    assert_eq!(page.len(), 25, "the page extends back to the turn start");
+    assert_eq!(page[0].role, mew_message::Role::User);
+    assert_eq!(
+        page[0].parts.first().and_then(|part| match part {
+            mew_message::Part::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        }),
+        Some("prompt 5"),
+        "a page never starts in the middle of a turn"
+    );
+}
+
+#[tokio::test]
+async fn mobile_history_pages_use_the_larger_page_limit() {
+    let directory = tempfile::tempdir().unwrap();
+    let server = test_server(directory.path().to_path_buf());
+    let session = server.session_manager.create(None).await.unwrap();
+    let attach_id = session.id.clone();
+    let messages = turn_messages(20, 5);
+    {
+        let agent = session.agent.lock().await;
+        let mut writer = agent.session.as_ref().unwrap().lock().await;
+        for message in &messages {
+            writer.write_message(message).await.unwrap();
+        }
+        drop(writer);
+        agent.load_messages(messages.clone()).await;
+    }
+    drop(session);
+
+    for (client_kind, expected) in [
+        (ClientKind::Mobile, mew_protocol::MOBILE_HISTORY_PAGE_LIMIT),
+        (
+            ClientKind::Web,
+            mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT + 1,
+        ),
+    ] {
+        let mut socket = connect(&server).await;
+        send(
+            &mut socket,
+            ClientMessage::AttachSession {
+                session_id: attach_id.clone(),
+                client_kind,
+            },
+        )
+        .await;
+        let page = first_history_page(&mut socket).await;
+        assert_eq!(page.len(), expected, "{client_kind:?} page size");
+    }
+}
+
+#[tokio::test]
+async fn history_pages_omit_manifests_for_clients_without_an_inspector() {
+    let directory = tempfile::tempdir().unwrap();
+    let server = test_server(directory.path().to_path_buf());
+    let session = server.session_manager.create(None).await.unwrap();
+    let session_id = session.agent.lock().await.session_id;
+    let attach_id = session.id.clone();
+
+    let manifest = mew_message::TurnManifest {
+        model: "test-model".into(),
+        context_window: 128_000,
+        input_tokens: Some(1_000),
+        output_tokens: Some(10),
+        cache_read_tokens: None,
+        cache_write_tokens: None,
+        reasoning_tokens: None,
+        segments: vec![mew_message::Segment {
+            label: "history".into(),
+            kind: mew_message::SegmentKind::Message,
+            source_id: None,
+            tokens: 900,
+            tokens_scaled: 900,
+            children: Vec::new(),
+        }],
+    };
+    let turns = mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT + 2;
+    let messages = (0..turns)
+        .map(|index| {
+            let message_id = mew_message::MessageId::new();
+            mew_message::Message {
+                id: message_id,
+                session_id,
+                role: mew_message::Role::Assistant,
+                parts: vec![mew_message::Part::Text(mew_message::TextPart {
+                    base: mew_message::PartBase {
+                        id: mew_message::PartId::new(),
+                        message_id,
+                        session_id,
+                    },
+                    text: format!("turn {index}"),
+                    synthetic: false,
+                })],
+                time: mew_message::Time {
+                    created: index as i64,
+                    completed: Some(index as i64 + 1),
+                },
+                assistant: Some(mew_message::AssistantMeta {
+                    model_id: "test-model".into(),
+                    manifest: Some(manifest.clone()),
+                    ..Default::default()
+                }),
+            }
+        })
+        .collect::<Vec<_>>();
+    {
+        let agent = session.agent.lock().await;
+        let mut writer = agent.session.as_ref().unwrap().lock().await;
+        for message in &messages {
+            writer.write_message(message).await.unwrap();
+        }
+        drop(writer);
+        agent.load_messages(messages.clone()).await;
+    }
+
+    // The phone attaches to the idle session the daemon reloads from disk.
+    drop(session);
+
+    for (client_kind, expect_manifests) in [(ClientKind::Mobile, false), (ClientKind::Web, true)] {
+        let mut socket = connect(&server).await;
+        send(
+            &mut socket,
+            ClientMessage::AttachSession {
+                session_id: attach_id.clone(),
+                client_kind,
+            },
+        )
+        .await;
+        let page = first_history_page(&mut socket).await;
+        assert_manifests(
+            &page,
+            expect_manifests,
+            &format!("{client_kind:?} attach page"),
+        );
+
+        // Older pages take the request path rather than the attach replay.
+        send(
+            &mut socket,
+            ClientMessage::LoadSessionHistory {
+                session_id: attach_id.clone(),
+                before: 2,
+                limit: mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT,
+            },
+        )
+        .await;
+        let older = first_history_page(&mut socket).await;
+        assert!(!older.is_empty(), "{client_kind:?} older page");
+        assert_manifests(
+            &older,
+            expect_manifests,
+            &format!("{client_kind:?} older page"),
+        );
+    }
+}
+
+async fn first_history_page(socket: &mut TestSocket) -> Vec<mew_message::Message> {
+    let mut seen = Vec::new();
+    for _ in 0..8 {
+        seen.extend(flush(socket).await);
+        if seen
+            .iter()
+            .any(|message| matches!(message, ServerMessage::SessionHistoryPage { .. }))
+        {
+            break;
+        }
+    }
+    seen.into_iter()
+        .find_map(|message| match message {
+            ServerMessage::SessionHistoryPage { messages, .. } => Some(messages),
+            ServerMessage::Error { message } => panic!("history request failed: {message}"),
+            _ => None,
+        })
+        .expect("history page")
+}
+
+fn assert_manifests(messages: &[mew_message::Message], expected: bool, context: &str) {
+    let assistants = messages
+        .iter()
+        .filter_map(|message| message.assistant.as_ref())
+        .collect::<Vec<_>>();
+    assert!(!assistants.is_empty(), "{context}: no assistant messages");
+    assert!(
+        assistants
+            .iter()
+            .all(|meta| meta.manifest.is_some() == expected),
+        "{context}: manifest presence should be {expected}"
+    );
 }
 
 #[tokio::test]
@@ -977,6 +1439,7 @@ async fn history_pages_preserve_messages_before_compaction_and_live_updates() {
                 &mut socket,
                 ClientMessage::NewSession {
                     cwd: None,
+                    scratch: false,
                     client_kind,
                 },
             )
@@ -2719,6 +3182,11 @@ impl crate::remote::RemoteAccessController for MockRemoteController {
         }
     }
 
+    fn set_auto_start(&self, enabled: bool) -> crate::remote::RemoteFuture<'_, ()> {
+        let store = self.store.clone();
+        Box::pin(async move { store.set_auto_start(enabled) })
+    }
+
     fn set_enabled(
         &self,
         enabled: bool,
@@ -2735,6 +3203,10 @@ impl crate::remote::RemoteAccessController for MockRemoteController {
                 .set_hosting(enabled, crate::remote::RemoteMode::Desktop, node)?;
             Ok(self.status())
         })
+    }
+
+    fn stop(&self) -> crate::remote::RemoteFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
     }
 
     fn create_pairing_invite(
@@ -2773,7 +3245,7 @@ async fn daemon_settings_include_automation_remote_and_pairing_invites() {
         .set(Arc::new(MockRemoteController {
             enabled: std::sync::atomic::AtomicBool::new(false),
             node_id: "node-abc".into(),
-            store,
+            store: store.clone(),
         }));
 
     let mut socket = connect(&server).await;
@@ -2847,6 +3319,7 @@ async fn daemon_settings_include_automation_remote_and_pairing_invites() {
             ..
         }
     )));
+    assert!(store.snapshot().auto_start);
 
     // Invite while enabled returns node_id and pairing payload.
     send(
@@ -2870,6 +3343,28 @@ async fn daemon_settings_include_automation_remote_and_pairing_invites() {
             && payload.starts_with("computer.mew.mew://node-abc?token=mew_")
             && *expires_at > 0
     ));
+
+    // Turning it off clears the remembered preference too.
+    send(
+        &mut socket,
+        ClientMessage::SetRemoteAccess {
+            enabled: false,
+            request_id: "disable".into(),
+        },
+    )
+    .await;
+    assert!(flush(&mut socket).await.iter().any(|msg| matches!(
+        msg,
+        ServerMessage::DaemonSettings {
+            request_id: Some(id),
+            remote: Some(mew_protocol::RemoteAccessInfo {
+                enabled: false,
+                ..
+            }),
+            ..
+        } if id == "disable"
+    )));
+    assert!(!store.snapshot().auto_start);
 
     // Only RemoteScope::Control may toggle remote access or create pairing invites.
     for scope in [RemoteScope::Observe, RemoteScope::Collaborate] {
@@ -2904,4 +3399,149 @@ async fn daemon_settings_include_automation_remote_and_pairing_invites() {
             ttl_secs: None,
         }
     ));
+}
+
+#[tokio::test]
+async fn scratch_session_uses_isolated_workspace_and_rejects_cwd() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = test_server(dir.path().to_path_buf());
+    let mut socket = connect(&server).await;
+
+    // Reject scratch: true combined with an explicit cwd.
+    send(
+        &mut socket,
+        ClientMessage::NewSession {
+            cwd: Some(dir.path().to_string_lossy().into_owned()),
+            scratch: true,
+            client_kind: ClientKind::Web,
+        },
+    )
+    .await;
+    let messages = flush(&mut socket).await;
+    assert!(messages.iter().any(|m| matches!(
+        m,
+        ServerMessage::SessionOperationFailed {
+            operation: mew_protocol::SessionOperation::Create,
+            ..
+        }
+    )));
+
+    // Create a scratch session with cwd: None.
+    send(
+        &mut socket,
+        ClientMessage::NewSession {
+            cwd: None,
+            scratch: true,
+            client_kind: ClientKind::Web,
+        },
+    )
+    .await;
+    let messages = flush(&mut socket).await;
+    let session_id = messages
+        .iter()
+        .find_map(|m| match m {
+            ServerMessage::SessionReady {
+                session_id,
+                cwd,
+                scratch,
+                ..
+            } if *scratch => {
+                assert!(cwd.is_none());
+                Some(session_id.clone())
+            }
+            _ => None,
+        })
+        .expect("scratch SessionReady");
+
+    let expected_workspace = mew_session::scratch_workspace_dir(dir.path(), &session_id);
+    assert!(expected_workspace.is_dir());
+    assert_eq!(
+        server.session_manager.session_cwd(&session_id).await,
+        Some(expected_workspace)
+    );
+    assert!(
+        server
+            .session_manager
+            .active
+            .lock()
+            .await
+            .get(&session_id)
+            .unwrap()
+            .scratch
+    );
+
+    // Send a prompt so the session is non-empty and appears in ListSessions.
+    send(
+        &mut socket,
+        ClientMessage::Prompt {
+            text: "hi".into(),
+            attachments: Vec::new(),
+        },
+    )
+    .await;
+    let _ = flush(&mut socket).await;
+
+    // ListSessions reports scratch: true and cwd: None.
+    send(&mut socket, ClientMessage::ListSessions).await;
+    let messages = flush(&mut socket).await;
+    assert!(
+        messages.iter().any(|m| matches!(
+            m,
+            ServerMessage::SessionList { sessions }
+                if sessions.iter().any(|s| s.session_id == session_id && s.scratch && s.cwd.is_none())
+        )),
+        "expected scratch session {session_id} in {messages:?}"
+    );
+}
+
+#[tokio::test]
+async fn uploaded_blob_attachments_are_materialized_in_scratch_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = test_server(dir.path().to_path_buf());
+    let mut socket = connect(&server).await;
+
+    send(
+        &mut socket,
+        ClientMessage::NewSession {
+            cwd: None,
+            scratch: true,
+            client_kind: ClientKind::Web,
+        },
+    )
+    .await;
+    let messages = flush(&mut socket).await;
+    let session_id = messages
+        .iter()
+        .find_map(|m| match m {
+            ServerMessage::SessionReady { session_id, .. } => Some(session_id.clone()),
+            _ => None,
+        })
+        .expect("SessionReady");
+
+    let store = mew_session::BlobStore::new(dir.path().join("blobs"));
+    let blob_id = store.put(b"fake-png-bytes").unwrap();
+    let session = server
+        .session_manager
+        .active
+        .lock()
+        .await
+        .get(&session_id)
+        .cloned()
+        .expect("active session");
+    let (parts, note) = crate::attachments::prepare_prompt_attachments(
+        &session,
+        vec![mew_protocol::Attachment {
+            path: mew_session::blob_url(&blob_id),
+            mime: Some("image/png".into()),
+        }],
+    )
+    .await;
+    assert_eq!(parts.len(), 1);
+    let rel = format!("uploads/{}.png", &blob_id[..12]);
+    assert!(
+        note.contains(&rel),
+        "expected note to mention {rel}, got {note:?}"
+    );
+    let materialized = mew_session::scratch_workspace_dir(dir.path(), &session_id).join(&rel);
+    assert_eq!(std::fs::read(&materialized).unwrap(), b"fake-png-bytes");
 }

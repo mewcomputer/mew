@@ -35,11 +35,20 @@ impl Agent {
     /// Permissive, which still honors the secret-file guard) asks.
     pub(crate) async fn ensure_workspace_path(
         &self,
+        tool_name: &str,
         tool_path: &Path,
         ev_tx: &mpsc::Sender<AgentEvent>,
     ) -> Result<(), String> {
         if self.permission_mode() == mew_hooks::PermissionMode::Dangerous
             || self.is_within_workspace(tool_path)
+        {
+            return Ok(());
+        }
+        if matches!(tool_name, "read" | "grep")
+            && self
+                .provider
+                .allows_readonly_spill_path(self.session_id, tool_path)
+                .await
         {
             return Ok(());
         }

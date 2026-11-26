@@ -742,6 +742,7 @@ impl crate::agent::Agent {
         events: &tokio::sync::mpsc::Sender<crate::AgentEvent>,
         mut worker: PythonSessionGuard<'_>,
         nested_calls: &mut Vec<mew_message::NestedToolCall>,
+        nested_artifacts: &mut Vec<mew_tools::tools::present_artifact::ArtifactMetadata>,
     ) -> Result<mew_hooks::ToolOutput, ToolError> {
         if ctx.cancel.is_cancelled() {
             return Err(ToolError::Execution("Python was cancelled".into()));
@@ -1019,6 +1020,18 @@ impl crate::agent::Agent {
                         })
                         .await;
                     if let Some(mew_message::ToolState::Completed(state)) = state {
+                        if name == "present_artifact" {
+                            if let Some(raw) = state.metadata.as_ref().and_then(|m| {
+                                m.get(mew_tools::tools::present_artifact::ARTIFACT_METADATA_KEY)
+                            }) {
+                                if let Ok(art) = serde_json::from_value::<
+                                    mew_tools::tools::present_artifact::ArtifactMetadata,
+                                >(raw.clone())
+                                {
+                                    nested_artifacts.push(art);
+                                }
+                            }
+                        }
                         if name == "exit_tool" {
                             *self.python_exit.lock().await = true;
                             let answer = state.output.clone();

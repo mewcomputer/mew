@@ -324,6 +324,9 @@ fn format_message_for_transcript(message: &Message) -> Option<String> {
                 let name = file.filename.as_deref().unwrap_or(&file.url);
                 lines.push(format!("[File: {} ({})]", name, file.mime));
             }
+            Part::Artifact(artifact) => {
+                lines.push(format!("[Artifact: {} ({})]", artifact.title, artifact.url));
+            }
         }
     }
     if lines.is_empty() {

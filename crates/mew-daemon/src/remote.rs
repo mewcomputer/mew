@@ -19,12 +19,30 @@ pub type RemoteFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + '
 /// Live lifecycle and invite controller for remote iroh access on a running daemon.
 pub trait RemoteAccessController: Send + Sync {
     fn status(&self) -> mew_protocol::RemoteAccessInfo;
+    /// Remember whether the iroh listener should be restored on next launch.
+    fn set_auto_start(&self, enabled: bool) -> RemoteFuture<'_, ()>;
     fn set_enabled(&self, enabled: bool) -> RemoteFuture<'_, mew_protocol::RemoteAccessInfo>;
+    /// Stop the live listener without changing the remembered preference.
+    fn stop(&self) -> RemoteFuture<'_, ()>;
     fn create_pairing_invite(
         &self,
         scope: RemoteScope,
         ttl_secs: u64,
     ) -> RemoteFuture<'_, (String, String, u64)>;
+}
+
+/// Start the iroh listener at daemon launch when the remote toggle was left on.
+/// The preference lives in the store so it survives daemon restarts; `enabled`
+/// only describes a listener that is actually running.
+pub async fn restore_auto_start(
+    store: &RemoteAccessStore,
+    controller: &dyn RemoteAccessController,
+) {
+    if store.snapshot().auto_start {
+        if let Err(error) = controller.set_enabled(true).await {
+            tracing::warn!(%error, "could not restore remote access on startup");
+        }
+    }
 }
 
 #[cfg(feature = "iroh")]
@@ -102,6 +120,28 @@ impl IrohRemoteController {
     pub fn node_id(&self) -> &str {
         &self.node_id
     }
+
+    /// Stop a live listener without changing the remembered startup preference.
+    async fn stop_listener(&self) -> Result<()> {
+        let mut guard = self.state.lock().await;
+        if let Some(mut running) = guard.running.take() {
+            let _ = running.shutdown_tx.send(Some(0));
+            if let Some(mut handle) = running.handle.take() {
+                if tokio::time::timeout(Duration::from_secs(3), &mut handle)
+                    .await
+                    .is_err()
+                {
+                    handle.abort();
+                }
+            }
+        }
+        self.enabled
+            .store(false, std::sync::atomic::Ordering::Release);
+        let store = self.store.clone();
+        let mode = self.remote_mode;
+        tokio::task::spawn_blocking(move || store.set_hosting(false, mode, None)).await??;
+        Ok(())
+    }
 }
 
 #[cfg(feature = "iroh")]
@@ -116,10 +156,17 @@ impl RemoteAccessController for IrohRemoteController {
         }
     }
 
+    fn set_auto_start(&self, enabled: bool) -> RemoteFuture<'_, ()> {
+        let store = self.store.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || store.set_auto_start(enabled)).await?
+        })
+    }
+
     fn set_enabled(&self, enabled: bool) -> RemoteFuture<'_, mew_protocol::RemoteAccessInfo> {
         Box::pin(async move {
-            let mut guard = self.state.lock().await;
             if enabled {
+                let mut guard = self.state.lock().await;
                 if guard.running.as_ref().is_some_and(|running| {
                     running
                         .handle
@@ -224,24 +271,18 @@ impl RemoteAccessController for IrohRemoteController {
                     tokio::time::sleep(Duration::from_millis(25)).await;
                 }
             } else {
-                if let Some(mut running) = guard.running.take() {
-                    let _ = running.shutdown_tx.send(Some(0));
-                    if let Some(mut handle) = running.handle.take() {
-                        if tokio::time::timeout(Duration::from_secs(3), &mut handle)
-                            .await
-                            .is_err()
-                        {
-                            handle.abort();
-                        }
-                    }
-                }
-                self.enabled
-                    .store(false, std::sync::atomic::Ordering::Release);
-                let store = self.store.clone();
-                let mode = self.remote_mode;
-                tokio::task::spawn_blocking(move || store.set_hosting(false, mode, None)).await??;
+                self.stop_listener().await?;
                 Ok(self.status())
             }
+        })
+    }
+
+    fn stop(&self) -> RemoteFuture<'_, ()> {
+        Box::pin(async move {
+            if let Err(error) = self.stop_listener().await {
+                tracing::warn!(%error, "could not stop iroh listener during shutdown");
+            }
+            Ok(())
         })
     }
 
@@ -313,6 +354,9 @@ impl RemoteDevice {
 pub struct RemoteAccessState {
     #[serde(default)]
     pub enabled: bool,
+    /// Whether the iroh listener should start again on the next daemon launch.
+    #[serde(default)]
+    pub auto_start: bool,
     #[serde(default)]
     pub mode: RemoteMode,
     #[serde(default)]
@@ -424,6 +468,16 @@ impl RemoteAccessStore {
         self.save_locked(&state)
     }
 
+    /// Remember the remote toggle independently of whether a listener is live.
+    /// Shutdown clears `enabled` but leaves this choice for the next launch.
+    pub fn set_auto_start(&self, enabled: bool) -> Result<()> {
+        let _lock = self.acquire_file_lock()?;
+        self.refresh_from_disk()?;
+        let mut state = self.state.lock().expect("remote state mutex poisoned");
+        state.auto_start = enabled;
+        self.save_locked(&state)
+    }
+
     pub fn revoke(&self, device_id: &str, now: u64) -> Result<bool> {
         self.revoke_as(device_id, now, None)
     }
@@ -526,6 +580,29 @@ impl RemoteAccessStore {
             .active_devices(now)
             .find(|device| device.node_id == node_id)
             .map(|device| device.scope))
+    }
+
+    /// Authorize a peer whose iroh node identity the transport has already
+    /// verified.
+    ///
+    /// A pairing token only bootstraps device registration and is consumed on
+    /// first use, so a client that kept its invite presents a dead token on
+    /// every later connection. Falling back to the paired-device record keeps
+    /// that reconnect working without granting anything the tokenless path
+    /// would not: the node key authenticates the peer either way.
+    pub fn authorize_peer(
+        &self,
+        token: Option<&str>,
+        node_id: &str,
+        device_name: &str,
+        now: u64,
+    ) -> Result<Option<RemoteScope>> {
+        if let Some(token) = token {
+            if let Some(scope) = self.authorize_token(token, node_id, device_name, now)? {
+                return Ok(Some(scope));
+            }
+        }
+        self.authorize_device(node_id, now)
     }
 
     fn save_locked(&self, state: &RemoteAccessState) -> Result<()> {
@@ -745,7 +822,92 @@ mod tests {
 
         let legacy: RemoteAccessState = serde_json::from_str("{}").unwrap();
         assert!(!legacy.enabled);
+        assert!(!legacy.auto_start);
         assert_eq!(legacy.mode, RemoteMode::Daemon);
+    }
+
+    #[test]
+    fn auto_start_survives_hosting_changes_and_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("remote.json");
+        let store = RemoteAccessStore::new(path.clone());
+        assert!(!store.snapshot().auto_start);
+
+        store.set_auto_start(true).unwrap();
+        store
+            .set_hosting(true, RemoteMode::Desktop, Some("node-1".into()))
+            .unwrap();
+        store.set_hosting(false, RemoteMode::Desktop, None).unwrap();
+
+        let reloaded = RemoteAccessStore::load(path.clone()).unwrap();
+        assert!(reloaded.snapshot().auto_start);
+        assert!(!reloaded.snapshot().enabled);
+
+        reloaded.set_auto_start(false).unwrap();
+        assert!(!RemoteAccessStore::load(path).unwrap().snapshot().auto_start);
+    }
+
+    struct RecordingController {
+        enabled: std::sync::atomic::AtomicBool,
+    }
+
+    impl RemoteAccessController for RecordingController {
+        fn status(&self) -> mew_protocol::RemoteAccessInfo {
+            mew_protocol::RemoteAccessInfo {
+                supported: true,
+                enabled: self.enabled.load(std::sync::atomic::Ordering::Acquire),
+                node_id: None,
+            }
+        }
+
+        fn set_auto_start(&self, _enabled: bool) -> RemoteFuture<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn set_enabled(&self, enabled: bool) -> RemoteFuture<'_, mew_protocol::RemoteAccessInfo> {
+            Box::pin(async move {
+                self.enabled
+                    .store(enabled, std::sync::atomic::Ordering::Release);
+                Ok(self.status())
+            })
+        }
+
+        fn stop(&self) -> RemoteFuture<'_, ()> {
+            Box::pin(async {
+                self.enabled
+                    .store(false, std::sync::atomic::Ordering::Release);
+                Ok(())
+            })
+        }
+
+        fn create_pairing_invite(
+            &self,
+            _scope: RemoteScope,
+            _ttl_secs: u64,
+        ) -> RemoteFuture<'_, (String, String, u64)> {
+            Box::pin(async { unreachable!("restore does not create invites") })
+        }
+    }
+
+    #[tokio::test]
+    async fn restore_auto_start_only_enables_when_preferred() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RemoteAccessStore::new(dir.path().join("remote.json"));
+        let controller = RecordingController {
+            enabled: std::sync::atomic::AtomicBool::new(false),
+        };
+
+        restore_auto_start(&store, &controller).await;
+        assert!(!controller.status().enabled);
+
+        store.set_auto_start(true).unwrap();
+        restore_auto_start(&store, &controller).await;
+        assert!(controller.status().enabled);
+
+        store.set_auto_start(false).unwrap();
+        let _ = controller.stop().await;
+        restore_auto_start(&store, &controller).await;
+        assert!(!controller.status().enabled);
     }
 
     #[test]
@@ -858,5 +1020,79 @@ mod tests {
         std::fs::remove_file(path).unwrap();
         let manager = RemoteDeviceManager::Scoped(store);
         assert_eq!(manager.authorized_scope("phone", 102).unwrap(), None);
+    }
+
+    #[test]
+    fn a_paired_device_reconnecting_with_a_consumed_token_stays_authorized() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RemoteAccessStore::new(dir.path().join("remote.json"));
+        store.set_hosting(true, RemoteMode::Daemon, None).unwrap();
+        let token = store.create_pairing(RemoteScope::Control, 100, 60).unwrap();
+
+        assert_eq!(
+            store
+                .authorize_peer(Some(&token), "node-1", "laptop", 101)
+                .unwrap(),
+            Some(RemoteScope::Control)
+        );
+        // The client kept its invite, so it replays a token that no longer
+        // exists. The device record it created is what authorizes it now.
+        assert_eq!(
+            store
+                .authorize_peer(Some(&token), "node-1", "laptop", 102)
+                .unwrap(),
+            Some(RemoteScope::Control)
+        );
+        assert_eq!(
+            store.authorize_peer(None, "node-1", "laptop", 103).unwrap(),
+            Some(RemoteScope::Control)
+        );
+        assert!(store.snapshot().pairings.is_empty());
+    }
+
+    #[test]
+    fn a_consumed_token_does_not_authorize_an_unpaired_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RemoteAccessStore::new(dir.path().join("remote.json"));
+        store.set_hosting(true, RemoteMode::Daemon, None).unwrap();
+        let token = store.create_pairing(RemoteScope::Observe, 100, 60).unwrap();
+        assert_eq!(
+            store
+                .authorize_peer(Some(&token), "node-1", "laptop", 101)
+                .unwrap(),
+            Some(RemoteScope::Observe)
+        );
+
+        assert_eq!(
+            store
+                .authorize_peer(Some(&token), "node-2", "intruder", 102)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            store
+                .authorize_peer(Some("mew_unknown"), "node-3", "unknown", 102)
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn a_revoked_device_cannot_return_with_a_stale_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RemoteAccessStore::new(dir.path().join("remote.json"));
+        let token = store.create_pairing(RemoteScope::Control, 100, 60).unwrap();
+        store
+            .authorize_peer(Some(&token), "node-1", "laptop", 101)
+            .unwrap();
+        let device = store.snapshot().devices[0].id.clone();
+        store.revoke(&device, 102).unwrap();
+
+        assert_eq!(
+            store
+                .authorize_peer(Some(&token), "node-1", "laptop", 103)
+                .unwrap(),
+            None
+        );
     }
 }
