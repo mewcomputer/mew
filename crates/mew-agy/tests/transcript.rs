@@ -546,3 +546,44 @@ fn prefixed_rendered_compaction_summary_is_not_duplicated() {
         "Handoff context follows:\n\nConcise checkpoint summary."
     );
 }
+
+#[test]
+fn prompt_blocks_places_latest_user_message_after_historical_attachments() {
+    let req = Request {
+        messages: vec![
+            message(
+                Role::User,
+                vec![
+                    text("controls are going off screen"),
+                    Part::File(FilePart {
+                        base: base(),
+                        mime: "image/png".into(),
+                        filename: Some("old.png".into()),
+                        url: "data:image/png;base64,iVBORw0KGgo=".into(),
+                    }),
+                ],
+            ),
+            message(Role::Assistant, vec![text("fixed the portrait layout")]),
+            message(Role::User, vec![text("can you deploy on surge.sh?")]),
+        ],
+        ..Default::default()
+    };
+
+    let blocks = prompt_blocks(&req).unwrap();
+    assert_eq!(blocks.len(), 3);
+    assert_eq!(blocks[0]["type"], "text");
+    assert!(blocks[0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("controls are going off screen"));
+    assert!(!blocks[0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("can you deploy on surge.sh?"));
+    assert_eq!(blocks[1]["type"], "image");
+    assert_eq!(blocks[2]["type"], "text");
+    assert_eq!(
+        blocks[2]["text"],
+        "Latest user message:\ncan you deploy on surge.sh?"
+    );
+}

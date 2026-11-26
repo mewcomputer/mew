@@ -248,23 +248,114 @@ fn attachment_prompt_block(file: &FilePart) -> Result<Value, String> {
 }
 
 pub(crate) fn build_prompt_blocks(request: &Request) -> Result<(Vec<Value>, usize), String> {
-    let replay = project(request)?;
-    let text = format!("{REPLAY_PREFIX}{replay}");
-    let text_size = text.len();
-    let mut blocks = vec![json!({
-        "type": "text",
-        "text": text,
-    })];
-    for message in &request.messages {
-        if message.role != Role::User {
-            continue;
+    let mut blocks = Vec::new();
+    let mut text_size = 0usize;
+
+    let split_latest_user = request.messages.last().is_some_and(|m| {
+        m.role == Role::User
+            && m.parts
+                .iter()
+                .all(|p| matches!(p, Part::Text(_) | Part::File(_)))
+    });
+
+    if split_latest_user {
+        let split_at = request.messages.len() - 1;
+        let historical = &request.messages[..split_at];
+        let latest = &request.messages[split_at];
+
+        if !historical.is_empty() {
+            let replay = serde_json::to_string(&Replay {
+                format: "mew_transcript_v1",
+                messages: project_messages(historical)?,
+            })
+            .map_err(|error| format!("cannot serialize transcript: {error}"))?;
+            let text = format!("{REPLAY_PREFIX}{replay}");
+            text_size = text_size.saturating_add(text.len());
+            blocks.push(json!({
+                "type": "text",
+                "text": text,
+            }));
+            for message in historical {
+                if message.role != Role::User {
+                    continue;
+                }
+                for part in &message.parts {
+                    if let Part::File(file) = part {
+                        let block = attachment_prompt_block(file)?;
+                        if block.get("type").and_then(Value::as_str) == Some("text") {
+                            if let Some(t) = block.get("text").and_then(Value::as_str) {
+                                text_size = text_size.saturating_add(t.len());
+                            }
+                        }
+                        blocks.push(block);
+                    }
+                }
+            }
         }
-        for part in &message.parts {
+
+        let mut latest_texts = Vec::new();
+        for part in &latest.parts {
+            if let Part::Text(text) = part {
+                if !text.text.is_empty() {
+                    latest_texts.push(text.text.as_str());
+                }
+            }
+        }
+        if !latest_texts.is_empty() {
+            let joined = latest_texts.join("\n");
+            let text = if historical.is_empty() {
+                joined
+            } else {
+                format!("Latest user message:\n{joined}")
+            };
+            text_size = text_size.saturating_add(text.len());
+            blocks.push(json!({
+                "type": "text",
+                "text": text,
+            }));
+        } else {
+            let text = if historical.is_empty() {
+                String::new()
+            } else {
+                "Latest user message:".to_string()
+            };
+            text_size = text_size.saturating_add(text.len());
+            blocks.push(json!({
+                "type": "text",
+                "text": text,
+            }));
+        }
+        for part in &latest.parts {
             if let Part::File(file) = part {
-                blocks.push(attachment_prompt_block(file)?);
+                let block = attachment_prompt_block(file)?;
+                if block.get("type").and_then(Value::as_str) == Some("text") {
+                    if let Some(t) = block.get("text").and_then(Value::as_str) {
+                        text_size = text_size.saturating_add(t.len());
+                    }
+                }
+                blocks.push(block);
+            }
+        }
+    } else {
+        let replay = project(request)?;
+        let text = format!("{REPLAY_PREFIX}{replay}");
+        text_size = text.len();
+        blocks.push(json!({
+            "type": "text",
+            "text": text,
+        }));
+        for message in &request.messages {
+            if message.role != Role::User {
+                continue;
+            }
+            for part in &message.parts {
+                if let Part::File(file) = part {
+                    blocks.push(attachment_prompt_block(file)?);
+                }
             }
         }
     }
+
     Ok((blocks, text_size))
 }
 
@@ -434,14 +525,27 @@ pub(crate) fn replay_budget(request: &Request, max_frame: usize) -> Result<(usiz
                 .any(|part| matches!(part, Part::File(_)))
     });
     if !has_user_attachments && max_frame >= MAX_REPLAY_TEXT.saturating_mul(8) {
-        let mut writer = CountWriter(0);
-        serde_json::to_writer(&mut writer, &replay(request)?)
-            .map_err(|error| format!("cannot size transcript: {error}"))?;
-        let text_size = REPLAY_PREFIX
-            .len()
-            .checked_add(writer.0)
-            .ok_or_else(|| "cannot size transcript: overflow".to_owned())?;
-        return Ok((text_size, MAX_REPLAY_TEXT));
+        if request.messages.len() == 1 && request.messages[0].role == Role::User {
+            let text_size: usize = request.messages[0]
+                .parts
+                .iter()
+                .filter_map(|p| match p {
+                    Part::Text(t) if !t.text.is_empty() => Some(t.text.len()),
+                    _ => None,
+                })
+                .sum();
+            return Ok((text_size, MAX_REPLAY_TEXT));
+        }
+        if request.messages.last().is_none_or(|m| m.role != Role::User) {
+            let mut writer = CountWriter(0);
+            serde_json::to_writer(&mut writer, &replay(request)?)
+                .map_err(|error| format!("cannot size transcript: {error}"))?;
+            let text_size = REPLAY_PREFIX
+                .len()
+                .checked_add(writer.0)
+                .ok_or_else(|| "cannot size transcript: overflow".to_owned())?;
+            return Ok((text_size, MAX_REPLAY_TEXT));
+        }
     }
     let (blocks, text_size) = build_prompt_blocks(request)?;
     let frame_size = prompt_frame_size(&blocks)?;
