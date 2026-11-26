@@ -11,6 +11,7 @@ struct ActivityView: View {
     let sessionId: String
     @EnvironmentObject private var store: AppStore
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.mewTheme) private var theme
 
     var body: some View {
         NavigationStack {
@@ -33,23 +34,28 @@ struct ActivityView: View {
                                     }
                                 }
                             }
+                            .listRowBackground(theme.card)
                         }
                         if !store.jobs.isEmpty {
                             Section("Background jobs") {
                                 ForEach(store.jobs, id: \.jobId) { job in
                                     NavigationLink(value: ActivityDestination.job(id: job.jobId, command: job.command)) {
                                         VStack(alignment: .leading, spacing: 5) {
-                                            Text(job.command).font(.subheadline.monospaced()).lineLimit(2)
+                                            Text(job.command).font(.mewMono(15)).lineLimit(2)
                                             Text(job.state.capitalized).font(.caption).foregroundStyle(.secondary)
                                         }
                                         .padding(.vertical, 4)
                                     }
                                 }
                             }
+                            .listRowBackground(theme.card)
                         }
                     }
+                    .mewThemedForm(theme)
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(theme.background.ignoresSafeArea())
             .navigationTitle("Workers & jobs")
             .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(for: ActivityDestination.self) { destination in
@@ -93,6 +99,7 @@ private struct WorkerHistoryView: View {
     let name: String
     @State private var toolDisclosures = ToolDisclosures()
     @EnvironmentObject private var store: AppStore
+    @Environment(\.mewTheme) private var theme
 
     var body: some View {
         Group {
@@ -125,6 +132,7 @@ private struct WorkerHistoryView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(theme.background.ignoresSafeArea())
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if let history = store.workerHistory, history.daemon == daemon,
                history.sessionId == sessionId, history.childSessionId == childSessionId,
@@ -168,10 +176,11 @@ private struct JobOutputView: View {
     let jobId: String
     let command: String
     @EnvironmentObject private var store: AppStore
+    @Environment(\.mewTheme) private var theme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(command).font(.subheadline.monospaced()).textSelection(.enabled).padding(.horizontal)
+            Text(command).font(.mewMono(15)).textSelection(.enabled).padding(.horizontal)
             if let detail = store.jobOutput, detail.daemon == daemon,
                detail.sessionId == sessionId, detail.jobId == jobId {
                 if let error = detail.error {
@@ -184,7 +193,7 @@ private struct JobOutputView: View {
                 ScrollView([.horizontal, .vertical]) {
                     if !detail.output.isEmpty {
                         Text(detail.output)
-                            .font(.caption.monospaced()).textSelection(.enabled)
+                            .font(.mewMono(12)).textSelection(.enabled)
                             .fixedSize(horizontal: true, vertical: false).padding()
                     } else if !detail.isLoading {
                         Text(detail.done ? "No output was captured." : "No output yet.")
@@ -215,6 +224,8 @@ private struct JobOutputView: View {
             }
         }
         .padding(.vertical)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(theme.background.ignoresSafeArea())
         .navigationTitle("Job output")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {

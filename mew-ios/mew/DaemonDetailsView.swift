@@ -6,6 +6,7 @@ struct DaemonDetailsView: View {
 
     @EnvironmentObject private var store: AppStore
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.mewTheme) private var theme
     @State private var nickname = ""
     @State private var nameError: String?
     @State private var showsRemoveConfirmation = false
@@ -36,6 +37,7 @@ struct DaemonDetailsView: View {
                         NavigationLink("New chat defaults") { DaemonDefaultsView(daemonNodeId: daemonNodeId) }
                         NavigationLink("Paired devices") { PairedDevicesView(daemonNodeId: daemonNodeId) }
                     }
+                    .listRowBackground(theme.card)
                     advancedSection(daemon)
                     Section {
                         Button("Remove from this phone", role: .destructive) {
@@ -43,10 +45,14 @@ struct DaemonDetailsView: View {
                         }
                         .frame(minHeight: 44)
                     }
+                    .listRowBackground(theme.card)
                 }
+                .mewThemedForm(theme)
             } else {
                 ContentUnavailableView("Connection removed", systemImage: "server.rack",
                     description: Text("This machine is no longer saved on this phone."))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(theme.background.ignoresSafeArea())
             }
         }
         .navigationTitle(daemon?.name ?? "Machine details")
@@ -97,6 +103,7 @@ struct DaemonDetailsView: View {
                 .frame(minHeight: 44)
             }
         }
+        .listRowBackground(theme.card)
     }
 
     private func nicknameSection(_ daemon: DaemonEntry) -> some View {
@@ -117,6 +124,7 @@ struct DaemonDetailsView: View {
         } footer: {
             Text("This nickname is saved on this phone.").font(.footnote)
         }
+        .listRowBackground(theme.card)
     }
 
     private func saveNickname(_ daemon: DaemonEntry) {
@@ -139,6 +147,7 @@ struct DaemonDetailsView: View {
             } footer: {
                 Text("Generate conversation titles for prompts sent through this phone's current connection to this machine.").font(.footnote)
             }
+            .listRowBackground(theme.card)
             Section {
                 Toggle("Auto-summary", isOn: Binding(
                     get: { store.daemonSettings[daemonNodeId]?.autoSummaryEnabled ?? settings.autoSummaryEnabled },
@@ -151,6 +160,7 @@ struct DaemonDetailsView: View {
             } footer: {
                 Text("Generate summaries while this daemon is idle. This setting affects all its sessions and connected clients.").font(.footnote)
             }
+            .listRowBackground(theme.card)
         } else {
             Section("Automation") {
                 if isConnected && store.daemonSettingsErrors[daemonNodeId] == nil {
@@ -160,6 +170,7 @@ struct DaemonDetailsView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            .listRowBackground(theme.card)
         }
         if let error = store.daemonSettingsErrors[daemonNodeId] {
             Section {
@@ -170,6 +181,7 @@ struct DaemonDetailsView: View {
                         .frame(minHeight: 44)
                 }
             }
+            .listRowBackground(theme.card)
         }
     }
 
@@ -190,5 +202,6 @@ struct DaemonDetailsView: View {
         } footer: {
             Text("The Node ID identifies this machine. Pairing a new phone requires the complete invite from `mew pair`.").font(.footnote)
         }
+        .listRowBackground(theme.card)
     }
 }

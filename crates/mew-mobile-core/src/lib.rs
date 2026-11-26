@@ -152,7 +152,9 @@ use std::str::FromStr;
 #[derive(uniffi::Object)]
 pub struct MobileCore {
     endpoint: Endpoint,
-    registry: Mutex<DaemonRegistry>,
+    /// Shared with connection tasks so a consumed invite credential can be
+    /// dropped as soon as the daemon accepts it.
+    registry: Arc<Mutex<DaemonRegistry>>,
     connections: Mutex<HashMap<String, DaemonConnection>>,
     listener: Mutex<Option<Arc<dyn CoreListener>>>,
     /// Handle to the tokio runtime, captured during `new()`.
@@ -399,7 +401,9 @@ impl DaemonConnection {
                 | ClientMessage::SlashCommand { .. }
                 | ClientMessage::SetThinkingVariant { .. }
                 | ClientMessage::ListPersonas
+                | ClientMessage::ListMentionCandidates
                 | ClientMessage::SwitchPersona { .. }
+                | ClientMessage::ReadFilePreview { .. }
                 | ClientMessage::ReadSessionDiff { .. }
                 | ClientMessage::LoadSessionHistory { .. }
                 | ClientMessage::ReadSubagentHistory { .. }
@@ -418,6 +422,7 @@ impl DaemonConnection {
                 || session_id.is_none()
                 || session_id != *self.state.requested_session.lock().unwrap()
                 || matches!(&message, ClientMessage::ReadSessionDiff { session_id: requested, .. }
+                    | ClientMessage::ReadFilePreview { session_id: requested, .. }
                     | ClientMessage::LoadSessionHistory { session_id: requested, .. }
                     | ClientMessage::ReadSubagentHistory { session_id: requested, .. }
                     | ClientMessage::ReadJobOutput { session_id: requested, .. }
@@ -490,7 +495,7 @@ impl MobileCore {
 
         Ok(Self {
             endpoint,
-            registry: Mutex::new(registry),
+            registry: Arc::new(Mutex::new(registry)),
             connections: Mutex::new(HashMap::new()),
             listener: Mutex::new(None),
             runtime,
@@ -577,7 +582,10 @@ impl MobileCore {
         let endpoint = self.endpoint.clone();
         let daemon_id = id.node_id.clone();
         let node_id = entry.node_id.clone();
-        let pairing_token = entry.pairing_token.clone();
+        let registry = self.registry.clone();
+        // Cleared in place once the daemon accepts the handshake, so the
+        // reconnect loop stops replaying a credential that no longer exists.
+        let mut pairing_token = entry.pairing_token.clone();
 
         // Sync the listener into ConnState so the background task reads
         // it per-event (supports set_listener after connect).
@@ -598,7 +606,8 @@ impl MobileCore {
                     &endpoint,
                     &daemon_id,
                     &node_id,
-                    pairing_token.as_deref(),
+                    &mut pairing_token,
+                    &registry,
                     &mut rx,
                     &conn_state_for_task,
                 )
@@ -705,6 +714,17 @@ impl MobileCore {
     /// Queue a prompt only after the requested session is confirmed.
     /// False leaves the caller's composer and transcript unchanged.
     pub fn prompt(&self, id: DaemonId, text: String) -> bool {
+        self.send_prompt_with_attachments(id, text, Vec::new())
+    }
+
+    /// Queue a prompt with optional file/image attachments only after the requested
+    /// session is confirmed. False leaves the caller's composer and transcript unchanged.
+    pub fn send_prompt_with_attachments(
+        &self,
+        id: DaemonId,
+        text: String,
+        attachments: Vec<events::PromptAttachment>,
+    ) -> bool {
         let conns = self.connections.lock().unwrap();
         let Some(conn) = conns.get(&id.node_id) else {
             return false;
@@ -727,12 +747,19 @@ impl MobileCore {
         if pending.contains_key(&session_id) {
             return false;
         }
+        let proto_attachments: Vec<mew_protocol::Attachment> = attachments
+            .into_iter()
+            .map(|a| mew_protocol::Attachment {
+                path: a.path,
+                mime: a.mime,
+            })
+            .collect();
         if conn
             .tx
             .send(QueuedCommand {
                 message: ClientMessage::Prompt {
                     text: text.clone(),
-                    attachments: vec![],
+                    attachments: proto_attachments.clone(),
                 },
                 session_id: Some(session_id.clone()),
                 generation: Some(generation),
@@ -744,7 +771,41 @@ impl MobileCore {
         }
         pending.insert(session_id.clone(), generation);
         drop(pending);
+        let text_is_empty = text.trim().is_empty();
         client.record_prompt(&session_id, text);
+        if !proto_attachments.is_empty() {
+            let shared_session = client.session_mut(&session_id);
+            if let Some(msg) = shared_session.messages.last_mut() {
+                if text_is_empty {
+                    msg.parts.clear();
+                }
+                let msg_id = msg.id;
+                let msg_session_id = msg.session_id;
+                for attachment in proto_attachments {
+                    let filename = (!attachment.path.starts_with("data:"))
+                        .then(|| {
+                            attachment
+                                .path
+                                .rsplit('/')
+                                .next()
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_owned)
+                        })
+                        .flatten();
+                    msg.parts
+                        .push(mew_message::Part::File(mew_message::FilePart {
+                            base: mew_message::PartBase {
+                                id: ulid::Ulid::new(),
+                                message_id: msg_id,
+                                session_id: msg_session_id,
+                            },
+                            mime: attachment.mime.unwrap_or_default(),
+                            filename,
+                            url: attachment.path,
+                        }));
+                }
+            }
+        }
         drop(client);
         sync_mobile_session_from_client_state(&conn.state);
         if let Some(listener) = conn.state.listener.lock().unwrap().clone() {
@@ -882,7 +943,7 @@ impl MobileCore {
     }
 
     /// Create a new session on a daemon.
-    pub fn new_session(&self, id: DaemonId, cwd: Option<String>) {
+    pub fn new_session(&self, id: DaemonId, cwd: Option<String>, scratch: bool) {
         let conns = self.connections.lock().unwrap();
         let accepted = if let Some(conn) = conns.get(&id.node_id).filter(|conn| {
             conn.state.client_state.lock().unwrap().connection
@@ -891,7 +952,8 @@ impl MobileCore {
             conn.state.invalidate_session_commands();
             *conn.state.requested_session.lock().unwrap() = None;
             conn.send(ClientMessage::NewSession {
-                cwd,
+                cwd: if scratch { None } else { cwd },
+                scratch,
                 client_kind: mew_protocol::ClientKind::Mobile,
             })
         } else {
@@ -903,6 +965,41 @@ impl MobileCore {
                 listener.on_event(CoreEvent::SessionCreationFailed {
                     daemon: id.node_id,
                     message: "Connect to this machine before starting a conversation.".into(),
+                });
+            }
+        }
+    }
+
+    /// Fetch a staged artifact file from a daemon over the protocol.
+    /// Response arrives as `CoreEvent::ArtifactFileLoaded`.
+    pub fn read_artifact(
+        &self,
+        id: DaemonId,
+        request_id: String,
+        session_id: String,
+        artifact_id: String,
+        path: String,
+    ) {
+        let conns = self.connections.lock().unwrap();
+        let sent = if let Some(conn) = conns.get(&id.node_id) {
+            conn.send(ClientMessage::ReadArtifact {
+                request_id: request_id.clone(),
+                session_id,
+                artifact_id,
+                path,
+            })
+        } else {
+            false
+        };
+        drop(conns);
+        if !sent {
+            if let Some(listener) = self.listener.lock().unwrap().clone() {
+                listener.on_event(CoreEvent::ArtifactFileLoaded {
+                    daemon: id.node_id,
+                    request_id,
+                    mime: String::new(),
+                    data_base64: String::new(),
+                    error: Some("Not connected to daemon.".into()),
                 });
             }
         }
@@ -927,6 +1024,35 @@ impl MobileCore {
                 path,
                 scoped_errors: false,
             });
+        }
+    }
+
+    /// Read a bounded file preview in a session's workspace. Results arrive as
+    /// `CoreEvent::FilePreviewLoaded` or `CoreEvent::FilePreviewFailed`.
+    pub fn read_file_preview(
+        &self,
+        id: DaemonId,
+        session_id: String,
+        path: String,
+        max_bytes: Option<u64>,
+    ) {
+        let conns = self.connections.lock().unwrap();
+        if let Some(conn) = conns.get(&id.node_id) {
+            let _ = conn.send(ClientMessage::ReadFilePreview {
+                session_id,
+                path,
+                max_bytes,
+                scoped_errors: true,
+            });
+        }
+    }
+
+    /// List available skills and subagents for the attached session.
+    /// Response arrives as `CoreEvent::MentionCandidates`.
+    pub fn list_mention_candidates(&self, id: DaemonId) {
+        let conns = self.connections.lock().unwrap();
+        if let Some(conn) = conns.get(&id.node_id) {
+            let _ = conn.send(ClientMessage::ListMentionCandidates);
         }
     }
 
@@ -967,7 +1093,7 @@ impl MobileCore {
         if !conn.send(ClientMessage::LoadSessionHistory {
             session_id,
             before,
-            limit: mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT,
+            limit: mew_protocol::MOBILE_HISTORY_PAGE_LIMIT,
         }) {
             conn.state.history_pending.store(false, Ordering::Relaxed);
             return false;
@@ -1335,6 +1461,16 @@ fn set_shared_connection_status(
     conn_state.push_shared_event(event);
 }
 
+/// Drop a pairing credential the daemon has already consumed.
+fn clear_persisted_pairing_token(registry: &Mutex<DaemonRegistry>, node_id: &str) {
+    let cleared = registry.lock().unwrap().clear_pairing_token(&DaemonId {
+        node_id: node_id.to_owned(),
+    });
+    if let Err(error) = cleared {
+        warn!(daemon = %node_id, error = %error, "could not clear the consumed pairing token");
+    }
+}
+
 /// Verify compatibility before announcing a connection or attaching a session.
 async fn verify_daemon_protocol<S>(
     ws: &mut tokio_tungstenite::WebSocketStream<S>,
@@ -1380,7 +1516,8 @@ async fn connect_and_run(
     endpoint: &Endpoint,
     daemon_id: &str,
     node_id: &str,
-    pairing_token: Option<&str>,
+    pairing_token: &mut Option<String>,
+    registry: &Arc<Mutex<DaemonRegistry>>,
     rx: &mut mpsc::UnboundedReceiver<QueuedCommand>,
     conn_state: &Arc<ConnState>,
 ) -> Result<ConnOutcome> {
@@ -1427,16 +1564,22 @@ async fn connect_and_run(
         .context("websocket handshake over iroh")?;
 
     // Iroh connections must complete the daemon's transport-level handshake
-    // before sending normal protocol messages. Existing paired mobile nodes
-    // authenticate through the daemon's trusted-node record, so they do not
-    // need a user token here.
+    // before sending normal protocol messages. A node that is already paired
+    // authenticates through the daemon's device record, so only a first-time
+    // connection needs the invite credential.
     let hello = mew_protocol::encode_json(&ClientMessage::RemoteHello {
-        token: pairing_token.map(str::to_owned),
+        token: pairing_token.clone(),
         device_name: "mew mobile".to_string(),
     })?;
     ws.send(Message::Text(hello)).await?;
 
     let pong = verify_daemon_protocol(&mut ws).await?;
+    // The daemon consumed the credential during this handshake, whether it
+    // matched an invite or the device record. Forget it before any reconnect:
+    // replaying it only produces "remote pairing credentials were rejected".
+    if pairing_token.take().is_some() {
+        clear_persisted_pairing_token(registry, daemon_id);
+    }
     set_shared_connection_status(conn_state, mew_client_core::ConnectionStatus::Connected);
     emit_event(CoreEvent::DaemonStatusChanged {
         daemon: daemon_id.to_string(),
@@ -1879,6 +2022,7 @@ fn translate_message(
                     pending_questions: s.pending_questions,
                     usage_cost: s.usage.as_ref().map(|u| u.cost).unwrap_or(0.0),
                     cwd: s.cwd.clone(),
+                    scratch: s.scratch,
                     model: s.model.clone(),
                     provider: s.provider.clone(),
                     created_at: s.created_at,
@@ -1931,6 +2075,45 @@ fn translate_message(
                 session_id: session_id.clone(),
                 path: path.clone(),
                 entries,
+            });
+        }
+
+        ServerMessage::FilePreview {
+            session_id,
+            path,
+            content,
+            truncated,
+            language,
+        } => {
+            let resolved_session = session_id.clone().unwrap_or_else(|| {
+                conn_state
+                    .session_state
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|s| s.session_id.clone())
+                    .unwrap_or_default()
+            });
+            events.push(CoreEvent::FilePreviewLoaded {
+                daemon: d,
+                session_id: resolved_session,
+                path: path.clone(),
+                content: content.clone(),
+                truncated: *truncated,
+                language: language.clone(),
+            });
+        }
+
+        ServerMessage::FilePreviewError {
+            session_id,
+            path,
+            error,
+        } => {
+            events.push(CoreEvent::FilePreviewFailed {
+                daemon: d,
+                session_id: session_id.clone(),
+                path: path.clone(),
+                error: error.clone(),
             });
         }
 
@@ -2196,6 +2379,12 @@ fn translate_message(
                         tool_time_end: None,
                         tool_sensitivity: None,
                         compaction_removed: None,
+                        file_name: None,
+                        file_mime: None,
+                        artifact_id: None,
+                        artifact_url: None,
+                        artifact_mode: None,
+                        artifact_height: None,
                     }],
                     assistant_meta: None,
                     steered: *steered,
@@ -2387,6 +2576,7 @@ fn translate_message(
                     id: m.id.clone(),
                     provider: m.provider.clone(),
                     model: m.model.clone(),
+                    display_name: m.display_name.clone(),
                     description: m.description.clone(),
                     context_window: m.context_window,
                     thinking_variants: m.thinking_variants.iter().map(|v| v.name.clone()).collect(),
@@ -2399,6 +2589,7 @@ fn translate_message(
                     id: m.id.clone(),
                     provider: m.provider.clone(),
                     model: m.model.clone(),
+                    display_name: m.display_name.clone(),
                     context_window: m.context_window,
                     thinking_variants: m.thinking_variants.iter().map(|v| v.name.clone()).collect(),
                 })
@@ -2406,6 +2597,26 @@ fn translate_message(
             events.push(CoreEvent::ModelList {
                 daemon: d,
                 models: summaries,
+            });
+        }
+
+        ServerMessage::MentionCandidates { skills, subagents } => {
+            events.push(CoreEvent::MentionCandidates {
+                daemon: d,
+                skills: skills
+                    .iter()
+                    .map(|c| events::MentionCandidate {
+                        name: c.name.clone(),
+                        description: c.description.clone(),
+                    })
+                    .collect(),
+                subagents: subagents
+                    .iter()
+                    .map(|c| events::MentionCandidate {
+                        name: c.name.clone(),
+                        description: c.description.clone(),
+                    })
+                    .collect(),
             });
         }
 
@@ -2781,8 +2992,6 @@ fn translate_message(
         | ServerMessage::SessionUsageChanged { .. }
         | ServerMessage::GroupList { .. }
         | ServerMessage::GroupsChanged { .. }
-        | ServerMessage::FilePreview { .. }
-        | ServerMessage::FilePreviewError { .. }
         | ServerMessage::DirListingError { .. }
         | ServerMessage::FilesystemDirListing { .. }
         | ServerMessage::GitStatusResult { .. }
@@ -2805,8 +3014,21 @@ fn translate_message(
         | ServerMessage::TerminalError { .. }
         | ServerMessage::AttachmentUploaded { .. }
         | ServerMessage::AttachmentData { .. }
-        | ServerMessage::PromptReceipt { .. }
-        | ServerMessage::MentionCandidates { .. } => {}
+        | ServerMessage::PromptReceipt { .. } => {}
+        ServerMessage::ArtifactFile {
+            request_id,
+            mime,
+            data_base64,
+            error,
+        } => {
+            events.push(CoreEvent::ArtifactFileLoaded {
+                daemon: daemon_id.to_string(),
+                request_id: request_id.clone(),
+                mime: mime.clone(),
+                data_base64: data_base64.clone(),
+                error: error.clone(),
+            });
+        }
         ServerMessage::SessionCompacting {
             session_id,
             active,
@@ -2835,6 +3057,12 @@ fn translate_message(
                             tool_time_end: None,
                             tool_sensitivity: None,
                             compaction_removed: removed_u32,
+                            file_name: None,
+                            file_mime: None,
+                            artifact_id: None,
+                            artifact_url: None,
+                            artifact_mode: None,
+                            artifact_height: None,
                         }],
                         assistant_meta: None,
                         steered: false,
@@ -3589,7 +3817,7 @@ mod tests {
         let command = rx.try_recv().unwrap();
         assert!(
             matches!(command.message, ClientMessage::LoadSessionHistory { before: 2, limit, .. }
-            if limit == mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT)
+            if limit == mew_protocol::MOBILE_HISTORY_PAGE_LIMIT)
         );
         assert!(rx.try_recv().is_err());
         let page = ServerMessage::SessionHistoryPage {
@@ -3657,6 +3885,7 @@ mod tests {
             &ServerMessage::SessionReady {
                 session_id: "next".into(),
                 cwd: None,
+                scratch: false,
                 model: None,
                 provider: None,
                 permission_mode: None,
@@ -3851,6 +4080,7 @@ mod tests {
             &ServerMessage::SessionReady {
                 session_id: id.into(),
                 cwd: None,
+                scratch: false,
                 model: None,
                 provider: None,
                 permission_mode: None,
@@ -3953,7 +4183,7 @@ mod tests {
             &attach.message,
             state.attachment_generation.load(Ordering::Relaxed),
         );
-        core.new_session(id.clone(), None);
+        core.new_session(id.clone(), None, false);
         let create = outbound.recv().await.unwrap();
         state.record_session_request(
             &create.message,
@@ -3962,6 +4192,7 @@ mod tests {
         let ready = |session: &str| ServerMessage::SessionReady {
             session_id: session.into(),
             cwd: None,
+            scratch: false,
             model: None,
             provider: None,
             permission_mode: None,
@@ -4071,7 +4302,7 @@ mod tests {
             ClientMessage::Prompt { .. }
         ));
 
-        core.new_session(id.clone(), None);
+        core.new_session(id.clone(), None, false);
         let create = outbound.recv().await.unwrap();
         state.record_session_request(
             &create.message,
@@ -4135,7 +4366,7 @@ mod tests {
     #[tokio::test]
     async fn a_queued_creation_expires_when_the_user_selects_another_chat() {
         let (core, id, state, mut outbound) = connected_core().await;
-        core.new_session(id.clone(), None);
+        core.new_session(id.clone(), None, false);
         let creation = outbound.recv().await.unwrap();
         assert!(creation.ready(&state));
         core.attach(id, "chosen".into());
@@ -4198,14 +4429,14 @@ mod tests {
                 error: "offline".into(),
             },
         );
-        core.new_session(id.clone(), None);
+        core.new_session(id.clone(), None, false);
         assert!(
             matches!(events.try_recv().unwrap(), CoreEvent::SessionCreationFailed { daemon, .. } if daemon == id.node_id)
         );
         assert!(outbound.try_recv().is_err());
 
         set_shared_connection_status(&state, mew_client_core::ConnectionStatus::Connected);
-        core.new_session(id.clone(), None);
+        core.new_session(id.clone(), None, false);
         let creation = outbound.try_recv().unwrap();
         assert!(creation.ready(&state));
         set_shared_connection_status(&state, mew_client_core::ConnectionStatus::Connecting);
@@ -4247,6 +4478,7 @@ mod tests {
             &ServerMessage::SessionReady {
                 session_id: "confirmed".into(),
                 cwd: None,
+                scratch: false,
                 model: None,
                 provider: None,
                 permission_mode: None,
@@ -4583,6 +4815,7 @@ mod tests {
             &ServerMessage::SessionReady {
                 session_id: "confirmed".into(),
                 cwd: None,
+                scratch: false,
                 model: None,
                 provider: None,
                 permission_mode: None,
@@ -4643,6 +4876,7 @@ mod tests {
             &ServerMessage::SessionReady {
                 session_id: id.into(),
                 cwd: None,
+                scratch: false,
                 model: None,
                 provider: None,
                 permission_mode: None,
@@ -4735,6 +4969,7 @@ mod tests {
             &ServerMessage::SessionReady {
                 session_id: id.into(),
                 cwd: None,
+                scratch: false,
                 model: None,
                 provider: None,
                 permission_mode: None,
@@ -4763,6 +4998,7 @@ mod tests {
             &ServerMessage::SessionReady {
                 session_id: id.into(),
                 cwd: None,
+                scratch: false,
                 model: None,
                 provider: None,
                 permission_mode: None,
@@ -4844,6 +5080,7 @@ mod tests {
             &ServerMessage::SessionReady {
                 session_id: id.into(),
                 cwd: None,
+                scratch: false,
                 model: None,
                 provider: None,
                 permission_mode: None,
@@ -5112,6 +5349,7 @@ mod tests {
             &ServerMessage::SessionReady {
                 session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
                 cwd: Some("/tmp/project".into()),
+                scratch: false,
                 model: Some("fake".into()),
                 provider: Some("fake".into()),
                 permission_mode: Some("standard".into()),
@@ -5155,6 +5393,7 @@ mod tests {
             ServerMessage::SessionReady {
                 session_id: session_id.into(),
                 cwd: None,
+                scratch: false,
                 model: None,
                 provider: None,
                 permission_mode: None,
@@ -5218,6 +5457,7 @@ mod tests {
             &ServerMessage::SessionReady {
                 session_id: session_id.into(),
                 cwd: Some("/tmp/project".into()),
+                scratch: false,
                 model: Some("fake".into()),
                 provider: Some("fake".into()),
                 permission_mode: Some("standard".into()),
@@ -5343,6 +5583,7 @@ mod tests {
             &ServerMessage::SessionReady {
                 session_id: "confirmed".into(),
                 cwd: None,
+                scratch: false,
                 model: None,
                 provider: None,
                 permission_mode: None,
@@ -5475,5 +5716,133 @@ mod tests {
         let last_msg = ss_lock.as_ref().unwrap().messages.last().unwrap();
         assert_eq!(last_msg.role, "assistant");
         assert!(last_msg.cancelled);
+    }
+
+    #[tokio::test]
+    async fn translates_mention_candidates_file_preview_models_and_prompt_attachments() {
+        let (core, id, conn, mut outbound) = connected_core().await;
+        let mut last_prompt = None;
+        let daemon = id.node_id.clone();
+
+        // 1. MentionCandidates & list_mention_candidates
+        core.list_mention_candidates(id.clone());
+        let sent = outbound.recv().await.unwrap();
+        assert!(matches!(sent.message, ClientMessage::ListMentionCandidates));
+        let events = translate_message(
+            &ServerMessage::MentionCandidates {
+                skills: vec![mew_protocol::MentionCandidate {
+                    name: "clarify".into(),
+                    description: "Clarify UX text".into(),
+                }],
+                subagents: vec![mew_protocol::MentionCandidate {
+                    name: "research".into(),
+                    description: "Read-only research".into(),
+                }],
+            },
+            &conn,
+            &mut last_prompt,
+            &daemon,
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [CoreEvent::MentionCandidates { skills, subagents, .. }]
+                if skills.len() == 1 && skills[0].name == "clarify"
+                && subagents.len() == 1 && subagents[0].name == "research"
+        ));
+
+        // 2. read_file_preview + FilePreview / FilePreviewError
+        core.read_file_preview(
+            id.clone(),
+            "confirmed".into(),
+            "src/main.rs".into(),
+            Some(4096),
+        );
+        let sent = outbound.recv().await.unwrap();
+        assert!(matches!(
+            sent.message,
+            ClientMessage::ReadFilePreview { ref session_id, ref path, max_bytes: Some(4096), scoped_errors: true }
+                if session_id == "confirmed" && path == "src/main.rs"
+        ));
+        let preview_events = translate_message(
+            &ServerMessage::FilePreview {
+                session_id: Some("confirmed".into()),
+                path: "src/main.rs".into(),
+                content: "fn main() {}".into(),
+                truncated: false,
+                language: Some("rust".into()),
+            },
+            &conn,
+            &mut last_prompt,
+            &daemon,
+        );
+        assert!(matches!(
+            preview_events.as_slice(),
+            [CoreEvent::FilePreviewLoaded { session_id, path, content, truncated: false, language, .. }]
+                if session_id == "confirmed" && path == "src/main.rs" && content == "fn main() {}" && language.as_deref() == Some("rust")
+        ));
+        let preview_err = translate_message(
+            &ServerMessage::FilePreviewError {
+                session_id: "confirmed".into(),
+                path: "missing.rs".into(),
+                error: "not found".into(),
+            },
+            &conn,
+            &mut last_prompt,
+            &daemon,
+        );
+        assert!(matches!(
+            preview_err.as_slice(),
+            [CoreEvent::FilePreviewFailed { session_id, path, error, .. }]
+                if session_id == "confirmed" && path == "missing.rs" && error == "not found"
+        ));
+
+        // 3. ModelList preserves display_name
+        let model_events = translate_message(
+            &ServerMessage::ModelList {
+                models: vec![mew_protocol::ModelInfo {
+                    id: "deepseek/deepseek-v4".into(),
+                    provider: "deepseek".into(),
+                    model: "deepseek-v4".into(),
+                    display_name: Some("DeepSeek V4".into()),
+                    description: None,
+                    thinking_variants: vec![],
+                    thinking_budget: None,
+                    context_window: Some(128_000),
+                }],
+            },
+            &conn,
+            &mut last_prompt,
+            &daemon,
+        );
+        assert!(matches!(
+            model_events.as_slice(),
+            [CoreEvent::ModelList { models, .. }]
+                if models[0].display_name.as_deref() == Some("DeepSeek V4")
+        ));
+        assert_eq!(
+            conn.models.lock().unwrap()[0].display_name.as_deref(),
+            Some("DeepSeek V4")
+        );
+
+        // 4. send_prompt_with_attachments records FilePart locally and forwards Attachment wire objects
+        assert!(core.send_prompt_with_attachments(
+            id,
+            "".into(),
+            vec![events::PromptAttachment {
+                path: "data:image/png;base64,iVBOR==".into(),
+                mime: Some("image/png".into()),
+            }],
+        ));
+        let sent = outbound.recv().await.unwrap();
+        assert!(matches!(
+            sent.message,
+            ClientMessage::Prompt { ref text, ref attachments }
+                if text.is_empty() && attachments.len() == 1 && attachments[0].mime.as_deref() == Some("image/png")
+        ));
+        let ss_lock = conn.session_state.lock().unwrap();
+        let last = ss_lock.as_ref().unwrap().messages.last().unwrap();
+        assert_eq!(last.parts.len(), 1);
+        assert_eq!(last.parts[0].kind, state::PartKind::File);
+        assert_eq!(last.parts[0].file_mime.as_deref(), Some("image/png"));
     }
 }

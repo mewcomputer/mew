@@ -384,20 +384,21 @@ final class AppNavigationTests: XCTestCase {
 
     private func summary(_ id: String) -> SessionSummary {
         SessionSummary(sessionId: id, title: id, state: "idle", archived: false, pinned: false,
-            pendingPermissions: 0, pendingQuestions: 0, usageCost: 0, cwd: nil, model: nil, provider: nil,
+            pendingPermissions: 0, pendingQuestions: 0, usageCost: 0, cwd: nil, scratch: false, model: nil, provider: nil,
             createdAt: 1, lastMessageAt: 1, lastTurnFailed: false, groupId: nil,
             inputTokens: 0, outputTokens: 0, turns: 0, contextTokens: nil)
     }
 
     private func model(_ id: String, provider: String) -> ModelSummary {
-        ModelSummary(id: id, provider: provider, model: "shared-name", description: nil,
+        ModelSummary(id: id, provider: provider, model: "shared-name", displayName: nil, description: nil,
             contextWindow: 200_000, thinkingVariants: [])
     }
 
     private func snapshot(_ id: String, text: String) -> DaemonSnapshot {
         let part = MessagePart(id: "\(id)-text", kind: .text, text: text, toolName: nil, toolState: nil,
             toolInput: nil, toolOutput: nil, toolError: nil, toolCallId: nil,
-            toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: nil)
+            toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: nil,
+            fileName: nil, fileMime: nil, artifactId: nil, artifactUrl: nil, artifactMode: nil, artifactHeight: nil)
         let message = ChatMessage(id: "\(id)-message", role: "assistant", parts: [part], assistantMeta: nil, steered: false, cancelled: false)
         let session = SessionInfo(sessionId: id, title: id, messages: [message], running: false,
             usageCost: 0, pendingPermissions: 0, pendingQuestions: 0,

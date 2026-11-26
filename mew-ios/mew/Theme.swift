@@ -21,20 +21,12 @@ enum Theme {
     static let background = Color(.systemGroupedBackground)
     static let secondaryBackground = Color(.secondarySystemGroupedBackground)
 
-    static let userBubble = Color.accentColor.opacity(0.15)
-    static let userBubbleText = Color.primary
-
-    static let assistantBubble = Color.clear
-    static let assistantBubbleText = Color.primary
-
     static let reasoningText = Color.secondary
     static let toolPending = Color.gray
     static let toolRunning = Color.accentColor
     static let toolCompleted = Color.green
     static let toolError = Color.red
 
-    static let permissionBg = Color.yellow.opacity(0.1)
-    static let permissionBorder = Color.yellow.opacity(0.5)
     static let allowOnce = Color.green
     static let deny = Color.red
 
@@ -43,6 +35,31 @@ enum Theme {
     static let connecting = Color.yellow
     static let disconnected = Color.gray
     static let backoff = Color.orange
+}
+
+private struct MewThemeKey: EnvironmentKey {
+    static let defaultValue: MewThemePalette = MewThemes.palette(id: MewThemes.defaultDarkId, fallbackDark: true)
+}
+
+extension EnvironmentValues {
+    var mewTheme: MewThemePalette {
+        get { self[MewThemeKey.self] }
+        set { self[MewThemeKey.self] = newValue }
+    }
+}
+
+extension View {
+    func mewThemedForm(_ theme: MewThemePalette) -> some View {
+        self
+            .scrollContentBackground(.hidden)
+            .background(theme.background.ignoresSafeArea())
+    }
+
+    func mewThemedPlainList(_ theme: MewThemePalette) -> some View {
+        self
+            .scrollContentBackground(.hidden)
+            .background(theme.background.ignoresSafeArea())
+    }
 }
 
 /// Small custom controls should acknowledge touch-down without fighting the

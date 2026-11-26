@@ -179,7 +179,7 @@ async fn mobile_core_emits_events_through_listener() -> Result<()> {
     println!("✓ Received DaemonVersion (Pong)");
 
     // Create a new session.
-    core.new_session(daemon_id.clone(), None);
+    core.new_session(daemon_id.clone(), None, false);
 
     // Wait for SessionReloaded.
     wait_for_event(&events, 10, |e| {
@@ -360,7 +360,7 @@ impl Harness {
         });
 
         // Create a session and wait for it to be ready.
-        core.new_session(daemon_id.clone(), None);
+        core.new_session(daemon_id.clone(), None, false);
         wait_for_event(&events, 10, |e| {
             matches!(e, CoreEvent::SessionReloaded { .. })
         });
@@ -886,6 +886,100 @@ async fn reconnect_replays_the_confirmed_session_and_disconnect_stops_retries() 
             ..
         })
     ));
+    router.shutdown().await?;
+    Ok(())
+}
+
+/// Pairing with a single-use invite registers the phone and then drops the
+/// consumed credential, so the next connection authorizes through the daemon's
+/// paired-device record instead of replaying a token the daemon deleted.
+#[tokio::test(flavor = "multi_thread")]
+async fn pairing_with_an_invite_clears_the_consumed_credential() -> Result<()> {
+    use mew_daemon::remote::{RemoteAccessStore, RemoteMode};
+    use mew_protocol::RemoteScope;
+
+    let dir = tempfile::tempdir()?;
+    let core_data_dir = dir.path().join("mobile-core");
+    let allowlist = Arc::new(NodeIdAllowlist::new(
+        dir.path().join("authorized_nodes.json"),
+    ));
+    let server = DaemonServer::with_session_dir(fake_builder(), dir.path().join("sessions"));
+
+    let store = Arc::new(RemoteAccessStore::new(dir.path().join("remote.json")));
+    store.set_hosting(true, RemoteMode::Daemon, None)?;
+    let invite = store.create_pairing(RemoteScope::Control, mew_daemon::remote::unix_now(), 300)?;
+
+    let handler = MewIrohHandler {
+        allowlist,
+        session_manager: server.session_manager.clone(),
+        groups_store: server.groups_store.clone(),
+        thinking_setter: None,
+        auto_summary_enabled: server.auto_summary_enabled.clone(),
+        remote_scope: Some(RemoteScope::Control),
+        remote_token: None,
+        remote_store: Some(store.clone()),
+    };
+
+    let daemon_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
+        .alpns(vec![MEW_ALPN.to_vec()])
+        .bind()
+        .await?;
+    let _ = tokio::time::timeout(Duration::from_secs(15), daemon_endpoint.online()).await;
+    let daemon_node_id = daemon_endpoint.id().to_string();
+    let router = iroh::protocol::Router::builder(daemon_endpoint)
+        .accept(MEW_ALPN, handler)
+        .spawn();
+
+    let phone_key = iroh::SecretKey::generate();
+    let core = MobileCore::new(
+        phone_key.to_bytes().to_vec(),
+        core_data_dir.to_str().unwrap().into(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let (listener, events) = TestListener::new();
+    core.set_listener(Arc::new(listener));
+
+    let daemon_id = core.add_daemon_with_token(daemon_node_id, "Remote daemon".into(), invite);
+    core.connect(daemon_id.clone());
+    wait_for_event(&events, 30, |e| {
+        matches!(
+            e,
+            CoreEvent::DaemonStatusChanged {
+                status: mew_mobile_core::DaemonStatus::Connected,
+                ..
+            }
+        )
+    });
+
+    // The invite paired this phone as a full-control device and is now spent.
+    let phone_node = core.node_id();
+    let state = store.snapshot();
+    assert!(state
+        .active_devices(mew_daemon::remote::unix_now())
+        .any(|device| device.node_id == phone_node && device.scope == RemoteScope::Control));
+    assert!(state.pairings.is_empty(), "an invite must be single use");
+
+    // The consumed credential is gone from memory and from disk.
+    assert_eq!(core.list_daemons()[0].pairing_token, None);
+    let saved = mew_mobile_core::DaemonRegistry::load(core_data_dir.join("daemons.json"))?;
+    assert_eq!(saved.get(&daemon_id).unwrap().pairing_token, None);
+
+    // Reconnecting sends no credential and still authorizes.
+    core.disconnect(daemon_id.clone());
+    events.lock().unwrap().clear();
+    core.connect(daemon_id.clone());
+    wait_for_event(&events, 30, |e| {
+        matches!(
+            e,
+            CoreEvent::DaemonStatusChanged {
+                status: mew_mobile_core::DaemonStatus::Connected,
+                ..
+            }
+        )
+    });
+
+    core.disconnect(daemon_id);
     router.shutdown().await?;
     Ok(())
 }

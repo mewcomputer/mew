@@ -36,7 +36,6 @@
 		B67F88A1A1044574B031AE03 /* ActivityView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67F88A1A1044574B031AE01 /* ActivityView.swift */; };
 		AB83A9F1D619452A8E38F813 /* ReviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB83A9F1D619452A8E38F812 /* ReviewView.swift */; };
 		AB83A9F1D619452A8E38F814 /* ReviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB83A9F1D619452A8E38F812 /* ReviewView.swift */; };
-		02A0EBFC07ECB4A8B8E33F65 /* JunicodeVF-Italic.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 5710FFECFB944E351E490A12 /* JunicodeVF-Italic.ttf */; };
 		0BAEB661227D370ACEAB5007 /* AppStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 545CECE3392D12E734D9A133 /* AppStore.swift */; };
 		0DD408C829CFAE400C464C3A /* SessionRailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB7E2A7290847C1C578F63BE /* SessionRailView.swift */; };
 		12C0132F6E3073C7F51E5F03 /* QRScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CFA34EA67DA0D120E7A78DE1 /* QRScannerView.swift */; };
@@ -54,14 +53,11 @@
 		3ECB5C0A4A6549A019628638 /* KeychainHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD1D5DA20DD1C3DBF5CE8EFB /* KeychainHelper.swift */; };
 		41E46AF0BE5C2433FF568197 /* TodoPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23A7B897CE17092834C10641 /* TodoPanelView.swift */; };
 		42F4BD23A9EEF6038F6DEDEB /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F9000A5647A1E452404A0D2 /* SettingsView.swift */; };
-		4F205612DED4C630D54F90DB /* Banga-VF.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 060BFA4C32C363DFB0A5DC2A /* Banga-VF.ttf */; };
 		5723B408ACF67DC4C8E46319 /* MessageItemView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CF93C654F76C6CC2E3B47D8 /* MessageItemView.swift */; };
 		5ED5BEC718C0C0867E591172 /* MewFonts.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF9524DB093AB7A0BC6A9D6B /* MewFonts.swift */; };
-		605F2CA9067A1B53FD5FD6BD /* garamontio.ttf in Resources */ = {isa = PBXBuildFile; fileRef = BB081877C5E2930723CD11C3 /* garamontio.ttf */; };
 		632665EBBF51BAEDC04AF1FA /* MewMarkdownTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84E0E7829B606C9933390B40 /* MewMarkdownTheme.swift */; };
 		64FF009410027CFE96073711 /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B88D5B96B52F24E2D3C0DD85 /* ChatView.swift */; };
 		7011CE2081771E324DCC4842 /* IoskeleyMono-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = F45D29FEF81E04698380B32C /* IoskeleyMono-Regular.ttf */; };
-		719B31FEF1EEF27D41E99D9B /* JunicodeVF-Roman.ttf in Resources */ = {isa = PBXBuildFile; fileRef = D9597B83C0928C3307E2A1AD /* JunicodeVF-Roman.ttf */; };
 		78626617983F31D8378EF494 /* MewMarkdownTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84E0E7829B606C9933390B40 /* MewMarkdownTheme.swift */; };
 		78F2165038F6E7A5F4B02918 /* IoskeleyMono-Medium.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 9D763AF8F21AA73C5478D393 /* IoskeleyMono-Medium.ttf */; };
 		7A81747C6C88584F8F89DA29 /* MewFontModifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57B73529E452736EB47B7E83 /* MewFontModifier.swift */; };
@@ -73,19 +69,31 @@
 		AEC055023E5D11E0B561E338 /* MessageItemView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CF93C654F76C6CC2E3B47D8 /* MessageItemView.swift */; };
 		B25B0163985FCF517BEB359E /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7648D55347F186781EF8A218 /* Theme.swift */; };
 		B307091C2FCB65E67531BAEF /* MewFonts.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF9524DB093AB7A0BC6A9D6B /* MewFonts.swift */; };
-		B967FFC6CC20B82D58AAF3AA /* OFLGoudyStMTT-Italic.ttf in Resources */ = {isa = PBXBuildFile; fileRef = E2329F2821DA57FBDAD6ECEB /* OFLGoudyStMTT-Italic.ttf */; };
-		BA99902191A1CE43C8C4BA11 /* OFLGoudyStMTT.ttf in Resources */ = {isa = PBXBuildFile; fileRef = B9709224898AB1D8CB8163E4 /* OFLGoudyStMTT.ttf */; };
 		C88D34820C3694AA611C616D /* FormatHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDC069E4C5076818999AC23D /* FormatHelper.swift */; };
-		CBFBCB51A0168B395BBF1213 /* garamontio_it.ttf in Resources */ = {isa = PBXBuildFile; fileRef = F14316FC19A01B05976B5676 /* garamontio_it.ttf */; };
 		CF7A311BE95F8E5D561A24A6 /* MockMobileCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DF104663A4B9CEC1F06E91E /* MockMobileCore.swift */; };
 		D3216BADB70A3EE813135568 /* DaemonListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 679C2551108B9BA54C017BBF /* DaemonListView.swift */; };
 		D7A06EE1B80E7200F99DF01E /* DaemonListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 679C2551108B9BA54C017BBF /* DaemonListView.swift */; };
 		E36840126D8EB50B8F3063E8 /* KeychainHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD1D5DA20DD1C3DBF5CE8EFB /* KeychainHelper.swift */; };
-		EF14AAB5D468BFCF4DF9B3A8 /* MiSansLatinVF.ttf in Resources */ = {isa = PBXBuildFile; fileRef = DCC1C2EB43A0A853DFF523E8 /* MiSansLatinVF.ttf */; };
 		F872BADD66AFD025999E2C17 /* SystemConfiguration.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C1DAF87DF928ED741CDF5D0D /* SystemConfiguration.framework */; };
 		F92E765C3BD2C9CFF5239DDE /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7648D55347F186781EF8A218 /* Theme.swift */; };
 		F9D40665D15C1FD5BE9B29A6 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F9000A5647A1E452404A0D2 /* SettingsView.swift */; };
 		FDEC179FCD1D0B1F5CA253E1 /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B88D5B96B52F24E2D3C0DD85 /* ChatView.swift */; };
+		AA0000000000000000000002 /* MascotView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000001 /* MascotView.swift */; };
+		AA0000000000000000000003 /* MascotView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000001 /* MascotView.swift */; };
+		AA0000000000000000000005 /* ThemeGenerated.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000004 /* ThemeGenerated.swift */; };
+		AA0000000000000000000006 /* ThemeGenerated.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000004 /* ThemeGenerated.swift */; };
+		AA0000000000000000000008 /* ThinkingGauge.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000007 /* ThinkingGauge.swift */; };
+		AA0000000000000000000009 /* ThinkingGauge.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000007 /* ThinkingGauge.swift */; };
+		AA000000000000000000000B /* ThinkingGaugeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000000000000000000000A /* ThinkingGaugeTests.swift */; };
+		AA0000000000000000000019 /* HistoryAutoLoadTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000000000000000000001A /* HistoryAutoLoadTests.swift */; };
+		AA000000000000000000001B /* CompletedLinger.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000000000000000000001C /* CompletedLinger.swift */; };
+		AA000000000000000000001D /* CompletedLinger.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000000000000000000001C /* CompletedLinger.swift */; };
+		AA000000000000000000001E /* CompletedLingerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000000000000000000001F /* CompletedLingerTests.swift */; };
+		AA000000000000000000000D /* InstrumentSans-VF.ttf in Resources */ = {isa = PBXBuildFile; fileRef = AA000000000000000000000C /* InstrumentSans-VF.ttf */; };
+		AA0000000000000000000012 /* Lottie in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000011 /* Lottie */; };
+		AA0000000000000000000015 /* Mascot in Resources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000013 /* Mascot */; };
+		AA0000000000000000000016 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000014 /* Assets.xcassets */; };
+		AA0000000000000000000017 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000018 /* AppIcon.icon */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -114,7 +122,6 @@
 		B67F88A1A1044574B031AE71 /* SubagentIdenticonView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubagentIdenticonView.swift; sourceTree = "<group>"; };
 		B67F88A1A1044574B031AE01 /* ActivityView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityView.swift; sourceTree = "<group>"; };
 		AB83A9F1D619452A8E38F812 /* ReviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewView.swift; sourceTree = "<group>"; };
-		060BFA4C32C363DFB0A5DC2A /* Banga-VF.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Banga-VF.ttf"; sourceTree = "<group>"; };
 		0A1ADE8FFE4EDE33968D7384 /* MewApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MewApp.swift; sourceTree = "<group>"; };
 		1DF104663A4B9CEC1F06E91E /* MockMobileCore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MockMobileCore.swift; sourceTree = "<group>"; };
 		1F9000A5647A1E452404A0D2 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
@@ -123,7 +130,6 @@
 		3655A4A573B1B7AC91FE0EFC /* Network.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Network.framework; path = System/Library/Frameworks/Network.framework; sourceTree = SDKROOT; };
 		3FD7A599A73C712D62E6DF76 /* AppStoreEventHandlingTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppStoreEventHandlingTests.swift; sourceTree = "<group>"; };
 		545CECE3392D12E734D9A133 /* AppStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStore.swift; sourceTree = "<group>"; };
-		5710FFECFB944E351E490A12 /* JunicodeVF-Italic.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "JunicodeVF-Italic.ttf"; sourceTree = "<group>"; };
 		57B73529E452736EB47B7E83 /* MewFontModifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MewFontModifier.swift; sourceTree = "<group>"; };
 		5CF93C654F76C6CC2E3B47D8 /* MessageItemView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageItemView.swift; sourceTree = "<group>"; };
 		679C2551108B9BA54C017BBF /* DaemonListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonListView.swift; sourceTree = "<group>"; };
@@ -136,20 +142,25 @@
 		9D763AF8F21AA73C5478D393 /* IoskeleyMono-Medium.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "IoskeleyMono-Medium.ttf"; sourceTree = "<group>"; };
 		B674A9B93C0BAF747838F26B /* MewMobileCore */ = {isa = PBXFileReference; lastKnownFileType = folder; path = MewMobileCore; sourceTree = SOURCE_ROOT; };
 		B88D5B96B52F24E2D3C0DD85 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
-		B9709224898AB1D8CB8163E4 /* OFLGoudyStMTT.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = OFLGoudyStMTT.ttf; sourceTree = "<group>"; };
-		BB081877C5E2930723CD11C3 /* garamontio.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = garamontio.ttf; sourceTree = "<group>"; };
 		BDC069E4C5076818999AC23D /* FormatHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FormatHelper.swift; sourceTree = "<group>"; };
 		C1DAF87DF928ED741CDF5D0D /* SystemConfiguration.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SystemConfiguration.framework; path = System/Library/Frameworks/SystemConfiguration.framework; sourceTree = SDKROOT; };
 		CD1D5DA20DD1C3DBF5CE8EFB /* KeychainHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainHelper.swift; sourceTree = "<group>"; };
 		CFA34EA67DA0D120E7A78DE1 /* QRScannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRScannerView.swift; sourceTree = "<group>"; };
-		D9597B83C0928C3307E2A1AD /* JunicodeVF-Roman.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "JunicodeVF-Roman.ttf"; sourceTree = "<group>"; };
 		DB7E2A7290847C1C578F63BE /* SessionRailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRailView.swift; sourceTree = "<group>"; };
-		DCC1C2EB43A0A853DFF523E8 /* MiSansLatinVF.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = MiSansLatinVF.ttf; sourceTree = "<group>"; };
-		E2329F2821DA57FBDAD6ECEB /* OFLGoudyStMTT-Italic.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "OFLGoudyStMTT-Italic.ttf"; sourceTree = "<group>"; };
 		E97D7FB0A96CF8B8EC3BF945 /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
 		EF9524DB093AB7A0BC6A9D6B /* MewFonts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MewFonts.swift; sourceTree = "<group>"; };
-		F14316FC19A01B05976B5676 /* garamontio_it.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = garamontio_it.ttf; sourceTree = "<group>"; };
 		F45D29FEF81E04698380B32C /* IoskeleyMono-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "IoskeleyMono-Regular.ttf"; sourceTree = "<group>"; };
+		AA0000000000000000000001 /* MascotView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MascotView.swift; sourceTree = "<group>"; };
+		AA0000000000000000000004 /* ThemeGenerated.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeGenerated.swift; sourceTree = "<group>"; };
+		AA0000000000000000000007 /* ThinkingGauge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThinkingGauge.swift; sourceTree = "<group>"; };
+		AA000000000000000000000A /* ThinkingGaugeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThinkingGaugeTests.swift; sourceTree = "<group>"; };
+		AA000000000000000000001A /* HistoryAutoLoadTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryAutoLoadTests.swift; sourceTree = "<group>"; };
+		AA000000000000000000001C /* CompletedLinger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompletedLinger.swift; sourceTree = "<group>"; };
+		AA000000000000000000001F /* CompletedLingerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompletedLingerTests.swift; sourceTree = "<group>"; };
+		AA000000000000000000000C /* InstrumentSans-VF.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "InstrumentSans-VF.ttf"; sourceTree = "<group>"; };
+		AA0000000000000000000013 /* Mascot */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Mascot; sourceTree = "<group>"; };
+		AA0000000000000000000014 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		AA0000000000000000000018 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = "folder.iconcomposer.icon"; path = AppIcon.icon; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -158,6 +169,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				1CDA1CE0CA9098BF1D1C0E1F /* MewMobileCore in Frameworks */,
+				AA0000000000000000000012 /* Lottie in Frameworks */,
 				2204447BBB5C4DE24837C742 /* SwiftStreamingMarkdown in Frameworks */,
 				F872BADD66AFD025999E2C17 /* SystemConfiguration.framework in Frameworks */,
 				25FE20CE2DBB5A85D0F1E250 /* Security.framework in Frameworks */,
@@ -224,6 +236,9 @@
 				B67F88A1A1044574B031AE31 /* SessionTimelineTests.swift */,
 				B67F88A1A1044574B031AE41 /* AppNavigationTests.swift */,
 				B67F88A1A1044574B031AE51 /* PhoneSettingsTests.swift */,
+				AA000000000000000000000A /* ThinkingGaugeTests.swift */,
+				AA000000000000000000001A /* HistoryAutoLoadTests.swift */,
+				AA000000000000000000001F /* CompletedLingerTests.swift */,
 			);
 			path = mewTests;
 			sourceTree = "<group>";
@@ -268,6 +283,13 @@
 				7648D55347F186781EF8A218 /* Theme.swift */,
 				FB769C03A8D2DF7E375E9D64 /* Fonts */,
 				23A7B897CE17092834C10641 /* TodoPanelView.swift */,
+				AA0000000000000000000014 /* Assets.xcassets */,
+				AA0000000000000000000013 /* Mascot */,
+				AA0000000000000000000018 /* AppIcon.icon */,
+				AA0000000000000000000001 /* MascotView.swift */,
+				AA0000000000000000000004 /* ThemeGenerated.swift */,
+				AA0000000000000000000007 /* ThinkingGauge.swift */,
+				AA000000000000000000001C /* CompletedLinger.swift */,
 			);
 			path = mew;
 			sourceTree = "<group>";
@@ -275,16 +297,9 @@
 		FB769C03A8D2DF7E375E9D64 /* Fonts */ = {
 			isa = PBXGroup;
 			children = (
-				060BFA4C32C363DFB0A5DC2A /* Banga-VF.ttf */,
-				F14316FC19A01B05976B5676 /* garamontio_it.ttf */,
-				BB081877C5E2930723CD11C3 /* garamontio.ttf */,
 				9D763AF8F21AA73C5478D393 /* IoskeleyMono-Medium.ttf */,
 				F45D29FEF81E04698380B32C /* IoskeleyMono-Regular.ttf */,
-				5710FFECFB944E351E490A12 /* JunicodeVF-Italic.ttf */,
-				D9597B83C0928C3307E2A1AD /* JunicodeVF-Roman.ttf */,
-				DCC1C2EB43A0A853DFF523E8 /* MiSansLatinVF.ttf */,
-				E2329F2821DA57FBDAD6ECEB /* OFLGoudyStMTT-Italic.ttf */,
-				B9709224898AB1D8CB8163E4 /* OFLGoudyStMTT.ttf */,
+				AA000000000000000000000C /* InstrumentSans-VF.ttf */,
 			);
 			path = Fonts;
 			sourceTree = "<group>";
@@ -324,6 +339,7 @@
 			);
 			name = mew;
 			packageProductDependencies = (
+				AA0000000000000000000011 /* Lottie */,
 				9CC84733CE8778E2900946DD /* MewMobileCore */,
 				E21A7B5599C9DBB6EBFDB014 /* SwiftStreamingMarkdown */,
 			);
@@ -350,6 +366,7 @@
 			mainGroup = 690161DC6FFE3EF2B2275E54;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
+				AA0000000000000000000010 /* XCRemoteSwiftPackageReference "lottie-spm" */,
 				0CCAE6E10B00E144DF565422 /* XCRemoteSwiftPackageReference "SwiftStreamingMarkdown" */,
 				20C1E61692A8625EE0C7AB6B /* XCLocalSwiftPackageReference "MewMobileCore" */,
 			);
@@ -369,16 +386,12 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				4F205612DED4C630D54F90DB /* Banga-VF.ttf in Resources */,
 				78F2165038F6E7A5F4B02918 /* IoskeleyMono-Medium.ttf in Resources */,
 				7011CE2081771E324DCC4842 /* IoskeleyMono-Regular.ttf in Resources */,
-				02A0EBFC07ECB4A8B8E33F65 /* JunicodeVF-Italic.ttf in Resources */,
-				719B31FEF1EEF27D41E99D9B /* JunicodeVF-Roman.ttf in Resources */,
-				EF14AAB5D468BFCF4DF9B3A8 /* MiSansLatinVF.ttf in Resources */,
-				B967FFC6CC20B82D58AAF3AA /* OFLGoudyStMTT-Italic.ttf in Resources */,
-				BA99902191A1CE43C8C4BA11 /* OFLGoudyStMTT.ttf in Resources */,
-				605F2CA9067A1B53FD5FD6BD /* garamontio.ttf in Resources */,
-				CBFBCB51A0168B395BBF1213 /* garamontio_it.ttf in Resources */,
+				AA0000000000000000000016 /* Assets.xcassets in Resources */,
+				AA0000000000000000000015 /* Mascot in Resources */,
+				AA0000000000000000000017 /* AppIcon.icon in Resources */,
+				AA000000000000000000000D /* InstrumentSans-VF.ttf in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -429,6 +442,13 @@
 				B67F88A1A1044574B031AE42 /* AppNavigationTests.swift in Sources */,
 				B67F88A1A1044574B031AE52 /* PhoneSettingsTests.swift in Sources */,
 				9D4F7BBD61F807B2EF078A4B /* TodoPanelView.swift in Sources */,
+				AA0000000000000000000003 /* MascotView.swift in Sources */,
+				AA0000000000000000000006 /* ThemeGenerated.swift in Sources */,
+				AA0000000000000000000009 /* ThinkingGauge.swift in Sources */,
+				AA000000000000000000001D /* CompletedLinger.swift in Sources */,
+				AA000000000000000000001E /* CompletedLingerTests.swift in Sources */,
+				AA000000000000000000000B /* ThinkingGaugeTests.swift in Sources */,
+				AA0000000000000000000019 /* HistoryAutoLoadTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -463,6 +483,10 @@
 				6B87AA3C0D94EE9A1983E487 /* DaemonDetailsView.swift in Sources */,
 				F92E765C3BD2C9CFF5239DDE /* Theme.swift in Sources */,
 				41E46AF0BE5C2433FF568197 /* TodoPanelView.swift in Sources */,
+				AA0000000000000000000002 /* MascotView.swift in Sources */,
+				AA0000000000000000000005 /* ThemeGenerated.swift in Sources */,
+				AA0000000000000000000008 /* ThinkingGauge.swift in Sources */,
+				AA000000000000000000001B /* CompletedLinger.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -731,6 +755,14 @@
 				kind = branch;
 			};
 		};
+		AA0000000000000000000010 /* XCRemoteSwiftPackageReference "lottie-spm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/airbnb/lottie-spm.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 4.5.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -742,6 +774,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 0CCAE6E10B00E144DF565422 /* XCRemoteSwiftPackageReference "SwiftStreamingMarkdown" */;
 			productName = SwiftStreamingMarkdown;
+		};
+		AA0000000000000000000011 /* Lottie */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA0000000000000000000010 /* XCRemoteSwiftPackageReference "lottie-spm" */;
+			productName = Lottie;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

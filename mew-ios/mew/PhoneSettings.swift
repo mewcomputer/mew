@@ -29,6 +29,8 @@ enum ReviewTextSize: String, CaseIterable {
 /// Local presentation preferences. These never change daemon policy or pending requests.
 struct PhoneSettings: Equatable {
     var appearance: PhoneAppearance = .system
+    var lightThemeId: String = MewThemes.defaultLightId
+    var darkThemeId: String = MewThemes.defaultDarkId
     var haptics = true
     var completionAlerts = true
     var errorAlerts = true
@@ -42,6 +44,10 @@ struct PhoneSettings: Equatable {
 
     init(defaults: UserDefaults) {
         appearance = PhoneAppearance(rawValue: defaults.string(forKey: "mew.appearance") ?? "") ?? .system
+        let storedLight = defaults.string(forKey: "mew.lightThemeId") ?? ""
+        lightThemeId = MewThemes.lightThemes.contains(where: { $0.id == storedLight }) ? storedLight : MewThemes.defaultLightId
+        let storedDark = defaults.string(forKey: "mew.darkThemeId") ?? ""
+        darkThemeId = MewThemes.darkThemes.contains(where: { $0.id == storedDark }) ? storedDark : MewThemes.defaultDarkId
         haptics = defaults.object(forKey: "mew.haptics") as? Bool ?? true
         completionAlerts = defaults.object(forKey: "mew.completionAlerts") as? Bool ?? true
         errorAlerts = defaults.object(forKey: "mew.errorAlerts") as? Bool ?? true
@@ -54,6 +60,8 @@ struct PhoneSettings: Equatable {
 
     func save(to defaults: UserDefaults) {
         defaults.set(appearance.rawValue, forKey: "mew.appearance")
+        defaults.set(lightThemeId, forKey: "mew.lightThemeId")
+        defaults.set(darkThemeId, forKey: "mew.darkThemeId")
         defaults.set(haptics, forKey: "mew.haptics")
         defaults.set(completionAlerts, forKey: "mew.completionAlerts")
         defaults.set(errorAlerts, forKey: "mew.errorAlerts")

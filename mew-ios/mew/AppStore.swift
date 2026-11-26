@@ -4,62 +4,40 @@ import MewMobileCore
 // MARK: - Font preference
 
 enum MewFontChoice: String, CaseIterable {
-    case system = "System"
-    case miSans = "Mi Sans"
-    case junicode = "Junicode"
-    case goudy = "OFL Goudy"
+    case instrumentSans = "Instrument Sans"
+    case system = "SF"
+    case serif = "New York"
 
     var displayName: String { rawValue }
-
-    /// Apply this font choice to the UIKit appearance.
-    func apply() {
-        switch self {
-        case .system:
-            UILabel.appearance().font = UIFont.systemFont(ofSize: UIFont.systemFontSize)
-        case .miSans:
-            if MewFonts.sansAvailable {
-                UILabel.appearance().font = UIFont(name: "MiSans", size: UIFont.systemFontSize)
-            }
-        case .junicode:
-            if MewFonts.serifAvailable {
-                UILabel.appearance().font = UIFont(name: "JunicodeVF-Roman", size: UIFont.systemFontSize)
-            }
-        case .goudy:
-            if MewFonts.goudyAvailable {
-                UILabel.appearance().font = UIFont(name: "OFLGoudyStMTT", size: UIFont.systemFontSize)
-            }
-        }
-    }
 
     /// The SwiftUI font for a given size.
     func swiftUIFont(_ size: CGFloat) -> Font {
         switch self {
-        case .system:       return .system(size: size)
-        case .miSans:       return .mewSans(size)
-        case .junicode:      return .mewSerif(size)
-        case .goudy:         return .mewGoudy(size)
+        case .instrumentSans: return .mewSans(size)
+        case .system:         return .system(size: size)
+        case .serif:          return .system(size: size, design: .serif)
         }
     }
 
-    /// The PostScript font name for UIKit/AttributedString rendering, or `nil`
-    /// for the system font (which has no single PostScript name).
-    var uiFontName: String? {
+    /// The UIKit font for `SwiftStreamingMarkdown` / `AttributedString` rendering.
+    func uiFont(_ size: CGFloat) -> UIFont {
         switch self {
-        case .system:   return nil
-        case .miSans:   return "MiSansLatinVF"
-        case .junicode: return "JunicodeVF-Regular"
-        case .goudy:    return "OFLGoudyStMTT"
+        case .instrumentSans:
+            return UIFont(name: "InstrumentSans-Regular", size: size) ?? .systemFont(ofSize: size)
+        case .system:
+            return .systemFont(ofSize: size)
+        case .serif:
+            let base = UIFont.systemFont(ofSize: size)
+            if let descriptor = base.fontDescriptor.withDesign(.serif) {
+                return UIFont(descriptor: descriptor, size: size)
+            }
+            return base
         }
     }
 
     /// Preview text in the picker.
     var previewText: String {
-        switch self {
-        case .system:   return "The quick brown fox"
-        case .miSans:    return "The quick brown fox"
-        case .junicode:  return "The quick brown fox"
-        case .goudy:     return "The quick brown fox"
-        }
+        "The quick brown fox"
     }
 }
 
@@ -109,6 +87,20 @@ struct JobOutputDetail {
 /// The single source of truth for the app, mirroring the web UI's session store.
 /// All CoreEvents are funneled through here; views subscribe via @Published.
 @MainActor
+enum FilePreviewState: Equatable {
+    case loading
+    case loaded(content: String, truncated: Bool, language: String?)
+    case failed(String)
+}
+
+struct StagedAttachment: Identifiable, Equatable {
+    let id = UUID()
+    let name: String
+    let path: String
+    let mime: String?
+    let byteCount: Int
+}
+
 final class AppStore: ObservableObject {
     @Published var daemons: [DaemonEntry] = []
     @Published var daemonStatuses: [String: DaemonStatus] = [:]
@@ -120,6 +112,7 @@ final class AppStore: ObservableObject {
     @Published var projectLists: [String: [ProjectInfo]] = [:]
     @Published var directoryListings: [String: DirListing] = [:]
     @Published var directoryLoading: Set<String> = []
+    @Published var filePreviews: [String: FilePreviewState] = [:]
     @Published var projectsLoading: Set<String> = []
 
     // Navigation stack, driven both by NavigationLinks and programmatically
@@ -145,6 +138,7 @@ final class AppStore: ObservableObject {
 
     // Creation results navigate only while the originating location is still open.
     private var pendingNewSessionDaemon: String?
+    private var pendingArtifactRequests: [String: CheckedContinuation<(mime: String, data: Data), Error>] = [:]
 
     // Chat state for the active session
     @Published var messages: [ChatMessage] = []
@@ -158,6 +152,58 @@ final class AppStore: ObservableObject {
     @Published var jobs: [BackgroundJob] = []
     @Published var workerHistory: WorkerHistory?
     @Published var jobOutput: JobOutputDetail?
+
+    /// Finished work: completed jobs and checklists leave the UI once they have
+    /// been finished for `CompletedLinger.grace`.
+    private var jobLinger = CompletedLinger()
+    private var todoLinger = CompletedLinger()
+    private var lingerPrune: Task<Void, Never>?
+    /// Clock for the linger window; tests substitute their own.
+    var now: () -> Date = Date.init
+
+    /// Remember which work just finished so it can leave the UI after the
+    /// grace window, and drop anything that has already waited it out.
+    private func noteFinishedWork() {
+        let at = now()
+        jobLinger.observe(finished: Set(jobs.filter { $0.state != "running" }.map(\.jobId)), now: at)
+        if let sessionId = selectedSessionId, let items = todos[sessionId], !items.isEmpty,
+           items.allSatisfy({ $0.status == "done" }) {
+            todoLinger.observe(finished: [sessionId], now: at)
+        } else {
+            todoLinger.observe(finished: [], now: at)
+        }
+        pruneFinishedWork()
+        scheduleFinishedWorkPrune()
+    }
+
+    /// Drop finished jobs and checklists that have been finished long enough.
+    private func pruneFinishedWork() {
+        let at = now()
+        let visible = jobs.filter { jobLinger.isVisible($0.jobId, now: at) }
+        if visible.count != jobs.count {
+            jobs = visible
+        }
+        if let sessionId = selectedSessionId, let items = todos[sessionId], !items.isEmpty,
+           !todoLinger.isVisible(sessionId, now: at) {
+            todos[sessionId] = []
+        }
+    }
+
+    /// One task waits out the grace window so the panel and the job list clear
+    /// themselves without every view running its own clock.
+    private func scheduleFinishedWorkPrune() {
+        guard lingerPrune == nil else { return }
+        let at = now()
+        guard jobLinger.hasFinishedWorkInsideGrace(now: at)
+            || todoLinger.hasFinishedWorkInsideGrace(now: at) else { return }
+        lingerPrune = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(CompletedLinger.grace))
+            guard !Task.isCancelled else { return }
+            self.lingerPrune = nil
+            self.pruneFinishedWork()
+            self.scheduleFinishedWorkPrune()
+        }
+    }
 
     /// Completed content; preserve turn boundaries before hiding non-renderable messages.
     var conversationItems: [ConversationItem] {
@@ -194,9 +240,11 @@ final class AppStore: ObservableObject {
     @Published var currentProvider: [String: String] = [:]
     @Published var thinkingVariant: [String: String?] = [:]
 
-    // Personas (per daemon)
+    // Personas & mention candidates (per daemon)
     @Published var availablePersonas: [String: [PersonaInfo]] = [:]
     @Published var currentPersona: [String: String] = [:]
+    @Published var availableSkills: [String: [MentionCandidate]] = [:]
+    @Published var availableSubagents: [String: [MentionCandidate]] = [:]
 
     // Session usage (per sessionId)
     @Published var sessionUsage: [String: SessionUsage] = [:]
@@ -256,7 +304,7 @@ final class AppStore: ObservableObject {
         preferences = defaults
         sessionFilter = defaults.string(forKey: "mew.sessionFilter")
         phoneSettings = PhoneSettings(defaults: defaults)
-        fontChoice = MewFontChoice(rawValue: defaults.string(forKey: "mew.fontChoice") ?? "Mi Sans") ?? .miSans
+        fontChoice = MewFontChoice(rawValue: defaults.string(forKey: "mew.fontChoice") ?? "Instrument Sans") ?? .instrumentSans
     }
 
     func start() {
@@ -476,11 +524,33 @@ final class AppStore: ObservableObject {
     }
 
     @discardableResult
-    func newSession(cwd: String? = nil, daemonNodeId: String) -> Bool {
+    func newSession(cwd: String? = nil, scratch: Bool = false, daemonNodeId: String) -> Bool {
         guard case .connected? = daemonStatuses[daemonNodeId], let core else { return false }
         pendingNewSessionDaemon = daemonNodeId
-        core.newSession(id: DaemonId(nodeId: daemonNodeId), cwd: cwd)
+        core.newSession(id: DaemonId(nodeId: daemonNodeId), cwd: cwd, scratch: scratch)
         return true
+    }
+
+    func readArtifactFile(
+        daemonNodeId: String,
+        sessionId: String,
+        artifactId: String,
+        path: String
+    ) async throws -> (mime: String, data: Data) {
+        guard let core else {
+            throw NSError(domain: "MewArtifact", code: 1, userInfo: [NSLocalizedDescriptionKey: "Core unavailable"])
+        }
+        let requestId = UUID().uuidString
+        return try await withCheckedThrowingContinuation { continuation in
+            pendingArtifactRequests[requestId] = continuation
+            core.readArtifact(
+                id: DaemonId(nodeId: daemonNodeId),
+                requestId: requestId,
+                sessionId: sessionId,
+                artifactId: artifactId,
+                path: path
+            )
+        }
     }
 
     private func failSessionCreation(daemon: String, message: String) {
@@ -506,6 +576,17 @@ final class AppStore: ObservableObject {
         let key = directoryKey(sessionId: sessionId, path: path)
         directoryLoading.insert(key)
         core.listDir(id: daemonId, sessionId: sessionId, path: path)
+    }
+
+    func filePreviewKey(sessionId: String, path: String) -> String {
+        "\(sessionId)::\(path)"
+    }
+
+    func readFilePreview(sessionId: String, path: String, maxBytes: UInt64? = 262_144) {
+        guard let daemonId = selectedDaemonId, let core else { return }
+        let key = filePreviewKey(sessionId: sessionId, path: path)
+        filePreviews[key] = .loading
+        core.readFilePreview(id: daemonId, sessionId: sessionId, path: path, maxBytes: maxBytes)
     }
 
     func refreshReview(daemon: String, sessionId: String) {
@@ -605,9 +686,15 @@ final class AppStore: ObservableObject {
     }
 
     @discardableResult
-    func sendPrompt(_ text: String) -> Bool {
-        guard canSendPrompt, let daemonId = selectedDaemonId, let core,
-              core.prompt(id: daemonId, text: text) else { return false }
+    func sendPrompt(_ text: String, attachments: [PromptAttachment] = []) -> Bool {
+        guard canSendPrompt, let daemonId = selectedDaemonId, let core else { return false }
+        let accepted: Bool
+        if attachments.isEmpty {
+            accepted = core.prompt(id: daemonId, text: text)
+        } else {
+            accepted = core.sendPromptWithAttachments(id: daemonId, text: text, attachments: attachments)
+        }
+        guard accepted else { return false }
         if let sessionId = selectedSessionId {
             pendingSubmissions[daemonId.nodeId, default: []].insert(sessionId)
             lastPrompt[sessionId] = text
@@ -724,6 +811,11 @@ final class AppStore: ObservableObject {
     func listPersonas() {
         guard let daemonId = selectedDaemonId, let core else { return }
         core.listPersonas(id: daemonId)
+    }
+
+    func listMentionCandidates() {
+        guard let daemonId = selectedDaemonId, let core else { return }
+        core.listMentionCandidates(id: daemonId)
     }
 
     func switchPersona(name: String) {
@@ -883,6 +975,7 @@ final class AppStore: ObservableObject {
             guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
             subagents = workers
             jobs = backgroundJobs
+            noteFinishedWork()
 
         case .workerHistoryLoaded(let daemon, let sessionId, let childSessionId, let requestId, let messages, let error):
             guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId,
@@ -961,6 +1054,34 @@ final class AppStore: ObservableObject {
             directoryLoading.remove(key)
             objectWillChange.send()
 
+        case .filePreviewLoaded(_, let sessionId, let path, let content, let truncated, let language):
+            filePreviews[filePreviewKey(sessionId: sessionId, path: path)] = .loaded(
+                content: content,
+                truncated: truncated,
+                language: language
+            )
+
+        case .filePreviewFailed(_, let sessionId, let path, let error):
+            filePreviews[filePreviewKey(sessionId: sessionId, path: path)] = .failed(error)
+
+        case .artifactFileLoaded(_, let requestId, let mime, let dataBase64, let error):
+            guard let continuation = pendingArtifactRequests.removeValue(forKey: requestId) else { break }
+            if let error {
+                continuation.resume(throwing: NSError(
+                    domain: "MewArtifact",
+                    code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: error]
+                ))
+            } else if let data = Data(base64Encoded: dataBase64) {
+                continuation.resume(returning: (mime: mime, data: data))
+            } else {
+                continuation.resume(throwing: NSError(
+                    domain: "MewArtifact",
+                    code: 3,
+                    userInfo: [NSLocalizedDescriptionKey: "Invalid base64 artifact payload"]
+                ))
+            }
+
         case .sessionReady(let daemon, let sessionId):
             pendingSubmissions[daemon]?.remove(sessionId)
             pendingPermissions.removeAll { $0.daemon == daemon }
@@ -1000,6 +1121,9 @@ final class AppStore: ObservableObject {
             if let snap = core?.snapshot(id: DaemonId(nodeId: daemon)) {
                 applySnapshot(snap)
             }
+            // Prefill one more page so the first scroll back is already loaded;
+            // pages are cheap now that they carry no turn manifests.
+            _ = loadOlderHistory()
             // Re-fetch persona list — it may have changed during disconnection.
             listPersonas()
         case .textDelta(let daemon, let sessionId, let partId, let delta):
@@ -1056,7 +1180,13 @@ final class AppStore: ObservableObject {
                     toolTimeStart: nil,
                     toolTimeEnd: nil,
                     toolSensitivity: nil,
-                    compactionRemoved: removed
+                    compactionRemoved: removed,
+                    fileName: nil,
+                    fileMime: nil,
+                    artifactId: nil,
+                    artifactUrl: nil,
+                    artifactMode: nil,
+                    artifactHeight: nil
                 )],
                 assistantMeta: nil,
                 steered: false,
@@ -1191,6 +1321,7 @@ final class AppStore: ObservableObject {
 
         case .todosUpdated(_, let sessionId, let todoItems):
             todos[sessionId] = todoItems
+            noteFinishedWork()
 
         case .modelList(let daemon, let models):
             modelsByDaemon[daemon] = models
@@ -1251,7 +1382,13 @@ final class AppStore: ObservableObject {
                     toolTimeStart: nil,
                     toolTimeEnd: nil,
                     toolSensitivity: nil,
-                    compactionRemoved: nil
+                    compactionRemoved: nil,
+                    fileName: nil,
+                    fileMime: nil,
+                    artifactId: nil,
+                    artifactUrl: nil,
+                    artifactMode: nil,
+                    artifactHeight: nil
                 )],
                 assistantMeta: nil,
                 steered: false,
@@ -1271,6 +1408,10 @@ final class AppStore: ObservableObject {
         case .personaList(let daemon, let personas):
             availablePersonas[daemon] = personas
             currentPersona[daemon] = personas.first(where: { $0.active })?.name
+
+        case .mentionCandidates(let daemon, let skills, let subagents):
+            availableSkills[daemon] = skills
+            availableSubagents[daemon] = subagents
 
         case .personaSwitched(let daemon, let name):
             currentPersona[daemon] = name
@@ -1322,6 +1463,7 @@ final class AppStore: ObservableObject {
             historyBefore = session.historyBefore
             subagents = session.subagents
             jobs = session.jobs
+            noteFinishedWork()
             isStreaming = session.running
             if let daemon = selectedDaemonId?.nodeId {
                 pendingPermissions.removeAll { $0.daemon == daemon && $0.sessionId == session.sessionId }
@@ -1342,6 +1484,7 @@ final class AppStore: ObservableObject {
                     turns: session.turns
                 )
                 todos[sessionId] = session.todos
+                noteFinishedWork()
             }
         }
         // Seed daemon-level state from snapshot

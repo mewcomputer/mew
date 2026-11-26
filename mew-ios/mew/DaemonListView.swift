@@ -3,6 +3,7 @@ import MewMobileCore
 
 struct DaemonListView: View {
     @EnvironmentObject var store: AppStore
+    @Environment(\.mewTheme) private var theme
     @State private var showAddDaemon = false
     @State private var daemonToDelete: DaemonEntry?
 
@@ -14,9 +15,11 @@ struct DaemonListView: View {
                     systemImage: "server.rack",
                     description: Text("Pair with a mew daemon to get started. Run `mew pair` on your machine, then tap +.")
                 )
+                .listRowBackground(Color.clear)
             } else {
                 ForEach(store.daemons, id: \.nodeId) { daemon in
                     daemonRow(daemon)
+                        .listRowBackground(theme.card)
                         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                             Button(role: .destructive) {
                                 daemonToDelete = daemon
@@ -41,6 +44,7 @@ struct DaemonListView: View {
                 }
             }
         }
+        .mewThemedForm(theme)
         .navigationTitle("Machines")
         .toolbarTitleDisplayMode(.inline)
         .toolbar {
@@ -144,6 +148,7 @@ struct PulseModifier: ViewModifier {
 
 struct AddDaemonView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.mewTheme) private var theme
     let onAdd: (DialInfo, String) -> String?
 
     @State private var nodeIdInput = ""
@@ -157,11 +162,12 @@ struct AddDaemonView: View {
                 Section("Pair") {
                     TextField("Node ID or mew001:…", text: $nodeIdInput, axis: .vertical)
                         .lineLimit(3...6)
-                        .font(.body.monospaced())
+                        .font(.mewMono(15))
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                     TextField("Name (e.g. Homelab)", text: $name)
                 }
+                .listRowBackground(theme.card)
 
                 Section {
                     Button {
@@ -170,20 +176,24 @@ struct AddDaemonView: View {
                         Label("Scan QR Code", systemImage: "qrcode.viewfinder")
                     }
                 }
+                .listRowBackground(theme.card)
 
                 Section {
                     Text("Run `mew pair` on your daemon machine, then paste the Node ID or scan the QR code.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                .listRowBackground(theme.card)
 
                 if let error {
                     Section {
                         Text(error)
                             .foregroundStyle(.red)
                     }
+                    .listRowBackground(theme.card)
                 }
             }
+            .mewThemedForm(theme)
             .navigationTitle("Add Daemon")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

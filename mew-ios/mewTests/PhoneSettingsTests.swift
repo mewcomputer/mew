@@ -27,6 +27,8 @@ final class PhoneSettingsTests: XCTestCase {
     func testDefaultsFollowTheSystemAndPreserveExistingReviewPresentation() {
         XCTAssertEqual(store.phoneSettings.appearance, .system)
         XCTAssertNil(store.phoneSettings.appearance.colorScheme)
+        XCTAssertEqual(store.phoneSettings.lightThemeId, MewThemes.defaultLightId)
+        XCTAssertEqual(store.phoneSettings.darkThemeId, MewThemes.defaultDarkId)
         XCTAssertTrue(store.phoneSettings.haptics)
         XCTAssertTrue(store.phoneSettings.completionAlerts)
         XCTAssertTrue(store.phoneSettings.errorAlerts)
@@ -37,9 +39,11 @@ final class PhoneSettingsTests: XCTestCase {
     }
 
     func testPreferencesAndMachineMutesSurviveReopeningWithoutChangingNavigationOrFont() {
-        store.fontChoice = .junicode
+        store.fontChoice = .serif
         defaults.set("remote", forKey: "mew.lastDaemon")
         store.phoneSettings.appearance = .dark
+        store.phoneSettings.lightThemeId = "jianghu-light"
+        store.phoneSettings.darkThemeId = "jianghu-dark"
         store.phoneSettings.haptics = false
         store.phoneSettings.completionAlerts = false
         store.phoneSettings.errorAlerts = false
@@ -52,18 +56,24 @@ final class PhoneSettingsTests: XCTestCase {
         let reopened = AppStore(defaults: defaults)
         XCTAssertEqual(reopened.phoneSettings, store.phoneSettings)
         XCTAssertEqual(reopened.phoneSettings.appearance.colorScheme, .dark)
-        XCTAssertEqual(reopened.fontChoice, .junicode)
+        XCTAssertEqual(reopened.fontChoice, .serif)
         XCTAssertEqual(defaults.string(forKey: "mew.lastDaemon"), "remote")
         XCTAssertEqual(AppStore(defaults: UserDefaults(suiteName: "\(suite!)-other")!).phoneSettings, PhoneSettings())
     }
 
     func testInvalidEnumsFallBackWithoutLosingOtherPreferences() {
         defaults.set("sepia", forKey: "mew.appearance")
+        defaults.set("not-a-theme", forKey: "mew.lightThemeId")
+        defaults.set("not-a-theme", forKey: "mew.darkThemeId")
         defaults.set("enormous", forKey: "mew.reviewTextSize")
+        defaults.set("Mi Sans", forKey: "mew.fontChoice")
         defaults.set(false, forKey: "mew.haptics")
         let reopened = AppStore(defaults: defaults)
         XCTAssertEqual(reopened.phoneSettings.appearance, .system)
+        XCTAssertEqual(reopened.phoneSettings.lightThemeId, MewThemes.defaultLightId)
+        XCTAssertEqual(reopened.phoneSettings.darkThemeId, MewThemes.defaultDarkId)
         XCTAssertEqual(reopened.phoneSettings.reviewTextSize, .standard)
+        XCTAssertEqual(reopened.fontChoice, .instrumentSans)
         XCTAssertFalse(reopened.phoneSettings.haptics)
     }
 

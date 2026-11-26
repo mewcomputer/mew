@@ -1,57 +1,107 @@
 import SwiftUI
 import MewMobileCore
 
-/// A compact collapsible checklist that appears above the composer when the
-/// agent has todo items. Renders each `TodoItem` with a status-appropriate
-/// indicator (checkbox, spinner, strikethrough) and dims items whose
-/// `depends_on` prerequisites are not yet done.
+/// A compact collapsible checklist that appears above the transcript when the
+/// agent has todo items. Defaults to collapsed to avoid obscuring messages,
+/// uses a translucent material surface so scrolling text does not bleed
+/// through, and animates with a critically damped spring.
 struct TodoPanelView: View {
     let todos: [TodoItem]
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var isExpanded: Bool = true
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @State private var isExpanded: Bool = false
+
+    private var activeTask: TodoItem? {
+        todos.first { $0.status == "in_progress" }
+    }
+
+    private var allDone: Bool {
+        !todos.isEmpty && completedCount == todos.count
+    }
 
     var body: some View {
         if !todos.isEmpty {
+            let shape = RoundedRectangle(cornerRadius: Theme.Layout.controlRadius, style: .continuous)
             VStack(spacing: 0) {
                 Button {
-                    withAnimation(Theme.Motion.value(Theme.Motion.disclosure, reduced: reduceMotion)) {
+                    withAnimation(Theme.Motion.value(.spring(response: 0.3, dampingFraction: 1.0), reduced: reduceMotion)) {
                         isExpanded.toggle()
                     }
                 } label: {
                     HStack(spacing: 8) {
-                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        Text("Tasks")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
+                        headerIcon
+                        Text(headerTitle)
+                            .font(.caption.weight(activeTask != nil && !isExpanded ? .medium : .semibold))
+                            .foregroundStyle(activeTask != nil && !isExpanded ? .primary : .secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Spacer(minLength: 8)
                         Text("\(completedCount)/\(todos.count)")
-                            .font(.caption2)
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                            .font(.caption2.weight(.semibold))
                             .foregroundStyle(.tertiary)
-                        Spacer()
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(MewPressButtonStyle())
 
                 if isExpanded {
+                    Divider()
+                        .opacity(0.4)
+                        .padding(.horizontal, 12)
                     VStack(spacing: 0) {
                         ForEach(todos, id: \.id) { todo in
                             todoRow(todo)
                         }
                     }
-                    .padding(.bottom, 4)
+                    .padding(.vertical, 6)
                 }
             }
-            .background(
-                    RoundedRectangle(cornerRadius: Theme.Layout.controlRadius, style: .continuous)
-                    .fill(Color(.secondarySystemBackground).opacity(0.7))
+            .background {
+                if reduceTransparency {
+                    shape.fill(Color(.secondarySystemBackground))
+                } else {
+                    shape.fill(.regularMaterial)
+                }
+            }
+            .overlay(
+                shape.strokeBorder(Color(.separator).opacity(0.45), lineWidth: 0.5)
             )
+            .shadow(color: .black.opacity(0.08), radius: 6, y: 2)
             .padding(.horizontal, 12)
-            .padding(.bottom, 4)
+            .padding(.vertical, 4)
         }
+    }
+
+    // MARK: - Header
+
+    @ViewBuilder
+    private var headerIcon: some View {
+        if activeTask != nil {
+            ProgressView()
+                .controlSize(.mini)
+                .frame(width: 14, height: 14)
+        } else if allDone {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 13))
+                .foregroundStyle(.green)
+        } else {
+            Image(systemName: "checklist")
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var headerTitle: String {
+        if !isExpanded, let activeTask {
+            return activeTask.content
+        }
+        return "Tasks"
     }
 
     // MARK: - Row
@@ -70,7 +120,7 @@ struct TodoPanelView: View {
 
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, 14)
         .padding(.vertical, 4)
     }
 

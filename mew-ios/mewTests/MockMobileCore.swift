@@ -13,6 +13,9 @@ final class MockMobileCore: @preconcurrency MobileCoreProtocol {
     var askUserResponseCalls: [(nodeId: String, requestId: String, answers: [String])] = []
     var promptAccepted = true
     var promptCalls: [(nodeId: String, text: String)] = []
+    var promptAttachmentCalls: [(nodeId: String, text: String, attachments: [PromptAttachment])] = []
+    var readFilePreviewCalls: [(nodeId: String, sessionId: String, path: String, maxBytes: UInt64?)] = []
+    var listMentionCandidatesCalls: [String] = []
     var enqueueCalls: [(nodeId: String, sessionId: String, text: String, steer: Bool)] = []
     var promoteQueueCalls: [(nodeId: String, sessionId: String, messageId: String)] = []
     var removeQueueCalls: [(nodeId: String, sessionId: String, messageId: String)] = []
@@ -104,6 +107,11 @@ final class MockMobileCore: @preconcurrency MobileCoreProtocol {
         return promptAccepted
     }
 
+    func sendPromptWithAttachments(id: DaemonId, text: String, attachments: [PromptAttachment]) -> Bool {
+        promptAttachmentCalls.append((id.nodeId, text, attachments))
+        return promptAccepted
+    }
+
     func cancel(id: DaemonId) { cancelCalls.append(id.nodeId) }
 
     func enqueueMessage(id: DaemonId, sessionId: String, text: String, steer: Bool) -> Bool {
@@ -135,12 +143,19 @@ final class MockMobileCore: @preconcurrency MobileCoreProtocol {
     }
 
     func listSessions(id: DaemonId) { listSessionsCalls.append(id.nodeId) }
-    func newSession(id: DaemonId, cwd: String?) {
+    func newSession(id: DaemonId, cwd: String?, scratch: Bool) {
         newSessionCalls.append(cwd)
         newSessionTargets.append(id.nodeId)
     }
+    func readArtifact(id: DaemonId, requestId: String, sessionId: String, artifactId: String, path: String) {}
     func listProjects(id: DaemonId) { projectCalls.append(id.nodeId) }
     func listDir(id: DaemonId, sessionId: String, path: String?) {}
+    func readFilePreview(id: DaemonId, sessionId: String, path: String, maxBytes: UInt64?) {
+        readFilePreviewCalls.append((id.nodeId, sessionId, path, maxBytes))
+    }
+    func listMentionCandidates(id: DaemonId) {
+        listMentionCandidatesCalls.append(id.nodeId)
+    }
 
     func readSessionDiff(id: DaemonId, sessionId: String, requestId: String) -> Bool {
         reviewCalls.append((id.nodeId, sessionId, requestId))

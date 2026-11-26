@@ -61,6 +61,33 @@ pub enum CoreEvent {
         entries: Vec<DirEntry>,
     },
 
+    /// Bounded workspace file preview (response to read_file_preview).
+    FilePreviewLoaded {
+        daemon: String,
+        session_id: String,
+        path: String,
+        content: String,
+        truncated: bool,
+        language: Option<String>,
+    },
+
+    /// Workspace file preview error (response to read_file_preview).
+    FilePreviewFailed {
+        daemon: String,
+        session_id: String,
+        path: String,
+        error: String,
+    },
+
+    /// A staged artifact file finished loading from the daemon.
+    ArtifactFileLoaded {
+        daemon: String,
+        request_id: String,
+        mime: String,
+        data_base64: String,
+        error: Option<String>,
+    },
+
     /// Fresh workspace changes, scoped to the originating review request.
     ReviewLoaded {
         daemon: String,
@@ -315,6 +342,13 @@ pub enum CoreEvent {
         personas: Vec<PersonaInfo>,
     },
 
+    /// Available skills and subagents for the attached session.
+    MentionCandidates {
+        daemon: String,
+        skills: Vec<MentionCandidate>,
+        subagents: Vec<MentionCandidate>,
+    },
+
     /// Persona was switched (via user action, cross-device, or tool call).
     PersonaSwitched {
         daemon: String,
@@ -435,6 +469,7 @@ pub struct SessionSummary {
     pub pending_questions: u32,
     pub usage_cost: f64,
     pub cwd: Option<String>,
+    pub scratch: bool,
     pub model: Option<String>,
     pub provider: Option<String>,
     pub created_at: i64,
@@ -471,9 +506,24 @@ pub struct ModelSummary {
     pub id: String,
     pub provider: String,
     pub model: String,
+    pub display_name: Option<String>,
     pub description: Option<String>,
     pub context_window: Option<i64>,
     pub thinking_variants: Vec<String>,
+}
+
+/// A skill or subagent definition offered by the inline @ picker.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct MentionCandidate {
+    pub name: String,
+    pub description: String,
+}
+
+/// A file or data-URL attachment included with a prompt.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct PromptAttachment {
+    pub path: String,
+    pub mime: Option<String>,
 }
 
 /// A todo item from the agent's todo list.

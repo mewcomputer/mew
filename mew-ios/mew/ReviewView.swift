@@ -7,6 +7,7 @@ struct ReviewView: View {
 
     @EnvironmentObject private var store: AppStore
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.mewTheme) private var theme
 
     private var review: WorkspaceReview? {
         guard store.review?.daemon == daemon, store.review?.sessionId == sessionId else { return nil }
@@ -39,6 +40,7 @@ struct ReviewView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(theme.background.ignoresSafeArea())
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if let review, !review.files.isEmpty {
                     RefreshStatusView(isLoading: review.isLoading, error: review.error, retry: refresh)
@@ -72,7 +74,7 @@ struct ReviewView: View {
                     } label: {
                         VStack(alignment: .leading, spacing: 5) {
                             Text(file.path)
-                                .font(.subheadline.monospaced())
+                                .font(.mewMono(15))
                                 .foregroundStyle(.primary)
                             if let oldPath = file.oldPath, oldPath != file.path {
                                 Text("From \(oldPath)")
@@ -83,13 +85,17 @@ struct ReviewView: View {
                                 Text(file.status.label)
                                     .foregroundStyle(.secondary)
                                 if file.added > 0 {
-                                    Text("+\(file.added)").foregroundStyle(.green)
+                                    Text("+\(file.added)")
+                                        .foregroundStyle(.green)
+                                        .monospacedDigit()
                                 }
                                 if file.removed > 0 {
-                                    Text("−\(file.removed)").foregroundStyle(.red)
+                                    Text("−\(file.removed)")
+                                        .foregroundStyle(.red)
+                                        .monospacedDigit()
                                 }
                             }
-                            .font(.caption.monospaced())
+                            .font(.mewMono(12))
                         }
                         .padding(.vertical, 4)
                     }
@@ -99,13 +105,16 @@ struct ReviewView: View {
             } footer: {
                 Text("Compared with the latest commit. Includes untracked files.")
             }
+            .listRowBackground(theme.card)
         }
+        .mewThemedForm(theme)
     }
 }
 
 private struct FileReviewView: View {
     let file: ReviewFile
     @EnvironmentObject private var store: AppStore
+    @Environment(\.mewTheme) private var theme
 
     var body: some View {
         Group {
@@ -119,6 +128,8 @@ private struct FileReviewView: View {
                 ReviewDiffView(file: file, settings: store.phoneSettings)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(theme.background.ignoresSafeArea())
         .navigationTitle(file.path.components(separatedBy: "/").last ?? file.path)
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -151,7 +162,7 @@ struct ReviewDiffView: View {
                     }
                 }
             }
-            .font(.system(size: fontSize, design: .monospaced))
+            .font(.mewMono(fontSize))
             .padding(.vertical, 8)
         }
         .defaultScrollAnchor(.topLeading)
@@ -199,7 +210,7 @@ struct ReviewLineView: View {
                 .fixedSize(horizontal: !wrapLines, vertical: true)
                 .frame(maxWidth: wrapLines ? .infinity : nil, alignment: .leading)
         }
-        .font(.system(size: fontSize, design: .monospaced))
+        .font(.mewMono(fontSize))
         .padding(.horizontal, 8)
         .padding(.vertical, 2)
         .frame(maxWidth: .infinity, alignment: .leading)

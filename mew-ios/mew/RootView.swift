@@ -6,7 +6,21 @@ struct RootView: View {
     @EnvironmentObject var store: AppStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.colorScheme) private var systemColorScheme
     @State private var bannerTask: Task<Void, Never>?
+
+    private var isDarkMode: Bool {
+        switch store.phoneSettings.appearance {
+        case .dark: return true
+        case .light: return false
+        case .system: return systemColorScheme == .dark
+        }
+    }
+
+    private var activeTheme: MewThemePalette {
+        let id = isDarkMode ? store.phoneSettings.darkThemeId : store.phoneSettings.lightThemeId
+        return MewThemes.palette(id: id, fallbackDark: isDarkMode)
+    }
 
     var body: some View {
         NavigationStack(path: $store.path) {
@@ -24,7 +38,8 @@ struct RootView: View {
                     }
                 }
         }
-        .tint(.accentColor)
+        .environment(\.mewTheme, activeTheme)
+        .tint(activeTheme.textAccent)
         .preferredColorScheme(store.phoneSettings.appearance.colorScheme)
         .onAppear { store.isAppActive = scenePhase == .active }
         .onChange(of: scenePhase) { _, phase in store.isAppActive = phase == .active }
@@ -70,16 +85,16 @@ struct RootView: View {
             HStack(spacing: 10) {
                 Image(systemName: iconForAlertKind(item.kind))
                     .font(.body)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(colorForAlertKind(item.kind))
                 VStack(alignment: .leading, spacing: 2) {
                     Text(item.title)
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(.primary)
                         .lineLimit(1)
                     if let detail = item.detail {
                         Text(detail)
                             .font(.caption)
-                            .foregroundStyle(.white.opacity(0.8))
+                            .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
                 }
@@ -87,10 +102,12 @@ struct RootView: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
-            .background(
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: Theme.Layout.panelRadius, style: .continuous))
+            .overlay(
                 RoundedRectangle(cornerRadius: Theme.Layout.panelRadius, style: .continuous)
-                    .fill(.black.opacity(0.85))
+                    .strokeBorder(Color(.separator).opacity(0.5), lineWidth: 0.5)
             )
+            .shadow(color: .black.opacity(0.12), radius: 10, y: 4)
             .padding(.horizontal, 12)
             .padding(.top, 8)
         }
@@ -103,6 +120,15 @@ struct RootView: View {
         case "inputneeded": return "questionmark.bubble.fill"
         case "error", "turnfailed": return "exclamationmark.triangle.fill"
         default:               return "bell.fill"
+        }
+    }
+
+    private func colorForAlertKind(_ kind: String) -> Color {
+        switch kind {
+        case "permissionneeded": return .orange
+        case "inputneeded": return .blue
+        case "error", "turnfailed": return .red
+        default:               return .accentColor
         }
     }
 }

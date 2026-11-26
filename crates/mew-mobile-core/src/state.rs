@@ -81,6 +81,18 @@ pub struct MessagePart {
     pub tool_sensitivity: Option<String>,
     /// Number of dropped messages for `PartKind::Compaction`, when known.
     pub compaction_removed: Option<u32>,
+    /// Filename for `PartKind::File`, if known.
+    pub file_name: Option<String>,
+    /// MIME type for `PartKind::File`, if known.
+    pub file_mime: Option<String>,
+    /// Artifact ID for `PartKind::Artifact`.
+    pub artifact_id: Option<String>,
+    /// Artifact URL (`/artifacts/<session>/<id>/...`) for `PartKind::Artifact`.
+    pub artifact_url: Option<String>,
+    /// Display mode (`"panel"` or `"inline"`) for `PartKind::Artifact`.
+    pub artifact_mode: Option<String>,
+    /// Optional initial height in pixels for `PartKind::Artifact` inline mode.
+    pub artifact_height: Option<u32>,
 }
 
 /// What kind of part this is.
@@ -90,6 +102,8 @@ pub enum PartKind {
     Reasoning,
     ToolCall,
     Compaction,
+    File,
+    Artifact,
     Error,
 }
 
@@ -227,6 +241,7 @@ pub struct ModelInfo {
     pub id: String,
     pub provider: String,
     pub model: String,
+    pub display_name: Option<String>,
     pub context_window: Option<i64>,
     pub thinking_variants: Vec<String>,
 }
@@ -329,6 +344,12 @@ impl SessionState {
                                 tool_time_end: None,
                                 tool_sensitivity: None,
                                 compaction_removed: None,
+                                file_name: None,
+                                file_mime: None,
+                                artifact_id: None,
+                                artifact_url: None,
+                                artifact_mode: None,
+                                artifact_height: None,
                             },
                         )
                     }
@@ -348,6 +369,63 @@ impl SessionState {
                             tool_time_end: None,
                             tool_sensitivity: None,
                             compaction_removed: None,
+                            file_name: None,
+                            file_mime: None,
+                            artifact_id: None,
+                            artifact_url: None,
+                            artifact_mode: None,
+                            artifact_height: None,
+                        },
+                    ),
+                    Part::File(fp) => (
+                        fp.base.id.to_string(),
+                        MessagePart {
+                            id: fp.base.id.to_string(),
+                            kind: PartKind::File,
+                            text: fp.filename.clone(),
+                            tool_name: None,
+                            tool_state: None,
+                            tool_input: None,
+                            tool_output: None,
+                            tool_error: None,
+                            tool_call_id: None,
+                            tool_time_start: None,
+                            tool_time_end: None,
+                            tool_sensitivity: None,
+                            compaction_removed: None,
+                            file_name: fp.filename.clone(),
+                            file_mime: (!fp.mime.is_empty()).then(|| fp.mime.clone()),
+                            artifact_id: None,
+                            artifact_url: None,
+                            artifact_mode: None,
+                            artifact_height: None,
+                        },
+                    ),
+                    Part::Artifact(ap) => (
+                        ap.base.id.to_string(),
+                        MessagePart {
+                            id: ap.base.id.to_string(),
+                            kind: PartKind::Artifact,
+                            text: Some(ap.title.clone()),
+                            tool_name: None,
+                            tool_state: None,
+                            tool_input: None,
+                            tool_output: None,
+                            tool_error: None,
+                            tool_call_id: None,
+                            tool_time_start: None,
+                            tool_time_end: None,
+                            tool_sensitivity: None,
+                            compaction_removed: None,
+                            file_name: None,
+                            file_mime: None,
+                            artifact_id: Some(ap.artifact_id.clone()),
+                            artifact_url: Some(ap.url.clone()),
+                            artifact_mode: Some(match ap.mode {
+                                mew_message::ArtifactMode::Inline => "inline".into(),
+                                mew_message::ArtifactMode::Panel => "panel".into(),
+                            }),
+                            artifact_height: ap.height,
                         },
                     ),
                     Part::ToolCall(tcp) => {
@@ -369,6 +447,12 @@ impl SessionState {
                                 tool_time_end: time_end,
                                 tool_sensitivity: None,
                                 compaction_removed: None,
+                                file_name: None,
+                                file_mime: None,
+                                artifact_id: None,
+                                artifact_url: None,
+                                artifact_mode: None,
+                                artifact_height: None,
                             },
                         )
                     }
@@ -549,6 +633,12 @@ fn to_mobile_part(part: &mew_message::Part) -> Option<MessagePart> {
                 tool_time_end: None,
                 tool_sensitivity: None,
                 compaction_removed: None,
+                file_name: None,
+                file_mime: None,
+                artifact_id: None,
+                artifact_url: None,
+                artifact_mode: None,
+                artifact_height: None,
             });
         }
         mew_message::Part::Reasoning(part) => {
@@ -566,6 +656,12 @@ fn to_mobile_part(part: &mew_message::Part) -> Option<MessagePart> {
                 tool_time_end: None,
                 tool_sensitivity: None,
                 compaction_removed: None,
+                file_name: None,
+                file_mime: None,
+                artifact_id: None,
+                artifact_url: None,
+                artifact_mode: None,
+                artifact_height: None,
             });
         }
         mew_message::Part::Compaction(part) => {
@@ -583,6 +679,61 @@ fn to_mobile_part(part: &mew_message::Part) -> Option<MessagePart> {
                 tool_time_end: None,
                 tool_sensitivity: None,
                 compaction_removed: part.removed_count,
+                file_name: None,
+                file_mime: None,
+                artifact_id: None,
+                artifact_url: None,
+                artifact_mode: None,
+                artifact_height: None,
+            });
+        }
+        mew_message::Part::File(part) => {
+            return Some(MessagePart {
+                id: part.base.id.to_string(),
+                kind: PartKind::File,
+                text: part.filename.clone(),
+                tool_name: None,
+                tool_state: None,
+                tool_input: None,
+                tool_output: None,
+                tool_error: None,
+                tool_call_id: None,
+                tool_time_start: None,
+                tool_time_end: None,
+                tool_sensitivity: None,
+                compaction_removed: None,
+                file_name: part.filename.clone(),
+                file_mime: (!part.mime.is_empty()).then(|| part.mime.clone()),
+                artifact_id: None,
+                artifact_url: None,
+                artifact_mode: None,
+                artifact_height: None,
+            });
+        }
+        mew_message::Part::Artifact(part) => {
+            return Some(MessagePart {
+                id: part.base.id.to_string(),
+                kind: PartKind::Artifact,
+                text: Some(part.title.clone()),
+                tool_name: None,
+                tool_state: None,
+                tool_input: None,
+                tool_output: None,
+                tool_error: None,
+                tool_call_id: None,
+                tool_time_start: None,
+                tool_time_end: None,
+                tool_sensitivity: None,
+                compaction_removed: None,
+                file_name: None,
+                file_mime: None,
+                artifact_id: Some(part.artifact_id.clone()),
+                artifact_url: Some(part.url.clone()),
+                artifact_mode: Some(match part.mode {
+                    mew_message::ArtifactMode::Inline => "inline".into(),
+                    mew_message::ArtifactMode::Panel => "panel".into(),
+                }),
+                artifact_height: part.height,
             });
         }
         mew_message::Part::ToolCall(part) => part,
@@ -604,6 +755,12 @@ fn to_mobile_part(part: &mew_message::Part) -> Option<MessagePart> {
         tool_time_end,
         tool_sensitivity: None,
         compaction_removed: None,
+        file_name: None,
+        file_mime: None,
+        artifact_id: None,
+        artifact_url: None,
+        artifact_mode: None,
+        artifact_height: None,
     })
 }
 

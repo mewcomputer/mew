@@ -26,16 +26,9 @@
 	<string>mew connects to your daemons over the local network and iroh relays.</string>
 	<key>UIAppFonts</key>
 	<array>
-		<string>MiSansLatinVF.ttf</string>
-		<string>Banga-VF.ttf</string>
+		<string>InstrumentSans-VF.ttf</string>
 		<string>IoskeleyMono-Regular.ttf</string>
 		<string>IoskeleyMono-Medium.ttf</string>
-		<string>JunicodeVF-Roman.ttf</string>
-		<string>JunicodeVF-Italic.ttf</string>
-		<string>OFLGoudyStMTT.ttf</string>
-		<string>OFLGoudyStMTT-Italic.ttf</string>
-		<string>garamontio.ttf</string>
-		<string>garamontio_it.ttf</string>
 	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
@@ -50,6 +43,8 @@
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 </dict>
 </plist>

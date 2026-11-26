@@ -4,6 +4,7 @@ import MewMobileCore
 struct DaemonDefaultsView: View {
     let daemonNodeId: String
     @EnvironmentObject private var store: AppStore
+    @Environment(\.mewTheme) private var theme
     @State private var sessionToSave: String?
     @State private var showsResetConfirmation = false
 
@@ -33,6 +34,7 @@ struct DaemonDefaultsView: View {
                 } footer: {
                     Text("Applies to new chats from every client on this machine. Existing chats keep their own settings.")
                 }
+                .listRowBackground(theme.card)
             }
 
             DaemonManagementStatusSection(daemonNodeId: daemonNodeId)
@@ -50,7 +52,9 @@ struct DaemonDefaultsView: View {
                     .disabled(!isConnected || isBusy || (store.managementSettings[daemonNodeId]?.defaults == nil && store.managementErrors[daemonNodeId] == nil))
                     .frame(minHeight: 44)
             }
+            .listRowBackground(theme.card)
         }
+        .mewThemedForm(theme)
         .navigationTitle("New chat defaults")
         .navigationBarTitleDisplayMode(.inline)
         .task { store.readDaemonManagementSettings(daemonNodeId: daemonNodeId) }
@@ -87,6 +91,7 @@ struct DaemonDefaultsView: View {
 struct PairedDevicesView: View {
     let daemonNodeId: String
     @EnvironmentObject private var store: AppStore
+    @Environment(\.mewTheme) private var theme
     @State private var showsRevokeConfirmation = false
 
     private var canManage: Bool {
@@ -121,9 +126,11 @@ struct PairedDevicesView: View {
                 } footer: {
                     Text("Revoking access disconnects the device and requires a new pairing invite. Conversations stay on this machine.")
                 }
+                .listRowBackground(theme.card)
             }
             DaemonManagementStatusSection(daemonNodeId: daemonNodeId)
         }
+        .mewThemedForm(theme)
         .navigationDestination(for: PairedDevice.self) { device in
             deviceDetail(device)
         }
@@ -149,6 +156,7 @@ struct PairedDevicesView: View {
                 Button("Copy Node ID") { UIPasteboard.general.string = device.nodeId }
                     .frame(minHeight: 44)
             }
+            .listRowBackground(theme.card)
             Section {
                 if let devices = store.managementSettings[daemonNodeId]?.devices {
                     if devices.contains(where: { $0.id == device.id }) {
@@ -160,8 +168,10 @@ struct PairedDevicesView: View {
                     }
                 }
             }
+            .listRowBackground(theme.card)
             DaemonManagementStatusSection(daemonNodeId: daemonNodeId)
         }
+        .mewThemedForm(theme)
         .navigationTitle(deviceName(device))
         .navigationBarTitleDisplayMode(.inline)
         .confirmationDialog("Revoke \(deviceName(device))?", isPresented: $showsRevokeConfirmation, titleVisibility: .visible) {
@@ -194,11 +204,13 @@ struct PairedDevicesView: View {
 private struct DaemonManagementStatusSection: View {
     let daemonNodeId: String
     @EnvironmentObject private var store: AppStore
+    @Environment(\.mewTheme) private var theme
 
     var body: some View {
         Group {
             if store.managementRequestIds[daemonNodeId] != nil {
                 Section { ProgressView("Waiting for confirmation…") }
+                    .listRowBackground(theme.card)
             } else if let error = store.managementErrors[daemonNodeId] {
                 Section {
                     Label("Couldn't confirm settings", systemImage: "exclamationmark.triangle")
@@ -207,11 +219,13 @@ private struct DaemonManagementStatusSection: View {
                 } footer: {
                     Text("Requires an updated daemon and full-control access. Changes are shown after the daemon confirms them.")
                 }
+                .listRowBackground(theme.card)
             } else if store.managementSettings[daemonNodeId] == nil {
                 Section {
                     Text("Connect to this machine to read its settings.").foregroundStyle(.secondary)
                     Text("Return to machine details to reconnect or pair again.").font(.footnote).foregroundStyle(.secondary)
                 }
+                .listRowBackground(theme.card)
             }
         }
     }

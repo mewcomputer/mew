@@ -25,9 +25,13 @@ let package = Package(
             dependencies: ["mew_mobile_coreFFI"],
             path: "Sources/MewMobileCore",
             exclude: ["mew_mobile_coreFFI.h", "mew_mobile_coreFFI.modulemap"],
+            // A staticlib does not carry rustc's `#[link]` directives, so the
+            // C libraries the Rust core calls have to be named here.
+            // `resolv` comes from netdev's iOS DNS lookup (`res_9_getservers`).
             linkerSettings: [
                 .linkedLibrary("z"),
                 .linkedLibrary("iconv"),
+                .linkedLibrary("resolv"),
             ]
         ),
     ]

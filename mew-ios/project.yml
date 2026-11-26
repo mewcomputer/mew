@@ -22,6 +22,9 @@ packages:
     # stable-versioned package with unstable-pinned transitive deps. Bump this
     # SHA deliberately to update.
     revision: 947e958edf0d5b4352ac9383ec4de7a9bf8f13b9
+  Lottie:
+    url: https://github.com/airbnb/lottie-spm.git
+    from: 4.5.0
 targets:
   mew:
     type: application
@@ -31,6 +34,7 @@ targets:
     dependencies:
       - package: MewMobileCore
       - package: SwiftStreamingMarkdown
+      - package: Lottie
       - sdk: SystemConfiguration.framework
       - sdk: Security.framework
       - sdk: Network.framework
@@ -46,19 +50,14 @@ targets:
           UIApplicationSupportsMultipleScenes: false
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
         NSLocalNetworkUsageDescription: "mew connects to your daemons over the local network and iroh relays."
         NSCameraUsageDescription: "mew uses the camera to scan QR codes when pairing with a daemon."
         UIAppFonts:
-          - MiSansLatinVF.ttf
-          - Banga-VF.ttf
+          - InstrumentSans-VF.ttf
           - IoskeleyMono-Regular.ttf
           - IoskeleyMono-Medium.ttf
-          - JunicodeVF-Roman.ttf
-          - JunicodeVF-Italic.ttf
-          - OFLGoudyStMTT.ttf
-          - OFLGoudyStMTT-Italic.ttf
-          - garamontio.ttf
-          - garamontio_it.ttf
 schemes:
   mew:
     build:

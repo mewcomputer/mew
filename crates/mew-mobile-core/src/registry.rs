@@ -122,6 +122,25 @@ impl DaemonRegistry {
         Ok(())
     }
 
+    /// Drop a pairing credential the daemon has already consumed.
+    ///
+    /// Invite tokens are single use, so once a handshake succeeds the stored
+    /// value can only replay a credential the daemon no longer knows about.
+    /// Reconnects then authorize through the daemon's paired-device record.
+    pub fn clear_pairing_token(&mut self, id: &DaemonId) -> anyhow::Result<()> {
+        let index = self
+            .entries
+            .iter()
+            .position(|entry| entry.node_id == id.node_id)
+            .ok_or_else(|| anyhow::anyhow!("saved daemon was not found"))?;
+        let previous = self.entries[index].pairing_token.take();
+        if let Err(error) = self.save() {
+            self.entries[index].pairing_token = previous;
+            return Err(error.context("could not save daemon registry"));
+        }
+        Ok(())
+    }
+
     /// Get a daemon entry by ID.
     pub fn get(&self, id: &DaemonId) -> Option<&DaemonEntry> {
         self.entries.iter().find(|e| e.node_id == id.node_id)
@@ -288,5 +307,57 @@ mod tests {
                 node_id: "node3".into()
             })
             .is_none());
+    }
+
+    #[test]
+    fn clearing_a_consumed_pairing_token_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemons.json");
+        let mut registry = DaemonRegistry::load(path.clone()).unwrap();
+        let id = registry.add_with_token("node1".into(), "Homelab".into(), "invite".into());
+
+        registry.clear_pairing_token(&id).unwrap();
+
+        assert_eq!(registry.get(&id).unwrap().pairing_token, None);
+        let saved = DaemonRegistry::load(path).unwrap();
+        assert_eq!(saved.get(&id).unwrap().pairing_token, None);
+        assert_eq!(saved.get(&id).unwrap().name, "Homelab");
+    }
+
+    #[test]
+    fn a_failed_token_clear_keeps_the_saved_credential() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemons.json");
+        let mut registry = DaemonRegistry::load(path.clone()).unwrap();
+        let id = registry.add_with_token("node1".into(), "Homelab".into(), "invite".into());
+        std::fs::create_dir(path.with_extension("json.tmp")).unwrap();
+
+        assert!(registry.clear_pairing_token(&id).is_err());
+
+        assert_eq!(
+            registry.get(&id).unwrap().pairing_token.as_deref(),
+            Some("invite")
+        );
+        assert_eq!(
+            DaemonRegistry::load(path)
+                .unwrap()
+                .get(&id)
+                .unwrap()
+                .pairing_token
+                .as_deref(),
+            Some("invite")
+        );
+    }
+
+    #[test]
+    fn clearing_a_token_for_an_unknown_daemon_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry = DaemonRegistry::load(dir.path().join("daemons.json")).unwrap();
+
+        assert!(registry
+            .clear_pairing_token(&DaemonId {
+                node_id: "missing".into()
+            })
+            .is_err());
     }
 }

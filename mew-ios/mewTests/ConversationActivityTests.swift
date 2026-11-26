@@ -6,44 +6,77 @@ final class ConversationActivityTests: XCTestCase {
     private func tool(_ id: String, _ name: String, input: String = "{}", state: String? = "completed") -> MessagePart {
         MessagePart(id: id, kind: .toolCall, text: nil, toolName: name, toolState: state,
             toolInput: input, toolOutput: "done", toolError: state == "error" ? "failed" : nil,
-            toolCallId: id, toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: nil)
+            toolCallId: id, toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: nil,
+            fileName: nil, fileMime: nil, artifactId: nil, artifactUrl: nil, artifactMode: nil, artifactHeight: nil)
     }
 
     private func text(_ id: String, _ value: String, kind: PartKind = .text) -> MessagePart {
         MessagePart(id: id, kind: kind, text: value, toolName: nil, toolState: nil,
             toolInput: nil, toolOutput: nil, toolError: nil, toolCallId: nil,
-            toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: nil)
+            toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: nil,
+            fileName: nil, fileMime: nil, artifactId: nil, artifactUrl: nil, artifactMode: nil, artifactHeight: nil)
     }
 
     private func message(_ id: String, _ parts: [MessagePart], role: String = "assistant", steered: Bool = false, cancelled: Bool = false) -> ChatMessage {
         ChatMessage(id: id, role: role, parts: parts, assistantMeta: nil, steered: steered, cancelled: cancelled)
     }
 
-    func testConsecutiveToolsGroupAcrossMessagesAndKeepSurroundingText() {
+    func testConsecutiveToolsGroupAcrossMessagesAndKeepTrailingAnswer() {
         let original = [
             message("a", [text("intro", "Checking…"), tool("edit", "write")]),
-            message("b", [tool("command-1", "bash")]),
-            message("c", [tool("command-2", "bash"), text("answer", "Done.")])
+            message("b", [text("ws", " \n "), tool("command-1", "bash")]),
+            message("c", [text("mid", "Now running tests…"), tool("command-2", "bash"), text("answer", "Done.")])
         ]
         let rows = ConversationItem.grouped(messages: original)
-        XCTAssertEqual(rows.count, 3)
-        XCTAssertEqual(rows[0].message.parts.map(\.id), ["intro"])
-        XCTAssertEqual(rows[1].message.parts.map(\.id), ["edit", "command-1", "command-2"])
-        XCTAssertEqual(rows[1].sourceMessageIds, ["a", "b", "c"])
-        XCTAssertEqual(rows[2].message.parts.map(\.id), ["answer"])
-        XCTAssertEqual(original.map { $0.parts.count }, [2, 1, 2])
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(rows[0].message.parts.map(\.id), ["intro", "edit", "command-1", "mid", "command-2"])
+        XCTAssertEqual(rows[0].sourceMessageIds, ["a", "b", "c"])
+        XCTAssertEqual(ToolActivity.workSummary(rows[0].message.parts), "Made 1 edit and ran 2 commands")
+        XCTAssertEqual(rows[1].message.parts.map(\.id), ["answer"])
+        XCTAssertEqual(original.map { $0.parts.count }, [2, 2, 3])
     }
 
-    func testTextReasoningErrorsAndUserMessagesSeparateGroups() {
-        for boundary in [text("boundary", "Explanation"), text("boundary", "Thinking", kind: .reasoning), text("boundary", "Failure", kind: .error)] {
-            let rows = ConversationItem.grouped(messages: [message("a", [tool("one", "bash"), boundary, tool("two", "bash")])])
-            XCTAssertEqual(rows.map { $0.message.parts.count }, [1, 1, 1])
-        }
-        for role in ["user", "system"] {
-            let rows = ConversationItem.grouped(messages: [message("a", [tool("one", "bash")]), message("boundary", [], role: role), message("b", [tool("two", "bash")])])
-            XCTAssertEqual(rows.count, 2)
-            XCTAssertEqual(rows.map { $0.message.parts.map(\.id) }, [["one"], ["two"]])
-        }
+    func testErrorsAndPromptBoundariesSeparateGroupsWhileToolResultsFold() {
+        let errorRows = ConversationItem.grouped(messages: [message("a", [tool("one", "bash"), text("boundary", "Failure", kind: .error), tool("two", "bash")])])
+        XCTAssertEqual(errorRows.map { $0.message.parts.count }, [1, 1, 1])
+
+        let textAfterWork = ConversationItem.grouped(messages: [message("a", [tool("one", "bash"), text("boundary", "Explanation")])])
+        XCTAssertEqual(textAfterWork.map { $0.message.parts.count }, [1, 1])
+
+        // Tool results reach the phone as user messages the mirror empties out.
+        // They carry no content of their own, so they must not split the turn.
+        let carriers = ConversationItem.grouped(messages: [
+            message("a", [tool("one", "bash")]),
+            message("tool-result", [], role: "user"),
+            message("b", [tool("two", "bash")])
+        ])
+        XCTAssertEqual(carriers.count, 1)
+        XCTAssertEqual(carriers[0].message.parts.map(\.id), ["one", "two"])
+        XCTAssertEqual(carriers[0].sourceMessageIds, ["a", "b"])
+
+        let folded = ConversationItem.grouped(messages: [
+            message("a", [text("t1", "Checking", kind: .reasoning), tool("one", "bash")]),
+            message("b", [text("t2", "More thinking", kind: .reasoning), tool("two", "read", input: "{\"path\":\"src/main.rs\"}")])
+        ])
+        XCTAssertEqual(folded.count, 1)
+        XCTAssertEqual(folded[0].message.parts.map(\.id), ["t1", "one", "t2", "two"])
+        XCTAssertEqual(ToolActivity.workSummary(folded[0].message.parts), "Ran 1 command and read 1 file")
+        XCTAssertEqual(ToolActivity.status(folded[0].message.parts), "Completed")
+    }
+
+    func testMultiRoundTurnFoldsIntoOneWorkRowPlusItsAnswer() {
+        let rows = ConversationItem.grouped(messages: [
+            message("prompt", [text("ask", "collapse this")], role: "user"),
+            message("r1", [text("t1", "Checking", kind: .reasoning), tool("one", "bash", input: "{\"command\":\"rg collapse\"}")]),
+            message("carrier-1", [], role: "user"),
+            message("r2", [tool("two", "read", input: "{\"path\":\"mew/ChatView.swift\"}")]),
+            message("carrier-2", [], role: "user"),
+            message("r3", [text("answer", "Done.")])
+        ])
+        XCTAssertEqual(rows.map { $0.sourceMessageIds }, [["prompt"], ["r1", "r2"], ["r3"]])
+        XCTAssertEqual(rows[1].message.parts.map(\.id), ["t1", "one", "two"])
+        XCTAssertEqual(ToolActivity.workSummary(rows[1].message.parts), "Ran 1 command and read 1 file")
+        XCTAssertEqual(rows[2].message.parts.map(\.id), ["answer"])
     }
 
     func testAppendingKeepsTheGroupIdentityAndPrependingRetainsReadingOrigins() {
@@ -120,7 +153,9 @@ final class ConversationActivityTests: XCTestCase {
         let compaction = MessagePart(
             id: "cmp-1", kind: .compaction, text: "Summary", toolName: nil, toolState: nil,
             toolInput: nil, toolOutput: nil, toolError: nil, toolCallId: nil,
-            toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: 6
+            toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: 6,
+            fileName: nil, fileMime: nil,
+            artifactId: nil, artifactUrl: nil, artifactMode: nil, artifactHeight: nil
         )
         let items = ConversationItem.grouped(messages: [
             message("u-1", [text("u1", "hi")], role: "user", steered: true),

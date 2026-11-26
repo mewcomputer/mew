@@ -7,51 +7,99 @@ import MewMobileCore
 struct SettingsView: View {
     @EnvironmentObject var store: AppStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.mewTheme) private var theme
 
     @State private var copiedNodeId = false
 
     var body: some View {
         Form {
             appearanceSection
-            feedbackSection
-            reviewSection
-            Section("This phone") {
-                NavigationLink("Connection identity") {
-                    Form { phoneSection }
-                        .navigationTitle("Connection identity")
-                        .navigationBarTitleDisplayMode(.inline)
-                }
-            }
-            daemonsSection
+                .listRowBackground(theme.card)
+            feedbackAndReviewSection
+                .listRowBackground(theme.card)
+            machinesSection
+                .listRowBackground(theme.card)
             aboutSection
+                .listRowBackground(theme.card)
         }
-        .navigationTitle("App settings")
+        .mewThemedForm(theme)
+        .navigationTitle("Settings")
         .navigationBarTitleDisplayMode(.inline)
     }
 
-    // MARK: - Font
+    // MARK: - Appearance
 
     private var appearanceSection: some View {
         Section("Appearance") {
-            Picker("Theme", selection: $store.phoneSettings.appearance) {
+            Picker(selection: $store.phoneSettings.appearance) {
                 ForEach(PhoneAppearance.allCases, id: \.self) { choice in
                     Text(choice.label).tag(choice)
                 }
-            }
-            NavigationLink {
-                Form { fontSection }
-                    .navigationTitle("Chat font")
-                    .navigationBarTitleDisplayMode(.inline)
             } label: {
-                LabeledContent("Chat font", value: store.fontChoice.displayName)
+                Label("Theme", systemImage: "circle.lefthalf.filled")
             }
+            .pickerStyle(.segmented)
+
+            Picker(selection: $store.phoneSettings.lightThemeId) {
+                ForEach(MewThemes.lightThemes) { palette in
+                    Text(palette.displayName).tag(palette.id)
+                }
+            } label: {
+                Label("Light theme", systemImage: "sun.max")
+            }
+
+            Picker(selection: $store.phoneSettings.darkThemeId) {
+                ForEach(MewThemes.darkThemes) { palette in
+                    Text(palette.displayName).tag(palette.id)
+                }
+            } label: {
+                Label("Dark theme", systemImage: "moon.stars")
+            }
+
+            Picker(selection: $store.fontChoice) {
+                ForEach(MewFontChoice.allCases, id: \.self) { choice in
+                    Text(choice.displayName).tag(choice)
+                }
+            } label: {
+                Label("Chat font", systemImage: "textformat")
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    ForEach([theme.background, theme.userBubble, theme.toolBackground, theme.textAccent], id: \.self) { swatch in
+                        Circle()
+                            .fill(swatch)
+                            .frame(width: 12, height: 12)
+                            .overlay(Circle().strokeBorder(theme.border, lineWidth: 0.5))
+                    }
+                    Text(theme.displayName)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(theme.mutedForeground)
+                }
+                Text(store.fontChoice.previewText)
+                    .font(store.fontChoice.swiftUIFont(15))
+                    .foregroundStyle(theme.foreground)
+                Text("let model = \"\(store.fontChoice.displayName)\"")
+                    .font(.mewMono(12))
+                    .foregroundStyle(theme.mutedForeground)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(theme.background, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(theme.border, lineWidth: 0.5))
+            .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 8, trailing: 16))
         }
     }
 
-    private var feedbackSection: some View {
+    // MARK: - Feedback & Review
+
+    private var feedbackAndReviewSection: some View {
         Section {
-            Toggle("Haptic feedback", isOn: $store.phoneSettings.haptics)
-            NavigationLink("Foreground alerts") {
+            Toggle(isOn: $store.phoneSettings.haptics) {
+                Label("Haptic feedback", systemImage: "iphone.radiowaves.left.and.right")
+            }
+
+            NavigationLink {
                 Form {
                     Section {
                         Toggle("Completed turns", isOn: $store.phoneSettings.completionAlerts)
@@ -60,6 +108,7 @@ struct SettingsView: View {
                     } footer: {
                         Text("Banners and alert haptics appear while the app is open. Pending requests and conversation activity stay visible when alerts are off. Errors from actions you take are always shown.")
                     }
+                    .listRowBackground(theme.card)
                     if !store.daemons.isEmpty {
                         Section {
                             ForEach(store.daemons, id: \.nodeId) { daemon in
@@ -76,21 +125,17 @@ struct SettingsView: View {
                         } footer: {
                             Text("These preferences affect only this phone.")
                         }
+                        .listRowBackground(theme.card)
                     }
                 }
+                .mewThemedForm(theme)
                 .navigationTitle("Foreground alerts")
                 .navigationBarTitleDisplayMode(.inline)
+            } label: {
+                Label("Foreground alerts", systemImage: "bell.badge")
             }
-        } header: {
-            Text("Feedback")
-        } footer: {
-            Text("Haptics acknowledge sent messages, completed turns, errors, and requests needing attention.")
-        }
-    }
 
-    private var reviewSection: some View {
-        Section {
-            NavigationLink("Review readability") {
+            NavigationLink {
                 Form {
                     Section {
                         Toggle("Wrap long lines", isOn: $store.phoneSettings.reviewWrapLines)
@@ -103,17 +148,22 @@ struct SettingsView: View {
                     } footer: {
                         Text("Applies to file diffs on this phone. Text also follows your iOS text size. Conversation text keeps its current size.")
                     }
+                    .listRowBackground(theme.card)
                     Section("Preview") {
                         ReviewDiffView(file: Self.previewFile, settings: store.phoneSettings)
                             .frame(height: 170)
                             .listRowInsets(EdgeInsets())
                     }
+                    .listRowBackground(theme.card)
                 }
+                .mewThemedForm(theme)
                 .navigationTitle("Review readability")
                 .navigationBarTitleDisplayMode(.inline)
+            } label: {
+                Label("Review readability", systemImage: "doc.text.magnifyingglass")
             }
         } header: {
-            Text("Review")
+            Text("Feedback & Review")
         }
     }
 
@@ -124,88 +174,12 @@ struct SettingsView: View {
             ReviewLine(kind: .addition, oldLine: nil, newLine: 13, text: "    format!(\"Hello, {name}. Your workspace is ready.\")")
         ])], added: 1, removed: 1)
 
-    @ViewBuilder
-    private var fontSection: some View {
+    // MARK: - Machines & Phone Identity
+
+    private var machinesSection: some View {
         Section {
-            ForEach(MewFontChoice.allCases, id: \.self) { choice in
-                Button {
-                    store.fontChoice = choice
-                } label: {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(choice.displayName)
-                                .font(choice.swiftUIFont(17))
-                                .foregroundStyle(.primary)
-                            Text(choice.previewText)
-                                .font(choice.swiftUIFont(13))
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        if store.fontChoice == choice {
-                            Image(systemName: "checkmark")
-                                .foregroundStyle(.tint)
-                        }
-                    }
-                    .frame(minHeight: 44)
-                }
-                .buttonStyle(.plain)
-            }
-        } header: {
-            Text("Chat font")
-        } footer: {
-            Text("Choose the font for conversation text on this phone. Changes apply immediately.").font(.footnote)
-        }
-    }
-
-    // MARK: - This Phone
-
-    @ViewBuilder
-    private var phoneSection: some View {
-        Section {
-            VStack(alignment: .leading, spacing: 8) {
-                Text(store.phoneNodeId)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .truncationMode(.middle)
-                    .textSelection(.enabled)
-
-                Button {
-                    UIPasteboard.general.string = store.phoneNodeId
-                    withAnimation(Theme.Motion.value(Theme.Motion.surface, reduced: reduceMotion)) {
-                        copiedNodeId = true
-                    }
-                    Task {
-                        try? await Task.sleep(nanoseconds: 1_500_000_000)
-                        await MainActor.run {
-                            withAnimation(Theme.Motion.value(Theme.Motion.surface, reduced: reduceMotion)) {
-                                copiedNodeId = false
-                            }
-                        }
-                    }
-                } label: {
-                    Label(copiedNodeId ? "Copied!" : "Copy Node ID", systemImage: copiedNodeId ? "checkmark" : "doc.on.doc")
-                        .font(.subheadline)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-                .disabled(store.phoneNodeId.isEmpty)
-            }
-            .padding(.vertical, 2)
-        } header: {
-            Text("This Phone")
-        } footer: {
-            Text("This is your phone's connection identity. To pair a new machine, scan or paste the complete invite from `mew pair`.").font(.footnote)
-        }
-    }
-
-    // MARK: - Daemons
-
-    @ViewBuilder
-    private var daemonsSection: some View {
-        Section("Saved machines") {
             if store.daemons.isEmpty {
-                Text("No saved machines")
+                Label("No saved machines", systemImage: "server.rack")
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(store.daemons, id: \.nodeId) { daemon in
@@ -222,19 +196,54 @@ struct SettingsView: View {
                     }
                 }
             }
+
+            Button {
+                guard !store.phoneNodeId.isEmpty else { return }
+                UIPasteboard.general.string = store.phoneNodeId
+                withAnimation(Theme.Motion.value(Theme.Motion.surface, reduced: reduceMotion)) {
+                    copiedNodeId = true
+                }
+                Task {
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    await MainActor.run {
+                        withAnimation(Theme.Motion.value(Theme.Motion.surface, reduced: reduceMotion)) {
+                            copiedNodeId = false
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 12) {
+                    Label("Phone identity", systemImage: "iphone")
+                        .foregroundStyle(.primary)
+                    Spacer(minLength: 8)
+                    Text(store.phoneNodeId.isEmpty ? "Unavailable" : store.phoneNodeId)
+                        .font(.mewMono(11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: 130, alignment: .trailing)
+                    Image(systemName: copiedNodeId ? "checkmark" : "doc.on.doc")
+                        .font(.caption)
+                        .foregroundStyle(copiedNodeId ? .green : .secondary)
+                }
+            }
+            .disabled(store.phoneNodeId.isEmpty)
+        } header: {
+            Text("Machines")
+        } footer: {
+            Text("Tap Phone identity to copy this phone's Node ID when pairing from `mew pair`.")
         }
     }
 
     // MARK: - About
 
-    @ViewBuilder
     private var aboutSection: some View {
         Section("About") {
-            NavigationLink("Connection diagnostics") {
+            NavigationLink {
                 Form {
                     Section {
                         Text(store.connectionDiagnostics)
-                            .font(.callout.monospaced())
+                            .font(.mewMono(13))
                             .textSelection(.enabled)
                         ShareLink(item: store.connectionDiagnostics) {
                             Label("Share diagnostics", systemImage: "square.and.arrow.up")
@@ -242,22 +251,21 @@ struct SettingsView: View {
                     } footer: {
                         Text("Includes app, iOS, and daemon versions and connection states. Excludes names, identities, credentials, error details, paths, and conversation content.")
                     }
+                    .listRowBackground(theme.card)
                 }
+                .mewThemedForm(theme)
                 .navigationTitle("Diagnostics")
                 .navigationBarTitleDisplayMode(.inline)
-            }
-            LabeledContent {
-                Text(appVersionString)
-                    .foregroundStyle(.secondary)
             } label: {
-                Label("Version", systemImage: "info.circle")
+                Label("Connection diagnostics", systemImage: "stethoscope")
             }
 
             LabeledContent {
-                Text(store.daemons.count, format: .number)
+                Text(appVersionString)
+                    .monospacedDigit()
                     .foregroundStyle(.secondary)
             } label: {
-                Label("Saved machines", systemImage: "server.rack")
+                Label("Version", systemImage: "info.circle")
             }
 
             Link(destination: URL(string: "https://github.com/polytoken/mew")!) {

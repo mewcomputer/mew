@@ -8,7 +8,9 @@ import MewMobileCore
 struct SessionRailView: View {
     @EnvironmentObject private var store: AppStore
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.mewTheme) private var theme
     @State private var showArchived = false
+    @State private var searchText = ""
     @State private var sessionToDelete: SessionTimelineItem?
     @State private var sessionToRename: SessionTimelineItem?
     @State private var renameText = ""
@@ -38,9 +40,14 @@ struct SessionRailView: View {
         .onChange(of: daemonNodeId) { _, nodeId in
             store.refreshSessions(daemonNodeId: nodeId)
         }
-        .safeAreaInset(edge: .top, spacing: 0) { filters }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if store.daemons.count > 1 {
+                filters
+            }
+        }
         .navigationTitle("Chats")
         .navigationBarTitleDisplayMode(.inline)
+        .searchable(text: $searchText, prompt: "Search chats")
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
                 NavigationLink(value: NavigationRoute.settings) {
@@ -115,6 +122,13 @@ struct SessionRailView: View {
                     cwd: $pickerCwd,
                     onPick: { cwd in
                         if store.newSession(cwd: cwd, daemonNodeId: creationDaemonId) {
+                            showingProjectPicker = false
+                        } else {
+                            pickerError = "Connect to this machine before creating a chat."
+                        }
+                    },
+                    onPickScratch: {
+                        if store.newSession(cwd: nil, scratch: true, daemonNodeId: creationDaemonId) {
                             showingProjectPicker = false
                         } else {
                             pickerError = "Connect to this machine before creating a chat."
@@ -202,9 +216,22 @@ struct SessionRailView: View {
     @ViewBuilder
     private var sessionList: some View {
         TimelineView(.periodic(from: .now, by: 60)) { context in
-            let sections = store.sessionTimeline(daemonNodeId: daemonNodeId, includeArchived: showArchived, now: context.date)
+            let allSections = store.sessionTimeline(daemonNodeId: daemonNodeId, includeArchived: showArchived, now: context.date)
+            let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let sections = query.isEmpty
+                ? allSections
+                : allSections.compactMap { section -> SessionTimelineSection? in
+                    let filtered = section.items.filter { item in
+                        item.session.title.localizedCaseInsensitiveContains(query)
+                            || item.session.sessionId.localizedCaseInsensitiveContains(query)
+                            || (folderName(item.session.cwd)?.localizedCaseInsensitiveContains(query) == true)
+                            || machineName(item.daemonNodeId).localizedCaseInsensitiveContains(query)
+                    }
+                    return filtered.isEmpty ? nil : SessionTimelineSection(period: section.period, items: filtered)
+                }
             List {
                 connectionNotice
+                    .listRowBackground(Color.clear)
                 if store.daemons.isEmpty {
                     ContentUnavailableView {
                         Label("No machines", systemImage: "server.rack")
@@ -214,35 +241,55 @@ struct SessionRailView: View {
                         NavigationLink("Pair a machine", value: NavigationRoute.machines)
                     }
                     .listRowSeparator(.hidden)
-                }
-                if hasArchived {
-                    Section {
-                        Toggle(isOn: $showArchived) {
-                            Label("Show archived", systemImage: "archivebox")
-                        }
-                    }
+                    .listRowBackground(Color.clear)
                 }
                 if sections.isEmpty && !store.daemons.isEmpty {
-                    emptySessions.listRowSeparator(.hidden)
+                    if !query.isEmpty {
+                        ContentUnavailableView.search(text: query)
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
+                    } else {
+                        emptySessions
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
+                    }
                 }
                 ForEach(sections) { section in
                     Section {
                         ForEach(section.items) { item in
                             sessionRow(item)
-                                .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+                                .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
                                 .listRowSeparator(.hidden)
+                                .listRowBackground(Color.clear)
                         }
                     } header: {
                         Text(section.period.title)
                             .font(.footnote.weight(.semibold))
-                            .foregroundStyle(.primary)
+                            .foregroundStyle(.secondary)
                             .textCase(nil)
-                            .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 4, trailing: 16))
+                            .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 4, trailing: 16))
                     }
                     .listSectionSeparator(.hidden)
                 }
+                if hasArchived {
+                    Section {
+                        Button {
+                            showArchived.toggle()
+                        } label: {
+                            Label(showArchived ? "Hide archived" : "Show archived", systemImage: "archivebox")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.vertical, 6)
+                        }
+                        .buttonStyle(.plain)
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+                    }
+                }
             }
             .listStyle(.plain)
+            .mewThemedPlainList(theme)
             .listSectionSpacing(8)
             .environment(\.defaultMinListRowHeight, 44)
             .environment(\.defaultMinListHeaderHeight, 28)
@@ -350,53 +397,53 @@ struct SessionRailView: View {
     @ViewBuilder
     private func sessionContent(_ item: SessionTimelineItem) -> some View {
         let session = item.session
-        HStack(spacing: 8) {
-            stateIndicator(connected(item.daemonNodeId) ? session.state : "offline")
+        let effectiveState = connected(item.daemonNodeId) ? session.state : "offline"
+        let folder = session.scratch ? "Scratch" : folderName(session.cwd)
+        let showMachine = daemonNodeId == nil && store.daemons.count > 1
 
-            VStack(alignment: .leading, spacing: 2) {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
+                    if effectiveState != "idle" {
+                        stateIndicator(effectiveState)
+                    }
                     if session.pinned {
                         Image(systemName: "pin.fill")
                             .font(.caption2)
                             .foregroundStyle(.yellow)
                     }
                     Text(displayName(session))
-                        .font(.body)
+                        .font(.body.weight(.medium))
+                        .foregroundStyle(.primary)
                         .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
                         .truncationMode(.tail)
                 }
 
-                let metadataLayout = dynamicTypeSize.isAccessibilitySize
-                    ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4))
-                    : AnyLayout(HStackLayout(spacing: 8))
-                metadataLayout {
-                    Text(machineName(item.daemonNodeId))
-                        .foregroundStyle(connected(item.daemonNodeId) ? Color.secondary : .orange)
-                        .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
-                    if let cwd = session.cwd, !cwd.isEmpty {
-                        Label((cwd as NSString).lastPathComponent, systemImage: "folder")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
+                if folder != nil || showMachine || effectiveState != "idle" {
+                    HStack(spacing: 5) {
+                        if let folder {
+                            Text(folder)
+                                .foregroundStyle(.secondary)
+                        }
+                        if showMachine {
+                            if folder != nil {
+                                Text("·").foregroundStyle(.tertiary)
+                            }
+                            Text(machineName(item.daemonNodeId))
+                                .foregroundStyle(connected(item.daemonNodeId) ? Color.secondary : .orange)
+                        }
+                        if effectiveState != "idle" {
+                            if folder != nil || showMachine {
+                                Text("·").foregroundStyle(.tertiary)
+                            }
+                            stateLabel(effectiveState)
+                                .foregroundStyle(stateColor(effectiveState))
+                        }
                     }
-                    stateLabel(connected(item.daemonNodeId) ? session.state : "offline")
-                        .font(.caption)
-                        .foregroundStyle(stateColor(connected(item.daemonNodeId) ? session.state : "offline"))
-
-                    if session.usageCost > 0 {
-                        Label(costString(session.usageCost),
-                              systemImage: "dollarsign.circle")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    if let pct = contextPercent(session, daemonNodeId: item.daemonNodeId) {
-                        Label("\(pct)% ctx", systemImage: "memorychip")
-                            .font(.caption)
-                            .foregroundStyle(pct >= 90 ? .orange : .secondary)
-                    }
+                    .font(.footnote)
+                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
+                    .truncationMode(.tail)
                 }
-                .font(.caption)
             }
 
             Spacer(minLength: 4)
@@ -426,6 +473,7 @@ struct SessionRailView: View {
     private func badge(count: Int, color: Color, icon: String) -> some View {
         Label("\(count)", systemImage: icon)
             .font(.caption.bold())
+            .monospacedDigit()
             .foregroundStyle(.white)
             .padding(.horizontal, 7)
             .padding(.vertical, 3)
@@ -523,32 +571,10 @@ struct SessionRailView: View {
         return session.title
     }
 
-    private func costString(_ cost: Double) -> String {
-        if cost < 0.01 {
-            return String(format: "$%.4f", cost)
-        }
-        return String(format: "$%.2f", cost)
-    }
-
-    /// Context occupancy as a percent of the session model's window.
-    /// Matches the session's model against the daemon's model list to find
-    /// the window; nil when either the reading or the window is unknown.
-    private func contextPercent(_ session: SessionSummary, daemonNodeId: String) -> Int? {
-        guard let used = session.contextTokens, used > 0,
-              let window = contextWindow(for: session, daemonNodeId: daemonNodeId), window > 0 else {
-            return nil
-        }
-        return Int((Double(used) / Double(window) * 100).rounded())
-    }
-
-    private func contextWindow(for session: SessionSummary, daemonNodeId: String) -> Int64? {
-        guard let model = session.model else { return nil }
-        return store.modelsByDaemon[daemonNodeId]?.first { m in
-            if let provider = session.provider {
-                return m.provider == provider && m.model == model
-            }
-            return m.model == model
-        }?.contextWindow
+    private func folderName(_ cwd: String?) -> String? {
+        guard let cwd, !cwd.isEmpty, cwd != "/" else { return nil }
+        let name = (cwd as NSString).lastPathComponent
+        return name.isEmpty || name == "/" ? nil : name
     }
 
 }
@@ -562,12 +588,30 @@ struct ProjectPickerSheet: View {
     let machineName: String
     @Binding var cwd: String
     let onPick: (String) -> Void
+    let onPickScratch: () -> Void
     let onChangeMachine: () -> Void
     let onClose: () -> Void
+
+    @Environment(\.mewTheme) private var theme
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
+                Button {
+                    onPickScratch()
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "plus.square.dashed")
+                            .foregroundStyle(theme.textAccent)
+                        Text("New Scratch Session (No Folder)")
+                            .font(.body.weight(.medium))
+                            .foregroundStyle(.primary)
+                        Spacer()
+                    }
+                    .padding(.horizontal)
+                    .padding(.vertical, 12)
+                }
+                Divider()
                 if let error {
                     Text(error)
                         .font(.caption)
@@ -607,9 +651,11 @@ struct ProjectPickerSheet: View {
                                         .foregroundStyle(.secondary)
                                 }
                             }
+                            .listRowBackground(Color.clear)
                         }
                     }
                     .listStyle(.plain)
+                    .mewThemedPlainList(theme)
                 }
 
                 Divider()
@@ -633,6 +679,7 @@ struct ProjectPickerSheet: View {
                 }
                 .padding()
             }
+            .background(theme.background.ignoresSafeArea())
             .navigationTitle("New chat")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

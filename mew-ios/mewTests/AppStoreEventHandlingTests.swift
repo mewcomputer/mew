@@ -2,6 +2,7 @@ import XCTest
 import SwiftUI
 import Combine
 import MewMobileCore
+import SwiftStreamingMarkdown
 @testable import mew
 
 @MainActor
@@ -200,7 +201,8 @@ final class AppStoreEventHandlingTests: XCTestCase {
     func testToolOnlyMessagesStayCompactInConversation() {
         let part = MessagePart(id: "tool", kind: .toolCall, text: nil, toolName: "read", toolState: "completed",
             toolInput: "{}", toolOutput: "file contents", toolError: nil, toolCallId: "call",
-            toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: nil)
+            toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: nil,
+            fileName: nil, fileMime: nil, artifactId: nil, artifactUrl: nil, artifactMode: nil, artifactHeight: nil)
         let message = ChatMessage(id: "assistant", role: "assistant", parts: [part], assistantMeta: nil, steered: false, cancelled: false)
         let controller = UIHostingController(rootView: MessageItemView(message: message, fontChoice: .system, disclosures: .constant(ToolDisclosures()))
             .environment(\.dynamicTypeSize, .large))
@@ -214,7 +216,8 @@ final class AppStoreEventHandlingTests: XCTestCase {
             MessagePart(id: "tool-\(index)", kind: .toolCall, text: nil, toolName: name, toolState: "completed",
                 toolInput: name == "write" ? "{\"path\":\"main.rs\"}" : "{\"command\":\"cargo test\"}",
                 toolOutput: "done", toolError: nil, toolCallId: "call-\(index)",
-                toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: nil)
+                toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: nil,
+                fileName: nil, fileMime: nil, artifactId: nil, artifactUrl: nil, artifactMode: nil, artifactHeight: nil)
         }
         let message = ChatMessage(id: "assistant", role: "assistant", parts: parts, assistantMeta: nil, steered: false, cancelled: false)
         let controller = UIHostingController(rootView: MessageItemView(message: message, fontChoice: .system, disclosures: .constant(ToolDisclosures()))
@@ -222,17 +225,44 @@ final class AppStoreEventHandlingTests: XCTestCase {
         XCTAssertLessThanOrEqual(controller.sizeThatFits(in: CGSize(width: 393, height: 1_000)).height, 50)
     }
 
-    func testInvisibleUserTurnsStillSeparateToolActivity() {
+    func testFoldedTurnRendersAsOneRowUntilOpened() {
+        let parts = (0..<10).map { index in
+            MessagePart(id: "tool-\(index)", kind: .toolCall, text: nil, toolName: "bash", toolState: "completed",
+                toolInput: "{\"command\":\"cargo test\"}", toolOutput: "tests passed", toolError: nil,
+                toolCallId: "call-\(index)", toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: nil,
+                fileName: nil, fileMime: nil, artifactId: nil, artifactUrl: nil, artifactMode: nil, artifactHeight: nil)
+        }
+        let rounds = parts.enumerated().flatMap { index, part -> [ChatMessage] in
+            [ChatMessage(id: "round-\(index)", role: "assistant", parts: [part], assistantMeta: nil, steered: false, cancelled: false),
+             ChatMessage(id: "carrier-\(index)", role: "user", parts: [], assistantMeta: nil, steered: false, cancelled: false)]
+        }
+        let items = ConversationItem.grouped(messages: rounds)
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items[0].message.parts.count, 10)
+
+        let collapsed = UIHostingController(rootView: MessageItemView(message: items[0].message, fontChoice: .system,
+            disclosures: .constant(ToolDisclosures())).environment(\.dynamicTypeSize, .large))
+        XCTAssertLessThanOrEqual(collapsed.sizeThatFits(in: CGSize(width: 393, height: 4_000)).height, 60,
+            "Ten rounds of work must cost one collapsed row")
+
+        var disclosures = ToolDisclosures()
+        disclosures.setGroupExpanded(true, parts: items[0].message.parts)
+        let opened = UIHostingController(rootView: MessageItemView(message: items[0].message, fontChoice: .system,
+            disclosures: .constant(disclosures)).environment(\.dynamicTypeSize, .large))
+        XCTAssertGreaterThan(opened.sizeThatFits(in: CGSize(width: 393, height: 8_000)).height, 300)
+    }
+    func testToolResultCarriersStayInsideTheirTurn() {
         let part = MessagePart(id: "one", kind: .toolCall, text: nil, toolName: "bash", toolState: "completed",
             toolInput: "{}", toolOutput: nil, toolError: nil, toolCallId: "one",
-            toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: nil)
+            toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: nil,
+            fileName: nil, fileMime: nil, artifactId: nil, artifactUrl: nil, artifactMode: nil, artifactHeight: nil)
         var second = part
         second.id = "two"
         store.messages = [ChatMessage(id: "first", role: "assistant", parts: [part], assistantMeta: nil, steered: false, cancelled: false),
-            ChatMessage(id: "attachment-only", role: "user", parts: [], assistantMeta: nil, steered: false, cancelled: false),
+            ChatMessage(id: "tool-result", role: "user", parts: [], assistantMeta: nil, steered: false, cancelled: false),
             ChatMessage(id: "second", role: "assistant", parts: [second], assistantMeta: nil, steered: false, cancelled: false)]
         let items = store.conversationItems
-        XCTAssertEqual(items.count, 2, "Hidden user messages must still separate turns")
+        XCTAssertEqual(items.count, 1, "Tool-result carriers belong to the turn that produced them")
         XCTAssertEqual(items.flatMap { $0.message.parts }.map(\.id), ["one", "two"])
     }
 
@@ -240,7 +270,8 @@ final class AppStoreEventHandlingTests: XCTestCase {
         let parts = (0..<3).map { index in
             MessagePart(id: "tool-\(index)", kind: .toolCall, text: nil, toolName: "bash", toolState: "completed",
                 toolInput: "{\"command\":\"cargo test\"}", toolOutput: "tests passed", toolError: nil,
-                toolCallId: "call-\(index)", toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: nil)
+                toolCallId: "call-\(index)", toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: nil,
+                fileName: nil, fileMime: nil, artifactId: nil, artifactUrl: nil, artifactMode: nil, artifactHeight: nil)
         }
         var disclosures = ToolDisclosures()
         disclosures.setGroupExpanded(true, parts: Array(parts.suffix(2)))
@@ -349,7 +380,8 @@ final class AppStoreEventHandlingTests: XCTestCase {
         let messages = texts.map { text in
             ChatMessage(id: text, role: "user", parts: [MessagePart(id: text, kind: .text, text: text,
                 toolName: nil, toolState: nil, toolInput: nil, toolOutput: nil, toolError: nil,
-                toolCallId: nil, toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: nil)],
+                toolCallId: nil, toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: nil,
+                fileName: nil, fileMime: nil, artifactId: nil, artifactUrl: nil, artifactMode: nil, artifactHeight: nil)],
                 assistantMeta: nil, steered: false, cancelled: false)
         }
         return DaemonSnapshot(sessions: [SessionInfo(sessionId: "sess-1", title: "History", messages: messages,
@@ -365,9 +397,11 @@ final class AppStoreEventHandlingTests: XCTestCase {
         store.handleEvent(.daemonStatusChanged(daemon: "daemon-1", status: .connected))
         store.handleEvent(.sessionReloaded(daemon: "daemon-1", sessionId: "sess-1"))
         XCTAssertEqual(store.historyBefore, 24)
-        XCTAssertTrue(store.loadOlderHistory())
-        XCTAssertFalse(store.loadOlderHistory())
+        // Opening a session prefetches one older page, so the button is already
+        // busy and a second request is refused.
         XCTAssertTrue(store.isLoadingOlderHistory)
+        XCTAssertEqual(mock.historyCalls.count, 1)
+        XCTAssertFalse(store.loadOlderHistory())
         XCTAssertEqual(store.messages.map(\.id), ["latest"])
         store.handleEvent(.historyExtended(daemon: "daemon-2", sessionId: "sess-1"))
         store.handleEvent(.historyExtended(daemon: "daemon-1", sessionId: "other"))
@@ -383,10 +417,11 @@ final class AppStoreEventHandlingTests: XCTestCase {
 
     func testOlderHistorySendFailuresAndDisconnectsAllowRecovery() {
         mock.snapshotResult = historySnapshot(before: 24, texts: ["latest"])
-        store.handleEvent(.daemonStatusChanged(daemon: "daemon-1", status: .connected))
-        store.handleEvent(.sessionReloaded(daemon: "daemon-1", sessionId: "sess-1"))
         mock.historyAccepted = false
-        XCTAssertFalse(store.loadOlderHistory())
+        store.handleEvent(.daemonStatusChanged(daemon: "daemon-1", status: .connected))
+        // The open-time prefetch is rejected, which surfaces an error without
+        // leaving the button stuck.
+        store.handleEvent(.sessionReloaded(daemon: "daemon-1", sessionId: "sess-1"))
         XCTAssertFalse(store.isLoadingOlderHistory)
         XCTAssertNotNil(store.historyError)
         mock.historyAccepted = true
@@ -409,7 +444,8 @@ final class AppStoreEventHandlingTests: XCTestCase {
         let parts = [("completed", "earlier answer"), ("active", "current")].map { id, text in
             MessagePart(id: id, kind: .text, text: text, toolName: nil, toolState: nil,
                 toolInput: nil, toolOutput: nil, toolError: nil, toolCallId: nil,
-                toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: nil)
+                toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: nil,
+                fileName: nil, fileMime: nil, artifactId: nil, artifactUrl: nil, artifactMode: nil, artifactHeight: nil)
         }
         snapshot.sessions[0].messages.append(ChatMessage(id: "assistant", role: "assistant", parts: parts, assistantMeta: nil, steered: false, cancelled: false))
         mock.snapshotResult = snapshot
@@ -427,6 +463,36 @@ final class AppStoreEventHandlingTests: XCTestCase {
         XCTAssertTrue(store.streamingText.isEmpty)
         XCTAssertNil(store.streamingPartId)
         XCTAssertTrue(store.isStreaming)
+    }
+
+    func testFinishedJobsAndChecklistsLeaveAfterTheGraceWindow() {
+        var clock = Date(timeIntervalSince1970: 1_000)
+        store.now = { clock }
+        let job = BackgroundJob(jobId: "job-1", command: "cargo test", state: "completed")
+        let done = TodoItem(id: 1, content: "tests", status: "done", dependsOn: [])
+        store.handleEvent(.activityUpdated(daemon: "daemon-1", sessionId: "sess-1", subagents: [], jobs: [job]))
+        store.handleEvent(.todosUpdated(daemon: "daemon-1", sessionId: "sess-1", todos: [done]))
+        XCTAssertEqual(store.jobs.map(\.jobId), ["job-1"], "finished work stays for the grace window")
+        XCTAssertEqual(store.todos["sess-1"]?.count, 1)
+
+        // The daemon keeps replaying the same finished work; once the window
+        // passes it must not come back.
+        clock = clock.addingTimeInterval(CompletedLinger.grace + 1)
+        store.handleEvent(.activityUpdated(daemon: "daemon-1", sessionId: "sess-1", subagents: [], jobs: [job]))
+        store.handleEvent(.todosUpdated(daemon: "daemon-1", sessionId: "sess-1", todos: [done]))
+        XCTAssertTrue(store.jobs.isEmpty)
+        XCTAssertEqual(store.todos["sess-1"], [])
+    }
+
+    func testLiveChecklistReturnsAfterAFinishedOneWasDropped() {
+        var clock = Date(timeIntervalSince1970: 2_000)
+        store.now = { clock }
+        let done = TodoItem(id: 1, content: "tests", status: "done", dependsOn: [])
+        store.handleEvent(.todosUpdated(daemon: "daemon-1", sessionId: "sess-1", todos: [done]))
+        clock = clock.addingTimeInterval(CompletedLinger.grace + 1)
+        let running = TodoItem(id: 2, content: "ship", status: "in_progress", dependsOn: [])
+        store.handleEvent(.todosUpdated(daemon: "daemon-1", sessionId: "sess-1", todos: [done, running]))
+        XCTAssertEqual(store.todos["sess-1"]?.map(\.id), [1, 2], "a live checklist comes straight back")
     }
 
     func testActivityAndWorkerHistoryStayWithTheirParentConversation() {
@@ -988,7 +1054,7 @@ final class AppStoreEventHandlingTests: XCTestCase {
     func testAttentionCountsUpdateOnlyTheOriginatingDaemonSession() {
         let summary = SessionSummary(sessionId: "sess-1", title: "Test", state: "running",
             archived: false, pinned: false, pendingPermissions: 0, pendingQuestions: 0,
-            usageCost: 0, cwd: nil, model: nil, provider: nil, createdAt: 0,
+            usageCost: 0, cwd: nil, scratch: false, model: nil, provider: nil, createdAt: 0,
             lastMessageAt: nil, lastTurnFailed: false, groupId: nil,
             inputTokens: 0, outputTokens: 0, turns: 0, contextTokens: nil)
         store.sessionLists = ["daemon-1": [summary], "daemon-2": [summary]]
@@ -1296,7 +1362,8 @@ final class AppStoreEventHandlingTests: XCTestCase {
                 id: "u-1", role: "user",
                 parts: [MessagePart(id: "up-1", kind: .text, text: "hello", toolName: nil, toolState: nil,
                     toolInput: nil, toolOutput: nil, toolError: nil, toolCallId: nil,
-                    toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: nil)],
+                    toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: nil,
+                    fileName: nil, fileMime: nil, artifactId: nil, artifactUrl: nil, artifactMode: nil, artifactHeight: nil)],
                 assistantMeta: nil, steered: false, cancelled: false
             )
         ]
@@ -1326,5 +1393,104 @@ final class AppStoreEventHandlingTests: XCTestCase {
             XCTAssertTrue(anyFilled)
         }
         XCTAssertNotEqual(hashSeedFnv1a("agent-a"), hashSeedFnv1a("agent-b"))
+    }
+
+    func testMentionCandidatesFilePreviewAndPromptAttachmentsFlow() {
+        mock.snapshotResult = historySnapshot(before: nil, texts: [])
+        store.handleEvent(.daemonStatusChanged(daemon: "daemon-1", status: .connected))
+        store.handleEvent(.sessionReady(daemon: "daemon-1", sessionId: "sess-1"))
+
+        store.listMentionCandidates()
+        XCTAssertEqual(mock.listMentionCandidatesCalls, ["daemon-1"])
+        store.handleEvent(.mentionCandidates(
+            daemon: "daemon-1",
+            skills: [MentionCandidate(name: "clarify", description: "Improve UX text")],
+            subagents: [MentionCandidate(name: "research", description: "Codebase search")]
+        ))
+        XCTAssertEqual(store.availableSkills["daemon-1"]?.map(\.name), ["clarify"])
+        XCTAssertEqual(store.availableSubagents["daemon-1"]?.map(\.name), ["research"])
+
+        store.readFilePreview(sessionId: "sess-1", path: "src/lib.rs")
+        XCTAssertEqual(store.filePreviews[store.filePreviewKey(sessionId: "sess-1", path: "src/lib.rs")], .loading)
+        XCTAssertEqual(mock.readFilePreviewCalls.last?.path, "src/lib.rs")
+
+        store.handleEvent(.filePreviewLoaded(
+            daemon: "daemon-1", sessionId: "sess-1", path: "src/lib.rs",
+            content: "pub fn ok() {}", truncated: false, language: "rust"
+        ))
+        XCTAssertEqual(
+            store.filePreviews[store.filePreviewKey(sessionId: "sess-1", path: "src/lib.rs")],
+            .loaded(content: "pub fn ok() {}", truncated: false, language: "rust")
+        )
+
+        store.handleEvent(.filePreviewFailed(
+            daemon: "daemon-1", sessionId: "sess-1", path: "missing.rs", error: "not found"
+        ))
+        XCTAssertEqual(
+            store.filePreviews[store.filePreviewKey(sessionId: "sess-1", path: "missing.rs")],
+            .failed("not found")
+        )
+
+        let attachment = PromptAttachment(path: "data:image/png;base64,AAAA", mime: "image/png")
+        XCTAssertTrue(store.sendPrompt("", attachments: [attachment]))
+        XCTAssertEqual(mock.promptAttachmentCalls.count, 1)
+        XCTAssertEqual(mock.promptAttachmentCalls.first?.attachments, [attachment])
+
+        let filePart = MessagePart(
+            id: "f-1", kind: .file, text: "shot.png", toolName: nil, toolState: nil,
+            toolInput: nil, toolOutput: nil, toolError: nil, toolCallId: nil,
+            toolTimeStart: nil, toolTimeEnd: nil, toolSensitivity: nil, compactionRemoved: nil,
+            fileName: "shot.png", fileMime: "image/png",
+            artifactId: nil, artifactUrl: nil, artifactMode: nil, artifactHeight: nil
+        )
+        let grouped = ConversationItem.grouped(messages: [
+            ChatMessage(id: "u-img", role: "user", parts: [filePart], assistantMeta: nil, steered: false, cancelled: false)
+        ])
+        XCTAssertEqual(grouped.count, 1)
+        XCTAssertEqual(grouped[0].message.parts.first?.kind, .file)
+    }
+}
+
+final class FileDirectiveTests: XCTestCase {
+    private func firstURL(in markdown: String) -> URL? {
+        guard let start = markdown.range(of: "mew-file://open?"),
+              let end = markdown[start.upperBound...].firstIndex(of: ")")
+        else { return nil }
+        return URL(string: String(markdown[start.lowerBound..<end]))
+    }
+
+    func testDirectivesBecomeCitationLinksThatCarryThePath() {
+        let markdown = FileDirective.markdown(
+            "open :file[remote.rs]{path=\"crates/mew-daemon/src/remote.rs\"} "
+                + "and :file[doc]{path=“docs/guide.md”} plus :file[bare]{path=notes.txt}"
+        )
+        let links = markdown.components(separatedBy: "[mew-file](").dropFirst().compactMap { firstURL(in: "[mew-file](" + $0) }
+
+        XCTAssertEqual(links.count, 3)
+        XCTAssertEqual(FileDirective.path(from: links[0]), "crates/mew-daemon/src/remote.rs")
+        XCTAssertEqual(FileDirective.path(from: links[1]), "docs/guide.md")
+        XCTAssertEqual(FileDirective.path(from: links[2]), "notes.txt")
+        XCTAssertFalse(markdown.contains(":file["))
+        XCTAssertTrue(markdown.contains("[mew-file]("))
+    }
+
+    func testMalformedDirectivesAndOtherLinksAreLeftAlone() {
+        XCTAssertEqual(
+            FileDirective.markdown("maybe :file[missing.swift]{label=\"x\"} and [site](https://example.com)"),
+            "maybe :file[missing.swift]{label=\"x\"} and [site](https://example.com)"
+        )
+        XCTAssertNil(FileDirective.path(from: URL(string: "https://example.com")!))
+    }
+
+    func testDirectiveRendersAsAnInlineAttachment() async {
+        let markdown = FileDirective.markdown("open :file[remote.rs]{path=\"remote.rs\"}")
+        let document = await MarkdownParserImpl().parse(text: markdown, config: .mewStatic(fontChoice: MewFontChoice.instrumentSans))
+        let renderables = Mirror(reflecting: document).children.first { $0.label == "renderables" }?.value
+        let renderable = renderables.flatMap { Mirror(reflecting: $0).children.first?.value }
+        let payload = renderable.flatMap { Mirror(reflecting: $0).children.first?.value }
+        let content = payload.flatMap { Mirror(reflecting: $0).children.first { $0.label == "content" }?.value } as? NSAttributedString
+
+        XCTAssertNotNil(content)
+        XCTAssertTrue(content?.containsAttachments(in: NSRange(location: 0, length: content?.length ?? 0)) == true)
     }
 }

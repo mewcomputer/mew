@@ -54,6 +54,7 @@ struct DaemonSwitcherView: View {
 
     @EnvironmentObject private var store: AppStore
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.mewTheme) private var theme
     @State private var showsPairing = false
     @State private var detailsNodeId: String?
 
@@ -69,6 +70,7 @@ struct DaemonSwitcherView: View {
                         machineRow(daemon)
                     }
                 }
+                .listRowBackground(theme.card)
                 Section {
                     Button("Pair a machine", systemImage: "plus") { showsPairing = true }
                         .frame(minHeight: 44)
@@ -79,7 +81,9 @@ struct DaemonSwitcherView: View {
                             .frame(minHeight: 44)
                     }
                 }
+                .listRowBackground(theme.card)
             }
+            .mewThemedForm(theme)
             .navigationTitle("Machines")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

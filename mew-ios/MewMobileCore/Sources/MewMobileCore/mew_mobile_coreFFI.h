@@ -319,6 +319,11 @@ void uniffi_mew_mobile_core_fn_method_mobilecore_delete_session(uint64_t ptr, Ru
 void uniffi_mew_mobile_core_fn_method_mobilecore_disconnect(uint64_t ptr, RustBuffer id, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_ENQUEUE_MESSAGE
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_ENQUEUE_MESSAGE
+int8_t uniffi_mew_mobile_core_fn_method_mobilecore_enqueue_message(uint64_t ptr, RustBuffer id, RustBuffer session_id, RustBuffer text, int8_t steer, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_LIST_DAEMONS
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_LIST_DAEMONS
 RustBuffer uniffi_mew_mobile_core_fn_method_mobilecore_list_daemons(uint64_t ptr, RustCallStatus *_Nonnull out_status
@@ -327,6 +332,11 @@ RustBuffer uniffi_mew_mobile_core_fn_method_mobilecore_list_daemons(uint64_t ptr
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_LIST_DIR
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_LIST_DIR
 void uniffi_mew_mobile_core_fn_method_mobilecore_list_dir(uint64_t ptr, RustBuffer id, RustBuffer session_id, RustBuffer path, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_LIST_MENTION_CANDIDATES
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_LIST_MENTION_CANDIDATES
+void uniffi_mew_mobile_core_fn_method_mobilecore_list_mention_candidates(uint64_t ptr, RustBuffer id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_LIST_MODELS
@@ -356,7 +366,7 @@ int8_t uniffi_mew_mobile_core_fn_method_mobilecore_load_older_history(uint64_t p
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_NEW_SESSION
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_NEW_SESSION
-void uniffi_mew_mobile_core_fn_method_mobilecore_new_session(uint64_t ptr, RustBuffer id, RustBuffer cwd, RustCallStatus *_Nonnull out_status
+void uniffi_mew_mobile_core_fn_method_mobilecore_new_session(uint64_t ptr, RustBuffer id, RustBuffer cwd, int8_t scratch, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_NODE_ID
@@ -369,9 +379,19 @@ RustBuffer uniffi_mew_mobile_core_fn_method_mobilecore_node_id(uint64_t ptr, Rus
 void uniffi_mew_mobile_core_fn_method_mobilecore_pin_session(uint64_t ptr, RustBuffer id, RustBuffer session_id, int8_t pinned, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_PROMOTE_QUEUED_MESSAGE
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_PROMOTE_QUEUED_MESSAGE
+int8_t uniffi_mew_mobile_core_fn_method_mobilecore_promote_queued_message(uint64_t ptr, RustBuffer id, RustBuffer session_id, RustBuffer message_id, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_PROMPT
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_PROMPT
 int8_t uniffi_mew_mobile_core_fn_method_mobilecore_prompt(uint64_t ptr, RustBuffer id, RustBuffer text, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_READ_ARTIFACT
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_READ_ARTIFACT
+void uniffi_mew_mobile_core_fn_method_mobilecore_read_artifact(uint64_t ptr, RustBuffer id, RustBuffer request_id, RustBuffer session_id, RustBuffer artifact_id, RustBuffer path, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_READ_AUTOMATION_SETTINGS
@@ -384,6 +404,11 @@ int8_t uniffi_mew_mobile_core_fn_method_mobilecore_read_automation_settings(uint
 int8_t uniffi_mew_mobile_core_fn_method_mobilecore_read_daemon_settings(uint64_t ptr, RustBuffer id, RustBuffer request_id, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_READ_FILE_PREVIEW
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_READ_FILE_PREVIEW
+void uniffi_mew_mobile_core_fn_method_mobilecore_read_file_preview(uint64_t ptr, RustBuffer id, RustBuffer session_id, RustBuffer path, RustBuffer max_bytes, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_READ_SESSION_DIFF
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_READ_SESSION_DIFF
 int8_t uniffi_mew_mobile_core_fn_method_mobilecore_read_session_diff(uint64_t ptr, RustBuffer id, RustBuffer session_id, RustBuffer request_id, RustCallStatus *_Nonnull out_status
@@ -392,6 +417,11 @@ int8_t uniffi_mew_mobile_core_fn_method_mobilecore_read_session_diff(uint64_t pt
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_REMOVE_DAEMON
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_REMOVE_DAEMON
 void uniffi_mew_mobile_core_fn_method_mobilecore_remove_daemon(uint64_t ptr, RustBuffer id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_REMOVE_QUEUED_MESSAGE
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_REMOVE_QUEUED_MESSAGE
+int8_t uniffi_mew_mobile_core_fn_method_mobilecore_remove_queued_message(uint64_t ptr, RustBuffer id, RustBuffer session_id, RustBuffer message_id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_RENAME_DAEMON
@@ -437,6 +467,11 @@ int8_t uniffi_mew_mobile_core_fn_method_mobilecore_revoke_device(uint64_t ptr, R
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_SAVE_SESSION_DEFAULTS
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_SAVE_SESSION_DEFAULTS
 int8_t uniffi_mew_mobile_core_fn_method_mobilecore_save_session_defaults(uint64_t ptr, RustBuffer id, RustBuffer session_id, RustBuffer request_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_SEND_PROMPT_WITH_ATTACHMENTS
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_SEND_PROMPT_WITH_ATTACHMENTS
+int8_t uniffi_mew_mobile_core_fn_method_mobilecore_send_prompt_with_attachments(uint64_t ptr, RustBuffer id, RustBuffer text, RustBuffer attachments, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_SET_AUTO_SUMMARY
@@ -839,6 +874,12 @@ uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_disconnect(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_ENQUEUE_MESSAGE
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_ENQUEUE_MESSAGE
+uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_enqueue_message(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_LIST_DAEMONS
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_LIST_DAEMONS
 uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_list_daemons(void
@@ -848,6 +889,12 @@ uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_list_daemons(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_LIST_DIR
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_LIST_DIR
 uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_list_dir(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_LIST_MENTION_CANDIDATES
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_LIST_MENTION_CANDIDATES
+uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_list_mention_candidates(void
     
 );
 #endif
@@ -899,9 +946,21 @@ uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_pin_session(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_PROMOTE_QUEUED_MESSAGE
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_PROMOTE_QUEUED_MESSAGE
+uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_promote_queued_message(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_PROMPT
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_PROMPT
 uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_prompt(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_READ_ARTIFACT
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_READ_ARTIFACT
+uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_read_artifact(void
     
 );
 #endif
@@ -917,6 +976,12 @@ uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_read_daemon_settings(
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_READ_FILE_PREVIEW
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_READ_FILE_PREVIEW
+uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_read_file_preview(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_READ_SESSION_DIFF
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_READ_SESSION_DIFF
 uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_read_session_diff(void
@@ -926,6 +991,12 @@ uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_read_session_diff(voi
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_REMOVE_DAEMON
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_REMOVE_DAEMON
 uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_remove_daemon(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_REMOVE_QUEUED_MESSAGE
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_REMOVE_QUEUED_MESSAGE
+uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_remove_queued_message(void
     
 );
 #endif
@@ -980,6 +1051,12 @@ uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_revoke_device(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_SAVE_SESSION_DEFAULTS
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_SAVE_SESSION_DEFAULTS
 uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_save_session_defaults(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_SEND_PROMPT_WITH_ATTACHMENTS
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_SEND_PROMPT_WITH_ATTACHMENTS
+uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_send_prompt_with_attachments(void
     
 );
 #endif

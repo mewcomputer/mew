@@ -18,7 +18,7 @@ final class SessionTimelineTests: XCTestCase {
                          archived: Bool = false, pinned: Bool = false) -> SessionSummary {
         let timestamp = Int64(date.timeIntervalSince1970 * 1_000)
         return SessionSummary(sessionId: id, title: id, state: state, archived: archived, pinned: pinned,
-            pendingPermissions: pending, pendingQuestions: 0, usageCost: 0, cwd: nil, model: nil, provider: nil,
+            pendingPermissions: pending, pendingQuestions: 0, usageCost: 0, cwd: nil, scratch: false, model: nil, provider: nil,
             createdAt: timestamp - 1_000, lastMessageAt: timestamp, lastTurnFailed: false, groupId: nil,
             inputTokens: 0, outputTokens: 0, turns: 0, contextTokens: nil)
     }

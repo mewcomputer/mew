@@ -2,32 +2,122 @@ import Foundation
 import MewMobileCore
 
 /// A display fragment with the original message identities used by history anchors.
+///
+/// The daemon stores one assistant message per provider round, so a single
+/// answer spans several messages. The transcript folds a whole turn (one prompt
+/// plus every round that answered it) into at most two rows: the work it took,
+/// and the answer it produced.
 struct ConversationItem: Identifiable, Equatable {
     var message: ChatMessage
     var sourceMessageIds: [String]
     var id: String { message.id }
 
+    /// Whether a message opens a new turn: the prompt itself, an error, or a
+    /// compaction boundary. Assistant messages continue the current turn.
+    private static func startsTurn(_ message: ChatMessage) -> Bool {
+        guard message.role != "assistant" else { return false }
+        return message.parts.contains { part in
+            switch part.kind {
+            case .text, .error:
+                return part.text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            case .compaction, .file, .artifact, .toolCall, .reasoning:
+                return true
+            }
+        }
+    }
+
     static func grouped(messages: [ChatMessage], hidingPartId: String? = nil) -> [ConversationItem] {
+        struct RunPart {
+            let part: MessagePart
+            let messageId: String
+            let meta: MobileAssistantMeta?
+            let steered: Bool
+        }
+
         var items: [ConversationItem] = []
+        var run: [RunPart] = []
+        var runCancelled = false
+
+        func deduplicatedIds(_ slice: ArraySlice<RunPart>) -> [String] {
+            var ids: [String] = []
+            for entry in slice where ids.last != entry.messageId {
+                ids.append(entry.messageId)
+            }
+            return ids
+        }
+
+        func flushRun() {
+            guard !run.isEmpty else {
+                runCancelled = false
+                return
+            }
+            if let lastWorkIndex = run.lastIndex(where: { $0.part.kind == .toolCall || $0.part.kind == .reasoning }) {
+                let workSlice = run[...lastWorkIndex]
+                let trailingSlice = run[(lastWorkIndex + 1)...]
+                let hasTrailing = !trailingSlice.isEmpty
+                items.append(ConversationItem(
+                    message: ChatMessage(
+                        id: "part:\(workSlice.first!.part.id)",
+                        role: "assistant",
+                        parts: workSlice.map(\.part),
+                        assistantMeta: workSlice.last?.meta,
+                        steered: workSlice.first?.steered ?? false,
+                        cancelled: hasTrailing ? false : runCancelled
+                    ),
+                    sourceMessageIds: deduplicatedIds(workSlice)
+                ))
+                if hasTrailing {
+                    items.append(ConversationItem(
+                        message: ChatMessage(
+                            id: "part:\(trailingSlice.first!.part.id)",
+                            role: "assistant",
+                            parts: trailingSlice.map(\.part),
+                            assistantMeta: trailingSlice.last?.meta,
+                            steered: trailingSlice.first?.steered ?? false,
+                            cancelled: runCancelled
+                        ),
+                        sourceMessageIds: deduplicatedIds(trailingSlice)
+                    ))
+                }
+            } else {
+                let allSlice = run[...]
+                items.append(ConversationItem(
+                    message: ChatMessage(
+                        id: "part:\(allSlice.first!.part.id)",
+                        role: "assistant",
+                        parts: allSlice.map(\.part),
+                        assistantMeta: allSlice.last?.meta,
+                        steered: allSlice.first?.steered ?? false,
+                        cancelled: runCancelled
+                    ),
+                    sourceMessageIds: deduplicatedIds(allSlice)
+                ))
+            }
+            run.removeAll(keepingCapacity: true)
+            runCancelled = false
+        }
+
         for message in messages {
-            guard message.role == "assistant" else {
+            if message.role != "assistant" {
+                // Tool results arrive as user messages whose parts the mirror
+                // drops. They carry no content of their own, so only a real
+                // prompt (or an error/compaction) closes the turn.
+                guard startsTurn(message) else { continue }
+                flushRun()
                 items.append(ConversationItem(message: message, sourceMessageIds: [message.id]))
                 continue
             }
-            let startCount = items.count
+
+            let itemsBefore = items.count
+            let runBefore = run.count
             for part in message.parts {
                 if part.id == hidingPartId { continue }
-                if part.kind == .text, part.text?.isEmpty != false { continue }
-                let isTool = part.kind == .toolCall
-                if let index = items.indices.last, items[index].message.role == "assistant",
-                   (isTool && items[index].message.parts.first?.kind == .toolCall
-                    || !isTool && items[index].sourceMessageIds.count == 1
-                    && items[index].sourceMessageIds.first == message.id && items[index].message.parts.first?.kind != .toolCall) {
-                    items[index].message.parts.append(part)
-                    if items[index].sourceMessageIds.last != message.id {
-                        items[index].sourceMessageIds.append(message.id)
-                    }
-                } else {
+                if (part.kind == .text || part.kind == .reasoning),
+                   part.text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+                    continue
+                }
+                if part.kind == .error || part.kind == .compaction {
+                    flushRun()
                     items.append(ConversationItem(
                         message: ChatMessage(
                             id: "part:\(part.id)",
@@ -39,25 +129,39 @@ struct ConversationItem: Identifiable, Equatable {
                         ),
                         sourceMessageIds: [message.id]
                     ))
+                } else {
+                    run.append(RunPart(
+                        part: part,
+                        messageId: message.id,
+                        meta: message.assistantMeta,
+                        steered: message.steered
+                    ))
                 }
             }
+
             if message.cancelled {
-                if items.count > startCount {
+                if run.count > runBefore {
+                    runCancelled = true
+                } else if items.count > itemsBefore {
                     items[items.count - 1].message.cancelled = true
                 } else {
+                    flushRun()
                     items.append(ConversationItem(message: message, sourceMessageIds: [message.id]))
                 }
             }
         }
+        flushRun()
+
         items.removeAll { item in
             if item.message.role == "assistant" && item.message.cancelled {
                 return false
             }
             return !item.message.parts.contains { part in
                 switch part.kind {
-                case .text, .reasoning, .error: return part.text?.isEmpty == false
+                case .text, .reasoning, .error:
+                    return part.text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
                 case .toolCall: return part.toolName != nil
-                case .compaction: return true
+                case .compaction, .file, .artifact: return true
                 }
             }
         }
@@ -192,9 +296,24 @@ enum ToolActivity {
         return title.prefix(1).uppercased() + title.dropFirst()
     }
 
+    /// Label for a folded turn. Once several rounds fold into one row, what the
+    /// agent did in tool terms is the useful description; a count of internal
+    /// thoughts is not.
+    static func workSummary(_ parts: [MessagePart], cache: Cache = Cache()) -> String {
+        let tools = parts.filter { $0.kind == .toolCall }
+        if !tools.isEmpty {
+            return summary(tools, cache: cache)
+        }
+        let thoughts = parts.filter {
+            $0.kind == .reasoning
+                && $0.text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        }.count
+        return thoughts == 1 ? "Thought" : "\(thoughts) thoughts"
+    }
+
     static func status(_ parts: [MessagePart]) -> String {
         var running = 0, failed = 0, pending = 0
-        for part in parts {
+        for part in parts where part.kind == .toolCall {
             switch part.toolState {
             case "running": running += 1
             case "error": failed += 1
