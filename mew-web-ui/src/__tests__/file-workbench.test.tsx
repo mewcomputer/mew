@@ -71,6 +71,33 @@ describe("WorkspaceFileWorkbench", () => {
     expect(wrapButton.getAttribute("aria-pressed")).toBe("true");
   });
 
+  it("opens markdown as a rendered document with a reopenable explorer", async () => {
+    useSessionStore.setState({ sessionId: "sess-1", sessionCwd: "/work/mew" });
+    render(<WorkspaceFileWorkbench hasWorkspace />);
+    act(() => useSessionStore.getState().onDirListing("", [{ name: "README.MD", is_dir: false }]));
+    fireEvent.click(await screen.findByRole("button", { name: "README.MD" }));
+    expect(screen.getByRole("button", { name: "Hide file explorer" })).toBeTruthy();
+    act(() => useSessionStore.getState().onFilePreview("README.MD", "# Project\n\nA **useful** guide.\n\n```rust\nfn main() {}\n```", true));
+    expect(await screen.findByRole("heading", { name: "Project" })).toBeTruthy();
+    expect(screen.getByText("useful").tagName).toBe("STRONG");
+    expect(screen.getByRole("button", { name: "Copy code" })).toBeTruthy();
+    expect(screen.getByText("Preview truncated")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Hide file explorer" }));
+    expect(screen.getByRole("button", { name: "Show file explorer" })).toBeTruthy();
+  });
+
+  it("restores the explorer preference with the files tab", () => {
+    useSessionStore.setState({ sessionId: "sess-1", sessionCwd: "/work/mew" });
+    let saved: import("../lib/workbench-tabs").FileWorkbenchState = { openPaths: ["guide.md"], activePath: "guide.md", explorerVisible: false };
+    const view = render(<WorkspaceFileWorkbench hasWorkspace fileState={saved} onFileStateChange={(state) => { saved = state; }} />);
+    expect(screen.getByRole("button", { name: "Show file explorer" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Show file explorer" }));
+    expect(saved.explorerVisible).toBe(true);
+    view.unmount();
+    render(<WorkspaceFileWorkbench hasWorkspace fileState={saved} />);
+    expect(screen.getByRole("button", { name: "Hide file explorer" })).toBeTruthy();
+  });
+
   it("keeps replies for multiple directories delivered in one batch", async () => {
     useSessionStore.setState({ sessionId: "sess-1", sessionCwd: "/work/mew" });
     render(<WorkspaceFileWorkbench hasWorkspace />);
@@ -257,7 +284,7 @@ describe("WorkspaceFileWorkbench", () => {
     expect(await screen.findByText("updated plan")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Close PLAN.md" }));
     expect(screen.queryByRole("button", { name: "Open PLAN.md" })).toBeNull();
-    expect(saved).toEqual({ openPaths: ["README.md"], activePath: "README.md" });
+    expect(saved).toEqual({ openPaths: ["README.md"], activePath: "README.md", explorerVisible: true });
     expect(clientMock.readFilePreview).toHaveBeenLastCalledWith("sess-1", "README.md");
     useSessionStore.getState().onFilePreview("README.md", "updated readme", false);
     expect(await screen.findByText("updated readme")).toBeTruthy();

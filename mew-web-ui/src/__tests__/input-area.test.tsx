@@ -177,7 +177,7 @@ describe("InputArea", () => {
       (b) => b.textContent?.trim() === "code-reviewer",
     );
     expect(reviewerBtn).toBeTruthy();
-    fireEvent.mouseDown(reviewerBtn!);
+    fireEvent.click(reviewerBtn!);
     expect(switchPersonaMock).toHaveBeenCalledWith("code-reviewer");
   });
 
@@ -331,8 +331,36 @@ describe("inline @ references", () => {
     expect(screen.getByText("audit")).toBeTruthy();
     const option = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("audit"));
     expect(option).toBeTruthy();
-    fireEvent.mouseDown(option!);
+    fireEvent.click(option!);
     expect(textarea.value).toBe("@skill:audit ");
+  });
+
+  it("opens the file picker and preserves text around the active token", () => {
+    useSessionStore.setState({ mentionSkills: [], mentionSubagents: [], availableModels: [], dirResults: new Map(), gitStatus: [], flaggedFiles: [], availablePersonas: [] });
+    const { container } = renderInputArea();
+    const textarea = container.querySelector("textarea")!;
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const click = vi.spyOn(fileInput, "click");
+    fireEvent.change(textarea, { target: { value: "before @att after", selectionStart: 11, selectionEnd: 11 } });
+    fireEvent.keyDown(textarea, { key: "Enter" });
+    expect(click).toHaveBeenCalledOnce();
+    expect(textarea.value).toBe("before  after");
+    fireEvent.change(fileInput, { target: { files: [new File(["data"], "local.txt")] } });
+    expect(screen.getByText("local.txt")).toBeTruthy();
+  });
+
+  it("navigates in visual group order and inserts the selected reference", () => {
+    useSessionStore.setState({ mentionSkills: [{ name: "audit", description: "Review code" }], mentionSubagents: [], availableModels: [], dirResults: new Map([["", { entries: [{ name: "README.md", is_dir: false }], error: null }]]), gitStatus: [], flaggedFiles: [], availablePersonas: [] });
+    const { container } = renderInputArea();
+    const textarea = container.querySelector("textarea")!;
+    fireEvent.change(textarea, { target: { value: "hello @ tail", selectionStart: 7, selectionEnd: 7 } });
+    const options = screen.getAllByRole("option");
+    expect(options.map((option) => option.textContent)).toEqual([expect.stringContaining("Attach files"), "README.md", expect.stringContaining("audit"), "default"]);
+    expect(options[0]!.getAttribute("aria-selected")).toBe("true");
+    fireEvent.keyDown(textarea, { key: "ArrowDown" });
+    expect(options[1]!.getAttribute("aria-selected")).toBe("true");
+    fireEvent.keyDown(textarea, { key: "Enter" });
+    expect(textarea.value).toBe("hello @README.md  tail");
   });
 
   it("offers workspace files from the root listing", () => {

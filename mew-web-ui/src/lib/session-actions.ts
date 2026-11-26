@@ -11,11 +11,11 @@ interface SessionRouter {
 export async function createAndOpenSession(
   client: MewClient,
   router: SessionRouter,
-  options?: { cwd?: string | null; errorMessage?: string },
+  options?: { cwd?: string | null; scratch?: boolean; errorMessage?: string },
 ): Promise<string | null> {
   const location = router.state.location;
   try {
-    const newId = await client.newSession(options?.cwd ?? null);
+    const newId = await client.newSession(options?.cwd ?? null, { scratch: options?.scratch });
     if (router.state.location !== location) return null;
     localStorage.setItem(SESSION_ID_KEY, newId);
     router.navigate({ to: "/session/$sessionId", params: { sessionId: newId } });

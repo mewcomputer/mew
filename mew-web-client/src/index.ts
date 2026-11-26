@@ -59,6 +59,27 @@ export interface RemoteAccessInfo {
   node_id?: string | null;
 }
 
+export interface WebSearchProviderInfo {
+  id: string;
+  configured: boolean;
+}
+
+export interface WebSearchInfo {
+  enabled: boolean;
+  provider: string;
+  providers: WebSearchProviderInfo[];
+}
+
+export interface RouterTierInfo {
+  id: string;
+  model: string;
+}
+
+export interface RouterInfo {
+  provider: string;
+  tiers: RouterTierInfo[];
+}
+
 export interface PairingInvite {
   request_id: string;
   node_id: string;
@@ -72,11 +93,13 @@ export interface DaemonSettings {
   devices: PairedDevice[] | null;
   automation?: AutomationSettingsInfo | null;
   remote?: RemoteAccessInfo | null;
+  web_search?: WebSearchInfo | null;
+  router?: RouterInfo | null;
 }
 
 export type ClientMessage =
   | { type: "remote_hello"; token?: string; device_name: string }
-  | { type: "new_session"; cwd: string | null; client_kind: string }
+  | { type: "new_session"; cwd: string | null; scratch?: boolean; client_kind: string }
   | { type: "attach_session"; session_id: string; client_kind: string }
   | { type: "load_session_history"; session_id: string; before: number; limit?: number }
   | { type: "load_session_index"; session_id: string }
@@ -96,6 +119,20 @@ export type ClientMessage =
   | { type: "reset_session_defaults"; request_id: string }
   | { type: "revoke_device"; device_id: string; request_id: string }
   | { type: "set_remote_access"; enabled: boolean; request_id: string }
+  | {
+      type: "set_web_search_settings";
+      enabled?: boolean;
+      provider?: string;
+      request_id: string;
+    }
+  | {
+      type: "set_router_tiers";
+      provider: string;
+      nano: string;
+      micro: string;
+      deci: string;
+      request_id: string;
+    }
   | { type: "create_pairing_invite"; request_id: string; scope?: "observe" | "collaborate" | "control"; ttl_secs?: number }
   | { type: "set_auto_summary"; enabled: boolean }
   | { type: "prompt"; text: string; attachments: Attachment[] }
@@ -166,7 +203,11 @@ export type ClientMessage =
   | { type: "get_attachment"; request_id: string; id: string }
   | { type: "enqueue_message"; session_id: string; request_id: string; text: string; attachments: Attachment[]; mode: QueueMode }
   | { type: "update_queued_message"; session_id: string; id: string; text?: string; mode?: QueueMode }
-  | { type: "remove_queued_message"; session_id: string; id: string };
+  | { type: "remove_queued_message"; session_id: string; id: string }
+  | { type: "terminal_open"; rows: number; cols: number }
+  | { type: "terminal_input"; terminal_id: string; bytes: number[] }
+  | { type: "terminal_resize"; terminal_id: string; rows: number; cols: number }
+  | { type: "terminal_close"; terminal_id: string };
 
 export type QueueMode = "follow_up" | "steer";
 
@@ -220,6 +261,16 @@ export type Part = PartBase & (
       mime: string;
       filename?: string;
       url: string;
+    }
+  | {
+      type: "artifact";
+      artifact_id: string;
+      title: string;
+      url: string;
+      mode: "panel" | "inline";
+      height?: number;
+      source_path?: string;
+      version?: number;
     }
   | {
       type: "compaction";
@@ -469,6 +520,7 @@ export interface SessionInfo {
   summary?: string;
   client_count: number;
   cwd?: string;
+  scratch?: boolean;
   last_turn_failed?: boolean;
   archived?: boolean;
   pinned?: boolean;
@@ -659,7 +711,7 @@ export type ServerMessage =
   | ({ type: "pairing_invite" } & PairingInvite)
   | { type: "daemon_settings_failed"; request_id: string; message: string }
   | { type: "remote_ready"; scope: "observe" | "collaborate" | "control" }
-  | { type: "session_ready"; session_id: string; cwd?: string; model?: string; provider?: string; permission_mode?: string }
+  | { type: "session_ready"; session_id: string; cwd?: string; scratch?: boolean; model?: string; provider?: string; permission_mode?: string }
   | SessionOperationFailed
   | PromptReceipt
   | SubagentMessageReceipt
@@ -806,7 +858,11 @@ export type ServerMessage =
   | { type: "attachment_uploaded"; request_id: string; id: string; url: string; mime: string; size: number }
   | { type: "attachment_data"; request_id: string; id: string; data_base64: string; size: number }
   | { type: "session_queue_changed"; session_id: string; items: QueuedMessageWire[] }
-  | { type: "session_compacting"; session_id: string; active: boolean; removed?: number; summary?: string };
+  | { type: "session_compacting"; session_id: string; active: boolean; removed?: number; summary?: string }
+  | { type: "terminal_opened"; terminal_id: string }
+  | { type: "terminal_output"; terminal_id: string; bytes: number[] }
+  | { type: "terminal_exited"; terminal_id: string; status: string }
+  | { type: "terminal_error"; terminal_id?: string | null; message: string };
 
 // ---------------------------------------------------------------------------
 // Minimal WebSocket interface — lets Node users pass `ws` while browsers
@@ -860,6 +916,7 @@ export interface MewClientEvents {
   "session-ready": (data: {
     session_id: string;
     cwd?: string;
+    scratch?: boolean;
     model?: string;
     provider?: string;
     permission_mode?: string;
@@ -1006,6 +1063,10 @@ export interface MewClientEvents {
   "session-queue-changed": (data: { session_id: string; items: QueuedMessageWire[] }) => void;
   "session-compacting": (data: { session_id: string; active: boolean; removed?: number; summary?: string }) => void;
   "remote-ready": (data: { scope: "observe" | "collaborate" | "control" }) => void;
+  "terminal-opened": (data: { terminal_id: string }) => void;
+  "terminal-output": (data: { terminal_id: string; bytes: number[] }) => void;
+  "terminal-exited": (data: { terminal_id: string; status: string }) => void;
+  "terminal-error": (data: { terminal_id: string | null; message: string }) => void;
 }
 
 export type MewEventName = keyof MewClientEvents;
@@ -1242,8 +1303,16 @@ export class MewClient {
   }
 
   /** Send `new_session`. Resolves with the daemon-assigned session id. */
-  newSession(cwd: string | null = null): Promise<string> {
-    return this.requestSession({ type: "new_session", cwd, client_kind: this.clientKind });
+  newSession(cwd: string | null = null, options?: { scratch?: boolean }): Promise<string> {
+    const msg: Extract<ClientMessage, { type: "new_session" }> = {
+      type: "new_session",
+      cwd: options?.scratch ? null : cwd,
+      client_kind: this.clientKind,
+    };
+    if (options?.scratch) {
+      msg.scratch = true;
+    }
+    return this.requestSession(msg);
   }
 
   /** Send `prompt`. Streaming events are emitted via the registered handlers. */
@@ -1527,6 +1596,20 @@ export class MewClient {
 
   setRemoteAccess(enabled: boolean, requestId: string): void {
     this.send({ type: "set_remote_access", enabled, request_id: requestId });
+  }
+
+  setWebSearchSettings(
+    settings: { enabled?: boolean; provider?: string },
+    requestId: string,
+  ): void {
+    this.send({ type: "set_web_search_settings", ...settings, request_id: requestId });
+  }
+
+  setRouterTiers(
+    tiers: { provider: string; nano: string; micro: string; deci: string },
+    requestId: string,
+  ): void {
+    this.send({ type: "set_router_tiers", ...tiers, request_id: requestId });
   }
 
   createPairingInvite(
@@ -1907,6 +1990,26 @@ export class MewClient {
   browserPress(key: string, tabId?: string): void { this.send({ type: "browser_press", key, tab_id: tabId }); }
   browserClose(tabId?: string): void { this.send({ type: "browser_close", tab_id: tabId }); }
 
+  terminalOpen(rows: number, cols: number): void {
+    this.send({ type: "terminal_open", rows, cols });
+  }
+
+  terminalInput(terminalId: string, bytes: Uint8Array | number[]): void {
+    this.send({
+      type: "terminal_input",
+      terminal_id: terminalId,
+      bytes: Array.isArray(bytes) ? bytes : Array.from(bytes),
+    });
+  }
+
+  terminalResize(terminalId: string, rows: number, cols: number): void {
+    this.send({ type: "terminal_resize", terminal_id: terminalId, rows, cols });
+  }
+
+  terminalClose(terminalId: string): void {
+    this.send({ type: "terminal_close", terminal_id: terminalId });
+  }
+
   // -------------------------------------------------------------------------
   // Event registration
   // -------------------------------------------------------------------------
@@ -1953,6 +2056,8 @@ export class MewClient {
           devices: msg.devices,
           ...(msg.automation !== undefined ? { automation: msg.automation } : {}),
           ...(msg.remote !== undefined ? { remote: msg.remote } : {}),
+          ...(msg.web_search !== undefined ? { web_search: msg.web_search } : {}),
+          ...(msg.router !== undefined ? { router: msg.router } : {}),
         });
         break;
       case "pairing_invite":
@@ -1979,6 +2084,7 @@ export class MewClient {
         this.emit("session-ready", {
           session_id: msg.session_id,
           cwd: msg.cwd,
+          scratch: msg.scratch,
           model: msg.model,
           provider: msg.provider,
           permission_mode: msg.permission_mode,
@@ -2383,6 +2489,18 @@ export class MewClient {
           ...(msg.removed !== undefined ? { removed: msg.removed } : {}),
           ...(msg.summary !== undefined ? { summary: msg.summary } : {}),
         });
+        break;
+      case "terminal_opened":
+        this.emit("terminal-opened", { terminal_id: msg.terminal_id });
+        break;
+      case "terminal_output":
+        this.emit("terminal-output", { terminal_id: msg.terminal_id, bytes: msg.bytes });
+        break;
+      case "terminal_exited":
+        this.emit("terminal-exited", { terminal_id: msg.terminal_id, status: msg.status });
+        break;
+      case "terminal_error":
+        this.emit("terminal-error", { terminal_id: msg.terminal_id ?? null, message: msg.message });
         break;
       default: {
         // Exhaustiveness check: adding a new ServerMessage variant

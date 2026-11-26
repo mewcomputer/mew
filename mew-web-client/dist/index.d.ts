@@ -26,6 +26,23 @@ export interface RemoteAccessInfo {
     enabled: boolean;
     node_id?: string | null;
 }
+export interface WebSearchProviderInfo {
+    id: string;
+    configured: boolean;
+}
+export interface WebSearchInfo {
+    enabled: boolean;
+    provider: string;
+    providers: WebSearchProviderInfo[];
+}
+export interface RouterTierInfo {
+    id: string;
+    model: string;
+}
+export interface RouterInfo {
+    provider: string;
+    tiers: RouterTierInfo[];
+}
 export interface PairingInvite {
     request_id: string;
     node_id: string;
@@ -38,6 +55,8 @@ export interface DaemonSettings {
     devices: PairedDevice[] | null;
     automation?: AutomationSettingsInfo | null;
     remote?: RemoteAccessInfo | null;
+    web_search?: WebSearchInfo | null;
+    router?: RouterInfo | null;
 }
 export type ClientMessage = {
     type: "remote_hello";
@@ -46,6 +65,7 @@ export type ClientMessage = {
 } | {
     type: "new_session";
     cwd: string | null;
+    scratch?: boolean;
     client_kind: string;
 } | {
     type: "attach_session";
@@ -120,6 +140,18 @@ export type ClientMessage = {
 } | {
     type: "set_remote_access";
     enabled: boolean;
+    request_id: string;
+} | {
+    type: "set_web_search_settings";
+    enabled?: boolean;
+    provider?: string;
+    request_id: string;
+} | {
+    type: "set_router_tiers";
+    provider: string;
+    nano: string;
+    micro: string;
+    deci: string;
     request_id: string;
 } | {
     type: "create_pairing_invite";
@@ -320,6 +352,22 @@ export type ClientMessage = {
     type: "remove_queued_message";
     session_id: string;
     id: string;
+} | {
+    type: "terminal_open";
+    rows: number;
+    cols: number;
+} | {
+    type: "terminal_input";
+    terminal_id: string;
+    bytes: number[];
+} | {
+    type: "terminal_resize";
+    terminal_id: string;
+    rows: number;
+    cols: number;
+} | {
+    type: "terminal_close";
+    terminal_id: string;
 };
 export type QueueMode = "follow_up" | "steer";
 export interface QueuedMessageWire {
@@ -384,6 +432,15 @@ export type Part = PartBase & ({
     mime: string;
     filename?: string;
     url: string;
+} | {
+    type: "artifact";
+    artifact_id: string;
+    title: string;
+    url: string;
+    mode: "panel" | "inline";
+    height?: number;
+    source_path?: string;
+    version?: number;
 } | {
     type: "compaction";
     auto: boolean;
@@ -605,6 +662,7 @@ export interface SessionInfo {
     summary?: string;
     client_count: number;
     cwd?: string;
+    scratch?: boolean;
     last_turn_failed?: boolean;
     archived?: boolean;
     pinned?: boolean;
@@ -796,6 +854,7 @@ export type ServerMessage = {
     type: "session_ready";
     session_id: string;
     cwd?: string;
+    scratch?: boolean;
     model?: string;
     provider?: string;
     permission_mode?: string;
@@ -1122,6 +1181,21 @@ export type ServerMessage = {
     active: boolean;
     removed?: number;
     summary?: string;
+} | {
+    type: "terminal_opened";
+    terminal_id: string;
+} | {
+    type: "terminal_output";
+    terminal_id: string;
+    bytes: number[];
+} | {
+    type: "terminal_exited";
+    terminal_id: string;
+    status: string;
+} | {
+    type: "terminal_error";
+    terminal_id?: string | null;
+    message: string;
 };
 export interface MewWebSocket {
     send(data: string): void;
@@ -1159,6 +1233,7 @@ export interface MewClientEvents {
     "session-ready": (data: {
         session_id: string;
         cwd?: string;
+        scratch?: boolean;
         model?: string;
         provider?: string;
         permission_mode?: string;
@@ -1468,6 +1543,21 @@ export interface MewClientEvents {
     "remote-ready": (data: {
         scope: "observe" | "collaborate" | "control";
     }) => void;
+    "terminal-opened": (data: {
+        terminal_id: string;
+    }) => void;
+    "terminal-output": (data: {
+        terminal_id: string;
+        bytes: number[];
+    }) => void;
+    "terminal-exited": (data: {
+        terminal_id: string;
+        status: string;
+    }) => void;
+    "terminal-error": (data: {
+        terminal_id: string | null;
+        message: string;
+    }) => void;
 }
 export type MewEventName = keyof MewClientEvents;
 export interface MewClientOptions {
@@ -1524,7 +1614,9 @@ export declare class MewClient {
     isSessionStable(sessionId: string): boolean;
     private requestSession;
     /** Send `new_session`. Resolves with the daemon-assigned session id. */
-    newSession(cwd?: string | null): Promise<string>;
+    newSession(cwd?: string | null, options?: {
+        scratch?: boolean;
+    }): Promise<string>;
     /** Send `prompt`. Streaming events are emitted via the registered handlers. */
     prompt(text: string, attachments?: Attachment[]): void;
     /** Resolve only when the daemon accepts the prompt in the specified session. */
@@ -1587,6 +1679,16 @@ export declare class MewClient {
     resetSessionDefaults(requestId: string): void;
     revokeDevice(deviceId: string, requestId: string): void;
     setRemoteAccess(enabled: boolean, requestId: string): void;
+    setWebSearchSettings(settings: {
+        enabled?: boolean;
+        provider?: string;
+    }, requestId: string): void;
+    setRouterTiers(tiers: {
+        provider: string;
+        nano: string;
+        micro: string;
+        deci: string;
+    }, requestId: string): void;
     createPairingInvite(requestId: string, options?: {
         scope?: "observe" | "collaborate" | "control";
         ttlSecs?: number;
@@ -1684,6 +1786,10 @@ export declare class MewClient {
     browserFill(selector: string, text: string, tabId?: string): void;
     browserPress(key: string, tabId?: string): void;
     browserClose(tabId?: string): void;
+    terminalOpen(rows: number, cols: number): void;
+    terminalInput(terminalId: string, bytes: Uint8Array | number[]): void;
+    terminalResize(terminalId: string, rows: number, cols: number): void;
+    terminalClose(terminalId: string): void;
     on<E extends MewEventName>(event: E, cb: MewClientEvents[E]): void;
     off<E extends MewEventName>(event: E, cb: MewClientEvents[E]): void;
     private emit;

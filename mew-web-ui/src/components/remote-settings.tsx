@@ -133,7 +133,7 @@ export function RemoteSettings({
               ? enabled
                 ? "Stopping iroh listener…"
                 : "Connecting to iroh relay…"
-              : "Accept authenticated peer-to-peer connections from paired devices"
+              : "Accept authenticated peer-to-peer connections from paired devices. This setting is remembered across restarts"
           }
           trailing={
             <SettingsSwitch

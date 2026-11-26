@@ -42,14 +42,19 @@ export function splitTurnParts(messages: ChatMessage[]): { work: MessagePart[]; 
   let start = last.parts.length;
   while (start > 0) {
     const part = last.parts[start - 1];
-    if (part?.type === "text" && part.text.trim()) start -= 1;
+    if ((part?.type === "text" && part.text.trim()) || part?.type === "artifact") start -= 1;
     else break;
   }
 
   const earlier = assistants.slice(0, -1).flatMap((message) => message.parts);
+  const preResponse = [...earlier, ...last.parts.slice(0, start)];
+  const liftedArtifacts = preResponse.filter((part) => part.type === "artifact");
   return {
-    work: [...earlier, ...last.parts.slice(0, start)].filter((part) => part.type !== "compaction"),
-    response: last.parts.slice(start).filter((part) => part.type !== "compaction"),
+    work: preResponse.filter((part) => part.type !== "compaction" && part.type !== "artifact"),
+    response: [
+      ...liftedArtifacts,
+      ...last.parts.slice(start).filter((part) => part.type !== "compaction"),
+    ],
   };
 }
 

@@ -55,6 +55,31 @@ describe("splitTurnParts", () => {
     expect(work[0]?.type).toBe("tool-call");
     expect(response).toEqual([{ type: "text", text: "done" }]);
   });
+
+  it("lifts artifact parts from earlier rounds into response while keeping tool calls in work", () => {
+    const artifact = {
+      type: "artifact" as const,
+      artifactId: "art_1",
+      title: "Sign Maker",
+      url: "/artifacts/sess_1/art_1/index.html",
+      mode: "panel" as const,
+    };
+    const { work, response } = splitTurnParts([
+      {
+        id: "a1",
+        role: "assistant",
+        timestamp: 0,
+        parts: [
+          { type: "tool-call", toolName: "present_artifact", callId: "c1", input: {}, state: "completed" },
+          artifact,
+        ],
+      },
+      { id: "a2", role: "assistant", timestamp: 1, parts: [{ type: "text", text: "made you a sign generator." }] },
+    ]);
+    expect(work).toHaveLength(1);
+    expect(work[0]?.type).toBe("tool-call");
+    expect(response).toEqual([artifact, { type: "text", text: "made you a sign generator." }]);
+  });
 });
 
 describe("formatDuration", () => {

@@ -69,6 +69,16 @@ export type MessagePart =
       time?: { start: number; end: number | null };
     }
   | { type: "file"; mime: string; filename?: string; url: string }
+  | {
+      type: "artifact";
+      artifactId: string;
+      title: string;
+      url: string;
+      mode: "panel" | "inline";
+      height?: number;
+      sourcePath?: string;
+      version?: number;
+    }
   | { type: "compaction"; summary: string; removed?: number }
   | { type: "error"; message: string };
 
@@ -174,6 +184,17 @@ function wirePartToMessagePart(part: Part, role?: Message["role"]): MessagePart 
       return null;
     case "file":
       return { type: "file", mime: part.mime, filename: part.filename, url: part.url };
+    case "artifact":
+      return {
+        type: "artifact",
+        artifactId: part.artifact_id,
+        title: part.title,
+        url: part.url,
+        mode: part.mode,
+        height: part.height,
+        sourcePath: part.source_path,
+        version: part.version,
+      };
     case "compaction":
       return {
         type: "compaction",
@@ -313,6 +334,7 @@ interface SessionState {
   confirmedSessionId: string | null;
   sessionActivity: SessionInfo["state"] | null;
   sessionCwd: string | null;
+  sessionScratch: boolean;
 
   // Messages
   messages: ChatMessage[];
@@ -554,6 +576,7 @@ function resetSessionState() {
     contextTokensKnown: true,
     contextWindow: 0,
     sessionCwd: null,
+    sessionScratch: false,
     sessionActivity: null,
     flaggedFiles: [],
     attachedClients: [],
@@ -570,6 +593,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   confirmedSessionId: null,
   sessionActivity: null,
   sessionCwd: null,
+  sessionScratch: false,
   messages: [],
   sessionIndex: [],
   historyCursor: null,
@@ -740,6 +764,27 @@ export const useSessionStore = create<SessionState>((set, get) => ({
                 id: crypto.randomUUID(),
                 role: "assistant" as const,
                 parts: [{ type: "reasoning" as const, text: "", streaming: true }],
+                timestamp: Date.now(),
+              });
+            }
+            return { messages: msgs };
+          });
+        } else if (ev.part.type === "artifact") {
+          const artifactPart = wirePartToMessagePart(ev.part);
+          if (!artifactPart) return;
+          set((s) => {
+            const msgs = [...s.messages];
+            const last = msgs[msgs.length - 1];
+            if (last && last.role === "assistant") {
+              msgs[msgs.length - 1] = {
+                ...last,
+                parts: [...last.parts, artifactPart],
+              };
+            } else {
+              msgs.push({
+                id: crypto.randomUUID(),
+                role: "assistant" as const,
+                parts: [artifactPart],
                 timestamp: Date.now(),
               });
             }
@@ -1662,6 +1707,7 @@ export function bridgeClientToStore(client: MewClient) {
       sessionId: data.session_id,
       confirmedSessionId: data.session_id,
       sessionCwd: data.cwd ?? null,
+      sessionScratch: Boolean(data.scratch),
       contextTokensKnown: active?.context_tokens !== undefined,
       contextTokens: active?.context_tokens ?? 0,
       ...(data.model && data.provider

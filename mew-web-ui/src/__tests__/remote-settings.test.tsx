@@ -61,6 +61,7 @@ it("shows unsupported message when daemon lacks iroh feature", async () => {
   const toggle = screen.getByRole("switch", { name: "Enable remote access" });
   expect(toggle.hasAttribute("disabled")).toBe(true);
   expect(screen.getByText(/This daemon binary was built without the/i)).toBeTruthy();
+  expect(screen.getByText(/remembered across restarts/i)).toBeTruthy();
 });
 
 it("enables remote access, renders pairing QR invite, and revokes devices", async () => {

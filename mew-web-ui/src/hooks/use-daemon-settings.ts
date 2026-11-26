@@ -5,20 +5,36 @@ import type {
   PairedDevice,
   PairingInvite,
   RemoteAccessInfo,
+  RouterInfo,
+  WebSearchInfo,
 } from "@mew/web-client";
 
 export interface DaemonSettingsState {
   settings: DaemonSettings | null;
   remote: RemoteAccessInfo | null;
+  webSearch: WebSearchInfo | null;
+  router: RouterInfo | null;
   devices: PairedDevice[];
   invite: PairingInvite | null;
   loading: boolean;
   pendingRemote: boolean;
   pendingInvite: boolean;
+  pendingWebSearch: boolean;
+  pendingRouter: boolean;
   revokingDeviceId: string | null;
   error: string | null;
   refresh: () => void;
   setRemoteEnabled: (enabled: boolean) => void;
+  setWebSearchSettings: (settings: {
+    enabled?: boolean;
+    provider?: string;
+  }) => void;
+  setRouterTiers: (tiers: {
+    provider: string;
+    nano: string;
+    micro: string;
+    deci: string;
+  }) => void;
   createPairingInvite: (
     scope?: "observe" | "collaborate" | "control",
     ttlSecs?: number,
@@ -42,12 +58,16 @@ export function useDaemonSettings(
   const [loading, setLoading] = useState(false);
   const [pendingRemote, setPendingRemote] = useState(false);
   const [pendingInvite, setPendingInvite] = useState(false);
+  const [pendingWebSearch, setPendingWebSearch] = useState(false);
+  const [pendingRouter, setPendingRouter] = useState(false);
   const [revokingDeviceId, setRevokingDeviceId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const remoteReqId = useRef<string | null>(null);
   const inviteReqId = useRef<string | null>(null);
   const revokeReqId = useRef<string | null>(null);
+  const webSearchReqId = useRef<string | null>(null);
+  const routerReqId = useRef<string | null>(null);
 
   const refresh = useCallback(() => {
     if (!connected) return;
@@ -68,10 +88,14 @@ export function useDaemonSettings(
       setLoading(false);
       setPendingRemote(false);
       setPendingInvite(false);
+      setPendingWebSearch(false);
+      setPendingRouter(false);
       setRevokingDeviceId(null);
       remoteReqId.current = null;
       inviteReqId.current = null;
       revokeReqId.current = null;
+      webSearchReqId.current = null;
+      routerReqId.current = null;
       return;
     }
 
@@ -86,6 +110,14 @@ export function useDaemonSettings(
         remoteReqId.current = null;
         setPendingRemote(false);
       }
+      if (next.request_id && next.request_id === webSearchReqId.current) {
+        webSearchReqId.current = null;
+        setPendingWebSearch(false);
+      }
+      if (next.request_id && next.request_id === routerReqId.current) {
+        routerReqId.current = null;
+        setPendingRouter(false);
+      }
       if (next.request_id && next.request_id === revokeReqId.current) {
         revokeReqId.current = null;
         setRevokingDeviceId(null);
@@ -94,6 +126,14 @@ export function useDaemonSettings(
         if (remoteReqId.current) {
           remoteReqId.current = null;
           setPendingRemote(false);
+        }
+        if (webSearchReqId.current) {
+          webSearchReqId.current = null;
+          setPendingWebSearch(false);
+        }
+        if (routerReqId.current) {
+          routerReqId.current = null;
+          setPendingRouter(false);
         }
         if (revokeReqId.current) {
           revokeReqId.current = null;
@@ -116,6 +156,12 @@ export function useDaemonSettings(
       if (failure.request_id === remoteReqId.current) {
         remoteReqId.current = null;
         setPendingRemote(false);
+      } else if (failure.request_id === webSearchReqId.current) {
+        webSearchReqId.current = null;
+        setPendingWebSearch(false);
+      } else if (failure.request_id === routerReqId.current) {
+        routerReqId.current = null;
+        setPendingRouter(false);
       } else if (failure.request_id === inviteReqId.current) {
         inviteReqId.current = null;
         setPendingInvite(false);
@@ -152,6 +198,40 @@ export function useDaemonSettings(
         remoteReqId.current = null;
         setPendingRemote(false);
         setError(reason instanceof Error ? reason.message : "Could not update remote access.");
+      }
+    },
+    [client],
+  );
+
+  const setWebSearchSettings = useCallback(
+    (settings: { enabled?: boolean; provider?: string }) => {
+      const id = nextRequestId("web-search-settings");
+      webSearchReqId.current = id;
+      setError(null);
+      setPendingWebSearch(true);
+      try {
+        client.setWebSearchSettings(settings, id);
+      } catch (reason) {
+        webSearchReqId.current = null;
+        setPendingWebSearch(false);
+        setError(reason instanceof Error ? reason.message : "Could not update web search.");
+      }
+    },
+    [client],
+  );
+
+  const setRouterTiers = useCallback(
+    (tiers: { provider: string; nano: string; micro: string; deci: string }) => {
+      const id = nextRequestId("router-tiers");
+      routerReqId.current = id;
+      setError(null);
+      setPendingRouter(true);
+      try {
+        client.setRouterTiers(tiers, id);
+      } catch (reason) {
+        routerReqId.current = null;
+        setPendingRouter(false);
+        setError(reason instanceof Error ? reason.message : "Could not update model sizes.");
       }
     },
     [client],
@@ -196,15 +276,21 @@ export function useDaemonSettings(
   return {
     settings,
     remote: settings?.remote ?? null,
+    webSearch: settings?.web_search ?? null,
+    router: settings?.router ?? null,
     devices: settings?.devices ?? [],
     invite,
     loading,
     pendingRemote,
     pendingInvite,
+    pendingWebSearch,
+    pendingRouter,
     revokingDeviceId,
     error,
     refresh,
     setRemoteEnabled,
+    setWebSearchSettings,
+    setRouterTiers,
     createPairingInvite,
     revokeDevice,
     clearInvite,

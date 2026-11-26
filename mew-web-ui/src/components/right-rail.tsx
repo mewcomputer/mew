@@ -29,7 +29,10 @@ import {
 import { getClient } from "../lib/client-ref";
 import { isElectronHost } from "../lib/host";
 import { FileTreePanel, ChangesPanel } from "./file-tree";
+import { isMarkdownPath } from "./file-workbench";
 import { BrowserPanel } from "./browser-panel";
+import { TerminalPanel } from "./terminal-panel";
+import { ArtifactFrame, collectArtifactVersions, isSafeArtifactUrl } from "./artifact-frame";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { FrameWorkbenchTitlebar, useOptionalWorkspaceFrame } from "./workspace-frame";
@@ -45,7 +48,7 @@ const NEW_TAB_TOOLS: ReadonlyArray<{
   icon: LucideIcon;
 }> = [
   { kind: "changes", label: "Changes", description: "Inspect the active working tree", icon: GitBranch },
-  { kind: "terminal", label: "Terminal", description: "Run and inspect background commands", icon: Terminal },
+  { kind: "terminal", label: "Terminal", description: "Interactive shell in the active workspace", icon: Terminal },
   { kind: "file", label: "Files", description: "Browse the active project files", icon: Folder },
   { kind: "review", label: "Review", description: "Inspect and review working-tree changes", icon: GitPullRequest },
 ];
@@ -105,6 +108,7 @@ export function RightRail({
   const sessionId = useSessionStore((s) => s.sessionId);
   const sessionCwd = useSessionStore((s) => s.sessionCwd);
   const availableSessions = useSessionStore((s) => s.availableSessions);
+  const sessionScratch = useSessionStore((s) => s.sessionScratch);
   const electron = isElectronHost();
   const currentOwner = workbenchSessionId ?? sessionId ?? undefined;
   const tabValue = (id: string, owner = currentOwner) => electron ? `${owner}/${id}` : id;
@@ -114,8 +118,9 @@ export function RightRail({
   ];
   // Moving an attached webview through the DOM can destroy its guest process.
   if (electron) renderedTabs.sort((a, b) => tabValue(a.tab.id, a.owner).localeCompare(tabValue(b.tab.id, b.owner)));
+  const activeSession = availableSessions.find((s) => s.session_id === sessionId);
   const sessionHasWorkspace = Boolean(
-    sessionCwd || availableSessions.find((s) => s.session_id === sessionId)?.cwd,
+    sessionCwd || activeSession?.cwd || activeSession?.scratch || sessionScratch,
   );
 
   const addWorkbenchTab = (kind: WorkbenchTabKind) => {
@@ -130,15 +135,16 @@ export function RightRail({
     addWorkbenchTab("browser");
   };
 
-  const openChangedFile = (path: string) => {
+  const openChangedFile = (path: string, fromLink = false) => {
     const existing = selectedWorkbenchTabs.tabs.find((tab) => tab.kind === "file");
     const paths = Array.isArray(existing?.payload?.files?.openPaths) ? existing.payload.files.openPaths : [];
-    const files = { openPaths: paths.includes(path) ? paths : [...paths, path], activePath: path };
+    const files = { ...existing?.payload?.files, openPaths: paths.includes(path) ? paths : [...paths, path], activePath: path, ...(!existing && fromLink && isMarkdownPath(path) ? { explorerVisible: false } : {}) };
     if (existing && paths.includes(path)) setFileRefresh({ tabId: existing.id, owner: currentOwner, path });
     if (!existing) {
-      applyWorkbenchAction({ type: "add", tab: createWorkbenchTab("file", {
+      const tab = createWorkbenchTab("file", {
         sessionId: sessionId ?? undefined, cwd: sessionCwd ?? undefined, payload: { files },
-      }) });
+      });
+      applyWorkbenchAction({ type: "add", tab });
       return;
     }
     const update: WorkbenchTabsAction = { type: "update", id: existing.id, patch: { payload: { ...existing.payload, files } } };
@@ -160,10 +166,66 @@ export function RightRail({
       const detail = (event as CustomEvent<{ sessionId?: string | null; path?: string }>).detail;
       if (!detail?.path || detail.sessionId !== sessionId) return;
       openChangeRef.current(true);
-      openFileRef.current(detail.path);
+      openFileRef.current(detail.path, true);
     };
     window.addEventListener("mew:open-file", receive);
     return () => window.removeEventListener("mew:open-file", receive);
+  }, [sessionId]);
+
+  const tabsStateRef = useRef(selectedWorkbenchTabs);
+  tabsStateRef.current = selectedWorkbenchTabs;
+  const applyActionRef = useRef(applyWorkbenchAction);
+  applyActionRef.current = applyWorkbenchAction;
+  useEffect(() => {
+    const receive = (event: Event) => {
+      const detail = (event as CustomEvent<{
+        sessionId?: string | null;
+        title?: string;
+        url?: string;
+        sourcePath?: string;
+        version?: number;
+      }>).detail;
+      if (!isSafeArtifactUrl(detail?.url)) return;
+      if (detail.sessionId != null && detail.sessionId !== sessionId) return;
+      openChangeRef.current(true);
+      const existing = tabsStateRef.current.tabs.find(
+        (tab) =>
+          tab.kind === "artifact" &&
+          ((detail.sourcePath && tab.payload?.sourcePath === detail.sourcePath) ||
+            tab.payload?.url === detail.url),
+      );
+      if (existing) {
+        applyActionRef.current({
+          type: "update",
+          id: existing.id,
+          patch: {
+            title: detail.title?.trim() || existing.title,
+            payload: {
+              ...existing.payload,
+              url: detail.url,
+              sourcePath: detail.sourcePath ?? existing.payload?.sourcePath,
+              version: detail.version ?? existing.payload?.version,
+            },
+          },
+        });
+        applyActionRef.current({ type: "select", id: existing.id });
+        return;
+      }
+      applyActionRef.current({
+        type: "add",
+        tab: createWorkbenchTab("artifact", {
+          title: detail.title?.trim() || "Artifact",
+          sessionId: sessionId ?? undefined,
+          payload: {
+            url: detail.url,
+            sourcePath: detail.sourcePath,
+            version: detail.version,
+          },
+        }),
+      });
+    };
+    window.addEventListener("mew:open-artifact", receive);
+    return () => window.removeEventListener("mew:open-artifact", receive);
   }, [sessionId]);
 
   // When the Files or Changes tab is opened, enable workspace watching so
@@ -359,7 +421,7 @@ export function RightRail({
             <TabsContent
               key={electron ? `${owner}/${tab.id}` : tab.id}
               value={tabValue(tab.id, owner)}
-              forceMount
+              forceMount={tab.kind === "artifact" ? undefined : true}
               hidden={!selected}
               className={cn(
                 "mt-0 h-full min-h-0 overflow-hidden focus-visible:outline-none",
@@ -411,6 +473,35 @@ export function RightRail({
             </div>
           </div>}
         />;
+      case "artifact": {
+        const versions = collectArtifactVersions(useSessionStore.getState().messages, {
+          sourcePath: tab.payload?.sourcePath,
+          title: tab.title,
+        });
+        return (
+          <ArtifactFrame
+            title={tab.title}
+            url={tab.payload?.url}
+            mode="panel"
+            version={tab.payload?.version}
+            versions={versions}
+            onSelectVersion={(entry) =>
+              applyWorkbenchAction({
+                type: "update",
+                id: tab.id,
+                patch: {
+                  title: entry.title,
+                  payload: {
+                    ...tab.payload,
+                    url: entry.url,
+                    version: entry.version,
+                  },
+                },
+              })
+            }
+          />
+        );
+      }
       case "file":
         if (workbenchSessionId && workbenchSessionId !== sessionId) return null;
         return (
@@ -435,7 +526,17 @@ export function RightRail({
         if (workbenchSessionId && workbenchSessionId !== sessionId) return null;
         return <div className="h-full min-h-0 overflow-y-auto p-3"><ReviewPanel gitStatus={gitStatus} statusError={gitStatusError} statusLoaded={gitStatusLoaded} hasWorkspace={sessionHasWorkspace} /></div>;
       case "terminal":
-        return <TerminalWorkbenchPanel jobs={jobs} />;
+        return (
+          <TerminalPanel
+            client={getClient()}
+            connected={connected}
+            active={open && active}
+            sessionId={confirmedSessionId ?? sessionId}
+            sessionCwd={sessionCwd}
+            jobCount={jobs.size}
+            jobsPanel={<JobsRailPanel jobs={jobs} />}
+          />
+        );
     }
   }
 
@@ -575,6 +676,8 @@ function workbenchTabMeta(kind: WorkbenchTabKind): {
       return { label: "Jobs", icon: Terminal };
     case "browser":
       return { label: "Browser", icon: Globe };
+    case "artifact":
+      return { label: "Artifact", icon: Globe };
     case "terminal":
       return { label: "Terminal", icon: Terminal };
     case "file":
@@ -584,25 +687,6 @@ function workbenchTabMeta(kind: WorkbenchTabKind): {
     case "review":
       return { label: "Review", icon: GitPullRequest };
   }
-}
-
-function TerminalWorkbenchPanel({ jobs }: { jobs: Map<string, JobInfo> }) {
-  return (
-    <div className="flex h-full min-h-0 flex-col gap-3 p-3">
-      <div className="rounded-lg border border-border bg-background/60 p-3">
-        <div className="flex items-center gap-2 text-xs font-medium text-foreground">
-          <Terminal className="h-3.5 w-3.5 text-primary" />
-          Terminal
-        </div>
-        <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
-          interactive terminal sessions will attach here. background command output is available below for now.
-        </p>
-      </div>
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        <JobsRailPanel jobs={jobs} />
-      </div>
-    </div>
-  );
 }
 
 function SubagentRailPanel({ subagents, parentId, active }: {

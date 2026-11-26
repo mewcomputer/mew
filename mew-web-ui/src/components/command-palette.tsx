@@ -62,7 +62,10 @@ export function CommandPalette({ client, open, onOpenChange }: CommandPalettePro
 
   const handleNewSession = async (cwd: string | null = null) => {
     if (!client) return;
-    const newId = await createAndOpenSession(client, router, { cwd });
+    const newId = await createAndOpenSession(client, router, {
+      cwd,
+      scratch: cwd === null,
+    });
     if (newId) onOpenChange(false);
   };
 

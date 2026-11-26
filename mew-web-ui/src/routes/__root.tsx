@@ -43,7 +43,7 @@ function RootComponent() {
         store.setConnectionError("Connect to the daemon before creating a chat.");
         return;
       }
-      void createAndOpenSession(client, router, { errorMessage: "Could not create a chat." });
+      void createAndOpenSession(client, router, { scratch: true, errorMessage: "Could not create a chat." });
     };
     const keyboard = (event: KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey)) return;

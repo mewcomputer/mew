@@ -60,26 +60,28 @@ function HostStartupError({ error, onRetry }: { error: unknown; onRetry: () => P
   };
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-background p-6 text-foreground">
-      <section className="w-full max-w-md space-y-5 rounded-xl border border-border bg-card p-6 shadow-sm">
-        <div className="flex items-start gap-3">
-          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-destructive/10 text-destructive">
-            <Server className="h-4 w-4" />
-          </span>
-          <div className="space-y-1">
-            <h1 className="text-base font-semibold">mew could not reach its daemon</h1>
-            <p className="text-sm text-muted-foreground">
-              The web client could not connect to the coding runtime.
-            </p>
+    <div className="h-full overflow-y-auto bg-background text-foreground">
+      <main className="flex min-h-full items-center justify-center p-6">
+        <section className="w-full max-w-md space-y-5 rounded-xl border border-border bg-card p-6 shadow-sm">
+          <div className="flex items-start gap-3">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-destructive/10 text-destructive">
+              <Server className="h-4 w-4" />
+            </span>
+            <div className="space-y-1">
+              <h1 className="text-base font-semibold">mew could not reach its daemon</h1>
+              <p className="text-sm text-muted-foreground">
+                The web client could not connect to the coding runtime.
+              </p>
+            </div>
           </div>
-        </div>
-        <p className="rounded-md bg-muted px-3 py-2 font-mono text-xs text-muted-foreground">{message}</p>
-        <Button onClick={handleRetry} disabled={retrying} className="w-full">
-          <RefreshCw className={retrying ? "h-3.5 w-3.5 animate-spin" : "h-3.5 w-3.5"} />
-          {retrying ? "Retrying…" : "Retry connection"}
-        </Button>
-      </section>
-    </main>
+          <p className="rounded-md bg-muted px-3 py-2 font-mono text-xs text-muted-foreground">{message}</p>
+          <Button onClick={handleRetry} disabled={retrying} className="w-full">
+            <RefreshCw className={retrying ? "h-3.5 w-3.5 animate-spin" : "h-3.5 w-3.5"} />
+            {retrying ? "Retrying…" : "Retry connection"}
+          </Button>
+        </section>
+      </main>
+    </div>
   );
 }
 

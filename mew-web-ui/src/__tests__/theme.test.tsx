@@ -41,6 +41,8 @@ describe("appearance", () => {
     expect(light.length).toBeGreaterThan(0);
     expect(dark.length).toBeGreaterThan(0);
     expect(light.length + dark.length).toBe(THEMES.length);
+    expect(dark.find((t) => t.id === "argenteus-dim")?.name).toBe("Argenteus dim");
+    expect(dark.find((t) => t.id === "jianghu-dim")?.name).toBe("Jianghu dim");
 
     function PairReader() {
       const { themeMode, lightTheme, darkTheme, setThemeMode, setLightTheme, setDarkTheme } = useTheme();

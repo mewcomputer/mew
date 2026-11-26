@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { parseRequest, isAppUrl, guestRequestAllowed, browserProtection, debugEndpoint, canonicalUrl } = require('./policy.cjs');
+const { parseRequest, isAppUrl, hostPermissionAllowed, contextMenuTemplate, guestRequestAllowed, browserProtection, debugEndpoint, canonicalUrl } = require('./policy.cjs');
 
 test('host requests reject malformed, oversized and ambiguous input', () => {
   for (const value of [null, '{}', 'null', '{', JSON.stringify({ type: 'bootstrap', extra: true }), ' '.repeat(16385)]) {
@@ -30,6 +30,42 @@ test('only the exact local app origin is privileged', () => {
   for (const value of ['mew://other/', 'file:///app.html', 'https://app/', 'mew://user@app/']) {
     assert.equal(isAppUrl(value, 'mew://app/'), false);
   }
+});
+
+test('host session allows only sanitized clipboard writes for the app origin', () => {
+  for (const origin of ['mew://app/', 'mew://app/session/test', 'mew://app']) {
+    assert.equal(hostPermissionAllowed('clipboard-sanitized-write', origin, 'mew://app/'), true);
+  }
+  for (const origin of ['mew://other/', 'https://example.com/', '', undefined]) {
+    assert.equal(hostPermissionAllowed('clipboard-sanitized-write', origin, 'mew://app/'), false);
+  }
+  for (const permission of ['clipboard-read', 'notifications', 'geolocation', 'media']) {
+    assert.equal(hostPermissionAllowed(permission, 'mew://app/', 'mew://app/'), false);
+  }
+});
+
+test('context menu shows copy and edit actions only when applicable', () => {
+  assert.deepEqual(contextMenuTemplate({ isEditable: false, selectionText: '' }), []);
+  assert.deepEqual(contextMenuTemplate({
+    isEditable: false,
+    selectionText: 'hello',
+    editFlags: { canCopy: true, canSelectAll: true },
+  }), [
+    { role: 'copy', enabled: true },
+    { type: 'separator' },
+    { role: 'selectAll', enabled: true },
+  ]);
+  assert.deepEqual(contextMenuTemplate({
+    isEditable: true,
+    selectionText: '',
+    editFlags: { canCut: false, canCopy: false, canPaste: true, canSelectAll: true },
+  }), [
+    { role: 'cut', enabled: false },
+    { role: 'copy', enabled: false },
+    { role: 'paste', enabled: true },
+    { type: 'separator' },
+    { role: 'selectAll', enabled: true },
+  ]);
 });
 
 test('guest traffic cannot reach host control ports through aliases or websockets', () => {

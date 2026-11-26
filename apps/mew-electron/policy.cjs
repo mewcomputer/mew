@@ -58,6 +58,30 @@ function isAppUrl(value, appUrl) {
   } catch { return false; }
 }
 
+function hostPermissionAllowed(permission, originOrUrl, appUrl) {
+  return permission === 'clipboard-sanitized-write' && isAppUrl(originOrUrl, appUrl);
+}
+
+function contextMenuTemplate(params) {
+  if (params?.isEditable) {
+    return [
+      { role: 'cut', enabled: Boolean(params.editFlags?.canCut) },
+      { role: 'copy', enabled: Boolean(params.editFlags?.canCopy) },
+      { role: 'paste', enabled: Boolean(params.editFlags?.canPaste) },
+      { type: 'separator' },
+      { role: 'selectAll', enabled: Boolean(params.editFlags?.canSelectAll) },
+    ];
+  }
+  if (params?.selectionText) {
+    return [
+      { role: 'copy', enabled: Boolean(params.editFlags?.canCopy ?? true) },
+      { type: 'separator' },
+      { role: 'selectAll', enabled: Boolean(params.editFlags?.canSelectAll ?? true) },
+    ];
+  }
+  return [];
+}
+
 function endpointPort(url) {
   return url.port || (['https:', 'wss:'].includes(url.protocol) ? '443' : '80');
 }
@@ -98,4 +122,4 @@ function debugEndpoint(contents) {
   return `http://127.0.0.1:${port}`;
 }
 
-module.exports = { parseRequest, isAppUrl, guestRequestAllowed, browserProtection, navigationUrl, canonicalUrl, debugEndpoint };
+module.exports = { parseRequest, isAppUrl, hostPermissionAllowed, contextMenuTemplate, guestRequestAllowed, browserProtection, navigationUrl, canonicalUrl, debugEndpoint };

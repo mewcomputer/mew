@@ -135,16 +135,17 @@ export function SessionRail({ client }: SessionRailProps) {
     }
   }, [client, connectionState, currentSessionId]);
 
-  const handleNewSession = async (cwd: string | null = null) => {
+  const handleNewSession = async (cwd: string | null = null, options?: { scratch?: boolean }) => {
     if (!client) return;
     const newId = await createAndOpenSession(client, router, {
       cwd,
+      scratch: options?.scratch,
       errorMessage: cwd
         ? "Could not create a session for that workspace."
         : "Could not create a session.",
     });
     if (!newId) return;
-    if (cwd !== null) setShowProjectPicker(false);
+    if (cwd !== null || options?.scratch) setShowProjectPicker(false);
     setOpenMobile(false);
   };
 
@@ -244,7 +245,7 @@ export function SessionRail({ client }: SessionRailProps) {
             else { searchRequested.current = true; setSearchOpen(true); }
           }}><Search className="h-3.5 w-3.5" /></Button>
         </div>
-        <Button onClick={() => handleNewSession()} disabled={!client || connectionState !== "connected"} variant="ghost" size="sm" className="h-8 w-full justify-start gap-2 rounded-lg border border-sidebar-border/80 bg-sidebar-accent/40 px-2.5 text-xs font-medium text-sidebar-foreground shadow-2xs hover:bg-sidebar-accent"><Plus className="h-3.5 w-3.5 text-muted-foreground" />New chat</Button>
+        <Button onClick={() => handleNewSession(null, { scratch: true })} disabled={!client || connectionState !== "connected"} variant="ghost" size="sm" className="h-8 w-full justify-start gap-2 rounded-lg border border-sidebar-border/80 bg-sidebar-accent/40 px-2.5 text-xs font-medium text-sidebar-foreground shadow-2xs hover:bg-sidebar-accent"><Plus className="h-3.5 w-3.5 text-muted-foreground" />New chat</Button>
         {searchOpen && <Input ref={searchInput} value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => {
           if (event.key !== "Escape") return;
           event.preventDefault();
@@ -387,6 +388,7 @@ export function SessionRail({ client }: SessionRailProps) {
         onOpenChange={setShowProjectPicker}
         projects={projects}
         onSelect={(cwd) => handleNewSession(cwd)}
+        onSelectScratch={() => handleNewSession(null, { scratch: true })}
       />
     </Sidebar>
   );
@@ -710,6 +712,7 @@ export function displaySessionTitle(customTitle?: string, s?: SessionInfo): stri
   const explicit = customTitle?.trim() || s?.title?.trim() || s?.first_message?.trim();
   if (explicit) return explicit;
   if (s?.model) return s.model.split("/").pop() ?? s.model;
+  if (s?.scratch) return "New scratch session";
   if (s?.cwd) return `New session · ${deriveWorkspaceName(s.cwd)}`;
   return "New session";
 }
@@ -748,7 +751,7 @@ export interface GroupedSection {
 export function groupByWorkspace(sorted: SessionInfo[]): GroupedSection[] {
   const map = new Map<string, SessionInfo[]>();
   for (const s of sorted) {
-    const key = s.cwd ?? "~";
+    const key = s.scratch ? "__scratch__" : (s.cwd ?? "~");
     const list = map.get(key) ?? [];
     list.push(s);
     map.set(key, list);
@@ -760,9 +763,9 @@ export function groupByWorkspace(sorted: SessionInfo[]): GroupedSection[] {
     const recentB = Math.max(...b[1].map((s) => s.last_message_at ?? s.created_at));
     return recentB - recentA;
   });
-  return entries.map(([cwd, items]) => ({
-    label: deriveWorkspaceName(cwd === "~" ? undefined : cwd),
-    cwd,
+  return entries.map(([key, items]) => ({
+    label: key === "__scratch__" ? "Scratch" : deriveWorkspaceName(key === "~" ? undefined : key),
+    cwd: key === "__scratch__" ? undefined : key,
     items,
   }));
 }
@@ -848,11 +851,13 @@ export function ProjectPickerModal({
   onOpenChange,
   projects,
   onSelect,
+  onSelectScratch,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   projects: ProjectInfo[];
   onSelect: (cwd: string) => void;
+  onSelectScratch?: () => void;
 }) {
   const [manualPath, setManualPath] = useState("");
   const [browseOpen, setBrowseOpen] = useState(false);
@@ -891,6 +896,17 @@ export function ProjectPickerModal({
           <DialogTitle>New session from project</DialogTitle>
         </DialogHeader>
         <div className="space-y-3">
+          {onSelectScratch && (
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full justify-start gap-2"
+              onClick={onSelectScratch}
+            >
+              <Plus className="h-4 w-4" />
+              <span>New scratch session (no folder)</span>
+            </Button>
+          )}
           <div className="rounded-md border border-border">
             <button
               type="button"

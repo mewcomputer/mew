@@ -19,6 +19,7 @@ import { cn } from "../lib/utils";
 import { normalizeFileWorkbenchState, type FileWorkbenchState } from "../lib/workbench-tabs";
 import { registerCustomTheme } from "@pierre/diffs";
 import { File } from "@pierre/diffs/react";
+import { MarkdownBody } from "./markdown-body";
 import { createCssVariablesTheme } from "shiki/core";
 import {
   ResizableHandle,
@@ -58,7 +59,7 @@ export function WorkspaceFileWorkbench({ hasWorkspace, fileState, onFileStateCha
   const [activePath, setActivePath] = useState<string | null>(() => normalizeFileWorkbenchState(fileState).activePath);
   const [previews, setPreviews] = useState<Map<string, FilePreview>>(() => new Map());
   const [filter, setFilter] = useState("");
-  const [explorerVisible, setExplorerVisible] = useState(true);
+  const [explorerVisible, setExplorerVisible] = useState(() => fileState?.explorerVisible ?? true);
   const [wrapLines, setWrapLines] = useState(false);
   const previewTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const directoryTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
@@ -198,7 +199,7 @@ export function WorkspaceFileWorkbench({ hasWorkspace, fileState, onFileStateCha
     const next = openPaths.includes(path) ? openPaths : [...openPaths, path];
     setActivePath(path);
     setOpenPaths(next);
-    onFileStateChange?.({ openPaths: next, activePath: path });
+    onFileStateChange?.({ openPaths: next, activePath: path, explorerVisible });
     if (previews.has(path)) return;
     const sid = useSessionStore.getState().sessionId;
     if (sid) requestPreview(sid, path);
@@ -219,7 +220,7 @@ export function WorkspaceFileWorkbench({ hasWorkspace, fileState, onFileStateCha
     setOpenPaths(next);
     const nextActive = activePath === path ? next[Math.max(0, index - 1)] ?? next[0] ?? null : activePath;
     setActivePath(nextActive);
-    onFileStateChange?.({ openPaths: next, activePath: nextActive });
+    onFileStateChange?.({ openPaths: next, activePath: nextActive, explorerVisible });
     if (nextActive && !previews.has(nextActive) && sessionId) requestPreview(sessionId, nextActive);
   };
 
@@ -247,7 +248,11 @@ export function WorkspaceFileWorkbench({ hasWorkspace, fileState, onFileStateCha
         {headerActions}
         <button
           type="button"
-          onClick={() => setExplorerVisible((visible) => !visible)}
+          onClick={() => {
+            const visible = !explorerVisible;
+            setExplorerVisible(visible);
+            onFileStateChange?.({ openPaths, activePath, explorerVisible: visible });
+          }}
           className={cn(
             "rounded p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
             explorerVisible && "bg-accent/70 text-foreground",
@@ -343,11 +348,11 @@ export function WorkspaceFileWorkbench({ hasWorkspace, fileState, onFileStateCha
               ))}
               </div>
               {activePath && previews.has(activePath) && !previews.get(activePath)?.error && <div className="flex shrink-0 items-center gap-0.5">
-                <button type="button" onClick={() => setWrapLines((wrapped) => !wrapped)}
+                {!isMarkdownPath(activePath) && <button type="button" onClick={() => setWrapLines((wrapped) => !wrapped)}
                   className={cn("rounded p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground", wrapLines && "bg-accent text-foreground")}
                   title={wrapLines ? "Stop wrapping lines" : "Wrap long lines"} aria-label={wrapLines ? "Stop wrapping lines" : "Wrap lines"} aria-pressed={wrapLines}>
                   <WrapText className="h-3 w-3" />
-                </button>
+                </button>}
                 <button type="button" onClick={() => openExternal(activePath)} className="rounded p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground" title="Open in default editor" aria-label="Open in default editor">
                   <ExternalLink className="h-3 w-3" />
                 </button>
@@ -474,11 +479,17 @@ function FileDocument({ preview, wrapLines }: { preview: FilePreview; wrapLines:
   return (
     <div className="flex min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-auto bg-muted/10 py-2">
-        <File
-          className="mew-file-preview"
-          file={{ name: preview.path, contents: preview.content }}
-          options={{ theme: "mew-file", disableFileHeader: true, overflow: wrapLines ? "wrap" : "scroll" }}
-        />
+        {isMarkdownPath(preview.path) ? (
+          <article className="typeset typeset-docs mx-auto w-full max-w-3xl px-6 py-6 text-foreground">
+            <MarkdownBody highlight>{preview.content}</MarkdownBody>
+          </article>
+        ) : (
+          <File
+            className="mew-file-preview"
+            file={{ name: preview.path, contents: preview.content }}
+            options={{ theme: "mew-file", disableFileHeader: true, overflow: wrapLines ? "wrap" : "scroll" }}
+          />
+        )}
         {preview.truncated && <p className="mt-2 px-3 text-[10px] italic text-muted-foreground">Preview truncated</p>}
       </div>
     </div>
@@ -495,6 +506,10 @@ function FileEditorEmptyState({ hasOpenFiles }: { hasOpenFiles: boolean }) {
       </p>
     </div>
   );
+}
+
+export function isMarkdownPath(path: string): boolean {
+  return /\.(?:md|markdown)$/i.test(path);
 }
 
 function normalizeRelativePath(path: string): string {

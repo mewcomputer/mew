@@ -1,6 +1,7 @@
 import {
   forwardRef,
   useRef,
+  useId,
   useState,
   useEffect,
   useLayoutEffect,
@@ -11,7 +12,7 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from "react";
-import { Square, Plus, X, ArrowUp, Shield, Loader2, File, CornerDownRight } from "lucide-react";
+import { Square, Plus, X, ArrowUp, Shield, Loader2, File, CornerDownRight, Paperclip, Sparkles, Cpu, Bot, UserRound } from "lucide-react";
 import { cn } from "../lib/utils";
 import { selectSessionRunning, useSessionStore } from "../stores/session";
 import { useSidebar } from "@/components/ui/sidebar";
@@ -51,6 +52,7 @@ interface MentionItem {
   secondary?: string;
   insert?: string;
   persona?: string;
+  action?: "attach";
 }
 
 /** The active `@token` before the caret, with the index of its `@`. */
@@ -103,6 +105,14 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
     const [historyIndex, setHistoryIndex] = useState<number | null>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const mentionListRef = useRef<HTMLDivElement>(null);
+    const mentionListId = useId();
+
+    useEffect(() => {
+      if (menuOpen === "persona") {
+        mentionListRef.current?.querySelector<HTMLElement>('[aria-selected="true"]')?.scrollIntoView?.({ block: "nearest" });
+      }
+    }, [menuOpen, menuIndex, mention]);
 
     useLayoutEffect(() => {
       activeDraft.current = { owner: draftOwner };
@@ -159,6 +169,9 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
       const term = (namespace ? query.slice(separator + 1) : query).toLowerCase();
       const matches = (value: string) => value.toLowerCase().includes(term);
       const items: MentionItem[] = [];
+      if (!namespace && (matches("attach files") || matches("upload"))) {
+        items.push({ id: "attach", group: "Actions", primary: "Attach files", secondary: "Choose files from your device", action: "attach" });
+      }
 
       if (!namespace || namespace === "skill") {
         for (const skill of mentionSkills) {
@@ -195,7 +208,8 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
           if (matches(persona)) items.push({ id: `persona:${persona}`, group: "Personas", primary: persona, persona });
         }
       }
-      return items;
+      const order = ["Actions", "Files", "Skills", "Models", "Subagents", "Personas"];
+      return items.sort((a, b) => order.indexOf(a.group) - order.indexOf(b.group));
     })();
     const menuLength = menuOpen === "slash" ? filteredSlash.length : mentionItems.length;
 
@@ -362,6 +376,14 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
 
     const selectMention = (item?: MentionItem) => {
       if (!item) return;
+      if (item.action === "attach") {
+        if (!mention) return;
+        const caret = textareaRef.current?.selectionStart ?? text.length;
+        setText(text.slice(0, mention.start) + text.slice(caret));
+        closeMenu();
+        fileInputRef.current?.click();
+        return;
+      }
       if (item.persona) { selectPersonaAction(item.persona); return; }
       if (!item.insert || !mention) return;
       const caret = textareaRef.current?.selectionStart ?? text.length;
@@ -380,9 +402,11 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
     const selectPersonaAction = (name: string) => {
       if (!connected) return;
       selectPersona(name);
-      setText("");
+      if (mention) {
+        const caret = textareaRef.current?.selectionStart ?? text.length;
+        setText(text.slice(0, mention.start) + text.slice(caret));
+      }
       closeMenu();
-      if (textareaRef.current) textareaRef.current.style.height = "auto";
     };
 
     const addFiles = (incoming: File[]) => {
@@ -512,6 +536,9 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
                   onBlur={() => setFocused(false)}
                   placeholder={connected ? "Ask anything, or describe a task" : "Connecting…"}
                   aria-label="Message prompt"
+                  aria-expanded={menuOpen === "persona" && mentionItems.length > 0}
+                  aria-controls={menuOpen === "persona" && mentionItems.length > 0 ? mentionListId : undefined}
+                  aria-activedescendant={menuOpen === "persona" && mentionItems[menuIndex] ? `${mentionListId}-${menuIndex}` : undefined}
                   disabled={!connected}
                   rows={1}
                   className="min-h-10 min-w-0 flex-1 resize-none bg-transparent px-0.5 pb-2 pt-1 text-[13px] leading-[1.6] text-foreground placeholder:text-muted-foreground focus:outline-hidden disabled:cursor-not-allowed"
@@ -522,7 +549,7 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
                   type="file"
                   multiple
                   className="hidden"
-                  onChange={(e) => handleAttach(e.target.files)}
+                  onChange={(e) => { handleAttach(e.target.files); e.target.value = ""; }}
                 />
               </div>
 
@@ -630,25 +657,29 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
             )}
 
             {menuOpen === "persona" && mentionItems.length > 0 && (
-              <>
-                {(["Files", "Skills", "Models", "Subagents", "Personas"] as const).map((group) => {
+              <div ref={mentionListRef} id={mentionListId} role="listbox" aria-label="Mention suggestions" data-mew-overlay=""
+                className="motion-enter absolute bottom-full left-0 z-30 mb-2 max-h-[min(50vh,24rem)] w-full overflow-y-auto rounded-xl border border-border bg-popover p-1.5 shadow-lg">
+                {(["Actions", "Files", "Skills", "Models", "Subagents", "Personas"] as const).map((group) => {
                   const groupItems = mentionItems.filter((item) => item.group === group);
                   if (!groupItems.length) return null;
+                  const Icon = { Actions: Paperclip, Files: File, Skills: Sparkles, Models: Cpu, Subagents: Bot, Personas: UserRound }[group];
                   return (
-                    <MenuPanel key={group} title={group}>
-                      {groupItems.map((item) => (
-                        <MenuRow
-                          key={item.id}
-                          active={mentionItems.indexOf(item) === menuIndex}
-                          onClick={() => selectMention(item)}
-                          primary={item.primary}
-                          secondary={item.secondary}
-                        />
-                      ))}
-                    </MenuPanel>
+                    <div key={group} role="group" aria-label={group}>
+                      <div className="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{group}</div>
+                      {groupItems.map((item) => {
+                        const index = mentionItems.indexOf(item);
+                        return <button key={item.id} id={`${mentionListId}-${index}`} type="button" role="option" aria-selected={index === menuIndex}
+                          onMouseDown={(e) => e.preventDefault()} onClick={() => selectMention(item)}
+                          className={cn("flex min-h-9 w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-xs", index === menuIndex ? "bg-accent" : "hover:bg-accent")}>
+                          <Icon aria-hidden="true" className="h-4 w-4 shrink-0 text-muted-foreground" />
+                          <span className="min-w-0 truncate font-medium text-foreground">{item.primary}</span>
+                          {item.secondary && <span className="min-w-0 truncate text-muted-foreground">{item.secondary}</span>}
+                        </button>;
+                      })}
+                    </div>
                   );
                 })}
-              </>
+              </div>
             )}
           </div>
 

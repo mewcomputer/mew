@@ -250,8 +250,16 @@ export class MewClient {
         return run;
     }
     /** Send `new_session`. Resolves with the daemon-assigned session id. */
-    newSession(cwd = null) {
-        return this.requestSession({ type: "new_session", cwd, client_kind: this.clientKind });
+    newSession(cwd = null, options) {
+        const msg = {
+            type: "new_session",
+            cwd: options?.scratch ? null : cwd,
+            client_kind: this.clientKind,
+        };
+        if (options?.scratch) {
+            msg.scratch = true;
+        }
+        return this.requestSession(msg);
     }
     /** Send `prompt`. Streaming events are emitted via the registered handlers. */
     prompt(text, attachments = []) {
@@ -526,6 +534,12 @@ export class MewClient {
     }
     setRemoteAccess(enabled, requestId) {
         this.send({ type: "set_remote_access", enabled, request_id: requestId });
+    }
+    setWebSearchSettings(settings, requestId) {
+        this.send({ type: "set_web_search_settings", ...settings, request_id: requestId });
+    }
+    setRouterTiers(tiers, requestId) {
+        this.send({ type: "set_router_tiers", ...tiers, request_id: requestId });
     }
     createPairingInvite(requestId, options) {
         this.send({
@@ -882,6 +896,22 @@ export class MewClient {
     browserFill(selector, text, tabId) { this.send({ type: "browser_fill", selector, text, tab_id: tabId }); }
     browserPress(key, tabId) { this.send({ type: "browser_press", key, tab_id: tabId }); }
     browserClose(tabId) { this.send({ type: "browser_close", tab_id: tabId }); }
+    terminalOpen(rows, cols) {
+        this.send({ type: "terminal_open", rows, cols });
+    }
+    terminalInput(terminalId, bytes) {
+        this.send({
+            type: "terminal_input",
+            terminal_id: terminalId,
+            bytes: Array.isArray(bytes) ? bytes : Array.from(bytes),
+        });
+    }
+    terminalResize(terminalId, rows, cols) {
+        this.send({ type: "terminal_resize", terminal_id: terminalId, rows, cols });
+    }
+    terminalClose(terminalId) {
+        this.send({ type: "terminal_close", terminal_id: terminalId });
+    }
     // -------------------------------------------------------------------------
     // Event registration
     // -------------------------------------------------------------------------
@@ -922,6 +952,8 @@ export class MewClient {
                     devices: msg.devices,
                     ...(msg.automation !== undefined ? { automation: msg.automation } : {}),
                     ...(msg.remote !== undefined ? { remote: msg.remote } : {}),
+                    ...(msg.web_search !== undefined ? { web_search: msg.web_search } : {}),
+                    ...(msg.router !== undefined ? { router: msg.router } : {}),
                 });
                 break;
             case "pairing_invite":
@@ -948,6 +980,7 @@ export class MewClient {
                 this.emit("session-ready", {
                     session_id: msg.session_id,
                     cwd: msg.cwd,
+                    scratch: msg.scratch,
                     model: msg.model,
                     provider: msg.provider,
                     permission_mode: msg.permission_mode,
@@ -1346,6 +1379,18 @@ export class MewClient {
                     ...(msg.removed !== undefined ? { removed: msg.removed } : {}),
                     ...(msg.summary !== undefined ? { summary: msg.summary } : {}),
                 });
+                break;
+            case "terminal_opened":
+                this.emit("terminal-opened", { terminal_id: msg.terminal_id });
+                break;
+            case "terminal_output":
+                this.emit("terminal-output", { terminal_id: msg.terminal_id, bytes: msg.bytes });
+                break;
+            case "terminal_exited":
+                this.emit("terminal-exited", { terminal_id: msg.terminal_id, status: msg.status });
+                break;
+            case "terminal_error":
+                this.emit("terminal-error", { terminal_id: msg.terminal_id ?? null, message: msg.message });
                 break;
             default: {
                 // Exhaustiveness check: adding a new ServerMessage variant

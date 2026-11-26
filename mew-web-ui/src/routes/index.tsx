@@ -54,7 +54,7 @@ function HomeComponent() {
     const client = getClient();
     const location = router.state.location;
     if (newChatId.current === null) {
-      newChatId.current = await client.newSession(selectedCwd ?? undefined);
+      newChatId.current = await client.newSession(selectedCwd ?? null, { scratch: !selectedCwd });
     }
     const newId = newChatId.current;
     const isCurrent = () => router.state.location === location && location.pathname === "/";

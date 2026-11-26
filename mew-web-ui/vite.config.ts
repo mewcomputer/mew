@@ -28,6 +28,10 @@ export default defineConfig({
         // Use the bridge's Host while preserving the browser's Origin.
         changeOrigin: true,
       },
+      "/artifacts": {
+        target: "http://127.0.0.1:9847",
+        changeOrigin: true,
+      },
     },
     watch: {
       ignored: [],

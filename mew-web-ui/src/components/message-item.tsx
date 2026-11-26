@@ -1,5 +1,6 @@
 import { memo, useEffect, useState } from "react";
-import { ChevronRight, Download, Paperclip } from "lucide-react";
+import { ArrowUpRight, ChevronRight, Download, Paperclip } from "lucide-react";
+import { ArtifactFrame, collectArtifactVersions, isSafeArtifactUrl } from "./artifact-frame";
 import type { AssistantMeta } from "@mew/web-client";
 import { useSessionStore, type ChatMessage, type MessagePart } from "../stores/session";
 import { getClient } from "../lib/client-ref";
@@ -121,6 +122,9 @@ function PartRenderer({
 
     case "file":
       return <FilePartView part={part} isUser={isUser} />;
+
+    case "artifact":
+      return <ArtifactPartView part={part} />;
 
     case "compaction":
       return <CompactionDivider part={part} />;
@@ -264,6 +268,74 @@ function useBlobUrl(url: string, mime: string): { resolvedUrl: string | null; lo
   if (blobId) return { resolvedUrl: fetchedUrl, loading };
   if (INLINE_IMAGE.test(url)) return { resolvedUrl: url, loading: false };
   return { resolvedUrl: null, loading: false };
+}
+
+function ArtifactPartView({
+  part,
+}: {
+  part: Extract<MessagePart, { type: "artifact" }>;
+}) {
+  const sessionId = useSessionStore((s) => s.sessionId);
+  const messages = useSessionStore((s) => s.messages);
+  const versions = collectArtifactVersions(messages, {
+    sourcePath: part.sourcePath,
+    title: part.title,
+  });
+
+  const openInPanel = () => {
+    if (!isSafeArtifactUrl(part.url)) return;
+    window.dispatchEvent(
+      new CustomEvent("mew:open-artifact", {
+        detail: {
+          sessionId,
+          title: part.title,
+          url: part.url,
+          sourcePath: part.sourcePath,
+          version: part.version,
+        },
+      }),
+    );
+  };
+
+  if (part.mode === "inline") {
+    return (
+      <ArtifactFrame
+        title={part.title}
+        url={part.url}
+        mode="inline"
+        height={part.height}
+        version={part.version}
+        versions={versions}
+        onOpenInPanel={openInPanel}
+      />
+    );
+  }
+
+  if (!isSafeArtifactUrl(part.url)) {
+    return (
+      <div className="my-1 text-xs text-muted-foreground">
+        Invalid artifact URL for {part.title}.
+      </div>
+    );
+  }
+
+  return (
+    <div className="my-1">
+      <button
+        type="button"
+        onClick={openInPanel}
+        className="inline-flex items-center gap-1.5 rounded-md border border-border bg-muted/40 px-2.5 py-1.5 text-sm font-medium text-foreground underline-offset-4 hover:bg-muted hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        <span>open {part.title}</span>
+        {part.version != null ? (
+          <span className="rounded bg-muted px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground">
+            v{part.version}
+          </span>
+        ) : null}
+        <ArrowUpRight className="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
+      </button>
+    </div>
+  );
 }
 
 function FilePartView({ part, isUser }: { part: Extract<MessagePart, { type: "file" }>; isUser: boolean }) {

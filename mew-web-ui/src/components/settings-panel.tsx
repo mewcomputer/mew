@@ -1,6 +1,8 @@
 import { useRouter } from "@tanstack/react-router";
 import { AutomationSettings } from "@/components/automation-settings";
 import { RemoteSettings } from "@/components/remote-settings";
+import { RouterSettings } from "@/components/router-settings";
+import { WebSearchSettings } from "@/components/web-search-settings";
 import { SettingsGroup, SettingsRow } from "@/components/settings-primitives";
 import { useState, useMemo } from "react";
 import { useSessionStore } from "@/stores/session";
@@ -243,6 +245,10 @@ export function SettingsPanel({
                   >
                     <AutomationSettings client={getClient()} connected={connected} />
                   </SettingsGroup>
+
+                  <WebSearchSettings client={getClient()} connected={connected} />
+
+                  <RouterSettings client={getClient()} connected={connected} />
                 </>
               )}
 
@@ -493,9 +499,15 @@ export function SettingsPanel({
 
 function PermissionModeSection() {
   const permissionMode = useSessionStore((s) => s.permissionMode);
+  const sessionId = useSessionStore((s) => s.sessionId);
 
-  const handleSelect = (mode: string) => {
-    getClient().setPermissionMode(mode);
+  const handleSelect = async (mode: string) => {
+    const client = getClient();
+    if (!client) return;
+    await client.setPermissionMode(mode);
+    if (sessionId) {
+      client.saveSessionDefaults(sessionId, `perm_default_${Date.now()}`);
+    }
   };
 
   return (

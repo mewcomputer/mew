@@ -240,4 +240,112 @@ describe("file parts", () => {
       setClient(null);
     }
   });
+
+  it("renders panel and inline artifacts with sandboxed iframes and dispatches open-artifact", async () => {
+    const user = userEvent.setup();
+    useSessionStore.setState({ sessionId: "sess-art" });
+    const opened: Array<{ title?: string; url?: string; sessionId?: string | null }> = [];
+    const listener = (event: Event) => opened.push((event as CustomEvent).detail);
+    window.addEventListener("mew:open-artifact", listener);
+
+    try {
+      render(<MessageItem message={{
+        id: "with-artifacts",
+        role: "assistant",
+        timestamp: 1,
+        parts: [
+          {
+            type: "artifact",
+            artifactId: "art_panel",
+            title: "Sign Maker",
+            url: "/artifacts/sess-art/art_panel/index.html",
+            mode: "panel",
+          },
+          {
+            type: "artifact",
+            artifactId: "art_inline",
+            title: "Color Picker",
+            url: "/artifacts/sess-art/art_inline/index.html",
+            mode: "inline",
+            height: 280,
+          },
+        ],
+      }} />);
+
+      const panelBtn = screen.getByRole("button", { name: /open Sign Maker/i });
+      await user.click(panelBtn);
+      expect(opened[0]).toEqual({
+        sessionId: "sess-art",
+        title: "Sign Maker",
+        url: "/artifacts/sess-art/art_panel/index.html",
+      });
+
+      const iframe = screen.getByTitle("Color Picker") as HTMLIFrameElement;
+      expect(iframe.getAttribute("sandbox")).toBe("allow-scripts allow-downloads allow-forms");
+      expect(iframe.getAttribute("src")).toBe("/artifacts/sess-art/art_inline/index.html");
+      expect(iframe.style.height).toBe("280px");
+    } finally {
+      window.removeEventListener("mew:open-artifact", listener);
+    }
+  });
+
+  it("blocks unsafe artifact URLs", () => {
+    render(<MessageItem message={{
+      id: "unsafe-artifact",
+      role: "assistant",
+      timestamp: 1,
+      parts: [
+        {
+          type: "artifact",
+          artifactId: "art_bad",
+          title: "Evil",
+          url: "javascript:alert(1)",
+          mode: "inline",
+        },
+      ],
+    }} />);
+    expect(screen.queryByTitle("Evil")).toBeNull();
+    expect(screen.getByText(/invalid artifact url/i)).toBeTruthy();
+  });
+
+  it("switches between versions of an inline artifact sharing a sourcePath", async () => {
+    const user = userEvent.setup();
+    const v1Part = {
+      type: "artifact" as const,
+      artifactId: "art_v1",
+      title: "Counter",
+      url: "/artifacts/sess-ver/art_v1/index.html",
+      mode: "inline" as const,
+      sourcePath: "counter/index.html",
+      version: 1,
+    };
+    const v2Part = {
+      type: "artifact" as const,
+      artifactId: "art_v2",
+      title: "Counter",
+      url: "/artifacts/sess-ver/art_v2/index.html",
+      mode: "inline" as const,
+      sourcePath: "counter/index.html",
+      version: 2,
+    };
+    useSessionStore.setState({
+      sessionId: "sess-ver",
+      messages: [
+        { id: "m1", role: "assistant", timestamp: 1, parts: [v1Part] },
+        { id: "m2", role: "assistant", timestamp: 2, parts: [v2Part] },
+      ],
+    });
+
+    render(<MessageItem message={{ id: "m2", role: "assistant", timestamp: 2, parts: [v2Part] }} />);
+    const select = screen.getByLabelText("Artifact version") as HTMLSelectElement;
+    expect(select.value).toBe("/artifacts/sess-ver/art_v2/index.html");
+    expect((screen.getByTitle("Counter") as HTMLIFrameElement).getAttribute("src")).toBe(
+      "/artifacts/sess-ver/art_v2/index.html",
+    );
+
+    await user.selectOptions(select, "/artifacts/sess-ver/art_v1/index.html");
+    expect((screen.getByTitle("Counter") as HTMLIFrameElement).getAttribute("src")).toBe(
+      "/artifacts/sess-ver/art_v1/index.html",
+    );
+  });
 });

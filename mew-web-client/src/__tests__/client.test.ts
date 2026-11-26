@@ -126,6 +126,11 @@ test("daemon settings retain request identity and unavailable device management"
   client.resetSessionDefaults("reset");
   client.revokeDevice("phone", "revoke");
   client.setRemoteAccess(true, "remote-on");
+  client.setWebSearchSettings({ provider: "exa" }, "search-exa");
+  client.setRouterTiers(
+    { provider: "router", nano: "a/n", micro: "a/m", deci: "" },
+    "tiers",
+  );
   client.createPairingInvite("pair", { scope: "control", ttlSecs: 120 });
   assert.deepEqual(latest().sent, [
     { type: "read_daemon_settings", request_id: "read" },
@@ -133,6 +138,15 @@ test("daemon settings retain request identity and unavailable device management"
     { type: "reset_session_defaults", request_id: "reset" },
     { type: "revoke_device", device_id: "phone", request_id: "revoke" },
     { type: "set_remote_access", enabled: true, request_id: "remote-on" },
+    { type: "set_web_search_settings", provider: "exa", request_id: "search-exa" },
+    {
+      type: "set_router_tiers",
+      provider: "router",
+      nano: "a/n",
+      micro: "a/m",
+      deci: "",
+      request_id: "tiers",
+    },
     { type: "create_pairing_invite", request_id: "pair", scope: "control", ttl_secs: 120 },
   ]);
   const invites: unknown[] = [];
@@ -143,6 +157,18 @@ test("daemon settings retain request identity and unavailable device management"
     defaults: null,
     devices: null,
     remote: { supported: true, enabled: true, node_id: "node-1" },
+    web_search: {
+      enabled: true,
+      provider: "tavily",
+      providers: [
+        { id: "tavily", configured: true },
+        { id: "exa", configured: false },
+      ],
+    },
+    router: {
+      provider: "router",
+      tiers: [{ id: "micro", model: "openai/gpt-5" }],
+    },
   });
   latest().peerSend({
     type: "pairing_invite",
@@ -158,6 +184,18 @@ test("daemon settings retain request identity and unavailable device management"
       defaults: null,
       devices: null,
       remote: { supported: true, enabled: true, node_id: "node-1" },
+      web_search: {
+        enabled: true,
+        provider: "tavily",
+        providers: [
+          { id: "tavily", configured: true },
+          { id: "exa", configured: false },
+        ],
+      },
+      router: {
+        provider: "router",
+        tiers: [{ id: "micro", model: "openai/gpt-5" }],
+      },
     },
   ]);
   assert.deepEqual(invites, [
@@ -1549,5 +1587,46 @@ test("compacting, steered user messages, and cancelled idle activity dispatch ex
   ]);
   assert.deepEqual(userMessages, [{ text: "change course", steered: true }]);
   assert.deepEqual(activity, [{ session_id: "chat-1", activity: "idle", cancelled: true }]);
+  client.disconnect();
+});
+
+test("terminal methods send wire commands and terminal events dispatch payloads", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connected = client.connect();
+  latest().open();
+  await connected;
+
+  const opened: unknown[] = [];
+  const output: unknown[] = [];
+  const exited: unknown[] = [];
+  const errors: unknown[] = [];
+  client.on("terminal-opened", (d) => opened.push(d));
+  client.on("terminal-output", (d) => output.push(d));
+  client.on("terminal-exited", (d) => exited.push(d));
+  client.on("terminal-error", (d) => errors.push(d));
+
+  client.terminalOpen(24, 80);
+  client.terminalInput("term-1", new Uint8Array([108, 115, 10]));
+  client.terminalResize("term-1", 40, 120);
+  client.terminalClose("term-1");
+
+  const recent = latest().sent.slice(-4);
+  assert.deepEqual(recent, [
+    { type: "terminal_open", rows: 24, cols: 80 },
+    { type: "terminal_input", terminal_id: "term-1", bytes: [108, 115, 10] },
+    { type: "terminal_resize", terminal_id: "term-1", rows: 40, cols: 120 },
+    { type: "terminal_close", terminal_id: "term-1" },
+  ]);
+
+  latest().peerSend({ type: "terminal_opened", terminal_id: "term-1" });
+  latest().peerSend({ type: "terminal_output", terminal_id: "term-1", bytes: [111, 107] });
+  latest().peerSend({ type: "terminal_exited", terminal_id: "term-1", status: "exited with code 0" });
+  latest().peerSend({ type: "terminal_error", message: "terminal is not open" });
+
+  assert.deepEqual(opened, [{ terminal_id: "term-1" }]);
+  assert.deepEqual(output, [{ terminal_id: "term-1", bytes: [111, 107] }]);
+  assert.deepEqual(exited, [{ terminal_id: "term-1", status: "exited with code 0" }]);
+  assert.deepEqual(errors, [{ terminal_id: null, message: "terminal is not open" }]);
   client.disconnect();
 });

@@ -214,6 +214,7 @@
   --color-markdown-code-fence-fg: var(--markdown-code-fence-fg);
   --color-markdown-code-fence-border: var(--markdown-code-fence-border);
   --color-markdown-link-text: var(--markdown-link-text);
+  --color-blue-fg: var(--blue-fg);
 }
 
 /* Title / display font choices (--font-display) and body font choices (--font-sans). */
@@ -286,6 +287,18 @@ h3 {
 
 * {
   border-color: var(--border);
+}
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+#root {
+  height: 100%;
+  overflow: hidden;
 }
 
 body {
@@ -363,6 +376,8 @@ body {
 
 .chat-scroll-container {
   scrollbar-gutter: stable;
+  overscroll-behavior-x: none;
+  overscroll-behavior-y: contain;
 }
 
 button:not(:disabled) {

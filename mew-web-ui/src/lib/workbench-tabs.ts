@@ -2,6 +2,7 @@ export type WorkbenchTabKind =
   | "agents"
   | "jobs"
   | "browser"
+  | "artifact"
   | "terminal"
   | "file"
   | "changes"
@@ -12,6 +13,7 @@ export type WorkbenchTabStatus = "idle" | "running" | "attention" | "error";
 export interface FileWorkbenchState {
   openPaths: string[];
   activePath: string | null;
+  explorerVisible?: boolean;
 }
 
 export function normalizeFileWorkbenchState(value: unknown): FileWorkbenchState {
@@ -20,7 +22,7 @@ export function normalizeFileWorkbenchState(value: unknown): FileWorkbenchState 
     : [];
   const activePath = isRecord(value) && typeof value.activePath === "string" && openPaths.includes(value.activePath)
     ? value.activePath : null;
-  return { openPaths, activePath };
+  return { openPaths, activePath, ...(isRecord(value) && typeof value.explorerVisible === "boolean" ? { explorerVisible: value.explorerVisible } : {}) };
 }
 
 export interface WorkbenchTab {
@@ -35,6 +37,8 @@ export interface WorkbenchTab {
     url?: string;
     path?: string;
     jobId?: string;
+    sourcePath?: string;
+    version?: number;
     files?: FileWorkbenchState;
   };
 }
@@ -125,6 +129,7 @@ export function isWorkbenchTabKind(value: unknown): value is WorkbenchTabKind {
   return value === "agents"
     || value === "jobs"
     || value === "browser"
+    || value === "artifact"
     || value === "terminal"
     || value === "file"
     || value === "changes"
@@ -170,6 +175,14 @@ function defaultTabForKind(kind: WorkbenchTabKind): WorkbenchTab {
         id: "browser-1",
         kind,
         title: "New tab",
+        closable: true,
+        payload: { url: "" },
+      };
+    case "artifact":
+      return {
+        id: "artifact-1",
+        kind,
+        title: "Artifact",
         closable: true,
         payload: { url: "" },
       };

@@ -15,6 +15,21 @@
     ]
   },
   {
+    "id": "jianghu-dim",
+    "name": "Jianghu dim",
+    "description": "Softened slate, ink, and jade garden",
+    "category": "mew",
+    "mode": "dark",
+    "baseText": "#e9e6df",
+    "preview": [
+      "#242b2e",
+      "#7fbba6",
+      "#e86a4c",
+      "#2d3539",
+      "#3d484d"
+    ]
+  },
+  {
     "id": "jianghu-light",
     "name": "Jianghu light",
     "description": "Warm parchment, ink, and jade",
@@ -42,6 +57,21 @@
       "#999999",
       "#333333",
       "#222222"
+    ]
+  },
+  {
+    "id": "argenteus-dim",
+    "name": "Argenteus dim",
+    "description": "Softer charcoal workspace",
+    "category": "mew",
+    "mode": "dark",
+    "baseText": "#f0f0f0",
+    "preview": [
+      "#2a2a2a",
+      "#f0f0f0",
+      "#ababab",
+      "#404040",
+      "#313131"
     ]
   },
   {

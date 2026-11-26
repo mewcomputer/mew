@@ -45,6 +45,34 @@ afterEach(() => {
   useSessionStore.setState({ sessionId: null, sessionCwd: null, gitStatus: [], filePreview: null, dirListing: null, dirListingPath: null });
 });
 
+it("closes the explorer only when a markdown link creates the files tab", async () => {
+  useSessionStore.setState({ sessionId: "chat-a", sessionCwd: "/work/mew", connectionState: "connected" });
+  render(<Workbench />);
+  fireEvent(window, new CustomEvent("mew:open-file", { detail: { sessionId: "chat-a", path: "docs/guide.md" } }));
+  expect(await screen.findByRole("button", { name: "Show file explorer" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Show file explorer" }));
+  fireEvent(window, new CustomEvent("mew:open-file", { detail: { sessionId: "chat-a", path: "docs/other.md" } }));
+  expect(screen.getByRole("button", { name: "Hide file explorer" })).toBeTruthy();
+});
+
+it("preserves an existing files explorer state when a markdown link opens", () => {
+  useSessionStore.setState({ sessionId: "chat-a", sessionCwd: "/work/mew", connectionState: "connected" });
+  render(<Workbench existingFile />);
+  expect(screen.getByRole("button", { name: "Hide file explorer", hidden: true })).toBeTruthy();
+  fireEvent(window, new CustomEvent("mew:open-file", { detail: { sessionId: "chat-a", path: "guide.md" } }));
+  expect(screen.getByRole("button", { name: "Hide file explorer" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Hide file explorer" }));
+  fireEvent(window, new CustomEvent("mew:open-file", { detail: { sessionId: "chat-a", path: "other.md" } }));
+  expect(screen.getByRole("button", { name: "Show file explorer" })).toBeTruthy();
+});
+
+it("keeps the explorer open for a link to a source file", async () => {
+  useSessionStore.setState({ sessionId: "chat-a", sessionCwd: "/work/mew", connectionState: "connected" });
+  render(<Workbench />);
+  fireEvent(window, new CustomEvent("mew:open-file", { detail: { sessionId: "chat-a", path: "src/main.rs" } }));
+  expect(await screen.findByRole("button", { name: "Hide file explorer" })).toBeTruthy();
+});
+
 it("shows a retryable error when refreshing an open file gets no response", () => {
   vi.useFakeTimers();
   useSessionStore.setState({ sessionId: "chat-a", sessionCwd: "/work/mew", connectionState: "connected", gitStatus: [{ path: "README.md", status: "modified" }] });
