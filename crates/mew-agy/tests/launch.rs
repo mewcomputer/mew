@@ -1,4 +1,4 @@
-use mew_agy::launch::{prepare, Capabilities};
+use mew_agy::launch::{prepare, prepare_with_tool_aliases, prepare_with_tools, Capabilities};
 use std::fs;
 
 #[test]
@@ -20,6 +20,16 @@ fn agent_instructions_identify_the_client_mcp_tool_server() {
     .unwrap();
     assert!(instructions.contains("MCP server `mew`"));
     assert!(instructions.contains("call_mcp_tool"));
+    assert!(instructions.contains("Do not use `list_resources` to discover tools"));
+    assert!(instructions.contains(".system_generated/steps/.../output.txt"));
+    assert!(instructions.contains("No workspace tools are registered on `mew` for this turn."));
+    assert!(!instructions.contains("web_search"));
+    assert!(!instructions.contains("web_fetch"));
+    let config: serde_json::Value = serde_json::from_slice(
+        &fs::read(launch.workspace().join(".agents/mcp_config.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(config["mcpServers"]["mew"].get("tools").is_none());
 }
 
 #[test]
@@ -206,4 +216,79 @@ fn system_instructions_are_preserved_verbatim_after_fixed_agent_preamble() {
             );
         }
     }
+}
+
+#[test]
+fn tool_roster_is_in_context_and_the_marker_still_precedes_system() {
+    let parent = tempfile::tempdir().unwrap();
+    let system = "SYSTEM PROMPT";
+    let launch = prepare_with_tools(
+        parent.path(),
+        "model",
+        "http://127.0.0.1:12345/0123456789abcdef",
+        Capabilities::default(),
+        system,
+        &["web_search".into(), "read".into(), "web_search".into()],
+    )
+    .unwrap();
+    let text = fs::read_to_string(
+        launch
+            .workspace()
+            .join(".agents/agents/mew-boundary/agent.md"),
+    )
+    .unwrap();
+
+    let roster =
+        "Available tools on `mew` (call directly as `mcp_mew_<name>` when declared, or via `call_mcp_tool` with `ServerName: \"mew\"` and `ToolName`): read, web_search\n";
+    assert!(text.contains(roster), "got {text}");
+    let config: serde_json::Value = serde_json::from_slice(
+        &fs::read(launch.workspace().join(".agents/mcp_config.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(config["mcpServers"]["mew"]["tools"]["read"]["eager"], true);
+    assert_eq!(
+        config["mcpServers"]["mew"]["tools"]["web_search"]["eager"],
+        true
+    );
+    let marker = "Use the available MCP interface, including `call_mcp_tool` when provided, to call those tools for workspace operations.\n";
+    let tail = text.split_once(marker).unwrap().1;
+    assert_eq!(
+        tail, system,
+        "the system prompt must follow the marker verbatim"
+    );
+}
+
+#[test]
+fn aliased_tools_document_original_names_and_mark_mcp_aliases_eager() {
+    let parent = tempfile::tempdir().unwrap();
+    let launch = prepare_with_tool_aliases(
+        parent.path(),
+        "model",
+        "http://127.0.0.1:12345/0123456789abcdef",
+        Capabilities::default(),
+        "SYS",
+        &[("mew_tool_0", "pkg.read"), ("read", "read")],
+    )
+    .unwrap();
+    let text = fs::read_to_string(
+        launch
+            .workspace()
+            .join(".agents/agents/mew-boundary/agent.md"),
+    )
+    .unwrap();
+    assert!(
+        text.contains("mew_tool_0 (alias for pkg.read), read"),
+        "got {text}"
+    );
+    let config: serde_json::Value = serde_json::from_slice(
+        &fs::read(launch.workspace().join(".agents/mcp_config.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        config["mcpServers"]["mew"]["tools"]["mew_tool_0"]["eager"],
+        true
+    );
+    assert!(config["mcpServers"]["mew"]["tools"]
+        .get("pkg.read")
+        .is_none());
 }

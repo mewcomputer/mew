@@ -1737,3 +1737,326 @@ elif m3['method']=='session/resume':
         "expected session/resume('s-abandon') after abandon_pending: {recorded_b:?}"
     );
 }
+
+#[tokio::test]
+async fn allows_readonly_spill_path_scopes_strictly_to_active_session_step_outputs() {
+    let parent = tempfile::tempdir().unwrap();
+    let app_data = tempfile::tempdir().unwrap();
+    let active_step_dir = app_data
+        .path()
+        .join("brain/s-spill/.system_generated/steps/5");
+    let root_step_dir = app_data
+        .path()
+        .join("brain/root-conv-42/.system_generated/steps/9");
+    let other_step_dir = app_data
+        .path()
+        .join("brain/other-conv/.system_generated/steps/5");
+    let active_logs_dir = app_data.path().join("brain/s-spill/.system_generated/logs");
+    let non_digit_step_dir = app_data
+        .path()
+        .join("brain/s-spill/.system_generated/steps/five");
+    for dir in [
+        &active_step_dir,
+        &root_step_dir,
+        &other_step_dir,
+        &active_logs_dir,
+        &non_digit_step_dir,
+    ] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let active_spill = active_step_dir.join("output.txt");
+    let root_spill = root_step_dir.join("output.txt");
+    let other_spill = other_step_dir.join("output.txt");
+    let transcript_log = active_logs_dir.join("transcript.jsonl");
+    let non_output_file = active_step_dir.join("notes.txt");
+    let non_digit_spill = non_digit_step_dir.join("output.txt");
+    let external_secret = parent.path().join("secret.txt");
+    for file in [
+        &active_spill,
+        &root_spill,
+        &other_spill,
+        &transcript_log,
+        &non_output_file,
+        &non_digit_spill,
+        &external_secret,
+    ] {
+        std::fs::write(file, "data\n").unwrap();
+    }
+    let symlink_spill = app_data
+        .path()
+        .join("brain/s-spill/.system_generated/steps/6");
+    std::fs::create_dir_all(&symlink_spill).unwrap();
+    let symlink_target = symlink_spill.join("output.txt");
+    std::os::unix::fs::symlink(&external_secret, &symlink_target).unwrap();
+
+    let script = format!(
+        r#"import sys,json,urllib.request
+for i,r in [(1,{{'protocolVersion':1}}),(2,{{}}),(3,{{'sessionId':'s-spill'}}),(4,{{}})]:
+ json.loads(sys.stdin.readline())
+ print(json.dumps({{'jsonrpc':'2.0','id':i,'result':r}}),flush=True)
+p1=json.loads(sys.stdin.readline())
+with open('.agents/mcp_config.json') as f: url=json.load(f)['mcpServers']['mew']['serverUrl']
+def post(body,sid=None):
+ h={{'Content-Type':'application/json'}}
+ if sid: h['mcp-session-id']=sid
+ with urllib.request.urlopen(urllib.request.Request(url,data=json.dumps(body).encode(),headers=h)) as r: return r.headers,r.read()
+h,_=post({{'jsonrpc':'2.0','id':1,'method':'initialize','params':{{'protocolVersion':'2025-11-25','capabilities':{{}},'clientInfo':{{'name':'fake','version':'1'}}}}}})
+sid=h['mcp-session-id']
+post({{'jsonrpc':'2.0','method':'notifications/initialized'}},sid)
+post({{'jsonrpc':'2.0','id':2,'method':'tools/call','params':{{'name':'read','arguments':{{'path':{:?}}},'_meta':{{'antigravity.google/root_conversation_id':'root-conv-42'}}}}}},sid)
+"#,
+        active_spill
+    );
+    let mut cfg = config(parent.path());
+    cfg.environment
+        .push(("ANTIGRAVITY_APP_DATA_DIR".into(), app_data.path().into()));
+    let provider = AgyProvider::new(cfg, fixture(parent.path(), &script));
+    let mut req = request();
+    req.tools = vec![ToolDef {
+        name: "read".into(),
+        description: "read".into(),
+        schema: json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}),
+    }];
+    let mew_sid = req.session_id.unwrap();
+    let events: Vec<_> = provider.stream(req.clone()).await.unwrap().collect().await;
+    assert!(events.iter().any(|e| matches!(
+        e,
+        ProviderEvent::MessageEnd {
+            finish: Finish::ToolUse,
+            ..
+        }
+    )));
+
+    assert!(
+        provider
+            .allows_readonly_spill_path(mew_sid, &active_spill)
+            .await
+    );
+    assert!(
+        provider
+            .allows_readonly_spill_path(mew_sid, &root_spill)
+            .await
+    );
+    assert!(
+        !provider
+            .allows_readonly_spill_path(mew_sid, &other_spill)
+            .await
+    );
+    assert!(
+        !provider
+            .allows_readonly_spill_path(mew_sid, &transcript_log)
+            .await
+    );
+    assert!(
+        !provider
+            .allows_readonly_spill_path(mew_sid, &non_output_file)
+            .await
+    );
+    assert!(
+        !provider
+            .allows_readonly_spill_path(mew_sid, &non_digit_spill)
+            .await
+    );
+    assert!(
+        !provider
+            .allows_readonly_spill_path(mew_sid, &symlink_target)
+            .await
+    );
+    let traversal =
+        active_step_dir.join("../../../other-conv/.system_generated/steps/5/output.txt");
+    assert!(
+        !provider
+            .allows_readonly_spill_path(mew_sid, &traversal)
+            .await
+    );
+    assert!(
+        !provider
+            .allows_readonly_spill_path(Ulid::new(), &active_spill)
+            .await
+    );
+}
+
+#[tokio::test]
+async fn unpaginated_spill_file_read_is_bounded_with_next_offset_and_workspace_reads_stay_intact() {
+    let parent = tempfile::tempdir().unwrap();
+    let spill_path = "/tmp/fake-brain/s-cap/.system_generated/steps/5/output.txt";
+    let script = format!(
+        r#"import sys,json,urllib.request
+for i,r in [(1,{{'protocolVersion':1}}),(2,{{}}),(3,{{'sessionId':'s-cap'}}),(4,{{}})]:
+ json.loads(sys.stdin.readline())
+ print(json.dumps({{'jsonrpc':'2.0','id':i,'result':r}}),flush=True)
+sys.stdin.readline()
+with open('.agents/mcp_config.json') as f: url=json.load(f)['mcpServers']['mew']['serverUrl']
+def post(body,sid=None):
+ h={{'Content-Type':'application/json'}}
+ if sid: h['mcp-session-id']=sid
+ with urllib.request.urlopen(urllib.request.Request(url,data=json.dumps(body).encode(),headers=h)) as r: return r.headers,r.read()
+h,_=post({{'jsonrpc':'2.0','id':1,'method':'initialize','params':{{'protocolVersion':'2025-11-25','capabilities':{{}},'clientInfo':{{'name':'fake','version':'1'}}}}}})
+sid=h['mcp-session-id']
+post({{'jsonrpc':'2.0','method':'notifications/initialized'}},sid)
+records=[]
+for idx, args in enumerate([
+    {{'path':{spill_path:?}}},
+    {{'path':{spill_path:?},'offset':120,'limit':20}},
+    {{'path':{spill_path:?}}},
+    {{'path':{spill_path:?}}},
+    {{'path':'src/lib.rs'}},
+], start=2):
+ _,body=post({{'jsonrpc':'2.0','id':idx,'method':'tools/call','params':{{'name':'read','arguments':args}}}},sid)
+ result=json.loads(body)['result']
+ records.append({{'id':idx,'len':len(result['content'][0]['text']),'isError':result['isError'],'text':result['content'][0]['text']}})
+for rec in records:
+ print(json.dumps({{'jsonrpc':'2.0','method':'session/update','params':{{'sessionId':'s-cap','update':{{'sessionUpdate':'agent_message_chunk','content':{{'type':'text','text':json.dumps(rec) + '\n'}}}}}}}}),flush=True)
+print(json.dumps({{'jsonrpc':'2.0','id':5,'result':{{'stopReason':'end_turn'}}}}),flush=True)
+"#
+    );
+    let provider = AgyProvider::new(config(parent.path()), fixture(parent.path(), &script));
+    let mut req = request();
+    req.tools = vec![ToolDef {
+        name: "read".into(),
+        description: "read".into(),
+        schema: json!({"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["path"]}),
+    }];
+
+    let numbered_20kb = (1..=450)
+        .map(|i| format!("{i}:line content padding to exceed eight kilobytes easily {i:04}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(numbered_20kb.len() > 20_000);
+    let small_slice = (121..=140)
+        .map(|i| format!("{i}:short line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let offloaded = format!(
+        "[Output offloaded: 800 lines / 60000 bytes saved to /tmp/fake.txt — use read tool with offset/limit to inspect]\n\n[output.txt#abc]\n{}\n\n[... middle omitted (600 lines / 45000 bytes) ...]\n\n790:tail line",
+        (1..=450)
+            .map(|i| format!("{i}:head content block padded to exceed eight kilobytes {i:04}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    assert!(offloaded.len() > 20_000);
+    let huge_single_line = format!("1:{}🦀{}", "a".repeat(12_000), "b".repeat(5_000));
+    let workspace_20kb = (1..=450)
+        .map(|i| format!("{i}:workspace line {i:04} padded for twenty kilobytes"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(workspace_20kb.len() > 20_000);
+
+    let payloads = [
+        (json!({"path": spill_path}), numbered_20kb),
+        (
+            json!({"path": spill_path, "offset": 120, "limit": 20}),
+            small_slice.clone(),
+        ),
+        (json!({"path": spill_path}), offloaded),
+        (json!({"path": spill_path}), huge_single_line),
+        (json!({"path": "src/lib.rs"}), workspace_20kb.clone()),
+    ];
+
+    let mut cur_req = req;
+    let mut final_text = String::new();
+    for (input_args, output_text) in payloads {
+        let events: Vec<_> = provider
+            .stream(cur_req.clone())
+            .await
+            .unwrap()
+            .collect()
+            .await;
+        for event in &events {
+            if let ProviderEvent::PartDelta {
+                field: "text",
+                delta,
+                ..
+            } = event
+            {
+                final_text.push_str(delta);
+            }
+        }
+        let call = events
+            .iter()
+            .find_map(|event| match event {
+                ProviderEvent::PartStart {
+                    part: Part::ToolCall(call),
+                } => Some(call.clone()),
+                _ => None,
+            })
+            .expect("tool call");
+        let mut done = call.clone();
+        done.state = ToolState::Completed(ToolStateCompleted {
+            input: input_args,
+            output: output_text,
+            metadata: None,
+            diff: None,
+            images: vec![],
+            time: ToolTime {
+                start: 0,
+                end: Some(1),
+            },
+        });
+        cur_req
+            .messages
+            .push(msg(Role::Assistant, vec![Part::ToolCall(done)]));
+        cur_req.messages.push(msg(
+            Role::User,
+            vec![Part::ToolResult(ToolResultPart {
+                base: base(),
+                call_id: call.call_id,
+            })],
+        ));
+    }
+    let last_events: Vec<_> = provider.stream(cur_req).await.unwrap().collect().await;
+    for event in &last_events {
+        if let ProviderEvent::PartDelta {
+            field: "text",
+            delta,
+            ..
+        } = event
+        {
+            final_text.push_str(delta);
+        }
+    }
+
+    let records: Vec<serde_json::Value> = final_text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(records.len(), 5);
+
+    // 1. Unpaginated 20 KB spill read is capped <= 8_000 bytes and gives exact next offset.
+    assert_eq!(records[0]["isError"], false);
+    assert!(records[0]["len"].as_u64().unwrap() <= 8_000);
+    let r0_text = records[0]["text"].as_str().unwrap();
+    let (r0_head, _) = r0_text.split_once("\n\n[mew-agy:").unwrap();
+    let last_no: usize = r0_head
+        .lines()
+        .last()
+        .unwrap()
+        .split_once(':')
+        .unwrap()
+        .0
+        .parse()
+        .unwrap();
+    assert!(
+        r0_text.contains(&format!("offset={last_no}")),
+        "expected offset={last_no} in {r0_text}"
+    );
+
+    // 2. Small paginated spill read is returned verbatim.
+    assert_eq!(records[1]["text"], small_slice);
+
+    // 3. Offloaded spill read omits tail and caps <= 8_000 bytes.
+    assert!(records[2]["len"].as_u64().unwrap() <= 8_000);
+    assert!(!records[2]["text"]
+        .as_str()
+        .unwrap()
+        .contains("790:tail line"));
+    assert!(records[2]["text"].as_str().unwrap().contains("offset="));
+
+    // 4. Single ultra-long line spill read caps cleanly at <= 8_000 bytes and points to offset=1.
+    assert!(records[3]["len"].as_u64().unwrap() <= 8_000);
+    assert!(records[3]["text"].as_str().unwrap().contains("offset=1"));
+
+    // 5. Normal workspace file read > 20 KB is NOT truncated by the 8 KB spill cap.
+    assert_eq!(records[4]["text"], workspace_20kb);
+}

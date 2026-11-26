@@ -20,7 +20,7 @@ mod unix {
     use std::{
         collections::{HashMap, HashSet},
         ffi::OsString,
-        path::PathBuf,
+        path::{Component, Path, PathBuf},
         pin::Pin,
         sync::{Arc, Mutex},
         task::{Context, Poll},
@@ -188,13 +188,27 @@ mod unix {
         {
             return Err(invalid("AGY tool result continuation mismatch"));
         }
-        let text = results[0]["content"]
+        let mut text_value = results[0]["content"]
             .as_str()
-            .ok_or_else(|| invalid("invalid tool result text"))?;
+            .ok_or_else(|| invalid("invalid tool result text"))?
+            .to_owned();
         let is_error = results[0]["is_error"]
             .as_bool()
             .ok_or_else(|| invalid("invalid tool result state"))?;
-        let mut content_blocks = vec![json!({"type": "text", "text": text})];
+        if !is_error
+            && matches!(p.name.as_str(), "read" | "grep")
+            && p.input
+                .get("path")
+                .and_then(Value::as_str)
+                .is_some_and(|path| is_spill_output_path(Path::new(path)))
+        {
+            if let Some(bounded) =
+                truncate_spill_tool_result(&p.name, &p.input, &text_value, MAX_SPILL_READ_BYTES)
+            {
+                text_value = bounded;
+            }
+        }
+        let mut content_blocks = vec![json!({"type": "text", "text": text_value})];
         if let Some(images) = results[0].get("images").and_then(Value::as_array) {
             for image in images {
                 let mime = image
@@ -283,6 +297,181 @@ mod unix {
         }
         Ok(suffix)
     }
+    const MAX_SPILL_READ_BYTES: usize = 8_000;
+
+    fn env_value(environment: &[(OsString, OsString)], key: &str) -> Option<OsString> {
+        environment
+            .iter()
+            .rev()
+            .find(|(k, v)| k == key && !v.is_empty())
+            .map(|(_, v)| v.clone())
+            .or_else(|| std::env::var_os(key).filter(|v| !v.is_empty()))
+    }
+
+    fn app_data_dir(config: &Config) -> Option<PathBuf> {
+        if let Some(dir) = env_value(&config.environment, "ANTIGRAVITY_APP_DATA_DIR") {
+            return Some(PathBuf::from(dir));
+        }
+        let home = env_value(&config.environment, "HOME")?;
+        Some(PathBuf::from(home).join(".gemini").join("antigravity-cli"))
+    }
+
+    fn is_step_dir(component: &std::ffi::OsStr) -> bool {
+        component
+            .to_str()
+            .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+    }
+
+    fn is_spill_output_path(path: &Path) -> bool {
+        let normals: Vec<&std::ffi::OsStr> = path
+            .components()
+            .filter_map(|c| match c {
+                Component::Normal(s) => Some(s),
+                _ => None,
+            })
+            .collect();
+        let len = normals.len();
+        len >= 4
+            && normals[len - 4] == ".system_generated"
+            && normals[len - 3] == "steps"
+            && is_step_dir(normals[len - 2])
+            && normals[len - 1] == "output.txt"
+    }
+
+    fn matches_session_spill_file(app_data_dir: &Path, conv_ids: &[String], path: &Path) -> bool {
+        if conv_ids.is_empty() {
+            return false;
+        }
+        if !std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_file()) {
+            return false;
+        }
+        let Ok(canonical_path) = std::fs::canonicalize(path) else {
+            return false;
+        };
+        for conv_id in conv_ids {
+            if !crate::mcp::valid_conversation_id(conv_id) {
+                continue;
+            }
+            let steps_dir = app_data_dir
+                .join("brain")
+                .join(conv_id)
+                .join(".system_generated")
+                .join("steps");
+            let Ok(canonical_steps) = std::fs::canonicalize(&steps_dir) else {
+                continue;
+            };
+            let Ok(rel) = canonical_path.strip_prefix(&canonical_steps) else {
+                continue;
+            };
+            let parts: Vec<Component<'_>> = rel.components().collect();
+            if parts.len() == 2
+                && matches!(parts[0], Component::Normal(step) if is_step_dir(step))
+                && matches!(parts[1], Component::Normal(file) if file == "output.txt")
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn floor_char_boundary(s: &str, max_bytes: usize) -> usize {
+        let mut idx = max_bytes.min(s.len());
+        while idx > 0 && !s.is_char_boundary(idx) {
+            idx -= 1;
+        }
+        idx
+    }
+
+    fn parse_numbered_line_prefix(line: &str) -> Option<usize> {
+        let (prefix, _) = line.split_once(':')?;
+        if prefix.is_empty() || !prefix.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        prefix.parse().ok()
+    }
+
+    fn format_spill_footer(
+        tool_name: &str,
+        input: &Value,
+        kept: &str,
+        total_bytes: usize,
+    ) -> String {
+        let shown = kept.len();
+        if tool_name == "read" {
+            if let Some(last_line_no) = kept.lines().rev().find_map(parse_numbered_line_prefix) {
+                return format!(
+                    "\n\n[mew-agy: truncated spill-file read ({shown} of {total_bytes} bytes) to stay below AGY's inline limit. Call `read` with offset={last_line_no} and a smaller limit (e.g. limit=120), or use `grep` on this path, to inspect more.]"
+                );
+            }
+            let next_offset = input
+                .get("offset")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                .saturating_add(1);
+            return format!(
+                "\n\n[mew-agy: truncated long line in spill-file read ({shown} of {total_bytes} bytes) to stay below AGY's inline limit. Use `grep` on this path, or call `read` with offset={next_offset} and a smaller limit to continue.]"
+            );
+        }
+        format!(
+            "\n\n[mew-agy: truncated spill-file grep ({shown} of {total_bytes} bytes) to stay below AGY's inline limit. Retry `grep` with a narrower pattern or lower `max_results`.]"
+        )
+    }
+
+    fn truncate_spill_tool_result(
+        tool_name: &str,
+        input: &Value,
+        text: &str,
+        max_bytes: usize,
+    ) -> Option<String> {
+        if text.len() <= max_bytes {
+            return None;
+        }
+        const FOOTER_RESERVE: usize = 320;
+        let body_budget = max_bytes.saturating_sub(FOOTER_RESERVE);
+        let window =
+            if text.starts_with("[Output offloaded:") || text.starts_with("[Output truncated:") {
+                if let Some(omitted_pos) = text.find("\n\n[... middle omitted") {
+                    &text[..omitted_pos]
+                } else {
+                    text
+                }
+            } else {
+                text
+            };
+        let char_cut = floor_char_boundary(window, body_budget);
+        let prefix = &window[..char_cut];
+        let mut kept = if char_cut == window.len() {
+            prefix
+        } else if let Some(nl_pos) = prefix.rfind('\n') {
+            let line_prefix = &prefix[..nl_pos];
+            let has_usable_line = if tool_name == "read" {
+                line_prefix
+                    .lines()
+                    .any(|line| parse_numbered_line_prefix(line).is_some())
+            } else {
+                line_prefix.lines().any(|line| !line.is_empty())
+            };
+            if has_usable_line {
+                line_prefix
+            } else {
+                prefix
+            }
+        } else {
+            prefix
+        };
+
+        let mut footer = format_spill_footer(tool_name, input, kept, text.len());
+        if kept.len() + footer.len() > max_bytes {
+            let trim_to = floor_char_boundary(kept, max_bytes.saturating_sub(footer.len()));
+            kept = &kept[..trim_to];
+            footer = format_spill_footer(tool_name, input, kept, text.len());
+        }
+        let mut out = String::with_capacity(kept.len() + footer.len());
+        out.push_str(kept);
+        out.push_str(&footer);
+        Some(out)
+    }
+
     fn idle_timeout(lifetime: Duration) -> Duration {
         lifetime.min(Duration::from_secs(600))
     }
@@ -324,8 +513,16 @@ mod unix {
                         .map_err(invalid)?,
                 );
             }
+            let tool_pairs: Vec<(String, String)> = defs
+                .iter()
+                .map(|tool| (tool.name().to_owned(), tool.original_name().to_owned()))
+                .collect();
+            let tool_refs: Vec<(&str, &str)> = tool_pairs
+                .iter()
+                .map(|(name, original)| (name.as_str(), original.as_str()))
+                .collect();
             let (server, calls) = McpServer::bind(defs, 16).await.map_err(invalid)?;
-            let launch = launch::prepare(
+            let launch = launch::prepare_with_tool_aliases(
                 &self.config.workspace_parent,
                 &request.model,
                 server.url(),
@@ -334,6 +531,7 @@ mod unix {
                     ..Default::default()
                 },
                 system,
+                &tool_refs,
             )?;
             let cwd = launch.workspace().to_path_buf();
             let cwd_str = cwd
@@ -416,6 +614,35 @@ mod unix {
             } else {
                 guard.continuity = None;
             }
+        }
+        async fn allows_readonly_spill_path(&self, session_id: SessionId, path: &Path) -> bool {
+            let slot = self
+                .sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&session_id)
+                .cloned();
+            let Some(slot) = slot else {
+                return false;
+            };
+            let guard = slot.lock().await;
+            let mut conv_ids = guard
+                .session
+                .as_ref()
+                .map(Session::conversation_ids)
+                .unwrap_or_default();
+            if let Some(continuity) = guard.continuity.as_ref() {
+                if !continuity.acp_session_id.is_empty()
+                    && !conv_ids.contains(&continuity.acp_session_id)
+                {
+                    conv_ids.push(continuity.acp_session_id.clone());
+                }
+            }
+            drop(guard);
+            let Some(app_data_dir) = app_data_dir(&self.config) else {
+                return false;
+            };
+            matches_session_spill_file(&app_data_dir, &conv_ids, path)
         }
         async fn replay_budget(
             &self,

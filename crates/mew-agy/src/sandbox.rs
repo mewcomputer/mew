@@ -88,15 +88,16 @@ mod macos {
                 .read(true)
                 .custom_flags(libc::O_NOFOLLOW)
                 .open(agents.join("mcp_config.json"))?;
-            if !file.metadata()?.is_file() || file.metadata()?.len() > 8192 {
+            if !file.metadata()?.is_file() || file.metadata()?.len() > 65_536 {
                 return Err(invalid("invalid MCP configuration"));
             }
             let mut text = String::new();
-            file.take(8193).read_to_string(&mut text)?;
+            file.take(65_537).read_to_string(&mut text)?;
             let config: serde_json::Value =
                 serde_json::from_str(&text).map_err(|_| invalid("invalid MCP configuration"))?;
             let url = config["mcpServers"]["mew"]["serverUrl"]
                 .as_str()
+                .or_else(|| config["mcpServers"]["mew"]["url"].as_str())
                 .ok_or_else(|| invalid("invalid MCP configuration"))?;
             let url = url::Url::parse(url).map_err(|_| invalid("invalid MCP URL"))?;
             let token = url.path().strip_prefix('/').unwrap_or_default();

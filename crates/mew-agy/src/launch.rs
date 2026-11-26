@@ -5,7 +5,8 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-const AGENT: &str = "---\nname: mew-boundary\ndescription: Client tool bridge\nmainAgent: true\nsubagent: false\nexcludeDefaultComponents: true\ninheritMcp: true\ninheritCustomizations: false\ntools: []\nagents: []\nrules: []\nskills: []\n---\nMew's client tools are available on MCP server `mew`. Use the available MCP interface, including `call_mcp_tool` when provided, to call those tools for workspace operations.\n";
+const AGENT_HEAD: &str = "---\nname: mew-boundary\ndescription: Client tool bridge\nmainAgent: true\nsubagent: false\nexcludeDefaultComponents: true\ninheritMcp: true\ninheritCustomizations: false\ntools: []\nagents: []\nrules: []\nskills: []\n---\nMew exposes client workspace tools on MCP server `mew`. Do not use `list_resources` to discover tools: it lists MCP resources, not tools, and `mew` has no resource index. If a `read` result is truncated, re-read the original workspace file with `offset` and `limit` instead of reading `.system_generated/steps/.../output.txt`. When inspecting a spilled command or search `output.txt`, pass `offset` and a small `limit` (e.g. 120 lines) or use `grep` on that file so the result stays below the inline limit.\n";
+const AGENT_TAIL: &str = "Use the available MCP interface, including `call_mcp_tool` when provided, to call those tools for workspace operations.\n";
 
 /// Capabilities not supported by this launch policy.
 #[derive(Debug, Default, Clone, Copy)]
@@ -45,6 +46,37 @@ pub fn prepare(
     mcp_url: &str,
     capabilities: Capabilities,
     system: &str,
+) -> io::Result<Launch> {
+    prepare_with_tools(parent, model, mcp_url, capabilities, system, &[])
+}
+
+/// Same as [`prepare`], but marks every tool eager in `.agents/mcp_config.json`
+/// and lists the available MCP tool names in the boundary instruction.
+pub fn prepare_with_tools(
+    parent: &Path,
+    model: &str,
+    mcp_url: &str,
+    capabilities: Capabilities,
+    system: &str,
+    tool_names: &[String],
+) -> io::Result<Launch> {
+    let pairs: Vec<(&str, &str)> = tool_names
+        .iter()
+        .map(|name| (name.as_str(), name.as_str()))
+        .collect();
+    prepare_with_tool_aliases(parent, model, mcp_url, capabilities, system, &pairs)
+}
+
+/// Same as [`prepare_with_tools`], accepting `(mcp_name, original_name)` pairs
+/// so aliased tools record their original Mew name in the boundary instruction
+/// while registering the valid MCP name as eager in `.agents/mcp_config.json`.
+pub fn prepare_with_tool_aliases(
+    parent: &Path,
+    model: &str,
+    mcp_url: &str,
+    capabilities: Capabilities,
+    system: &str,
+    tools: &[(&str, &str)],
 ) -> io::Result<Launch> {
     if capabilities.native_browser
         || capabilities.native_subagents
@@ -92,13 +124,51 @@ pub fn prepare(
         .to_str()
         .ok_or_else(|| invalid("workspace path is not UTF-8"))?
         .to_owned();
+    let mut tools_sorted: Vec<(&str, &str)> = tools.to_vec();
+    tools_sorted.sort_unstable_by_key(|(name, _)| *name);
+    tools_sorted.dedup_by_key(|(name, _)| *name);
+
+    let roster_line = if tools_sorted.is_empty() {
+        "No workspace tools are registered on `mew` for this turn.\n".to_owned()
+    } else {
+        let labels: Vec<String> = tools_sorted
+            .iter()
+            .map(|(name, original)| {
+                if name == original {
+                    (*name).to_owned()
+                } else {
+                    format!("{name} (alias for {original})")
+                }
+            })
+            .collect();
+        format!(
+            "Available tools on `mew` (call directly as `mcp_mew_<name>` when declared, or via `call_mcp_tool` with `ServerName: \"mew\"` and `ToolName`): {}\n",
+            labels.join(", ")
+        )
+    };
+
     let agent_dir = workspace.path().join(".agents/agents/mew-boundary");
     fs::create_dir_all(&agent_dir)?;
-    let mut agent = String::with_capacity(AGENT.len() + system.len());
-    agent.push_str(AGENT);
+    let mut agent = String::with_capacity(
+        AGENT_HEAD.len() + roster_line.len() + AGENT_TAIL.len() + system.len(),
+    );
+    agent.push_str(AGENT_HEAD);
+    agent.push_str(&roster_line);
+    agent.push_str(AGENT_TAIL);
     agent.push_str(system);
     write_private(agent_dir.join("agent.md"), agent.as_bytes())?;
-    let config = serde_json::json!({ "mcpServers": { "mew": { "serverUrl": mcp_url, "timeoutSeconds": -1 } } });
+    let mut server_entry = serde_json::Map::new();
+    server_entry.insert("serverUrl".into(), serde_json::json!(mcp_url));
+    server_entry.insert("timeoutSeconds".into(), serde_json::json!(-1));
+    if !tools_sorted.is_empty() {
+        let mut eager_tools = serde_json::Map::new();
+        for (name, _) in &tools_sorted {
+            eager_tools.insert((*name).to_owned(), serde_json::json!({ "eager": true }));
+        }
+        server_entry.insert("tools".into(), serde_json::Value::Object(eager_tools));
+    }
+    let config =
+        serde_json::json!({ "mcpServers": { "mew": serde_json::Value::Object(server_entry) } });
     write_private(
         workspace.path().join(".agents/mcp_config.json"),
         config.to_string().as_bytes(),

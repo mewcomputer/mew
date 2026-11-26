@@ -26,14 +26,17 @@ def file_sha256(path):
     return digest.hexdigest()
 
 
-def make_config(base, code_mode):
+def make_config(base, code_mode, max_turns=None):
     if "code_mode" in tomllib.loads(base):
         raise ValueError(
             "eval config must omit [code_mode]; use the runner's mode options"
         )
-    # JSON strings and booleans are also valid TOML values.
+    # JSON strings and booleans are also valid TOML values. Top-level keys must
+    # precede the [code_mode] table, so max_turns is prepended to the base text.
+    prefix = "" if max_turns is None else f"max_turns = {max_turns}\n"
     return (
-        base
+        prefix
+        + base
         + "\n[code_mode]\n"
         + "".join(f"{key} = {json.dumps(value)}\n" for key, value in code_mode.items())
     )
@@ -252,7 +255,7 @@ def run_case(task, options, output):
         if options.python:
             config["python"] = str(Path(options.python).resolve())
         (state / "config/config.toml").write_text(
-            make_config(options.config_text, config)
+            make_config(options.config_text, config, options.max_turns)
         )
         if options.auth_file and options.provider == "codex":
             auth = state / "config/auth"
@@ -269,7 +272,6 @@ def run_case(task, options, output):
                 "MEW_DATA_DIR": str(state / "data"),
                 "MEW_CACHE_DIR": str(state / "cache"),
                 "MEW_SESSION_DIR": str(state / "sessions"),
-                "MEW_MAX_TURNS": str(options.max_turns),
             }
         )
         command = [

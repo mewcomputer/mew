@@ -80,6 +80,27 @@ impl Provider for Router {
         }
     }
 
+    async fn allows_readonly_spill_path(
+        &self,
+        session_id: mew_message::SessionId,
+        path: &std::path::Path,
+    ) -> bool {
+        if self.deci.allows_readonly_spill_path(session_id, path).await {
+            return true;
+        }
+        if self
+            .micro
+            .allows_readonly_spill_path(session_id, path)
+            .await
+        {
+            return true;
+        }
+        if let Some(ref nano) = self.nano {
+            return nano.allows_readonly_spill_path(session_id, path).await;
+        }
+        false
+    }
+
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         let mut models = self.deci.list_models().await?;
         models.extend(self.micro.list_models().await?);
@@ -132,6 +153,16 @@ impl Provider for Routed {
 
     async fn abandon_pending(&self, session_id: mew_message::SessionId) {
         self.inner.abandon_pending(session_id).await;
+    }
+
+    async fn allows_readonly_spill_path(
+        &self,
+        session_id: mew_message::SessionId,
+        path: &std::path::Path,
+    ) -> bool {
+        self.inner
+            .allows_readonly_spill_path(session_id, path)
+            .await
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {

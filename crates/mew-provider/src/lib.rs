@@ -32,6 +32,16 @@ pub trait Provider: Send + Sync {
     /// Release any open in-turn continuation state (for example a live
     /// tool-handoff subprocess) when an agent turn ends without resuming it.
     async fn abandon_pending(&self, _session_id: mew_message::SessionId) {}
+    /// Whether `path` is a provider-managed spill file (for example, an
+    /// external CLI's truncated tool-output file) that read-only tools in
+    /// `session_id` may inspect without triggering an out-of-workspace prompt.
+    async fn allows_readonly_spill_path(
+        &self,
+        _session_id: mew_message::SessionId,
+        _path: &std::path::Path,
+    ) -> bool {
+        false
+    }
     /// Run an internal, tool-free helper request. Temperature, max tokens and
     /// disabled reasoning are advisory here: a provider without those controls
     /// may use its defaults. Ordinary turns must use `stream` instead.

@@ -41,6 +41,15 @@ class ManifestTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             runner.make_config('[code_mode]\nmode = "off"\n', {"mode": "full"})
 
+    def test_turn_limit_lands_before_the_first_table(self):
+        base = '[providers.example]\nshape = "openai"\nbase_url = "https://example.invalid"\n'
+        parsed = __import__("tomllib").loads(
+            runner.make_config(base, {"mode": "off"}, max_turns=7)
+        )
+        self.assertEqual(parsed["max_turns"], 7)
+        self.assertEqual(parsed["providers"]["example"]["shape"], "openai")
+        self.assertNotIn("max_turns", runner.make_config(base, {"mode": "off"}))
+
     def test_model_matrix_requires_unambiguous_provider_names(self):
         self.assertEqual(
             runner.parse_models(

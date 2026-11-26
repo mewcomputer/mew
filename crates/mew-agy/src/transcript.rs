@@ -589,6 +589,7 @@ fn project_messages_indexed(
                         });
                     }
                 }
+                Part::Artifact(_) => {}
             }
         }
         if message.role == Role::User && !pending.is_empty() {

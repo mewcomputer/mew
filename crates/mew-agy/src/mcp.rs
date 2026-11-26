@@ -56,6 +56,14 @@ pub struct Tool {
 }
 
 impl Tool {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn original_name(&self) -> &str {
+        &self.original_name
+    }
+
     pub fn new(name: &str, description: &str, schema: Value) -> Result<Self, String> {
         Self::aliased(name, name, description, schema)
     }
@@ -94,6 +102,16 @@ pub(crate) fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
 }
 
+pub(crate) fn valid_conversation_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id != "."
+        && id != ".."
+        && id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"-_".contains(&c))
+}
+
 #[derive(Debug)]
 pub struct ToolCall {
     pub id: String,
@@ -119,6 +137,7 @@ struct State {
     path: String,
     tools: HashMap<String, Tool>,
     registry: Mutex<Registry>,
+    root_conversation_id: Arc<Mutex<Option<String>>>,
     calls: mpsc::Sender<ToolCall>,
     slots: Arc<Semaphore>,
     /// Signalled when the last outstanding tool call settles, so a bounded
@@ -175,6 +194,7 @@ impl McpServer {
             path: path.clone(),
             tools: map,
             registry: Mutex::new(Registry::default()),
+            root_conversation_id: Arc::new(Mutex::new(None)),
             calls: tx,
             slots: Arc::new(Semaphore::new(max_pending)),
             settled: tokio::sync::Notify::new(),
@@ -274,6 +294,10 @@ impl McpServer {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         registry.quiesced = false;
+    }
+
+    pub(crate) fn root_conversation_id_handle(&self) -> Arc<Mutex<Option<String>>> {
+        Arc::clone(&self.state.root_conversation_id)
     }
     pub fn resolve(&self, id: &str, result: Value) -> Result<(), &'static str> {
         let sender = self
@@ -523,17 +547,35 @@ async fn handle_inner(req: Request<Incoming>, state: Arc<State>) -> Response<Bod
     {
         return rpc_error(id, -32602, "invalid parameters");
     }
+    if let Some(conv_id) = params
+        .get("_meta")
+        .and_then(|meta| meta.get("antigravity.google/root_conversation_id"))
+        .and_then(Value::as_str)
+        .filter(|id| valid_conversation_id(id))
+    {
+        *state
+            .root_conversation_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(conv_id.to_owned());
+    }
     let Some(name) = params.get("name").and_then(Value::as_str) else {
         return rpc_error(id, -32602, "invalid tool name");
     };
     let Some(tool) = state.tools.get(name) else {
         return rpc_error(id, -32602, "unknown tool");
     };
-    let Some(arguments) = params.get("arguments").filter(|v| v.is_object()) else {
-        return rpc_error(id, -32602, "invalid arguments");
+    let empty_args = json!({});
+    let arguments = match params.get("arguments") {
+        None | Some(Value::Null) => &empty_args,
+        Some(value) if value.is_object() => value,
+        _ => return rpc_error(id, -32602, "invalid arguments"),
     };
-    if !tool.validator.is_valid(arguments) {
-        return rpc_error(id, -32602, "invalid arguments");
+    if let Err(error) = tool.validator.validate(arguments) {
+        let mut detail: String = error.to_string().chars().take(256).collect();
+        if detail.is_empty() {
+            detail.push_str("schema validation failed");
+        }
+        return rpc_error(id, -32602, &format!("invalid arguments: {detail}"));
     }
     {
         // Report a quiesced server as quiesced even when capacity is exhausted,

@@ -163,6 +163,7 @@ mod unix {
         shutdown: CancellationToken,
         suppress_turn_cancel: Arc<AtomicBool>,
         acp_session_id: Arc<Mutex<Option<String>>>,
+        root_conversation_id: Arc<Mutex<Option<String>>>,
         actor: tokio::sync::Mutex<Option<tokio::task::JoinHandle<io::Result<()>>>>,
     }
     pub struct Turn {
@@ -284,6 +285,7 @@ mod unix {
             let shutdown = options.parent_shutdown.child_token();
             let suppress_turn_cancel = Arc::new(AtomicBool::new(false));
             let acp_session_id = Arc::new(Mutex::new(None));
+            let root_conversation_id = server.root_conversation_id_handle();
             let actor = tokio::spawn(run(
                 process,
                 stdin,
@@ -306,6 +308,7 @@ mod unix {
                 shutdown,
                 suppress_turn_cancel,
                 acp_session_id,
+                root_conversation_id,
                 actor: tokio::sync::Mutex::new(Some(actor)),
             })
         }
@@ -315,6 +318,29 @@ mod unix {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone()
+        }
+
+        pub(crate) fn conversation_ids(&self) -> Vec<String> {
+            let mut ids = Vec::with_capacity(2);
+            if let Some(acp_sid) = self
+                .acp_session_id
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .filter(|id| !id.is_empty())
+            {
+                ids.push(acp_sid.clone());
+            }
+            if let Some(root_cid) = self
+                .root_conversation_id
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .filter(|id| !id.is_empty() && !ids.contains(id))
+            {
+                ids.push(root_cid.clone());
+            }
+            ids
         }
         /// Close an idle/pending session when the owning agent ends its turn
         /// without resuming, cleaning up the subprocess without cancelling the
@@ -537,7 +563,11 @@ mod unix {
             return false;
         };
         if name == "call_mcp_tool" {
-            let Some(args) = tool_call.get("args").and_then(Value::as_object) else {
+            let Some(args) = tool_call
+                .get("args")
+                .or_else(|| tool_call.get("rawInput"))
+                .and_then(Value::as_object)
+            else {
                 return false;
             };
             return args.get("ServerName").and_then(Value::as_str) == Some("mew");
@@ -1130,6 +1160,7 @@ mod unix {
             if let Some(sid) = phase.session_id() {
                 if let Ok(mut close_line) = serde_json::to_vec(&json!({
                     "jsonrpc": "2.0",
+                    "id": next_rpc_id,
                     "method": "session/close",
                     "params": { "sessionId": sid }
                 })) {
@@ -1317,7 +1348,7 @@ assert p3['method']=='session/prompt'
 print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'s-persist','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'turn3-model-b'}}}}),flush=True)
 print(json.dumps({'jsonrpc':'2.0','id':p3['id'],'result':{'stopReason':'end_turn'}}),flush=True)
 c=read_req()
-assert c['method']=='session/close' and c['params']['sessionId']=='s-persist'
+assert c['method']=='session/close' and isinstance(c.get('id'), int) and c['params']['sessionId']=='s-persist'
 "#;
             let parent = CancellationToken::new();
             let (session, client, url, sid, workspace) = spawn_persistent_py(
@@ -1436,6 +1467,24 @@ time.sleep(5)
             assert_eq!(session.acp_session_id().as_deref(), Some("fresh-sid"));
             drop(turn);
             session.shutdown().await.unwrap();
+        }
+
+        #[test]
+        fn tool_call_allowed_accepts_args_and_raw_input_for_mew_only() {
+            assert!(tool_call_allowed(&json!({
+                "name": "call_mcp_tool",
+                "args": { "ServerName": "mew", "ToolName": "read" }
+            })));
+            assert!(tool_call_allowed(&json!({
+                "name": "call_mcp_tool",
+                "rawInput": { "ServerName": "mew", "ToolName": "read" }
+            })));
+            assert!(tool_call_allowed(&json!({ "name": "mcp_mew_read" })));
+            assert!(!tool_call_allowed(&json!({
+                "name": "call_mcp_tool",
+                "rawInput": { "ServerName": "other", "ToolName": "read" }
+            })));
+            assert!(!tool_call_allowed(&json!({ "name": "run_command" })));
         }
     }
 }

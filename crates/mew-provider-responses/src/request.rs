@@ -312,7 +312,7 @@ impl Adapter {
                         // assistant message is dropped — the API rejects
                         // orphan outputs.
                         Part::ToolResult(_) => {}
-                        Part::Compaction(_) | Part::Reasoning(_) => {}
+                        Part::Compaction(_) | Part::Reasoning(_) | Part::Artifact(_) => {}
                         Part::ToolCall(_) => {
                             // Tool calls from the user role are unusual;
                             // skip them in the input.

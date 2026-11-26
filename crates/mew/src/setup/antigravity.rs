@@ -487,6 +487,21 @@ impl Provider for LocalAgyProvider {
         }
     }
 
+    async fn allows_readonly_spill_path(
+        &self,
+        session_id: mew_message::SessionId,
+        path: &std::path::Path,
+    ) -> bool {
+        if let Some(ready) = self.ready.get() {
+            ready
+                .provider
+                .allows_readonly_spill_path(session_id, path)
+                .await
+        } else {
+            false
+        }
+    }
+
     async fn stream(&self, mut request: Request) -> Result<EventStream, ProviderError> {
         if request.model.is_empty() {
             request.model.clone_from(&self.model);

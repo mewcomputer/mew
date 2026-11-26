@@ -723,3 +723,67 @@ async fn settlement_is_observable_without_polling() {
     assert!(server.is_settled());
     assert!(waiting.await.unwrap().get("result").is_some());
 }
+
+#[tokio::test]
+async fn tools_call_allows_omitted_or_null_arguments_and_explains_validation_errors() {
+    let zero_arg = Tool::new(
+        "ping",
+        "Ping",
+        json!({"type":"object","properties":{},"additionalProperties":false}),
+    )
+    .unwrap();
+    let typed = Tool::new(
+        "echo",
+        "Echo",
+        json!({"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}),
+    )
+    .unwrap();
+    let (server, mut calls, client) = {
+        let (server, calls) = McpServer::bind(vec![zero_arg, typed], 4).await.unwrap();
+        (server, calls, reqwest::Client::new())
+    };
+    let session = initialize(&server, &client).await;
+
+    for (rpc_id, params) in [
+        (30, json!({"name": "ping"})),
+        (31, json!({"name": "ping", "arguments": Value::Null})),
+    ] {
+        let client2 = client.clone();
+        let url = server.url().to_owned();
+        let sid = session.clone();
+        let req = tokio::spawn(async move {
+            client2
+                .post(url)
+                .header("mcp-session-id", sid)
+                .json(&json!({"jsonrpc":"2.0","id":rpc_id,"method":"tools/call","params":params}))
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()
+        });
+        let call = tokio::time::timeout(Duration::from_secs(3), calls.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(call.name, "ping");
+        assert_eq!(call.arguments, json!({}));
+        server.resolve(&call.id, json!({"content":[]})).unwrap();
+        assert!(req.await.unwrap().get("result").is_some());
+    }
+
+    let invalid: Value = client
+        .post(server.url())
+        .header("mcp-session-id", &session)
+        .json(&json!({"jsonrpc":"2.0","id":32,"method":"tools/call","params":{"name":"echo","arguments":{}}}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let msg = invalid["error"]["message"].as_str().unwrap();
+    assert!(msg.starts_with("invalid arguments: "), "got {msg}");
+    assert!(msg.contains("text"), "expected missing property in {msg}");
+}
