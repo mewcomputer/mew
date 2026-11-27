@@ -118,13 +118,16 @@ print(json.dumps({'jsonrpc':'2.0','id':5,'result':{'stopReason':'end_turn'}}),fl
         .collect()
         .await;
     assert!(events.iter().any(|event| matches!(event, ProviderEvent::PartDelta { field: "text", delta, .. } if delta == "ALLOW")));
-    assert!(matches!(
-        events.last(),
-        Some(ProviderEvent::MessageEnd {
-            finish: Finish::Stop,
-            ..
-        })
-    ));
+    assert!(
+        matches!(
+            events.last(),
+            Some(ProviderEvent::MessageEnd {
+                finish: Finish::Stop,
+                ..
+            })
+        ),
+        "got {events:?}"
+    );
 
     auxiliary.params.as_mut().unwrap().top_p = Some(0.5);
     assert!(provider.stream_auxiliary(auxiliary.clone()).await.is_err());
@@ -812,13 +815,16 @@ print(json.dumps({'jsonrpc':'2.0','id':5,'result':{'stopReason':'end_turn'}}),fl
     ));
     let events: Vec<_> = provider.stream(req.clone()).await.unwrap().collect().await;
     assert!(events.iter().any(|event| matches!(event, ProviderEvent::PartDelta { field:"text", delta, .. } if delta == "small result")));
-    assert!(matches!(
-        events.last(),
-        Some(ProviderEvent::MessageEnd {
-            finish: Finish::Stop,
-            ..
-        })
-    ));
+    assert!(
+        matches!(
+            events.last(),
+            Some(ProviderEvent::MessageEnd {
+                finish: Finish::Stop,
+                ..
+            })
+        ),
+        "got {events:?}"
+    );
 
     // The same original large result must also remain replayable on the next turn.
     req.messages.push(msg(
@@ -1338,13 +1344,16 @@ c=read_msg()
     assert!(events.iter().any(
         |e| matches!(e, ProviderEvent::PartDelta { field: "text", delta, .. } if delta == "t1-ok")
     ));
-    assert!(matches!(
-        events.last(),
-        Some(ProviderEvent::MessageEnd {
-            finish: Finish::Stop,
-            ..
-        })
-    ));
+    assert!(
+        matches!(
+            events.last(),
+            Some(ProviderEvent::MessageEnd {
+                finish: Finish::Stop,
+                ..
+            })
+        ),
+        "got {events:?}"
+    );
 
     // Turn 2: model switch + short follow-up must keep same ACP session & tiny delta budget!
     req.model = "model-b".into();
@@ -2059,4 +2068,87 @@ print(json.dumps({{'jsonrpc':'2.0','id':5,'result':{{'stopReason':'end_turn'}}}}
 
     // 5. Normal workspace file read > 20 KB is NOT truncated by the 8 KB spill cap.
     assert_eq!(records[4]["text"], workspace_20kb);
+}
+
+#[tokio::test]
+async fn provider_restarts_resume_persisted_acp_session_with_delta_prompt() {
+    let parent = tempfile::tempdir().unwrap();
+    let script = r#"import json,sys
+resumed_sid = None
+for line in sys.stdin:
+    req = json.loads(line)
+    m = req.get("method")
+    if m == "initialize":
+        print(json.dumps({"jsonrpc":"2.0","id":req["id"],"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":True,"sessionCapabilities":{"resume":{}}}}}), flush=True)
+    elif m == "session/new":
+        print(json.dumps({"jsonrpc":"2.0","id":req["id"],"result":{"sessionId":"persisted-sid-1"}}), flush=True)
+    elif m == "session/resume":
+        resumed_sid = req["params"]["sessionId"]
+        print(json.dumps({"jsonrpc":"2.0","id":req["id"],"result":{"sessionId":resumed_sid}}), flush=True)
+    elif m == "session/prompt":
+        p = req["params"]["prompt"]
+        reply = f"resumed={resumed_sid};prompt={json.dumps(p)}" if resumed_sid else "ok"
+        print(json.dumps({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"persisted-sid-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":reply}}}}), flush=True)
+        print(json.dumps({"jsonrpc":"2.0","id":req["id"],"result":{"stopReason":"end_turn"}}), flush=True)
+    elif "id" in req:
+        print(json.dumps({"jsonrpc":"2.0","id":req["id"],"result":{}}), flush=True)
+"#;
+
+    let req1 = request();
+    let provider_a = AgyProvider::new(config(parent.path()), fixture(parent.path(), script));
+    let e1: Vec<_> = provider_a
+        .stream(req1.clone())
+        .await
+        .unwrap()
+        .collect()
+        .await;
+    assert!(
+        matches!(
+            e1.last(),
+            Some(ProviderEvent::MessageEnd {
+                finish: Finish::Stop,
+                ..
+            })
+        ),
+        "provider_a failed: {e1:?}"
+    );
+    drop(provider_a);
+
+    let mut req2 = req1;
+    req2.messages.push(msg(
+        Role::Assistant,
+        vec![Part::Text(TextPart {
+            base: base(),
+            text: "ok".into(),
+            synthetic: false,
+        })],
+    ));
+    req2.messages.push(msg(
+        Role::User,
+        vec![Part::Text(TextPart {
+            base: base(),
+            text: "follow-up after restart".into(),
+            synthetic: false,
+        })],
+    ));
+
+    let provider_b = AgyProvider::new(config(parent.path()), fixture(parent.path(), script));
+    let events: Vec<_> = provider_b.stream(req2).await.unwrap().collect().await;
+    let reply: String = events
+        .iter()
+        .filter_map(|e| match e {
+            ProviderEvent::PartDelta {
+                field: "text",
+                delta,
+                ..
+            } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        reply.contains("resumed=persisted-sid-1;"),
+        "got {reply:?}, events={events:?}"
+    );
+    assert!(reply.contains("follow-up after restart"), "got {reply}");
+    assert!(!reply.contains("mew_transcript_v1"), "got {reply}");
 }

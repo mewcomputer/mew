@@ -56,6 +56,61 @@ mod unix {
         history: Arc<Vec<Value>>,
         after_abandon: bool,
     }
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct PersistedContinuity {
+        acp_session_id: String,
+        session_contract: Value,
+        history: Vec<Value>,
+        after_abandon: bool,
+    }
+    fn continuity_path(workspace_parent: &Path, session_id: SessionId) -> PathBuf {
+        let base = workspace_parent
+            .parent()
+            .map(|p| p.join("continuity"))
+            .unwrap_or_else(|| workspace_parent.join("continuity"));
+        base.join(format!("{session_id}.json"))
+    }
+    fn load_continuity(workspace_parent: &Path, session_id: SessionId) -> Option<Continuity> {
+        let path = continuity_path(workspace_parent, session_id);
+        let bytes = std::fs::read(path).ok()?;
+        let parsed: PersistedContinuity = serde_json::from_slice(&bytes).ok()?;
+        Some(Continuity {
+            acp_session_id: parsed.acp_session_id,
+            session_contract: parsed.session_contract,
+            history: Arc::new(parsed.history),
+            after_abandon: parsed.after_abandon,
+        })
+    }
+    fn save_continuity(workspace_parent: &Path, session_id: SessionId, continuity: &Continuity) {
+        let path = continuity_path(workspace_parent, session_id);
+        if let Some(parent) = path.parent() {
+            if let Err(error) = std::fs::create_dir_all(parent) {
+                tracing::warn!(%error, "failed to create AGY continuity directory");
+                return;
+            }
+        }
+        let payload = PersistedContinuity {
+            acp_session_id: continuity.acp_session_id.clone(),
+            session_contract: continuity.session_contract.clone(),
+            history: (*continuity.history).clone(),
+            after_abandon: continuity.after_abandon,
+        };
+        let Ok(bytes) = serde_json::to_vec(&payload) else {
+            return;
+        };
+        let tmp = path.with_extension("json.tmp");
+        if let Err(error) = std::fs::write(&tmp, bytes) {
+            tracing::warn!(%error, "failed to write AGY continuity file");
+            return;
+        }
+        if let Err(error) = std::fs::rename(&tmp, &path) {
+            let _ = std::fs::remove_file(&tmp);
+            tracing::warn!(%error, "failed to commit AGY continuity file");
+        }
+    }
+    fn remove_continuity(workspace_parent: &Path, session_id: SessionId) {
+        let _ = std::fs::remove_file(continuity_path(workspace_parent, session_id));
+    }
     struct Pending {
         id: String,
         name: String,
@@ -602,17 +657,21 @@ mod unix {
                 let acp_sid = session.acp_session_id();
                 let _ = session.abandon().await;
                 if let Some(acp_session_id) = acp_sid {
-                    guard.continuity = Some(Continuity {
+                    let next = Continuity {
                         acp_session_id,
                         session_contract: session_contract_of(&pending.contract),
                         history: Arc::new(pending.history),
                         after_abandon: true,
-                    });
+                    };
+                    save_continuity(&self.config.workspace_parent, session_id, &next);
+                    guard.continuity = Some(next);
                 } else {
                     guard.continuity = None;
+                    remove_continuity(&self.config.workspace_parent, session_id);
                 }
             } else {
                 guard.continuity = None;
+                remove_continuity(&self.config.workspace_parent, session_id);
             }
         }
         async fn allows_readonly_spill_path(&self, session_id: SessionId, path: &Path) -> bool {
@@ -667,6 +726,9 @@ mod unix {
                         c.after_abandon,
                     )
                 })
+            } else if let Some(sid) = request.session_id {
+                load_continuity(&self.config.workspace_parent, sid)
+                    .map(|c| (c.session_contract, c.history, c.after_abandon))
             } else {
                 None
             };
@@ -819,6 +881,11 @@ mod unix {
                 }
             } else {
                 let session_contract = session_contract_of(&contract);
+                if guard.continuity.is_none() {
+                    if let Some(sid) = request.session_id {
+                        guard.continuity = load_continuity(&self.config.workspace_parent, sid);
+                    }
+                }
                 let matched = if request.session_id.is_some() {
                     guard.continuity.as_ref().and_then(|continuity| {
                         match match_continuity(continuity, &session_contract, &history) {
@@ -928,6 +995,9 @@ mod unix {
                         let _ = old.abandon().await;
                     }
                     guard.continuity = None;
+                    if let Some(sid) = request.session_id {
+                        remove_continuity(&self.config.workspace_parent, sid);
+                    }
                     let req_for_blocks = request.clone();
                     let (prompt, text_size) = tokio::task::spawn_blocking(move || {
                         transcript::build_prompt_blocks(&req_for_blocks)
@@ -975,10 +1045,12 @@ mod unix {
                 history,
                 tx,
                 self.shutdown.clone(),
+                self.config.workspace_parent.clone(),
             ));
             Ok(Box::pin(Output { rx }))
         }
     }
+    #[allow(clippy::too_many_arguments)]
     async fn deliver(
         mut turn: Turn,
         mut slot: OwnedMutexGuard<Slot>,
@@ -987,6 +1059,7 @@ mod unix {
         history: Vec<Value>,
         tx: mpsc::Sender<Delivery>,
         shutdown: CancellationToken,
+        workspace_parent: PathBuf,
     ) {
         macro_rules! send {
             ($event:expr) => {
@@ -1162,7 +1235,7 @@ mod unix {
                         if cleanup.is_err() {
                             break "AGY process cleanup failed";
                         }
-                    } else {
+                    } else if let Some(sid) = request.session_id {
                         let acp_sid = slot.session.as_ref().and_then(Session::acp_session_id);
                         if let Some(acp_session_id) = acp_sid {
                             let mut seen_history = history;
@@ -1170,14 +1243,17 @@ mod unix {
                                 "role": "assistant",
                                 "content": [{"type": "text", "text": emitted_text}]
                             }));
-                            slot.continuity = Some(Continuity {
+                            let next = Continuity {
                                 acp_session_id,
                                 session_contract: session_contract_of(&contract),
                                 history: Arc::new(seen_history),
                                 after_abandon: false,
-                            });
+                            };
+                            save_continuity(&workspace_parent, sid, &next);
+                            slot.continuity = Some(next);
                         } else {
                             slot.continuity = None;
+                            remove_continuity(&workspace_parent, sid);
                         }
                     }
                     let _ = send!(Delivery::Event(ProviderEvent::MessageEnd {
@@ -1207,6 +1283,9 @@ mod unix {
         drop(turn);
         slot.pending = None;
         slot.continuity = None;
+        if let Some(sid) = request.session_id {
+            remove_continuity(&workspace_parent, sid);
+        }
         if let Some(session) = slot.session.take() {
             let _ = session.shutdown().await;
         }
